@@ -16,7 +16,7 @@ it runs **locally**: on the instrument PC, next to the Claude desktop app. It ha
 machines. Unlike the other translators, the backend has no Python API: LabSpec is automated with VBScript
 (*LabSpec 5/6 Automation*, HORIBA, 2018). That is why the bridge script exists.
 
-First instrument: **XploRA** (LabSpec 6, Windows 11). Version 2026.11.19.1.
+First instrument: **XploRA** (LabSpec 6, Windows 11). Version 2026.11.19.2.
 
 **Scope of version 1**
 
@@ -27,8 +27,12 @@ First instrument: **XploRA** (LabSpec 6, Windows 11). Version 2026.11.19.1.
 | `series` | Repeated spectra at one spot: a time series |
 | `calibration` | A spectrum of a silicon reference; fits the Si line and checks it against 520.7 ± 1 cm⁻¹ |
 
+**Video snapshots**: a frame of LabSpec's camera with the laser position marked, on demand (`snapshot`) or during a
+study (`video`, on by default for calibration). Optionally the laser shutter opens for about a second: the beam
+shows, ls6t finds the spot, and reports its offset from LabSpec's laser position.
+
 Not yet included: LabSpec's own (native) fast mapping engine, Linkam temperature set-points, polarisation and PMT
-detectors, video snapshots. See `planning.md`.
+detectors. See `planning.md`.
 
 **Contents:**
 
@@ -38,6 +42,7 @@ detectors, video snapshots. See `planning.md`.
 - [A study](#a-study)
 - [Results](#results)
 - [Safety and the operator](#safety-and-the-operator)
+- [Video snapshots: where the beam is](#video-snapshots-where-the-beam-is)
 - [The checker](#the-checker)
 - [How it works](#how-it-works)
 - [For LLM tools: the MCP server](#for-llm-tools-the-mcp-server)
@@ -175,6 +180,10 @@ limits a person sets. Until one exists, ls6t uses built-in XploRA defaults and s
      `sensitive_max_filter_pct` for samples marked sensitive.
    - `stage.x_um` / `stage.y_um`: absolute stage limits `[min, max]`, if wanted.
    - `detector.max_temp_c`: warmer than this, results are unreliable (the CCD is not cooled down).
+   - `motors.laser_shutter`: the laser shutter's motor name, needed only for video snapshots with the laser on.
+     The import proposes one if it finds a shutter motor; confirm it with the maintainer.
+   - `video.laser_offset_um`: where the beam really is relative to LabSpec's laser position. It is measured with a
+     snapshot with the laser on (TESTING T5b).
 
    Only a person edits this file. Studies cannot change it, and the MCP tools can only *propose* a profile
    (`instrument(action="discover")` writes `profile.proposed.json`).
@@ -298,6 +307,7 @@ ls6t status <request folder>                 # results, or progress while it run
 ls6t cancel <request folder>                 # stop it: the acquisition or move in progress stops
 ls6t jobs                                    # recent requests; which one holds the instrument
 ls6t instrument status | discover | resume
+ls6t instrument snapshot [--laser]           # a video frame with the laser position marked (PNG)
 ls6t bridge call <verb> key=value ...        # one bridge command, for the maintainer (TESTING.md)
 ls6t profile show | default | import <dump>
 ls6t bench                                   # the benchmarks on the simulator
@@ -339,6 +349,7 @@ Studies are given as `{name: study}`; names use letters, digits, `_` and `-`. An
 | `expect` | `[{quantity: "dotted.result.path", value, tol}]`, checked after the run |
 | `images` | `true`: PNGs (spectra with fits; one map image per peak quantity and band) |
 | `save_native` | `true` (default): LabSpec also saves `.l6s` files |
+| `video` | `{before, after, with_laser}`: video frames with the laser position marked, before the first and/or after the last acquisition. `before` is on by default for `calibration`. `with_laser` opens the laser shutter for `video.laser_s` (profile) so the beam shows; it needs `setup.filter` and a laser shutter motor in the profile. |
 
 Validation refuses anything outside the profile: a laser, grating, filter or objective the instrument does not have,
 a filter above the caps, exposures, accumulations or points above the limits, moves beyond `max_xy_um` or
@@ -362,7 +373,8 @@ a filter above the caps, exposures, accumulations or points above the limits, mo
 | `series` | `t_s` and each quantity over time, with a summary |
 | `calibration` | `reference_cm1`, `measured_cm1`, `offset_cm1`, `fwhm_cm1`, `pass` |
 | `expect` | Each expected value: `got`, `pass` |
-| `images`, `files`, `seconds`, `execution` | Pictures, paths, timing, mode and bridge version |
+| `video` | `before` / `after`: the PNG (`path`), the raw frame, LabSpec's own image files, the stage position, `marker_um`, the field of view; with the laser: `spot_um` and `measured_offset_um` |
+| `images`, `files`, `seconds`, `execution` | Pictures (including `video_before` / `video_after`), paths, timing, mode and bridge version |
 
 Spectrum files are written by the bridge (`spectra/p00000.txt`: `# key=value` header lines, including LabSpec's
 acquisition info as `acq.*`, then wavelength and counts). The Raman-shift version sits next to it (`.shift.txt`).
@@ -386,6 +398,31 @@ acquisition info as `acq.*`, then wavelength and counts). The Raman-shift versio
   during acquisitions (LabSpec's automatic shutter mode).
 - **One request at a time** holds the instrument (a lock file). Others wait as `queued`.
 - **No code travels**: the bridge runs only its fixed verbs, with values checked on both sides.
+
+## Video snapshots: where the beam is
+
+A snapshot copies the current frame of LabSpec's video camera; the live view goes on. ls6t draws the frame with the
+stage axes in µm and a **red cross at the laser position**. That position is the stage position, which LabSpec's
+video axes use, plus the profile's measured `video.laser_offset_um`. LabSpec also tries to save the frame in its own
+image formats (`video.formats`), next to the PNG.
+
+**With the laser** (`snapshot(with_laser=true)`, `ls6t instrument snapshot --laser`, or a study's
+`video.with_laser`):
+
+1. The bridge takes a frame with the shutter closed.
+2. It opens the laser shutter in manual shutter mode for `video.laser_s` seconds (default 1, at most
+   `video.max_laser_s`).
+3. It takes a second frame, then closes the shutter and restores the shutter mode on every path out, including a stop.
+4. The difference between the two frames is the spot alone. ls6t finds its centre and draws it as a dashed circle.
+   It reports `spot_um` and `measured_offset_um`, the value to put in `video.laser_offset_um` so the cross sits on the
+   beam.
+
+Guards for the laser: the profile must name the laser shutter motor; the current filter must be within the
+profile's caps for the laser in use; the operator answers Yes in LabSpec first (unless `LS6T_CONFIRM=never`); and
+it is refused while a request holds the instrument. In a study, the frame is taken after the request's confirmation.
+
+Use it before a calibration or a measurement to check that the beam is on the intended spot. From the Claude app, the
+`snapshot` tool returns the image itself, so Claude sees where the beam is.
 
 ## The checker
 
@@ -434,6 +471,9 @@ On the instrument, the standing check is the `calibration` study on a silicon wa
 | `GetValue(id, "XYData")` gives x in the spectrum axis unit (`AxisUnits` for `AxisType` "Spectr") | Si line at 520.7 cm⁻¹ |
 | `Acq(4, …)` returns the detector temperature | `checks.detector_temp_c` |
 | Map/Profile build live views from single spectra | TESTING T6 (visual) |
+| `Video(2)` gives the live frame's id; `Exec(id, 3)` clones it; `GetValue(clone, "Data")` gives the pixels, X varying fastest, colours packed as COLORREF (`video.order`, `video.packing`) | TESTING T5b: orientation and colours |
+| Video axes are stage coordinates in µm ("mkm"), so the stage position marks the laser | TESTING T5b: the marker against the beam |
+| `PutValue(0, "ShutterMode", 1)` and moving the shutter motor to 1 / 0 open and close the laser shutter | TESTING T5b, with the maintainer |
 
 ## How it works
 
@@ -454,6 +494,7 @@ Claude app ──MCP──> ls6t-mcp ──> request folder + runner process (ls
 | `runner.py` | Runs a request in its own process: instrument lock, confirmation, set-up with read-back, points, live views, analysis, checks, results written atomically |
 | `spectra.py` | Spectrum files, Raman shift, baseline, noise, spikes, saturation, peak fits, bands |
 | `render.py` | PNG plots (optional extra `render`) |
+| `video.py` | Video frames: decoding, the laser marker, finding the spot, the PNG |
 | `sim.py` | A simulated LabSpec + XploRA speaking the same protocol (`LS6T_MODE=sim`, tests, benchmarks) |
 | `bench.py` | The benchmarks |
 | `api.py`, `cli.py`, `mcp_server.py` | The functions, the command line, the MCP server |
@@ -470,7 +511,9 @@ names.
 
 Verbs: `ping`, `status`, `discover`, `move` (`motor`, `mode`: value, label or index, `value`), `move_xy`,
 `autofocus`, `acquire`, `view` (live map or profile in LabSpec: create, add, save), `save`, `remove`, `confirm`,
-`message` (status bar), `safe`, `resume`, `quit`.
+`message` (status bar), `safe`, `resume`, `quit`, `video` (a frame: `out`, `settle_s`, `laser_s`,
+`m_laser_shutter`, `formats`, `camera`; written as `<out>.video.txt`, with `<out>.nolaser.video.txt` when the
+laser was on).
 
 ## For LLM tools: the MCP server
 
@@ -485,6 +528,7 @@ measured).
 | `study_status` | Results, or progress with `eta_min` |
 | `cancel`, `jobs` | Stop a request; recent requests |
 | `instrument` | `status`, `discover` (proposes a profile), `resume` (after an operator halt) |
+| `snapshot` | A video frame now, with the laser position marked; `with_laser` shows the beam and measures its offset. Returns the image. |
 | `get_inputs` | The commands of one study, without running |
 | `run_benchmarks` | The benchmarks on the simulator |
 | `get_file`, `get_image` | Files as base64; PNGs as images |
@@ -524,18 +568,21 @@ labspec_translator/
   README.md  TESTING.md  planning.md  pyproject.toml
   examples/studies.json          six studies covering the scope
   labspec_translator/            the package (config, profile, format, plan, bridge, runner, spectra, render,
-                                 sim, bench, api, cli, mcp_server; vbs/ the LabSpec script parts)
+                                 video, sim, bench, api, cli, mcp_server; vbs/ the LabSpec script parts)
   tests/test_ls6t.py
 ```
 
 A request folder (`LS6T_OUT\run_<date>_<time>_<id>\`) holds `request.json`, `studies.json`, `validation.json`,
 `state.json`, `start.json` (the instrument at the start), `runner.json` and `runner.log`. Per study it holds
 `progress.json`, `spectra\`, the result `<name>.json`, map files, `images\` and LabSpec's `.l6s` files.
+Snapshots taken outside a study go to `LS6T_OUT\snapshots\snap_<date>_<time>_<id>\` (`frame.png`, the raw
+frames, LabSpec's image files, `snapshot.json`); a study's frames go to its `video\` folder.
 
 ## Versions
 
 | Version | Changes |
 |---|---|
+| 2026.11.19.2 | Video snapshots: `video` bridge verb (frame cloned from the live video; optional timed laser shutter with a frame without and with the beam), `snapshot` tool and `ls6t instrument snapshot`, study key `video` (on by default for calibration), the laser position marked, the spot found and its offset measured; profile `video` settings and `motors.laser_shutter` (from discovery). |
 | 2026.11.19.1 | First version: study format and validation, VBS bridge (protocol 1) and discovery script, runner with operator confirmation and stops, analysis and checks, simulator and benchmarks, CLI and MCP server. Not yet tested on the instrument (TESTING.md). |
 
 Author: Nicola Ferralis. License: MIT.

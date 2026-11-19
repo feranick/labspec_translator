@@ -40,6 +40,14 @@ Const LS_MB_ICONWARNING = 50
 Const LS_IDYES = 1
 Const LS_MB_STOP = 14
 Const LS_STAGE_REL = 0
+Const LS_START_VIDEO = 0
+Const LS_STOP_VIDEO = 1
+Const LS_GET_VIDEO_ID = 2
+Const LS_GET_ACTIVE_CAMERA = 4
+Const LS_SET_ACTIVE_CAMERA = 10
+Const LS_REMOVE_DATA = 2
+Const LS_CLONE_DATA = 3
+Const LS_SHUTTER_MANUAL = 1
 
 Dim fso, gSep, gLastError
 Set fso = CreateObject("Scripting.FileSystemObject")
@@ -225,7 +233,8 @@ Function DiscoverTo(outPath, withPopup)
     d("decimal_separator") = gSep
     names = Array("Laser", "Grating", "Filter", "Density", "ND", "Attenuator", "Objective", "Objectives", _
                   "Microscope", "Nosepiece", "Hole", "Slit", "Spectro", "Premono", "X", "Y", "Z", "XT", "YT", _
-                  "XL", "YL", "Polarizer", "Raman Polarizer", "Laser Polarizer", "DetectorShutter")
+                  "XL", "YL", "Polarizer", "Raman Polarizer", "Laser Polarizer", "DetectorShutter", _
+                  "Shutter", "LaserShutter", "Laser Shutter", "Laser shutter")
     For i = 0 To UBound(names)
         name = names(i)
         size = MotorSize(name)
@@ -272,6 +281,10 @@ Function DiscoverTo(outPath, withPopup)
     End If
     d("selftest.stop_button") = LabSpec.MessageEx("", LS_MB_STOP)
     d("selftest.stop_button_error") = Err.Description
+    Err.Clear
+    d("video.active_camera") = LabSpec.Video(LS_GET_ACTIVE_CAMERA)
+    d("video.id_now") = LabSpec.Video(LS_GET_VIDEO_ID)          ' > 0 when the live video runs
+    d("video.error") = Err.Description
     Err.Clear
     LabSpec.Message "ls6t discovery running", LS_MB_STATUS_BAR
     d("selftest.status_bar") = Bit(Err.Number = 0)

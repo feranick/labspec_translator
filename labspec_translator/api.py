@@ -1,5 +1,5 @@
 """api.py — the functions behind the command line and the MCP server (JSON in, JSON out).
-Version: 2026.11.19.1
+Version: 2026.11.19.2
 """
 from __future__ import annotations
 
@@ -319,6 +319,65 @@ def compose_vbs(bridge_dir: Path, home_dir: Path) -> dict:
     return out
 
 
+def snapshot(with_laser: bool = False) -> dict:
+    """A video frame now, with the laser position marked (LabSpec's position plus the profile's measured offset).
+    with_laser opens the laser shutter for video.laser_s seconds so the beam shows: only with a laser shutter motor
+    in the profile, the current filter within the profile's caps, and the operator's Yes in LabSpec."""
+    from . import video
+    lock = runner.read_json(runner.lock_path(), None)
+    if lock:
+        return {"ok": False, "error": f"the instrument is busy with {lock.get('request')}: the request's own "
+                                      "snapshots are in its results (study key 'video')"}
+    prof = P.load()
+    b = Bridge()
+    if config.mode() == "sim":
+        from . import sim as S
+        S.ensure(b.dir)
+    v = prof.get("video", {})
+    try:
+        st = b.call("status", timeout_s=15, **runner.motor_args(prof))
+        if with_laser:
+            if not prof["motors"].get("laser_shutter"):
+                return {"ok": False, "error": "no laser shutter motor in the profile (motors.laser_shutter): a person "
+                                              "sets it from the discovery dump"}
+            from .profile import filter_pct, laser_key
+            pct = prof.get("filters", {}).get(st.get("filter"))
+            pct = pct if pct is not None else filter_pct(st.get("filter", ""))
+            lk = laser_key(prof, st.get("laser_nm"))
+            caps = [prof["limits"]["max_filter_pct"]]
+            if lk:
+                caps.append(prof["lasers"][lk].get("max_filter_pct", 100))
+            if pct is None or pct > min(c for c in caps if c is not None):
+                return {"ok": False, "error": f"the current filter {st.get('filter')!r} is unknown or above the "
+                                              f"profile's cap ({min(caps):g} %): choose a stronger filter first"}
+            if config.confirm_policy() != "never":
+                r = b.call("confirm", timeout_s=3600,
+                           text=f"ls6t asks to open the laser shutter for {float(v.get('laser_s', 1)):g} s to show "
+                                f"the beam on the video (laser {st.get('laser_nm')} nm, filter {st.get('filter')}, "
+                                f"objective {st.get('objective')}). Continue?")
+                if r.get("answer") != "yes":
+                    return {"ok": False, "error": "the operator declined in LabSpec"}
+        folder = config.out_dir() / "snapshots" / f"snap_{time.strftime('%Y%m%d_%H%M%S')}_{secrets.token_hex(2)}"
+        folder.mkdir(parents=True)
+        base = folder / "frame"
+        laser_s = float(v.get("laser_s", 1.0)) if with_laser else 0.0
+        settle = float(v.get("settle_s", 1.5))
+        r = b.call("video", timeout_s=60 + settle + laser_s, out=str(base), settle_s=settle, laser_s=laser_s,
+                   formats=",".join(v.get("formats", [])), camera=v.get("camera"), **runner.motor_args(prof))
+    except BridgeError as exc:
+        return {"ok": False, "error": str(exc)}
+    if not r["ok"]:
+        return {"ok": False, "error": r.get("error"), "stopped_by": r.get("stopped_by")}
+    snap = video.snapshot(r, prof, base, f"video {time.strftime('%H:%M:%S')}"
+                          + (f", objective {r.get('objective')}" if r.get("objective") else ""))
+    out = {"ok": True, "folder": str(folder), **snap,
+           "instrument": {k: st.get(k) for k in ("laser_nm", "filter", "objective", "x_um", "y_um", "z_um")}}
+    if with_laser and str(r.get("shutter_closed")) != "1":
+        out["warnings"].append("the laser shutter could not be confirmed closed: check LabSpec")
+    runner.write_json(folder / "snapshot.json", out)
+    return out
+
+
 def install_bridge(dest: Path | None = None) -> dict:
     """Writes ls6t_bridge.vbs and ls6t_discover.vbs, configured with this machine's folders, to LS6T_HOME/vbs."""
     dest = Path(dest) if dest else config.home() / "vbs"
@@ -352,7 +411,7 @@ def read_file(path: str, max_mb: float = 20) -> dict:
 
 def image_path(path: str) -> Path:
     p = Path(path).expanduser().resolve()
-    base = config.out_dir().resolve()
+    base = config.out_dir().resolve()       # requests and snapshots
     if base not in p.parents or p.suffix.lower() != ".png" or not p.is_file():
         raise ValueError(f"{path}: not a PNG written by a study (under {base})")
     return p

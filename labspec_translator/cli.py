@@ -1,5 +1,5 @@
 """cli.py — the command line. Every command prints JSON; '-' reads the studies from stdin.
-Version: 2026.11.19.1
+Version: 2026.11.19.2
 
   ls6t status [REQUEST] [--wait S]   versions, the bridge, the profile; or a request's studies
   ls6t format                        the study format
@@ -10,6 +10,7 @@ Version: 2026.11.19.1
   ls6t jobs [--limit N] [--active]   recent requests
   ls6t bench [NAMES...]              the benchmarks (on the simulator)
   ls6t instrument status|discover|resume
+  ls6t instrument snapshot [--laser] a video frame with the laser position marked (--laser: the beam shows)
   ls6t bridge install [--dest DIR]   write the LabSpec scripts configured for this machine
   ls6t bridge call VERB [k=v ...]    one bridge command, for the maintainer's tests (TESTING.md); acquire and
                                      autofocus fire the laser and need --laser
@@ -62,7 +63,8 @@ def main(argv=None) -> int:
     s = sub.add_parser("bench")
     s.add_argument("names", nargs="*")
     s = sub.add_parser("instrument")
-    s.add_argument("action", choices=["status", "discover", "resume"])
+    s.add_argument("action", choices=["status", "discover", "resume", "snapshot"])
+    s.add_argument("--laser", action="store_true", help="snapshot: open the laser shutter briefly (asks in LabSpec)")
     s = sub.add_parser("bridge")
     s.add_argument("action", choices=["install", "call"])
     s.add_argument("verb", nargs="?")
@@ -107,6 +109,10 @@ def main(argv=None) -> int:
         _print(r)
         return 0 if not r["failed"] else 1
     elif a.cmd == "instrument":
+        if a.action == "snapshot":
+            r = api.snapshot(with_laser=a.laser)
+            _print(r)
+            return 0 if r.get("ok") else 1
         _print(api.instrument(a.action))
     elif a.cmd == "bridge":
         if a.action == "install":

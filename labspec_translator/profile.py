@@ -1,5 +1,5 @@
 """profile.py — the machine profile: what the instrument has (from the discovery script) and the limits a person sets.
-Version: 2026.11.19.1
+Version: 2026.11.19.2
 
 The profile is a JSON file (LS6T_PROFILE, default ~/ls6t/profile.json). Studies never change it: an LLM can only
 ask for what the profile allows. Without a file, the built-in XploRA defaults below apply and every result says so
@@ -24,7 +24,8 @@ DEFAULT_PROFILE: dict = {
     "system": "XploRA",
     # LabSpec motor names, from the discovery script. Filter and objective names vary by configuration.
     "motors": {"laser": "Laser", "grating": "Grating", "filter": "Filter", "objective": "Objective",
-               "hole": "Hole", "slit": "Slit", "x": "X", "y": "Y", "z": "Z"},
+               "hole": "Hole", "slit": "Slit", "x": "X", "y": "Y", "z": "Z",
+               "laser_shutter": None},    # needed only for video snapshots with the laser on (from discovery)
     "lasers": {"532": {"nm": 532.0, "label": "532", "power_mw": None, "max_filter_pct": 100},
                "638": {"nm": 638.0, "label": "638", "power_mw": None, "max_filter_pct": 100},
                "785": {"nm": 785.0, "label": "785", "power_mw": None, "max_filter_pct": 100}},
@@ -45,6 +46,12 @@ DEFAULT_PROFILE: dict = {
     "timing": {"command_s": 0.3, "move_s": 2.0, "laser_s": 15.0, "grating_s": 15.0, "objective_s": 20.0,
                "xy_um_per_s": 2000.0, "xy_settle_s": 0.3, "autofocus_s": 10.0, "readout_s": 0.5,
                "window_move_s": 2.0},
+    # video snapshots: where the beam really is relative to LabSpec's laser position (µm, measured: TESTING T5b),
+    # how LabSpec packs colour pixels (colorref 0x00BBGGRR, rgb 0x00RRGGBB, or gray), which axis varies fastest in
+    # the pixel data, the image formats LabSpec is asked to save, the settle time and the laser time (s)
+    "video": {"laser_offset_um": [0.0, 0.0], "marker": "stage", "packing": "colorref", "order": "x_fastest",
+              "formats": ["png", "jpg", "bmp", "tif"], "settle_s": 1.5, "laser_s": 1.0, "max_laser_s": 5.0,
+              "camera": None},
     "checks": {"min_snr": 10.0, "detect_snr": 5.0, "si_cm1": 520.7, "si_tol_cm1": 1.0, "saturation_frac": 0.98},
 }
 
@@ -243,6 +250,12 @@ def import_discovery(text: str, base: dict | None = None) -> tuple[dict, list[st
             prof["objectives"] = labels
             notes.append(f"objectives ({m['name']}): " + ", ".join(labels))
 
+    for name in ("Shutter", "LaserShutter", "Laser Shutter", "Laser shutter"):
+        if name in names:
+            prof["motors"]["laser_shutter"] = name
+            notes.append(f"laser shutter motor: {name!r} (check with the maintainer that it is the laser shutter "
+                         "before using video snapshots with the laser)")
+            break
     for role, key in (("hole", "holes_um"), ("slit", "slits_um")):
         m = _motor(d, prof["motors"][role])
         if m and m["size"] > 0:

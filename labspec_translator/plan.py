@@ -1,5 +1,5 @@
 """plan.py — a study as bridge commands: the setup moves, the points, the acquisitions; and the time estimate.
-Version: 2026.11.19.1
+Version: 2026.11.19.2
 
 Everything here is computed from the study and the profile alone: wavelengths from Raman shifts, the number of
 detector windows, the stage positions (always offsets from where the operator left the stage, Z from the
@@ -205,6 +205,11 @@ def estimate(study: dict, prof: dict) -> dict:
         if af and (k == 0 or (every and k % every == 0)):
             total += t["autofocus_s"]
         total += acq_s
+    vd = study.get("video") or {}
+    v = prof.get("video", {})
+    shots = int(bool(vd.get("before", study.get("kind") == "calibration"))) + int(bool(vd.get("after")))
+    total += shots * (float(v.get("settle_s", 1.5)) + 5.0 +
+                      (float(v.get("laser_s", 1.0)) if vd.get("with_laser") else 0.0))
     if study.get("kind") == "series":
         total += max(0.0, float(study.get("series", {}).get("interval_s", 0)) * (len(pts) - 1)
                      - acq_s * (len(pts) - 1)) if len(pts) > 1 else 0.0

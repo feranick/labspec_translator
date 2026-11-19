@@ -551,6 +551,247 @@ Sub VView(cmd, res)
     res("view") = name
 End Sub
 
+' Writes image `id` (a video frame) as '# key=value' header lines (axis types, sizes, units and values), then its
+' pixel values, comma-separated, 256 per line, in LabSpec's order. Python decodes and draws it.
+Function WriteImage(id, outPath, res)
+    Dim data, at, sz, au, ax, ts, tmp, i, j, n, line, d2, n1, n2
+    WriteImage = False
+    On Error Resume Next
+    LabSpec.GetValue id, "Data", data
+    If Err.Number <> 0 Or Not IsArray(data) Then
+        Fail res, ErrText("GetValue Data (video)")
+        Err.Clear
+        Exit Function
+    End If
+    LabSpec.GetValue id, "AxisType", at
+    LabSpec.GetValue id, "AxisSize", sz
+    LabSpec.GetValue id, "AxisUnits", au
+    LabSpec.GetValue id, "Axis", ax
+    Err.Clear
+    tmp = outPath & ".tmp"
+    Set ts = fso.CreateTextFile(tmp, True, True)
+    If Err.Number <> 0 Then
+        Fail res, ErrText("cannot write " & outPath)
+        Err.Clear
+        Exit Function
+    End If
+    ts.WriteLine "# kind=video"
+    ts.WriteLine "# id=" & id
+    If IsArray(at) Then
+        line = ""
+        For i = 0 To UBound(at)
+            If i > 0 Then line = line & ","
+            line = line & CStr(at(i))
+        Next
+        ts.WriteLine "# axis_types=" & line
+    End If
+    If IsArray(sz) Then
+        line = ""
+        For i = 0 To UBound(sz)
+            If i > 0 Then line = line & ","
+            line = line & Fmt(sz(i))
+        Next
+        ts.WriteLine "# axis_sizes=" & line
+    End If
+    If IsArray(au) Then
+        line = ""
+        For i = 0 To UBound(au)
+            If i > 0 Then line = line & ","
+            line = line & CStr(au(i))
+        Next
+        ts.WriteLine "# axis_units=" & line
+    End If
+    If IsArray(ax) Then
+        line = ""
+        For i = 0 To UBound(ax)
+            If i > 0 Then line = line & ","
+            line = line & Fmt(ax(i))
+        Next
+        ts.WriteLine "# axis_values=" & line
+    End If
+    ' the pixel values: one or two dimensions
+    n2 = -1
+    n1 = UBound(data, 1)
+    n2 = UBound(data, 2)
+    If Err.Number <> 0 Then
+        Err.Clear
+        n2 = -1
+    End If
+    If n2 >= 0 Then
+        ts.WriteLine "# data_dims=" & (n1 + 1) & "," & (n2 + 1)
+        For j = 0 To n2
+            line = ""
+            For i = 0 To n1
+                If i > 0 Then line = line & ","
+                line = line & Fmt(data(i, j))
+            Next
+            ts.WriteLine line
+        Next
+        n = (n1 + 1) * (n2 + 1)
+    Else
+        ts.WriteLine "# data_dims=" & (n1 + 1)
+        line = ""
+        For i = 0 To n1
+            If line <> "" Then line = line & ","
+            line = line & Fmt(data(i))
+            If (i + 1) Mod 256 = 0 Then
+                ts.WriteLine line
+                line = ""
+                BeatNow
+            End If
+        Next
+        If line <> "" Then ts.WriteLine line
+        n = n1 + 1
+    End If
+    ts.Close
+    If fso.FileExists(outPath) Then fso.DeleteFile outPath, True
+    fso.MoveFile tmp, outPath
+    If Err.Number <> 0 Then
+        Fail res, ErrText("cannot write " & outPath)
+        Err.Clear
+        Exit Function
+    End If
+    On Error GoTo 0
+    res("pixels") = n
+    WriteImage = True
+End Function
+
+' Waits `seconds`, answering stop requests and writing the heartbeat; False when stopped (gStoppedBy says who)
+Function WaitStoppable(seconds)
+    Dim t0, who
+    WaitStoppable = True
+    t0 = Timer
+    Do While Elapsed(t0) < seconds
+        who = StopRequested()
+        If who <> "" Then
+            gStoppedBy = who
+            WaitStoppable = False
+            Exit Function
+        End If
+        BeatNow
+        LabSpec.Pause 50
+    Loop
+End Function
+
+' A copy of the current video frame (the live view goes on), or 0
+Function GrabFrame(res)
+    Dim vid, clone, p
+    GrabFrame = 0
+    On Error Resume Next
+    vid = LabSpec.Video(LS_GET_VIDEO_ID)
+    If Err.Number <> 0 Or vid <= 0 Then
+        Err.Clear
+        vid = LabSpec.GetActiveData("Video")
+    End If
+    clone = 0
+    If vid > 0 Then clone = LabSpec.Exec(vid, LS_CLONE_DATA, p)
+    If Err.Number <> 0 Or clone <= 0 Then
+        Fail res, ErrText("no video frame (video id " & vid & ")")
+        Err.Clear
+        clone = 0
+    End If
+    On Error GoTo 0
+    GrabFrame = clone
+End Function
+
+' A frame of the video camera. The live frame is cloned (the live view goes on), written for Python (out &
+' ".video.txt") and saved by LabSpec in each image format it accepts (out & "." & format). With laser_s > 0 a frame
+' is first taken without the laser (out & ".nolaser.video.txt"), then the laser shutter (motor m_laser_shutter) is
+' opened in manual shutter mode for laser_s, the frame is taken while it is open, and the shutter is closed and the
+' shutter mode restored on every path out (frames are written to disk only after it is closed).
+Sub VVideo(cmd, res)
+    Dim outBase, cam, vid, wasOn, clone, clone0, p, shutter, laserS, oldMode, newMode, fmts, i, r, settle
+    Dim opened, ok
+    outBase = GetP(cmd, "out", "")
+    cam = GetP(cmd, "camera", "")
+    settle = ParseNum(GetP(cmd, "settle_s", "1.5"))
+    laserS = ParseNum(GetP(cmd, "laser_s", "0"))
+    shutter = GetP(cmd, "m_laser_shutter", "")
+    fmts = Split(GetP(cmd, "formats", "png,jpg,bmp,tif"), ",")
+    If outBase = "" Then
+        Fail res, "video needs 'out'"
+        Exit Sub
+    End If
+    If laserS > 0 And shutter = "" Then
+        Fail res, "video with the laser needs the laser shutter's motor name (profile motors.laser_shutter)"
+        Exit Sub
+    End If
+    opened = False
+    ok = True
+    On Error Resume Next
+    If cam <> "" Then LabSpec.Video LS_SET_ACTIVE_CAMERA + CLng(ParseNum(cam))
+    Err.Clear
+    wasOn = False
+    vid = LabSpec.Video(LS_GET_VIDEO_ID)
+    If Err.Number = 0 And vid > 0 Then wasOn = True
+    Err.Clear
+    If Not wasOn Then
+        LabSpec.Video LS_START_VIDEO
+        If Err.Number <> 0 Then
+            Fail res, ErrText("Video start")
+            Err.Clear
+            Exit Sub
+        End If
+    End If
+    ' let the camera settle (exposure, live image)
+    ok = WaitStoppable(settle)
+    clone0 = 0
+    clone = 0
+    If ok And laserS > 0 Then
+        ' a frame without the laser first: the difference with the lit frame shows the spot alone
+        clone0 = GrabFrame(res)
+        oldMode = LSValue(0, "ShutterMode")
+        newMode = LS_SHUTTER_MANUAL
+        LabSpec.PutValue 0, "ShutterMode", newMode
+        LabSpec.MoveMotor shutter, 1, "", LS_MOTOR_VALUE
+        opened = True                     ' close it below, even if opening reported an error
+        If Err.Number <> 0 Then
+            Fail res, ErrText("opening the laser shutter (" & shutter & ")")
+            Err.Clear
+            ok = False
+        End If
+        If ok Then ok = WaitStoppable(laserS)
+    End If
+    If ok Then clone = GrabFrame(res)
+    ' the laser off first, whatever happened
+    If opened Then
+        LabSpec.MoveMotor shutter, 0, "", LS_MOTOR_VALUE
+        If CStr(oldMode) <> "" Then
+            newMode = oldMode
+            LabSpec.PutValue 0, "ShutterMode", newMode
+        End If
+        res("shutter_closed") = Bit(Err.Number = 0)
+        Err.Clear
+    End If
+    res("laser_s") = laserS
+    If Not wasOn Then LabSpec.Video LS_STOP_VIDEO
+    Err.Clear
+    On Error GoTo 0
+    If clone0 > 0 Then
+        If WriteImage(clone0, outBase & ".nolaser.video.txt", res) Then res("out_nolaser") = outBase & ".nolaser.video.txt"
+        On Error Resume Next
+        LabSpec.Exec clone0, LS_REMOVE_DATA, p
+        Err.Clear
+        On Error GoTo 0
+    End If
+    If clone > 0 Then
+        res("id") = clone
+        If WriteImage(clone, outBase & ".video.txt", res) Then res("out") = outBase & ".video.txt"
+        On Error Resume Next
+        For i = 0 To UBound(fmts)
+            r = LabSpec.Save(clone, outBase & "." & fmts(i), fmts(i))
+            res("saved_" & fmts(i)) = Bit(Err.Number = 0 And r = 0)
+            Err.Clear
+        Next
+        LabSpec.Exec clone, LS_REMOVE_DATA, p
+        Err.Clear
+        On Error GoTo 0
+    End If
+    res("x_um") = MotorValue(GetP(cmd, "m_x", "X"))
+    res("y_um") = MotorValue(GetP(cmd, "m_y", "Y"))
+    res("objective") = MotorLabel(GetP(cmd, "m_objective", "Objective"))
+End Sub
+
 Sub VConfirm(cmd, res)
     Dim b
     On Error Resume Next
@@ -680,6 +921,7 @@ Sub HandleFile(path)
                 Err.Clear
                 On Error GoTo 0
             Case "safe": VSafe cmd, res
+            Case "video": VVideo cmd, res
             Case "resume": VResume cmd, res
             Case "quit": gQuit = True
             Case Else: Fail res, "unknown verb " & verb

@@ -1,5 +1,5 @@
 """format.py — the study format and its static checks (no instrument needed).
-Version: 2026.11.19.1
+Version: 2026.11.19.2
 """
 from __future__ import annotations
 
@@ -10,7 +10,8 @@ from .profile import filter_pct, laser_key
 
 KINDS = ("spectrum", "map", "series", "calibration")
 TOP_KEYS = {"kind", "sample", "setup", "acquire", "focus", "points", "map", "series", "process", "expect",
-            "images", "save_native", "notes"}
+            "images", "save_native", "notes", "video"}
+VIDEO_KEYS = {"before", "after", "with_laser"}
 SETUP_KEYS = {"laser_nm", "grating", "filter", "objective", "hole_um", "slit_um"}
 ACQ_KEYS = {"range_cm1", "center_cm1", "exposure_s", "accumulations", "auto_exposure", "spike", "dark"}
 AE_KEYS = {"target_counts", "min_s", "max_s", "test_s"}
@@ -71,6 +72,10 @@ def study_format(status: dict | None = None) -> dict:
             "expect": "[{quantity: dotted result path (e.g. 'peaks.0.position_cm1', "
                       "'calibration.offset_cm1', 'map.summary.G.position_cm1.mean'), value, tol}]",
             "images": "true: PNG plots (spectrum with fits; map images of each peak and band)",
+            "video": "{before: true (default for calibration), after, with_laser}: a video frame with the laser "
+                     "position marked, before the first and/or after the last acquisition (results video.before/"
+                     "after, images video_before/after: look with get_image); with_laser opens the laser shutter "
+                     "for about a second so the beam itself shows",
             "save_native": "true (default): LabSpec also saves its own .l6s files",
         },
         "conventions": [
@@ -294,6 +299,28 @@ def validate_study(name: str, study: dict, prof: dict) -> dict:
                 errors.append("series.interval_s: seconds >= 0")
     elif study.get("series") is not None:
         errors.append("series: only with kind 'series'")
+
+    # ---- video snapshots
+    vd = study.get("video")
+    if vd is not None:
+        if not isinstance(vd, dict):
+            errors.append("video: {before, after, with_laser} (booleans)")
+        else:
+            _unknown(vd, VIDEO_KEYS, "video", errors)
+            for k in VIDEO_KEYS:
+                if k in vd and not isinstance(vd[k], bool):
+                    errors.append(f"video.{k}: true or false")
+            if vd.get("with_laser"):
+                if not (vd.get("before", kind == "calibration") or vd.get("after")):
+                    errors.append("video.with_laser: also give before or after (when to take the frame)")
+                if not prof["motors"].get("laser_shutter"):
+                    errors.append("video.with_laser: the profile has no laser shutter motor (motors.laser_shutter, "
+                                  "from the discovery script; set by a person)")
+                if s.get("filter") is None:
+                    errors.append("video.with_laser: give setup.filter (the laser shines during the snapshot)")
+                v = prof.get("video", {})
+                if float(v.get("laser_s", 1.0)) > float(v.get("max_laser_s", 5.0)):
+                    errors.append("profile video.laser_s is above video.max_laser_s")
 
     # ---- process, expect
     pr = study.get("process", {})

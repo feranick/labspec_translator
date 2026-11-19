@@ -12,7 +12,7 @@ stops and cancel on the simulator, and `ls6t bench` gives known answers. What re
 LabSpec and hardware. The plan goes from no laser and no motion to Claude driving a full map, in stages. Each stage
 starts only when the previous one passed.
 
-Version under test: 2026.11.19.1 (bridge protocol 1).
+Version under test: 2026.11.19.2 (bridge protocol 1).
 
 ---
 
@@ -49,7 +49,7 @@ Version under test: 2026.11.19.1 (bridge protocol 1).
   - a transparent film on silicon for a depth profile (optional).
 - The maintainer's usual settings for these samples (laser, grating, filter, objective, exposure). They are the
   reference for what ls6t should reproduce.
-- About **3 hours** for stages T0–T6, and 1 hour for T7–T9 (they can be another day).
+- About **3.5 hours** for stages T0–T6 (including T5b), and 1 hour for T7–T9 (they can be another day).
 
 ## Open questions this plan answers
 
@@ -69,6 +69,10 @@ The vendor manual (2018) leaves these open. Each is answered by the test listed.
 | Q10 | Do the live views (`Map`, `Profile`) appear and fill in? Are the axis units right ("mkm")? What do Map's From/To limits do? | T6.1, T7.1 |
 | Q11 | How does LabSpec's memory behave with large maps built point by point? | T6.4 |
 | Q12 | Does a request survive closing the Claude app (the runner process breaking away from the app's job)? | T9.1 |
+| Q13 | Video: does `Video(2)` return the live frame's id from a script, and does `Exec(id, 3)` clone it? Which image formats does `Save` write for a frame? | T1.1, T5b.1 |
+| Q14 | Video pixels: which axis varies fastest, how are colours packed (COLORREF 0x00BBGGRR or RGB), and are the axes stage coordinates in µm? | T5b.2 |
+| Q15 | Which motor is the laser shutter, and do `PutValue(0, "ShutterMode", 1)` plus moving it to 1 / 0 open and close it? | T1.2, T5b.3 |
+| Q16 | How far is the beam from LabSpec's laser position, per objective (`video.laser_offset_um`)? | T5b.4 |
 
 ---
 
@@ -105,7 +109,8 @@ Pass:
 - the dump file exists (**Q1**: file access works);
 - in the dump: `selftest.pause=1`, `selftest.popup_open=-1`, `selftest.popup_closed=0`, `selftest.stop_button=0`,
   `selftest.status_bar=1` (**Q2**);
-- `system=XploRA` (or the actual model), and `detector_temp_c` close to LabSpec's display.
+- `system=XploRA` (or the actual model), and `detector_temp_c` close to LabSpec's display;
+- `video.id_now` > 0 if the live video was running (start it first to check), and no `video.error` (**Q13**).
 
 If the dump is missing, **stop**: file access is not available to scripts, and the transport must change before
 anything else (see planning.md). Note any error message LabSpec showed.
@@ -127,6 +132,9 @@ With the maintainer, go through:
   with 500), `max_dz_um` (start with 20), `max_exposure_s`, `max_accumulations`, `max_points`, `max_minutes`,
   `stage.x_um` / `stage.y_um` if wanted, `detector.max_temp_c`.
 - `manual_objective`: true if LabSpec asks the operator to turn the turret.
+- `motors.laser_shutter` (**Q15**): the import proposes a motor named like a shutter. The maintainer confirms it
+  is the **laser** shutter, not the detector's. Leave it `null` until then: snapshots with the laser are refused
+  without it.
 
 Pass: `ls6t format` shows the instrument's lasers, gratings, filters and objectives, and the limits agreed.
 
@@ -244,6 +252,48 @@ Pass:
 
 Record whether autofocus left a spectrum in LabSpec.
 
+## T5b. Video snapshots (T5b.1–T5b.2 no laser; T5b.3–T5b.4 LASER)
+
+**T5b.1 A frame (Q13).** Start the live video in LabSpec, with the Si wafer or the contrast sample in focus, then run
+`ls6t instrument snapshot`. Pass: `ok`; `frame.png` shows the same view as LabSpec's video window; `um_axes` is true
+and `field_um` matches the objective's field of view. Record which formats appear under `native`, i.e. those LabSpec
+saved. Repeat with the live video stopped: the bridge starts it, takes the frame and stops it again.
+
+**T5b.2 Orientation and colours (Q14).** Choose a feature that is easy to recognise (an edge, a corner, a coloured
+object).
+
+- Take a snapshot, then `ls6t bridge call move_xy x_um=<X+10> y_um=<Y>`, then take another. Pass: the feature moves
+  by 10 µm in the PNG, in the same direction as in LabSpec's video window.
+- Do the same in Y.
+- Pass: colours look as in LabSpec.
+  - Red and blue swapped: set `video.packing` to `rgb`.
+  - The image scrambled into stripes: set `video.order` to `y_fastest`.
+  - If neither fixes it, keep `raw` (the `.video.txt` file) for analysis.
+
+**T5b.3 The beam (LASER, Q15).** Only after T1.2 confirmed the laser shutter motor. Use silicon, the lowest filter
+that shows a spot on the camera (typically 1 %), and the maintainer at the instrument. Run
+`ls6t instrument snapshot --laser`.
+
+Pass:
+- LabSpec asks for confirmation (answer Yes);
+- the shutter opens for about 1 s, then closes;
+- LabSpec's shutter mode is back to what it was;
+- the answer has `shutter_closed: 1`;
+- the PNG shows the spot inside the dashed circle;
+- `spot_um` and `measured_offset_um` are given, with no warning.
+
+Then answer No to the question once and check nothing opens. Also check the 785 nm laser, if present: the camera
+may not see it, which gives a "spot not found" warning.
+
+**T5b.4 The beam's offset (LASER, Q16).** Repeat T5b.3 three times per objective (x10, x50, x100). Record
+`measured_offset_um` each time. Pass: the three agree within about 0.5 µm at x100 (the spot's size sets the
+precision). Put the mean in the profile's `video.laser_offset_um`. If the objectives disagree by more than 1 µm, note
+the values per objective (the profile has one offset: planning.md). Take a last snapshot with the laser: the red
+cross now sits on the spot.
+
+**T5b.5 In a calibration study.** Run the calibration study with `"video": {"after": true}`. Pass: `video.before`
+and `video.after` are in the result and the images, and the Si result is as in T4.2.
+
 ## T6. Maps (LASER)
 
 **T6.1 A small map (Q9, Q10).** On the contrast sample: a map study, 5 × 5 points, 1 µm steps, a short exposure, the
@@ -324,6 +374,11 @@ With the Claude desktop app connected (README step 8):
 | T4.5 | | | | Q7: | |
 | T4.6 | | | | | |
 | T5 | | | | Q8: | |
+| T5b.1 | | | | Q13 (formats saved): | |
+| T5b.2 | | | | Q14 (order, packing, axes): | |
+| T5b.3 | | | | Q15: | |
+| T5b.4 | | | | Q16 offsets x10 / x50 / x100: | |
+| T5b.5 | | | | | |
 | T6.1 | | | | Q10: | |
 | T6.2 | | | | | |
 | T6.3 | | | | | |

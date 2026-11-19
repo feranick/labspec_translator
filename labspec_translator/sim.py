@@ -1,5 +1,5 @@
 """sim.py — a simulated LabSpec + XploRA behind the same bridge protocol as ls6t_bridge.vbs.
-Version: 2026.11.19.1
+Version: 2026.11.19.2
 
 It answers every verb of the bridge with the same keys, so the runner, the checks and the MCP server are tested
 without the instrument (LS6T_MODE=sim, and the tests). The simulated sample is a silicon wafer with a graphene
@@ -57,9 +57,11 @@ class SimLabSpec:
                              "labels": list(DEFAULT_PROFILE["filters"]), "i": 4},
                   "Objective": {"values": [10.0, 50.0, 100.0], "labels": ["x10", "x50", "x100"], "i": 2},
                   "Hole": {"value": 300.0}, "Slit": {"value": 100.0}, "Spectro": {"value": 550.0},
+                  "Shutter": {"values": [0.0, 1.0], "labels": ["closed", "open"], "i": 0},
                   "X": {"value": self.x0}, "Y": {"value": self.y0}, "Z": {"value": self.zf}}
         self.exposure, self.accumulations = 1.0, 1
         self.temp_c = -60.0
+        self.laser_offset = (1.5, -0.8)     # where the beam really is, relative to LabSpec's laser position (µm)
         self.moves = 0
         self.acquisitions = 0
 
@@ -267,6 +269,68 @@ class SimLabSpec:
             return self._stopped(who)
         self.m["Z"]["value"] = self.zf + float(self.rng.normal(0, 0.2))
         return {"z_um": self.m["Z"]["value"], "how": p.get("how", "laser")}
+
+    def v_video(self, p):
+        """A white-light frame around the stage position (160 x 120 px, field 6400/magnification µm wide): silicon,
+        the flake at x >= start; with laser_s > 0 the laser spot, offset from LabSpec's position by laser_offset."""
+        out = p.get("out")
+        if not out:
+            return {"ok": 0, "error": "video needs 'out'"}
+        laser_s = float(p.get("laser_s", 0) or 0)
+        if laser_s > 0:
+            name = p.get("m_laser_shutter", "")
+            if name not in self.m:
+                return {"ok": 0, "error": "video with the laser needs the laser shutter's motor name"}
+        who = self._wait(float(p.get("settle_s", 1.5)) + laser_s)
+        if who:
+            return self._stopped(who)
+        mag = self.m["Objective"]["values"][self.m["Objective"]["i"]]
+        w_um = 6400.0 / mag
+        W, H = 160, 120
+        x = self.m["X"]["value"]
+        y = self.m["Y"]["value"]
+        xs = x + (np.arange(W) - (W - 1) / 2) * w_um / W
+        ys = y + (np.arange(H) - (H - 1) / 2) * w_um / W
+        X, Y = np.meshgrid(xs, ys)          # rows: Y, columns: X (X varies fastest in the flat data)
+        base = 150 + 6 * np.sin(X / 3.0) * np.cos(Y / 4.0) + self.rng.normal(0, 3, X.shape)
+        flake = X >= self.x0
+        r = np.where(flake, base - 35, base)
+        g = np.where(flake, base - 25, base)
+        b = np.where(flake, base - 10, base + 8)
+        def write(path, r, g, b):
+            r, g, b = (np.clip(c, 0, 255).astype(int) for c in (r, g, b))
+            packed = (r | (g << 8) | (b << 16)).ravel()          # Windows COLORREF: 0x00BBGGRR
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("# kind=video\n# id=900\n# axis_types=X,Y,Intens\n")
+                fh.write(f"# axis_sizes={W},{H},0\n# axis_units=mkm,mkm,cnt\n")
+                fh.write("# axis_values=" + ",".join(f"{v:.4f}" for v in np.concatenate([xs, ys])) + "\n")
+                fh.write(f"# data_dims={W * H}\n")
+                for k in range(0, packed.size, 256):
+                    fh.write(",".join(str(int(v)) for v in packed[k:k + 256]) + "\n")
+            return int(packed.size)
+
+        extra = {}
+        if laser_s > 0:
+            write(Path(out + ".nolaser.video.txt"), r, g, b)
+            extra["out_nolaser"] = out + ".nolaser.video.txt"
+            fpct = self.m["Filter"]["values"][self.m["Filter"]["i"]] or 0.0
+            las = self.m["Laser"]["values"][self.m["Laser"]["i"]]
+            sx, sy = x + self.laser_offset[0], y + self.laser_offset[1]
+            spot = np.exp(-((X - sx) ** 2 + (Y - sy) ** 2) / (2 * (0.6 + 0.02 * w_um) ** 2))
+            amp = 255.0 * min(1.0, 0.2 + fpct / 10.0)
+            col = {532.0: (0.3, 1.0, 0.3), 638.0: (1.0, 0.25, 0.2)}.get(las, (0.5, 0.5, 0.5))
+            r, g, b = r + amp * col[0] * spot, g + amp * col[1] * spot, b + amp * col[2] * spot
+        path = Path(out + ".video.txt")
+        npix = write(path, r, g, b)
+        res = {"id": 900, "out": str(path), "pixels": npix, "laser_s": laser_s, **extra,
+               "x_um": x, "y_um": y, "objective": self.m["Objective"]["labels"][self.m["Objective"]["i"]]}
+        for f in str(p.get("formats", "")).split(","):
+            if f:
+                res[f"saved_{f}"] = 0           # the simulator writes no LabSpec image files
+        if laser_s > 0:
+            res["shutter_closed"] = 1
+        return res
 
     def v_confirm(self, p):
         if (self.dir / "sim_confirm_no").exists():

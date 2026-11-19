@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.19.1)
+## Architecture (version 2026.11.19.2)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -48,11 +48,21 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   table). Added `ls6t bridge call VERB key=value` (maintainer tool; acquire/autofocus need --laser; refused while a
   request holds the instrument). MCP stdio handshake checked with the SDK client: initialize 0.26 s, 11 tools,
   run_studies + get_image + instrument on the simulator. Simulator now recognises another process's simulator by
-  pid. 42 tests pass.
+  pid. 42 tests pass. Committed and tagged 2026.11.19.1 ("First release").
+- 2026-11-19, 2026.11.19.2: video snapshots. Bridge verb `video` clones the live frame (Video(2) + Exec(id, 3)),
+  writes axes and pixels for Python and tries LabSpec's image formats. With laser_s, it takes a frame without the
+  laser, opens the shutter (ShutterMode manual + motors.laser_shutter) for laser_s, takes the lit frame, and closes
+  and restores on every path. video.py decodes (COLORREF/RGB, x/y fastest), marks the laser position (stage +
+  video.laser_offset_um) and finds the spot from the difference of the two frames: on the simulator the offset
+  (1.5, -0.8) µm is recovered to 0.01 µm at x100/x50 and 0.06 µm at x10. Tool `snapshot` (image + details),
+  `ls6t instrument snapshot [--laser]`, study key `video` (before on by default for calibration). Guards: shutter
+  motor in the profile, current filter within caps, operator confirmation, refused while a request runs. Discovery
+  looks for shutter motors and records the video state. TESTING T5b and Q13-Q16 added. 48 tests pass; the MCP
+  snapshot tool returns [image, text] through the stdio protocol (SDK 2.3).
 
 ## To do next
 
-1. **At the instrument**: carry out TESTING.md (T0-T9) with the maintainer; record the answers to Q1-Q12 here and
+1. **At the instrument**: carry out TESTING.md (T0-T9, T5b) with the maintainer; record the answers to Q1-Q16 here and
    change the code where they differ from the assumptions (README "Assumptions about LabSpec").
 2. Put the measured times in the profile's `timing` (T3, T7.2).
 3. Later: native LabSpec maps (SetMappingParams + ACQ_SPECTRAL_IMAGE) for large fast maps; Linkam temperature
@@ -61,5 +71,6 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
 
 ## Open ideas
 
-- Video snapshot of the sample (Video + export) so the LLM can see where it measures.
+- Per-objective laser offsets (if T5b.4 shows they differ): video.laser_offset_um as {objective: [dx, dy]}.
+- Use the measured offset to correct where maps and points land (today it only places the marker).
 - Adaptive maps: refine around boundaries found in a coarse map.

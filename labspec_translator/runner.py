@@ -1,5 +1,5 @@
 """runner.py — runs a request's studies on the instrument, one command at a time, and checks every result.
-Version: 2026.11.19.1
+Version: 2026.11.19.2
 
 A request runs in its own process (`ls6t run-request FOLDER`, started detached by api.start), so it outlives the
 MCP call that started it. One request at a time holds the instrument (a lock file under LS6T_HOME); others wait
@@ -17,7 +17,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import __version__, BRIDGE_PROTOCOL, config, plan, spectra
+from . import __version__, BRIDGE_PROTOCOL, config, plan, spectra, video
 from . import profile as P
 from .bridge import Bridge, BridgeError, BridgeGone, BridgeTimeout
 
@@ -332,6 +332,9 @@ def run_study(name: str, study: dict, ctx: Ctx) -> dict:
     native = study.get("save_native", True)
     stop_exc = None
     t_acq = 0.0
+    vd = study.get("video") or {}
+    want_before = vd.get("before", kind == "calibration")
+    snaps: dict = {}
     for k, p in enumerate(pts):
         if ctx.cancelled():
             stop_exc = Stop("cancelled", "cancel")
@@ -381,6 +384,8 @@ def run_study(name: str, study: dict, ctx: Ctx) -> dict:
                     if not r["ok"]:
                         raise Stop(f"point {k}: Z move failed: {r.get('error')}", "study")
                     zcur = target
+            if k == 0 and want_before:
+                snaps["before"] = _snapshot(ctx, name, sd, "before", bool(vd.get("with_laser")), warnings)
             out = sd / "spectra" / f"p{k:05d}.txt"
             params = dict(acq)
             params.pop("verb", None)
@@ -425,6 +430,11 @@ def run_study(name: str, study: dict, ctx: Ctx) -> dict:
         except Stop as exc:
             stop_exc = exc
             break
+    if vd.get("after") and per_point and stop_exc is None:
+        try:
+            snaps["after"] = _snapshot(ctx, name, sd, "after", bool(vd.get("with_laser")), warnings)
+        except Stop as exc:
+            stop_exc = exc
     if view and native:
         try:
             vr = ctx.call("view", timeout_s=60, action="save", name=name, path=str(sd / f"{name}.l6s"))
@@ -466,12 +476,40 @@ def run_study(name: str, study: dict, ctx: Ctx) -> dict:
             result["images"] = render.study_images(name, study, result, sd)
         except Exception as exc:  # noqa: BLE001
             warnings.append(f"images not drawn: {type(exc).__name__}: {exc}")
+    snaps = {k: v for k, v in snaps.items() if v}
+    if snaps:
+        result["video"] = snaps
+        imgs = result.setdefault("images", {})
+        for tag, sn in snaps.items():
+            if sn.get("path"):
+                imgs[f"video_{tag}"] = {"path": sn["path"], "what": sn.get("what")}
     result = clean(result)
     write_json(sd / f"{name}.json", result)
     _progress(sd, state="done" if stop_exc is None else "stopped", stage="done", point=len(per_point))
     if stop_exc is not None and stop_exc.by in ("cancel", "operator", "bridge", "timeout"):
         raise stop_exc
     return result
+
+
+def _snapshot(ctx: Ctx, name: str, sd: Path, tag: str, with_laser: bool, warnings: list) -> dict | None:
+    """A video frame now (LabSpec's live video; with_laser: the shutter opens for video.laser_s), drawn with the
+    laser position marked. A failure is a warning, never a reason to stop the study."""
+    v = ctx.prof.get("video", {})
+    base = sd / "video" / tag
+    base.parent.mkdir(parents=True, exist_ok=True)
+    laser_s = float(v.get("laser_s", 1.0)) if with_laser else 0.0
+    settle = float(v.get("settle_s", 1.5))
+    r = ctx.call("video", timeout_s=60 + settle + laser_s, out=str(base), settle_s=settle, laser_s=laser_s,
+                 formats=",".join(v.get("formats", [])), camera=v.get("camera"), **motor_args(ctx.prof))
+    if not r["ok"]:
+        warnings.append(f"video snapshot ({tag}) failed: {r.get('error')}")
+        return None
+    snap = video.snapshot(r, ctx.prof, base, f"{name}: {tag}")
+    if with_laser and str(r.get("shutter_closed")) != "1":
+        warnings.append("after the snapshot the laser shutter could not be confirmed closed: check LabSpec")
+    for w in snap.get("warnings", []):
+        warnings.append(f"video ({tag}): {w}")
+    return snap
 
 
 def _matches(step: dict, r: dict) -> tuple[bool, str]:
