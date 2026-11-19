@@ -1,0 +1,702 @@
+"""runner.py — runs a request's studies on the instrument, one command at a time, and checks every result.
+Version: 2026.11.19.1
+
+A request runs in its own process (`ls6t run-request FOLDER`, started detached by api.start), so it outlives the
+MCP call that started it. One request at a time holds the instrument (a lock file under LS6T_HOME); others wait
+as 'queued'. Everything is written to the request folder: state.json, runner.json (the runner's heartbeat), and per
+study progress.json, the spectra and <name>.json (the result, written atomically).
+"""
+from __future__ import annotations
+
+import json
+import math
+import os
+import time
+import traceback
+from pathlib import Path
+
+import numpy as np
+
+from . import __version__, BRIDGE_PROTOCOL, config, plan, spectra
+from . import profile as P
+from .bridge import Bridge, BridgeError, BridgeGone, BridgeTimeout
+
+FINAL = ("done", "cancelled", "failed", "interrupted")
+
+
+class Stop(Exception):
+    """The request ends here: cancelled, stopped by the operator, declined, or the bridge is gone."""
+
+    def __init__(self, why: str, by: str):
+        super().__init__(why)
+        self.why, self.by = why, by
+
+
+# --------------------------------------------------------------------------------------------- files
+
+def write_json(path: Path, data):
+    path = Path(path)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, indent=1, default=_jsonable), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def read_json(path: Path, default=None):
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return default
+
+
+def _jsonable(o):
+    if isinstance(o, (np.floating,)):
+        return None if not math.isfinite(float(o)) else float(o)
+    if isinstance(o, (np.integer,)):
+        return int(o)
+    if isinstance(o, np.ndarray):
+        return [_jsonable(v) if isinstance(v, (np.floating, np.integer)) else v for v in o.tolist()]
+    if isinstance(o, Path):
+        return str(o)
+    return str(o)
+
+
+def clean(v):
+    """NaN and inf as None, recursively (JSON has neither)."""
+    if isinstance(v, dict):
+        return {k: clean(x) for k, x in v.items() if not str(k).startswith("_")}
+    if isinstance(v, (list, tuple)):
+        return [clean(x) for x in v]
+    if isinstance(v, (float, np.floating)):
+        return float(v) if math.isfinite(float(v)) else None
+    if isinstance(v, np.integer):
+        return int(v)
+    return v
+
+
+def motor_args(prof: dict) -> dict:
+    """The profile's LabSpec motor names, as the bridge's status, move_xy, autofocus and safe verbs take them."""
+    return {f"m_{k}": v for k, v in prof["motors"].items()}
+
+
+def lock_path() -> Path:
+    return (config.out_dir() / "sim_instrument.lock") if config.mode() == "sim" else (config.home() / "instrument.lock")
+
+
+# --------------------------------------------------------------------------------------------- the request
+
+class Ctx:
+    def __init__(self, folder: Path, bridge: Bridge, prof: dict):
+        self.folder = folder
+        self.bridge = bridge
+        self.prof = prof
+        self.start: dict = {}
+        self.confirmed = False
+        self.last_beat = 0.0
+        self.bridge_version = None
+
+    def cancelled(self) -> bool:
+        return (self.folder / "cancel").exists()
+
+    def beat(self, force: bool = False):
+        now = time.time()
+        if force or now - self.last_beat > 3:
+            self.last_beat = now
+            write_json(self.folder / "runner.json", {"pid": os.getpid(), "time": now, "version": __version__})
+            try:
+                os.utime(lock_path(), None)
+            except OSError:
+                pass
+
+    def call(self, verb: str, timeout_s: float = 60.0, **params) -> dict:
+        try:
+            r = self.bridge.call(verb, timeout_s=timeout_s, should_stop=self.cancelled, on_wait=self.beat, **params)
+        except BridgeGone as exc:
+            raise Stop(str(exc), "bridge") from exc
+        except BridgeTimeout as exc:
+            raise Stop(str(exc), "timeout") from exc
+        self.beat()
+        if not r["ok"]:
+            if r.get("stopped_by") == "operator" or r.get("halted") == "1":
+                raise Stop("stopped by the operator in LabSpec", "operator")
+            if r.get("stopped_by") == "request" or self.cancelled():
+                raise Stop("cancelled", "cancel")
+        return r
+
+
+def _acquire_lock(folder: Path, ctx_beat) -> None:
+    lp = lock_path()
+    lp.parent.mkdir(parents=True, exist_ok=True)
+    while True:
+        try:
+            fd = os.open(lp, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            with os.fdopen(fd, "w") as fh:
+                fh.write(json.dumps({"request": str(folder), "pid": os.getpid(), "time": time.time()}))
+            return
+        except FileExistsError:
+            try:
+                age = time.time() - lp.stat().st_mtime
+                holder = read_json(lp, {}).get("request")
+            except OSError:
+                continue
+            if age > 90 or holder == str(folder):
+                try:
+                    lp.unlink()
+                except OSError:
+                    pass
+                continue
+            write_json(folder / "state.json", {"state": "queued", "reason": f"the instrument is busy with {holder}",
+                                               "time": time.time()})
+            if (folder / "cancel").exists():
+                raise Stop("cancelled while queued", "cancel")
+            ctx_beat()
+            time.sleep(2)
+
+
+def _release_lock(folder: Path):
+    lp = lock_path()
+    if read_json(lp, {}).get("request") == str(folder):
+        try:
+            lp.unlink()
+        except OSError:
+            pass
+
+
+def run_request(folder: Path | str) -> dict:
+    """Runs every study of a request folder (created by api.start) in order; returns the final state."""
+    folder = Path(folder)
+    studies = read_json(folder / "studies.json", {})
+    req = read_json(folder / "request.json", {})
+    prof = P.load()
+    started = time.time()
+    state = {"state": "running", "started": started, "pid": os.getpid()}
+    bridge_dir = Path(req.get("bridge_dir") or config.active_bridge_dir())
+    sim = None
+    ctx = None
+    try:
+        ctx = Ctx(folder, Bridge(bridge_dir), prof)
+        ctx.beat(force=True)
+        _acquire_lock(folder, ctx.beat)
+        write_json(folder / "state.json", state)
+        if req.get("mode", config.mode()) == "sim":
+            from . import sim as S
+            sim = S.ensure(bridge_dir)
+        ping = ctx.call("ping", timeout_s=15)
+        ctx.bridge_version = ping.get("version")
+        if str(ping.get("protocol")) != str(BRIDGE_PROTOCOL):
+            raise Stop(f"the bridge speaks protocol {ping.get('protocol')}, this ls6t {BRIDGE_PROTOCOL}: install the "
+                       "bridge script of this version (ls6t bridge install)", "bridge")
+        if ping.get("halted") == "1":
+            raise Stop("the bridge is halted by the operator: resume it in LabSpec first", "operator")
+        st = ctx.call("status", timeout_s=15, **motor_args(prof))
+        ctx.start = {k: _f(st.get(k)) for k in ("x_um", "y_um", "z_um")}
+        ctx.start["laser_nm"] = _f(st.get("laser_nm"))
+        write_json(folder / "start.json", {"status": st, "time": time.time()})
+        ctx.call("message", text=f"ls6t: request {folder.name} started ({len(studies)} studies)")
+        stopped = None
+        for name, study in studies.items():
+            if stopped:
+                write_json(folder / name / f"{name}.json",
+                           {"ok": False, "why": f"not run: {stopped.why}", "reliable": False,
+                            "unreliable_because": [stopped.why], "warnings": []})
+                continue
+            try:
+                run_study(name, study, ctx)
+            except Stop as exc:
+                res = folder / name / f"{name}.json"
+                if not res.exists():
+                    write_json(res, {"ok": False, "why": f"stopped before measuring: {exc.why}", "reliable": False,
+                                     "unreliable_because": [exc.why], "warnings": [], "complete": False,
+                                     "points_measured": 0})
+                    _progress(folder / name, state="stopped", stage="done")
+                if exc.by != "study":      # a study's own problem does not stop the next studies
+                    stopped = exc
+        state.update(state="cancelled" if stopped else "done", finished=time.time(),
+                     why=stopped.why if stopped else None, stopped_by=stopped.by if stopped else None)
+    except Stop as exc:
+        state.update(state="cancelled" if exc.by in ("cancel", "operator") else "failed", why=exc.why,
+                     stopped_by=exc.by, finished=time.time())
+        for name in studies:
+            res = folder / name / f"{name}.json"
+            if not res.exists():
+                (folder / name).mkdir(exist_ok=True)
+                write_json(res, {"ok": False, "why": f"not run: {exc.why}", "reliable": False,
+                                 "unreliable_because": [exc.why], "warnings": []})
+    except Exception as exc:  # noqa: BLE001
+        state.update(state="failed", why=f"{type(exc).__name__}: {exc}", trace=traceback.format_exc()[-3000:],
+                     finished=time.time())
+        for name in studies:
+            res = folder / name / f"{name}.json"
+            if not res.exists():
+                (folder / name).mkdir(exist_ok=True)
+                write_json(res, {"ok": False, "why": f"runner failed: {type(exc).__name__}: {exc}",
+                                 "reliable": False, "unreliable_because": ["runner failed"], "warnings": []})
+    finally:
+        if ctx is not None:
+            try:
+                if ctx.bridge.alive():
+                    ctx.bridge.call("safe", timeout_s=15, **motor_args(prof))
+                    ctx.bridge.call("message", timeout_s=10,
+                                    text=f"ls6t: request {folder.name} {state.get('state')}")
+            except (BridgeError, OSError):
+                pass
+        _release_lock(folder)
+        state["seconds"] = round(time.time() - started, 1)
+        write_json(folder / "state.json", state)
+        if sim is not None and req.get("stop_sim", True):
+            sim.stop()
+    return state
+
+
+def _f(v):
+    try:
+        x = float(v)
+        return x if math.isfinite(x) else None
+    except (TypeError, ValueError):
+        return None
+
+
+# --------------------------------------------------------------------------------------------- one study
+
+def _progress(sd: Path, **kw):
+    cur = read_json(sd / "progress.json", {})
+    cur.update(kw, time=time.time())
+    write_json(sd / "progress.json", cur)
+
+
+def run_study(name: str, study: dict, ctx: Ctx) -> dict:
+    prof = ctx.prof
+    sd = ctx.folder / name
+    (sd / "spectra").mkdir(parents=True, exist_ok=True)
+    t_start = time.time()
+    kind = study.get("kind", "spectrum")
+    pts = plan.positions(study)
+    _progress(sd, state="running", stage="setup", point=0, points=len(pts), started=t_start,
+              estimate_min=plan.estimate(study, prof)["minutes"])
+    warnings: list[str] = []
+    unreliable: list[str] = []
+    checks: dict = {}
+    if not prof.get("measured"):
+        warnings.append("no machine profile: built-in XploRA defaults (run the discovery script)")
+
+    # ---- setup, with read-back
+    before = ctx.call("status", timeout_s=15, **motor_args(prof))
+    readback = []
+    for step in plan.setup_steps(study, prof):
+        p = {k: v for k, v in step.items() if k not in ("verb", "why")}
+        long_move = p["motor"] in (prof["motors"]["laser"], prof["motors"]["grating"], prof["motors"]["objective"])
+        r = ctx.call("move", timeout_s=600 if long_move else 120, **p)
+        ok, got = _matches(step, r)
+        readback.append({"motor": step["motor"], "asked": step["value"], "got": r.get("label") or r.get("value"),
+                         "ok": bool(r["ok"] and ok), "error": r.get("error") or None})
+        if not r["ok"] or not ok:
+            unreliable.append(f"{step['why']}: asked {step['value']}, " +
+                              (f"LabSpec said: {r.get('error')}" if not r["ok"] else f"got {got}"))
+    after = ctx.call("status", timeout_s=15, **motor_args(prof))
+    laser = _f(after.get("laser_nm")) or plan.laser_nm(study, prof) or ctx.start.get("laser_nm")
+    temp = _f(after.get("detector_temp_c"))
+    checks["detector_temp_c"] = {"value": temp, "max": prof["detector"]["max_temp_c"],
+                                 "pass": temp is not None and temp <= prof["detector"]["max_temp_c"]}
+    if temp is None:
+        warnings.append("the detector temperature could not be read")
+    elif temp > prof["detector"]["max_temp_c"]:
+        unreliable.append(f"detector at {temp:g} C, warmer than {prof['detector']['max_temp_c']:g} C: let it cool")
+    checks["setup"] = {"pass": all(r["ok"] for r in readback), "moves": readback}
+    rng = plan.acq_range(study, prof, laser)
+    if rng.get("from_nm") is None:
+        raise Stop("the laser line is unknown: give setup.laser_nm", "study")
+
+    # ---- the operator's go-ahead
+    policy = config.confirm_policy()
+    if policy == "study" or (policy == "request" and not ctx.confirmed):
+        what = (f"ls6t is about to expose '{study.get('sample', {}).get('name', name)}' ({kind}, {len(pts)} "
+                f"point(s)) with laser {laser:g} nm, filter {after.get('filter')}, objective {after.get('objective')}."
+                f" Continue?")
+        r = ctx.call("confirm", timeout_s=3600, text=what)
+        if r.get("answer") != "yes":
+            raise Stop("the operator declined in LabSpec", "operator")
+        ctx.confirmed = True
+
+    # ---- points
+    acq = plan.acquire_step(study, prof, rng)
+    focus = study.get("focus", {})
+    af = focus.get("autofocus")
+    every = int(focus.get("every", 0) or 0)
+    x0, y0 = ctx.start.get("x_um"), ctx.start.get("y_um")
+    zref = ctx.start.get("z_um")          # the operator's focus when the request started
+    zcur = _f(before.get("z_um"))
+    cur_xy = (_f(before.get("x_um")), _f(before.get("y_um")))
+    stage = prof.get("stage", {})
+    per_point = []
+    t_series0 = None
+    view = None
+    native = study.get("save_native", True)
+    stop_exc = None
+    t_acq = 0.0
+    for k, p in enumerate(pts):
+        if ctx.cancelled():
+            stop_exc = Stop("cancelled", "cancel")
+            break
+        try:
+            _progress(sd, stage="measuring", point=k, points=len(pts),
+                      eta_min=_eta(t_start, k, len(pts), study, prof))
+            if kind == "series" and k > 0:
+                wait_until = t_series0 + k * float(study["series"].get("interval_s", 0))
+                while time.time() < wait_until:
+                    if ctx.cancelled():
+                        raise Stop("cancelled", "cancel")
+                    ctx.beat()
+                    time.sleep(min(0.5, max(0.0, wait_until - time.time())))
+            ax, ay = cur_xy
+            if x0 is None or y0 is None:
+                if p["x_um"] or p["y_um"]:
+                    raise Stop("the stage position could not be read: XY moves are refused", "study")
+            elif cur_xy[0] is None or cur_xy[1] is None or \
+                    math.hypot(x0 + p["x_um"] - cur_xy[0], y0 + p["y_um"] - cur_xy[1]) > 0.01:
+                ax, ay = x0 + p["x_um"], y0 + p["y_um"]
+                for val, lim_key in ((ax, "x_um"), (ay, "y_um")):
+                    lim = stage.get(lim_key)
+                    if lim and not lim[0] <= val <= lim[1]:
+                        raise Stop(f"point {k}: stage {lim_key[0].upper()} = {val:g} µm is outside the profile's "
+                                   f"stage limits {lim}", "study")
+                r = ctx.call("move_xy", timeout_s=180, x_um=round(ax, 3), y_um=round(ay, 3),
+                             **motor_args(prof))
+                if not r["ok"]:
+                    raise Stop(f"point {k}: XY move failed: {r.get('error')}", "study")
+                cur_xy = (_f(r.get("x_um")) if _f(r.get("x_um")) is not None else ax,
+                          _f(r.get("y_um")) if _f(r.get("y_um")) is not None else ay)
+                ax, ay = cur_xy
+            if af and (k == 0 or (every and k % every == 0)):
+                r = ctx.call("autofocus", timeout_s=240, how=af, **motor_args(prof))
+                if r["ok"] and _f(r.get("z_um")) is not None:
+                    zref = zcur = _f(r.get("z_um"))
+                else:
+                    warnings.append(f"point {k}: autofocus failed ({r.get('error')}); kept the previous focus")
+            if p["dz_um"] and zref is None:
+                raise Stop("the Z position could not be read: Z offsets are refused", "study")
+            if zref is not None:
+                target = zref + p["dz_um"]       # Z is always relative to the operator's (or autofocus') focus
+                if zcur is None or abs(target - zcur) > 1e-6:
+                    r = ctx.call("move", timeout_s=120, motor=prof["motors"]["z"], mode="value",
+                                 value=round(target, 3))
+                    if not r["ok"]:
+                        raise Stop(f"point {k}: Z move failed: {r.get('error')}", "study")
+                    zcur = target
+            out = sd / "spectra" / f"p{k:05d}.txt"
+            params = dict(acq)
+            params.pop("verb", None)
+            params["out"] = str(out)
+            params["sample"] = study.get("sample", {}).get("name", name)
+            if native and kind not in ("map", "series"):
+                params["native"] = str(sd / "spectra" / f"p{k:05d}.l6s")
+            if kind == "series" and k == 0:
+                t_series0 = time.time()
+            t_a = time.time()
+            r = ctx.call("acquire", timeout_s=_acq_timeout(study, prof, rng), **params)
+            t_acq += time.time() - t_a
+            if not r["ok"]:
+                raise Stop(f"point {k}: acquisition failed: {r.get('error')}", "study")
+            rec = {"point": k, "offset": {"x_um": p["x_um"], "y_um": p["y_um"], "dz_um": p["dz_um"]},
+                   "stage": {"x_um": ax, "y_um": ay, "z_um": zcur}, "file": str(out),
+                   "native": params.get("native"), "id": r.get("id"), "t": round(time.time() - t_start, 3),
+                   "exposure_s": _f(r.get("exposure_s")), "accumulations": _f(r.get("accumulations")),
+                   "detector_temp_c": _f(r.get("detector_temp_c"))}
+            per_point.append(rec)
+            # live view in LabSpec: the map or the series grows as it is measured
+            if kind in ("map", "series") and r.get("id"):
+                try:
+                    if view is None:
+                        vr = ctx.call("view", timeout_s=30, action="create", name=name, vfrom=rng.get("from_nm"),
+                                      vto=rng.get("to_nm"),
+                                      kind="map" if kind == "map" else "profile", id=r["id"],
+                                      x=p["x_um"], y=p["y_um"], value=rec["t"],
+                                      label="time" if kind == "series" else "XY", unit="s" if kind == "series" else "um")
+                        view = vr.get("view") if vr["ok"] else False
+                        if not vr["ok"]:
+                            warnings.append(f"live view in LabSpec not available: {vr.get('error')}")
+                    elif view:
+                        vr = ctx.call("view", timeout_s=30, action="add", name=name, id=r["id"],
+                                      x=p["x_um"], y=p["y_um"], value=rec["t"], vfrom=rng.get("from_nm"),
+                                      vto=rng.get("to_nm"))
+                        if not vr["ok"]:
+                            warnings.append(f"live view: {vr.get('error')}")
+                            view = False
+                except Stop:
+                    raise
+        except Stop as exc:
+            stop_exc = exc
+            break
+    if view and native:
+        try:
+            vr = ctx.call("view", timeout_s=60, action="save", name=name, path=str(sd / f"{name}.l6s"))
+            if not vr["ok"]:
+                warnings.append(f"LabSpec could not save the {kind} file: {vr.get('error')}")
+        except Stop as exc:
+            stop_exc = stop_exc or exc
+
+    # ---- analysis and checks
+    t_an = time.time()
+    _progress(sd, stage="analysing")
+    result = analyse(name, study, per_point, prof, laser, rng, sd, warnings, unreliable, checks)
+    if stop_exc is not None:
+        if stop_exc.by in ("cancel", "operator", "bridge", "timeout"):
+            unreliable.append(f"stopped after {len(per_point)} of {len(pts)} points: {stop_exc.why}")
+        else:
+            unreliable.append(stop_exc.why)
+    result.update(
+        ok=bool(per_point), complete=len(per_point) == len(pts) and stop_exc is None,
+        reliable=bool(per_point) and not unreliable, unreliable_because=unreliable, warnings=warnings,
+        checks=checks, kind=kind, sample=study.get("sample", {}),
+        setup={"requested": study.get("setup", {}), "before": before, "after": after, "moves": readback},
+        instrument={"laser_nm": laser, "detector_temp_c": temp, "system": after.get("system"),
+                    "filter": after.get("filter"), "objective": after.get("objective"),
+                    "grating": _f(after.get("grating"))},
+        range=rng, points_measured=len(per_point), points_planned=len(pts),
+        seconds={"total": round(time.time() - t_start, 2), "acquisition": round(t_acq, 2),
+                 "analysis": round(time.time() - t_an, 2)},
+        execution={"mode": config.mode(), "bridge": ctx.bridge_version, "translator": __version__,
+                   "protocol": BRIDGE_PROTOCOL})
+    if not per_point:
+        result["why"] = stop_exc.why if stop_exc else "no spectrum was measured"
+    result["expect"] = evaluate_expect(study.get("expect", []), result)
+    if any(e.get("pass") is False for e in result["expect"]):
+        warnings.append("an expected value is out of tolerance (see 'expect')")
+    if study.get("images") and per_point:
+        try:
+            from . import render
+            result["images"] = render.study_images(name, study, result, sd)
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"images not drawn: {type(exc).__name__}: {exc}")
+    result = clean(result)
+    write_json(sd / f"{name}.json", result)
+    _progress(sd, state="done" if stop_exc is None else "stopped", stage="done", point=len(per_point))
+    if stop_exc is not None and stop_exc.by in ("cancel", "operator", "bridge", "timeout"):
+        raise stop_exc
+    return result
+
+
+def _matches(step: dict, r: dict) -> tuple[bool, str]:
+    if not r.get("ok"):
+        return False, ""
+    if step["mode"] == "label":
+        got = r.get("label", "")
+        return got == str(step["value"]), got
+    got = _f(r.get("value"))
+    return got is not None and abs(got - float(step["value"])) <= 0.5, str(got)
+
+
+def _acq_timeout(study: dict, prof: dict, rng: dict) -> float:
+    return 120.0 + 3.0 * plan.acquire_seconds(study, prof, rng)
+
+
+def _eta(t0: float, done: int, total: int, study: dict, prof: dict) -> float | None:
+    if done <= 0:
+        return plan.estimate(study, prof)["minutes"]
+    el = time.time() - t0
+    return round(el / done * (total - done) / 60.0, 2)
+
+
+# --------------------------------------------------------------------------------------------- analysis
+
+def _stats(vals) -> dict:
+    a = np.asarray([v for v in vals if v is not None and math.isfinite(v)], float)
+    if not a.size:
+        return {"n": 0}
+    return {"n": int(a.size), "mean": float(a.mean()), "std": float(a.std()), "min": float(a.min()),
+            "max": float(a.max())}
+
+
+def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreliable, checks) -> dict:
+    kind = study.get("kind", "spectrum")
+    process = dict(study.get("process", {}))
+    if kind == "calibration" and not process.get("peaks"):
+        process["peaks"] = [{"name": "Si", "near_cm1": prof["checks"]["si_cm1"], "window_cm1": 30}]
+    fs = prof["detector"]["full_scale"]
+    frac = prof["checks"]["saturation_frac"]
+    min_snr = prof["checks"]["min_snr"]
+    sat_points, spike_points, cover_short = [], [], []
+    spike_mode = study.get("acquire", {}).get("spike", "labspec")
+    axes, ys = [], []
+    for rec in per_point:
+        sp = spectra.read(rec["file"])
+        try:
+            shift, unit = spectra.to_shift(sp["x"], sp["meta"].get("x_unit", "nm"), laser)
+        except ValueError as exc:
+            warnings.append(f"point {rec['point']}: {exc}")
+            continue
+        y = sp["y"]
+        if sp["meta"].get("y_unit", "cnt").lower().startswith("cnt/s") and rec.get("exposure_s"):
+            y_counts = y * rec["exposure_s"]
+        else:
+            y_counts = y
+        sat = spectra.saturation(y_counts, fs, frac)
+        a = spectra.analyze(shift, y, process, min_snr, prof["checks"].get("detect_snr", 5.0))
+        rec.update(max_counts=sat["max_counts"], saturated=sat["saturated"], saturated_pixels=sat["pixels"],
+                   noise_sigma=a["noise_sigma"], spikes=len(a["spikes"]), from_cm1=a["from_cm1"],
+                   to_cm1=a["to_cm1"], peaks=a["peaks"], bands=a["bands"], auto_peaks=a["auto_peaks"])
+        if sat["saturated"]:
+            sat_points.append(rec["point"])
+        if a["spikes"]:
+            spike_points.append(rec["point"])
+        lo, hi = rng.get("from_cm1"), rng.get("to_cm1")
+        if lo is not None and hi is not None and not rng.get("single"):
+            if a["from_cm1"] > lo + 2 or a["to_cm1"] < hi - 2:
+                cover_short.append(rec["point"])
+        axes.append(a["_x"])
+        ys.append(a["_y"])
+        if kind != "map":
+            spectra.write(Path(rec["file"]).with_suffix(".shift.txt"), a["_x"], a["_y"],
+                          {"x_unit": "1/cm", "y_unit": sp["meta"].get("y_unit", "cnt"), "laser_nm": laser})
+    n = len(per_point)
+    checks["saturation"] = {"pass": not sat_points, "points": sat_points[:50], "full_scale": fs, "threshold": fs * frac}
+    if sat_points:
+        unreliable.append(f"saturated in {len(sat_points)} of {n} spectra: choose a stronger filter or a shorter "
+                          "exposure")
+    checks["spikes"] = {"points": spike_points[:50], "count": len(spike_points)}
+    if spike_points:
+        warnings.append(f"cosmic-ray spikes left in {len(spike_points)} spectra"
+                        + (" (spike removal is off: use 'double')" if spike_mode == "none" else ""))
+    checks["range"] = {"pass": not cover_short, "points": cover_short[:50]}
+    if cover_short:
+        warnings.append(f"{len(cover_short)} spectra do not cover the whole range asked for")
+    weak = [r["point"] for r in per_point for pk in r.get("peaks", [])
+            if pk.get("ok") and pk.get("snr") is not None and pk["snr"] < min_snr]
+    failed = [r["point"] for r in per_point for pk in r.get("peaks", [])
+              if not pk.get("ok") and pk.get("detected") is not False]
+    undetected = [r["point"] for r in per_point for pk in r.get("peaks", []) if pk.get("detected") is False]
+    checks["snr"] = {"min_snr": min_snr, "weak_points": sorted(set(weak))[:50],
+                     "not_detected_points": sorted(set(undetected))[:50]}
+    if failed and kind != "map":
+        warnings.append(f"a peak fit failed in {len(set(failed))} spectra (see peaks[].why)")
+    if undetected and kind != "map" and process.get("peaks"):
+        warnings.append(f"a requested peak was not detected in {len(set(undetected))} spectra (see peaks[].why)")
+
+    out: dict = {"files": {"folder": str(sd)}}
+    if kind == "map":
+        out["map"] = _map_result(name, study, per_point, axes, ys, sd, process)
+        out["files"]["map"] = out["map"]["files"]
+        if failed:
+            warnings.append(f"a peak fit failed at {len(set(failed))} of {n} map points (null in the map)")
+    elif kind == "series":
+        out["series"] = _series_result(per_point, process)
+        out["spectra"] = [_point_summary(r) for r in per_point]
+    else:
+        out["spectra"] = [_point_summary(r) for r in per_point]
+    if per_point and kind != "map":
+        first = per_point[0]
+        out["peaks"] = first.get("peaks", [])
+        out["peaks_by_name"] = {pk["name"]: pk for pk in first.get("peaks", []) if pk.get("name")}
+        out["bands"] = first.get("bands", {})
+    if kind == "calibration" and per_point:
+        pk = per_point[0]["peaks"][0] if per_point[0].get("peaks") else {}
+        ref, tol = prof["checks"]["si_cm1"], prof["checks"]["si_tol_cm1"]
+        if pk.get("ok"):
+            off = pk["position_cm1"] - ref
+            out["calibration"] = {"reference_cm1": ref, "measured_cm1": pk["position_cm1"],
+                                  "offset_cm1": round(off, 4), "fwhm_cm1": pk["fwhm_cm1"], "tol_cm1": tol,
+                                  "snr": pk.get("snr"), "pass": abs(off) <= tol}
+            checks["calibration"] = {"pass": abs(off) <= tol, "offset_cm1": round(off, 4), "tol_cm1": tol}
+            if abs(off) > tol:
+                unreliable.append(f"the Si line is at {pk['position_cm1']:.2f} cm-1, {off:+.2f} from {ref}: "
+                                  "calibrate the spectrometer in LabSpec (zero order and Si offset)")
+        else:
+            out["calibration"] = {"reference_cm1": ref, "pass": False, "why": pk.get("why", "no Si peak")}
+            checks["calibration"] = {"pass": False}
+            unreliable.append("no Si line found: check the sample is silicon and in focus")
+    return out
+
+
+def _point_summary(r: dict) -> dict:
+    keys = ("point", "offset", "stage", "file", "native", "t", "exposure_s", "accumulations", "max_counts",
+            "saturated", "noise_sigma", "spikes", "from_cm1", "to_cm1", "peaks", "bands")
+    return {k: r.get(k) for k in keys}
+
+
+def _quantities(per_point, process) -> dict:
+    q: dict = {}
+    for r in per_point:
+        for i, pk in enumerate(r.get("peaks", []) or []):
+            nm = pk.get("name") or f"peak{i}"
+            for f in ("position_cm1", "fwhm_cm1", "height", "area", "snr"):
+                q.setdefault(nm, {}).setdefault(f, []).append(pk.get(f) if pk.get("ok") else None)
+        for bn, val in (r.get("bands") or {}).items():
+            q.setdefault(bn, {}).setdefault("area", []).append(val)
+        q.setdefault("max_counts", {}).setdefault("value", []).append(r.get("max_counts"))
+    return q
+
+
+def _map_result(name, study, per_point, axes, ys, sd: Path, process) -> dict:
+    nx, ny, nz = plan.map_shape(study)
+    m = study.get("map", {})
+    xs = plan.axis_values(m["x_um"]) if m.get("x_um") else [0.0]
+    yv = plan.axis_values(m["y_um"]) if m.get("y_um") else [0.0]
+    zs = plan.axis_values(m["z_um"]) if m.get("z_um") else [0.0]
+    pos = plan.positions(study)
+    q = _quantities(per_point, process)
+    grids: dict = {}
+    for qn, fields in q.items():
+        for f, vals in fields.items():
+            g = np.full((nz, ny, nx), np.nan)
+            for r, v in zip(per_point, vals):
+                p = pos[r["point"]]
+                if v is not None:
+                    g[p["iz"], p["iy"], p["ix"]] = v
+            grids[f"{qn}.{f}"] = g
+    summary: dict = {}
+    for key, g in grids.items():
+        qn, f = key.rsplit(".", 1)
+        summary.setdefault(qn, {})[f] = _stats(g.ravel().tolist())
+    files = {}
+    if axes:
+        ref = axes[0]
+        spec = np.full((len(per_point), ref.size), np.nan)
+        for i, (xa, ya) in enumerate(zip(axes, ys)):
+            spec[i] = np.interp(ref, xa, ya, left=np.nan, right=np.nan)
+        idx = np.array([[pos[r["point"]]["ix"], pos[r["point"]]["iy"], pos[r["point"]]["iz"]] for r in per_point])
+        npz = sd / f"{name}_map.npz"
+        np.savez_compressed(npz, shift_cm1=ref, spectra=spec, index_xyz=idx, x_um=np.array(xs),
+                            y_um=np.array(yv), z_um=np.array(zs),
+                            **{k.replace(".", "__"): v for k, v in grids.items()})
+        files["npz"] = str(npz)
+    mj = sd / f"{name}_map.json"
+    write_json(mj, clean({"x_um": xs, "y_um": yv, "z_um": zs, "shape_zyx": [nz, ny, nx],
+                          "grids": {k: v.tolist() for k, v in grids.items()}}))
+    files["json"] = str(mj)
+    if (sd / f"{name}.l6s").exists():
+        files["native"] = str(sd / f"{name}.l6s")
+    return {"nx": nx, "ny": ny, "nz": nz, "x_um": xs, "y_um": yv, "z_um": zs, "points": len(per_point),
+            "quantities": sorted(grids), "summary": summary, "files": files}
+
+
+def _series_result(per_point, process) -> dict:
+    q = _quantities(per_point, process)
+    return {"t_s": [r["t"] for r in per_point], "values": q,
+            "summary": {qn: {f: _stats(v) for f, v in fields.items()} for qn, fields in q.items()}}
+
+
+# --------------------------------------------------------------------------------------------- expect
+
+def lookup(data, path: str):
+    cur = data
+    for part in path.split("."):
+        if isinstance(cur, dict) and part in cur:
+            cur = cur[part]
+        elif isinstance(cur, list):
+            try:
+                cur = cur[int(part)]
+            except (ValueError, IndexError):
+                return None
+        else:
+            return None
+    return cur
+
+
+def evaluate_expect(expect: list, result: dict) -> list:
+    out = []
+    for e in expect or []:
+        got = lookup(result, e["quantity"])
+        tol = float(e.get("tol", 0))
+        ok = isinstance(got, (int, float)) and not isinstance(got, bool) and abs(got - e["value"]) <= tol
+        out.append({"quantity": e["quantity"], "value": e["value"], "tol": tol,
+                    "got": got if isinstance(got, (int, float, str)) or got is None else "(not a number)",
+                    "pass": bool(ok)})
+    return out

@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "labspec-translator"
+version = "2026.11.19.1"
+description = "Raman studies (JSON) -> HORIBA LabSpec 6 through a VBS bridge the operator watches; checked results, CLI and MCP server"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Nicola Ferralis", email = "ferralis@generalflash.com" }]
+license = { text = "MIT" }
+dependencies = ["numpy>=1.22", "scipy>=1.8"]
+
+[project.optional-dependencies]
+mcp = ["mcp>=1.2"]
+render = ["matplotlib>=3.5"]
+test = ["pytest>=7"]
+
+[project.scripts]
+ls6t = "labspec_translator.cli:main"
+ls6t-mcp = "labspec_translator.mcp_server:main"
+
+[tool.setuptools]
+packages = ["labspec_translator"]
+
+[tool.setuptools.package-data]
+labspec_translator = ["vbs/*.vbs"]
