@@ -12,7 +12,7 @@ stops and cancel on the simulator, and `ls6t bench` gives known answers. What re
 LabSpec and hardware. The plan goes from no laser and no motion to Claude driving a full map, in stages. Each stage
 starts only when the previous one passed.
 
-Version under test: 2026.11.19.7 (bridge protocol 1).
+Version under test: 2026.11.19.8 (bridge protocol 1).
 
 ---
 
@@ -85,6 +85,7 @@ The vendor manual (2018) leaves these open. Each is answered by the test listed.
 | Q30 | Native maps: does `Acq(ACQ_SPECTRAL_IMAGE, -1, ...)` use the interface's exposure and accumulations set by `PutValue`, or does it need them in `Acq` (`mapping.acq_time`)? Which spectral window does it use? | T6.7 |
 | Q31 | Native maps: does `GetAcqID` return the map when it ends, and does `ACQ_CANCEL` stop it? | T6.7 |
 | Q32 | Native maps: in which order are the values in `GetValue(map, "Data")` (`mapping.data_order`), and how long does writing out a 50 × 50 map take? Does `Save(map, "...txt", "txt")` write LabSpec's text export? | T6.7 |
+| Q34 | Which commands does the installed LabSpec's ActiveX offer beyond the 2018 manual (AutoAlignment, AutoCalibration, calibration settings, lamp, map progress)? | T1.3 |
 | Q33 | Is SWIFT available on this XploRA (`GetValue SWIFT`), and how much faster is it? Time per point native vs point by point (`mapping.native_point_s`) | T6.7 |
 | Q25 | How much does the beam drift from LabSpec's marker over a day, between objectives, after AutoAlignment? | T5e.3 |
 | Q21 | Does the focus scan find the same focus as the maintainer (and as LabSpec's autofocus) on Si and on a real sample? Is 1 µm a good step at x100, and what at x50 and x10? | T6.5 |
@@ -154,6 +155,12 @@ With the maintainer, go through:
   without it.
 
 Pass: `ls6t format` shows the instrument's lasers, gratings, filters and objectives, and the limits agreed.
+
+**T1.3 What the installed LabSpec offers (Q34).** Read-only, no LabSpec needed. Run
+`ls6t-typelib --format markdown --out labspec_commands.md` (`--list` shows which files it found; `--path` points at
+`NFActiveX.ocx` in LabSpec's folder if none is found). Pass: the list opens; its first lines say how many methods are
+not in the 2018 manual and which look useful. Keep the file: methods marked `NEW` with *align*, *calib*, *lamp*,
+*progress* or *map* are candidates for ls6t (planning.md), to try one at a time with the maintainer.
 
 ## T2. The bridge, idle (no laser, no motion)
 
@@ -541,6 +548,7 @@ With the Claude desktop app connected ([INSTALL.md](INSTALL.md) step 8):
 | T0.4 | | | | | |
 | T1.1 | | | | Q1: Q2: | |
 | T1.2 | | | | Q5: | |
+| T1.3 | | | | Q34: methods new / of interest: | labspec_commands.md |
 | T2.1 | | | | | |
 | T2.2 | | | | Q3: | |
 | T2.3 | | | | | |

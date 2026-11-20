@@ -64,7 +64,7 @@ cd labspec_translator
 py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
-pip install -e ".[mcp,render,test]"
+pip install -e ".[mcp,render,test,windows]"
 ```
 
 - **`Activate.ps1` cannot be loaded because running scripts is disabled**: allow local scripts for your account once,
@@ -75,10 +75,12 @@ pip install -e ".[mcp,render,test]"
   ```
 
   Or skip activation and call the programs by their full path, e.g. `.\.venv\Scripts\ls6t.exe status`.
-- The extras: `mcp` (the server for the Claude app), `render` (PNG plots, matplotlib), `test` (pytest).
+- The extras: `mcp` (the server for the Claude app), `render` (PNG plots, matplotlib), `test` (pytest),
+  `windows` (comtypes, for `ls6t-typelib`).
 - `-e` (editable) means a `git pull` updates the installed code; reinstall only when dependencies change.
 
-The install puts two programs in `.venv\Scripts`: `ls6t.exe` (the command line) and `ls6t-mcp.exe` (the MCP server).
+The install puts three programs in `.venv\Scripts`: `ls6t.exe` (the command line), `ls6t-mcp.exe` (the MCP
+server) and `ls6t-typelib.exe` (lists every command of LabSpec's ActiveX, see step 6).
 
 ## 5. Check the install (no instrument needed)
 
@@ -107,6 +109,18 @@ It also creates the bridge folder `C:\Users\<you>\ls6t\bridge\` (with `inbox` an
 
 In **LabSpec 6**: *Processing > Scripts*. Add both scripts (the manual's script manager allows adding, configuring and
 starting scripts). Run the scripts again after every `ls6t bridge install`, for example after an update.
+
+**What does this LabSpec offer?** `ls6t-typelib` reads LabSpec's ActiveX type library (`NFActiveX.ocx`). It lists
+every command and property of the installed version, and marks:
+
+- `NEW`: commands not in the 2018 automation manual;
+- commands whose names look useful (alignment, calibration, lamp, progress...).
+
+It only reads the file: nothing starts or moves.
+
+- `ls6t-typelib --format markdown --out labspec_commands.md` writes the list to a file.
+- `--path` reads another file (a `.tlb`, or LabSpec's `.exe`).
+- It also runs on its own: `python typelib.py`.
 
 ## 7. The machine profile
 
@@ -192,7 +206,7 @@ The first measurements follow [TESTING.md](TESTING.md), with the instrument's ma
 cd $HOME\Software\labspec_translator
 git pull
 .\.venv\Scripts\Activate.ps1
-pip install -e ".[mcp,render,test]"     # only needed when dependencies changed; harmless otherwise
+pip install -e ".[mcp,render,test,windows]"     # only needed when dependencies changed; harmless otherwise
 ls6t bridge install                      # the scripts must match the package's bridge protocol
 ls6t bench
 ```
@@ -207,13 +221,13 @@ Instrument PCs are often kept off the network. On a connected Windows computer w
 ```powershell
 git clone https://github.com/feranick/labspec_translator.git
 cd labspec_translator
-py -3.12 -m pip download -d wheels ".[mcp,render,test]"
+py -3.12 -m pip download -d wheels ".[mcp,render,test,windows]"
 ```
 
 Copy the whole folder, `wheels` included, to the instrument PC. Then, in step 4, install with:
 
 ```powershell
-pip install --no-index --find-links wheels -e ".[mcp,render,test]"
+pip install --no-index --find-links wheels -e ".[mcp,render,test,windows]"
 ```
 
 (The Claude app itself needs network access to reach Claude.)

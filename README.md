@@ -16,7 +16,7 @@ it runs **locally**: on the instrument PC, next to the Claude desktop app. It ha
 machines. Unlike the other translators, the backend has no Python API: LabSpec is automated with VBScript
 (*LabSpec 5/6 Automation*, HORIBA, 2018). That is why the bridge script exists.
 
-First instrument: **XploRA** (LabSpec 6, Windows 11). Version 2026.11.19.7.
+First instrument: **XploRA** (LabSpec 6, Windows 11). Version 2026.11.19.8.
 
 **Scope of version 1**
 
@@ -70,7 +70,7 @@ detectors. See `planning.md`.
 ## Installation
 
 On the instrument PC (Windows 11, next to LabSpec 6 and the Claude desktop app): Python 3.10+ and Git, a venv,
-`pip install -e ".[mcp,render,test]"`, `ls6t bridge install`, the two scripts in LabSpec, the discovery and
+`pip install -e ".[mcp,render,test,windows]"`, `ls6t bridge install`, the two scripts in LabSpec, the discovery and
 the machine profile, then the MCP entry in the Claude app. The steps, the offline install, updating and
 troubleshooting are in **[INSTALL.md](INSTALL.md)**.
 
@@ -113,6 +113,7 @@ ls6t references clear correction [LASER@GRATING] | background NAME | spot
 ls6t alignment status                        # per laser: baseline, last check, age
 ls6t alignment record <request> [--study NAME] [--attempt N]   # after AutoAlignment: the check becomes the baseline
 ls6t bench                                   # the benchmarks on the simulator
+ls6t-typelib [--format markdown] [--out F]   # every command of LabSpec's ActiveX (read-only), new ones marked
 ```
 
 Every command prints JSON. `-` instead of a file reads the studies from standard input.
@@ -531,6 +532,7 @@ Claude app ──MCP──> ls6t-mcp ──> request folder + runner process (ls
 | `spot.py` | The beam's offsets per objective and laser, with history and drift |
 | `xcal.py` | Reference lines (ASTM E1840) and ls6t's spectral corrections per laser and grating |
 | `background.py` | White-light backgrounds: storing and subtracting them |
+| `typelib.py` | `ls6t-typelib`: reads LabSpec's ActiveX type library (read-only) and lists every method, marking those not in the 2018 manual |
 | `sim.py` | A simulated LabSpec + XploRA speaking the same protocol (`LS6T_MODE=sim`, tests, benchmarks) |
 | `bench.py` | The benchmarks |
 | `api.py`, `cli.py`, `mcp_server.py` | The functions, the command line, the MCP server |
@@ -623,6 +625,7 @@ frames, LabSpec's image files, `snapshot.json`); a study's frames go to its `vid
 
 | Version | Changes |
 |---|---|
+| 2026.11.19.8 | `ls6t-typelib`: a separate, read-only tool that reads LabSpec's ActiveX type library (comtypes or pywin32) and lists every method and property of the installed version, marking those not in the 2018 manual and those of interest (alignment, calibration, lamp, progress...); text, markdown or JSON; extra `windows`. |
 | 2026.11.19.7 | Native mapping: `map.engine` (`auto`, `points`, `native`) and `swift`; bridge verb `map_native` (`SetMappingParams` per axis, interface exposure and accumulations, spectrometer centred, SWIFT, `Acq` spectral image, wait and cancel, the map written for ls6t and saved as `.l6s` and text); ls6t splits it into spectra and analyses it like point-by-point maps; profile `mapping` settings for what the manual leaves open; benchmark `native_map`. |
 | 2026.11.19.6 | Depth profiles (kind `depth`: Z steps into the sample, profiles and interfaces, refractive-index correction; profile `stage.z_into_sample`; Z-only maps get the same analysis and a live profile in LabSpec), the spectral zero (kind `calibration` with `reference`, `lines_cm1`, `adjust: labspec` (guided correction of LabSpec's zero, then a new check) or `ls6t` (a remembered correction applied to later spectra), offset and scale fit), white-light backgrounds (kind `background`, `acquire.subtract_background`; bridge `acquire` with `laser_off`), tool and command `references`; INSTALL.md (the installation, out of the README) and FUNCTIONALITY.md; benchmarks `depth_profile`, `calibration_zero`, `white_light`. |
 | 2026.11.19.5 | The laser spot: kind `spot` (with the shutter, in a frame during an acquisition, or by the Raman signal over a small feature: grid scan, dip or peak, offset = feature − stage), remembered per objective and laser with drift (`spot.json`, `ls6t spot status/forget`, tool `spot_status`); snapshots list features to aim at and mark the beam with the remembered offset; `move.to_um` puts the beam on a picked point; bridge `video` takes `during_acq_s`; benchmarks `spot_video`, `spot_raman`. |

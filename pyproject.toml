@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "labspec-translator"
-version = "2026.11.19.7"
+version = "2026.11.19.8"
 description = "Raman studies (JSON) -> HORIBA LabSpec 6 through a VBS bridge the operator watches; checked results, CLI and MCP server"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -16,10 +16,13 @@ dependencies = ["numpy>=1.22", "scipy>=1.8"]
 mcp = ["mcp>=1.2"]
 render = ["matplotlib>=3.5"]
 test = ["pytest>=7"]
+# reading LabSpec's ActiveX type library (ls6t-typelib); pywin32 works too
+windows = ["comtypes>=1.2; sys_platform == 'win32'"]
 
 [project.scripts]
 ls6t = "labspec_translator.cli:main"
 ls6t-mcp = "labspec_translator.mcp_server:main"
+ls6t-typelib = "labspec_translator.typelib:main"
 
 [tool.setuptools]
 packages = ["labspec_translator"]

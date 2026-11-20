@@ -839,3 +839,37 @@ def test_native_map_validation_and_auto():
     big = {"kind": "map", "acquire": {"center_cm1": 520}, "map": {"x_um": [0, 19, 1], "y_um": [0, 19, 1]}}
     assert plan.map_engine(big, P.load()) == "native"
     assert plan.map_engine(dict(big, focus={"autofocus": "laser", "every": 10}), P.load()) == "points"
+
+
+# --------------------------------------------------------------------------------------------- the type-library reader
+
+def test_typelib_annotate_and_render():
+    from labspec_translator import typelib
+    lib = {"file": "NFActiveX.ocx", "library": "NFActiveXLib", "doc": "LabSpec 6 ActiveX", "version": "6.6",
+           "guid": "{x}", "types": [
+               {"name": "_DNFActiveX", "kind": "dispinterface", "doc": "", "guid": "{y}", "properties": [],
+                "values": [], "methods": [
+                    {"name": "Acq", "invoke": "method", "returns": "long", "dispid": 1, "doc": "",
+                     "params": [{"name": "Mode", "type": "long", "dir": "in", "optional": False}]},
+                    {"name": "AutoAlignment", "invoke": "method", "returns": "long", "dispid": 2, "doc": "",
+                     "params": []},
+                    {"name": "GetMapProgress", "invoke": "method", "returns": "double", "dispid": 3, "doc": "",
+                     "params": [{"name": "ID", "type": "long", "dir": "in", "optional": True}]},
+                    {"name": "Invoke", "invoke": "method", "returns": "void", "dispid": 4, "doc": "", "params": []}]},
+               {"name": "AcqMode", "kind": "enum", "doc": "", "guid": "{z}", "methods": [], "properties": [],
+                "values": [{"name": "ACQ_SPECTRUM", "type": "int", "value": 0}]}]}
+    lib = typelib.annotate(lib)
+    s = lib["summary"]
+    assert s["new"] == ["AutoAlignment", "GetMapProgress"] and "AutoAlignment" in s["new_of_interest"]
+    assert "Invoke" not in s["new"] and "MoveMotor" in s["documented_missing"]
+    txt = typelib.render(lib, "text")
+    assert "NEW long AutoAlignment()" in txt and "[align]" in txt and "ACQ_SPECTRUM = 0" in txt
+    md = typelib.render(lib, "markdown")
+    assert md.startswith("# NFActiveXLib") and "| NEW | GetMapProgress" in md
+    assert json.loads(typelib.render(lib, "json"))["summary"]["methods"] == 3
+
+
+def test_typelib_cli_off_windows(capsys):
+    from labspec_translator import typelib
+    rc = typelib.main(["--list"])
+    assert rc == 1 and "no LabSpec ActiveX" in capsys.readouterr().out

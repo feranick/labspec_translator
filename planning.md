@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.19.7)
+## Architecture (version 2026.11.19.8)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -109,10 +109,15 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   spatial axis fastest -> per-point records with grid indices, analysed like points maps. The open points are
   profile settings (mapping.positions, data_order, acq_time, native_point_s) for TESTING T6.7 (Q29-Q33).
   75 tests; 14/14 benchmarks (native_map = the points map).
+- 2026-11-19, 2026.11.19.8: ls6t-typelib (typelib.py, separate console script, also `python typelib.py`):
+  LoadTypeLibEx (REGKIND_NONE) via comtypes, or pythoncom; finds NFActiveX.ocx / NGSActiveX.ocx in LabSpec's folders
+  or registered type libraries naming LabSpec/HORIBA; lists types, methods (signatures, in/out/optional, dispid,
+  doc), properties, enum values; marks methods not in the 2018 manual (NEW) and words of interest; text, markdown,
+  JSON. Not run on Windows yet (TESTING T1.3, Q34). 77 tests.
 
 ## To do next
 
-1. **At the instrument**: carry out TESTING.md (T0-T9, T5b-T5d) with the maintainer; record the answers to Q1-Q33 here and
+1. **At the instrument**: carry out TESTING.md (T0-T9, T5b-T5d) with the maintainer; record the answers to Q1-Q34 here and
    change the code where they differ from the assumptions (README "Assumptions about LabSpec").
 2. Put the measured times in the profile's `timing` (T3, T7.2).
 3. Later: trigger scripts during native maps (per-point actions: Send, PutDataInfo); script-controlled motors

@@ -1,6 +1,6 @@
 # labspec-translator (ls6t): what it can do
 
-This is the complete list of functions in version 2026.11.19.7. It covers:
+This is the complete list of functions in version 2026.11.19.8. It covers:
 
 - what a study can ask for;
 - the tools an LLM sees;
@@ -12,7 +12,7 @@ How it all fits together: [README.md](README.md). Installation: [INSTALL.md](INS
 [TESTING.md](TESTING.md).
 
 Everything below runs on the built-in simulator and is covered by tests and benchmarks. Nothing has run on the
-instrument yet: TESTING.md lists what remains to be confirmed there (Q1–Q33).
+instrument yet: TESTING.md lists what remains to be confirmed there (Q1–Q34).
 
 ---
 
@@ -96,6 +96,7 @@ trusting numbers, the safety rules and the polling etiquette.
 | `ls6t spot status / forget [--objective --laser]` | The beam's offsets |
 | `ls6t references show / clear correction [LASER@GRATING] / clear background NAME / clear spot` | Everything ls6t remembers between sessions |
 | `ls6t sim [--seconds S]` | Run the simulator by hand |
+| `ls6t-typelib [--path F] [--format text/markdown/json] [--out F] [--list]` | (a separate program) Read LabSpec's ActiveX type library and list every method and property of the installed version; `NEW` marks those not in the 2018 manual, and words of interest are flagged. Read-only: nothing starts or moves |
 | `ls6t run-request FOLDER` | What the detached runner runs (internal) |
 
 Only the command line can record alignment baselines, change the profile, or clear what is remembered. An LLM can
@@ -226,5 +227,5 @@ profile. The shutter mode is restored on every path.
   - `si_calibration`, `graphene_map`, `extended_range`, `saturation`, `series`;
   - `guided_focus`, `focus_scan`, `spot_raman`, `spot_video`;
   - `depth_profile`, `calibration_zero`, `white_light`, `native_map`, `operator_stop`.
-- **Test suite** (`pytest`, 75 tests), which also checks the LabSpec scripts' structure.
+- **Test suite** (`pytest`, 77 tests), which also checks the LabSpec scripts' structure.
 - **Instrument tests** with the maintainer: [TESTING.md](TESTING.md).
