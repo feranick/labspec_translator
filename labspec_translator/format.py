@@ -1,5 +1,5 @@
 """format.py — the study format and its static checks (no instrument needed).
-Version: 2026.11.20.21
+Version: 2026.11.20.22
 """
 from __future__ import annotations
 
@@ -615,7 +615,13 @@ def validate_study(name: str, study: dict, prof: dict) -> dict:
         errors.append(f"estimated {est['minutes']:g} min: above the ceiling of {cap:g} min "
                       "(limits.max_minutes or LS6T_MAX_MINUTES); fewer points, shorter exposures or two studies")
     if not prof.get("measured"):
-        warnings.append("no machine profile yet: the built-in XploRA defaults are used (run the discovery script)")
+        if config.mode() == "labspec":
+            errors.append("no machine profile: the built-in defaults are a generic XploRA for the simulator (laser "
+                          "lines, objectives and caps not this instrument's) and are never used on the instrument. "
+                          "Start ls6t_bridge.vbs in LabSpec once (it reads the instrument and ls6t builds a cautious "
+                          "profile from it), or import a reviewed profile: ls6t profile import <profile.json>")
+        else:
+            warnings.append("no machine profile yet: the built-in XploRA defaults are used (simulator)")
     out.update(ok=not errors, errors=errors, warnings=warnings, estimate=est,
                range=rng, laser_nm=laser)
     return out

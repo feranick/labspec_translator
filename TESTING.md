@@ -12,7 +12,7 @@ stops and cancel on the simulator, and `ls6t bench` gives known answers. What re
 LabSpec and hardware. The plan goes from no laser and no motion to an LLM app driving a full map, in stages. Each
 stage starts only when the previous one passed.
 
-Version under test: 2026.11.20.21 (bridge protocol 1).
+Version under test: 2026.11.20.22 (bridge protocol 1).
 
 **Already known** (2026-11-20, from the instrument's discovery dump, its `NFActiveX.ocx`, `OLConfig.ini`,
 `OLSetup.ini` and LabSpec 6.7.1's service scripts): the motors and their positions (lasers 532, 637.75, 785.04 nm;
@@ -106,12 +106,12 @@ files already showed.
 | Q32 | Native maps: in which order are the values in `GetValue(map, "Data")` (`mapping.data_order`), and how long does writing out a 50 × 50 map take? Does `Save(map, "...txt", "txt")` write LabSpec's text export? | T6.7 |
 | Q33 | Is SWIFT available on this XploRA (`GetValue SWIFT`), and how much faster is it? Time per point native vs point by point (`mapping.native_point_s`) | T6.7 |
 | Q34 | Which commands does the installed LabSpec offer beyond the 2018 manual? **Known:** 15 methods in the `NFActiveX.ocx` type library (planning.md); HORIBA's scripts also use `Dialog`, `OperVar`, `GUI`, `SetSingleScriptParam`, `SetDetectorZone`, `SetAutoExposure`, `MoveXY`, `MapEx`, `Send`. Re-run `ls6t-typelib` after a LabSpec update. | T1.3 |
-| Q35 | `GetValueSimplePart(id, "Data", 0, VT_R4, start, size)`: in which units are start and size? **Known: not values** (size 8 gave 2 values: bytes?), so native maps are read whole (`mapping.export_chunk` 0). Discovery's ramp probe now records the values returned. | T1.1 |
+| Q35 | `GetValueSimplePart(id, "Data", 0, VT_R4, start, size)`: in which units are start and size? **Known: not values** (size 8 gave 2 values: bytes?), so native maps are read whole (`mapping.export_chunk` 0). Discovery no longer probes it (its write probe is the suspect in the 2026-11-20 crash): left open, chunked export stays off. | — |
 | Q36 | `SaveConfig(ini, 0)` / `LoadConfig(ini, 0)`: what does the file hold (laser, grating, filter, hole, slit, acquisition settings, stage?), does `ShowDialog` 0 run without a dialog, and does loading move motors? Is it safe to restore it after each request (`session.restore_config`)? | T1.4 |
-| Q37 | `GetConfigParam`: what parameters does it list? **Known: it works, and lists none** for the bridge (it is the script's own configuration). `SetConfigParam` is not used. | T1.1 |
+| Q37 | `GetConfigParam`: what parameters does it list? **Known: it works, and lists none** for the bridge (it is the script's own configuration; no longer probed). `SetConfigParam` is not used. | — |
 | Q38 | Script-controlled motors: when does LabSpec run the motor script, and what do `GetMotorAction`'s Action and Position hold for a move to a value, to a named position, and a stop? What does `SetMotorInfo`'s State mean? | T1.4 |
 | Q39 | Extended video (`Video(3)`): where is its area set, does the call return only when the image is complete, does it return the image's id, and where is the stage left? | T5b.6 |
-| Q40 | `GetValueEx` is in the manual but not in this build. **Known: confirmed missing** (`selftest.get_value_ex=0`); nothing depends on it. | T1.1 |
+| Q40 | `GetValueEx` is in the manual but not in this build. **Known: confirmed missing** (`selftest.get_value_ex=0`, no longer probed); nothing depends on it. | — |
 | Q41 | `OLConfig.ini` (`Parameters\ACQUISITION`): ls6t reads the camera names, the objectives' NA and their field of view (inferred) from it. Is the field of view right (a snapshot's `field_um`)? **Known:** cameras Top = 0 and Internal = 1, confirmed by switching in LabSpec. | T5b.1 |
 | Q42 | LabSpec's AutoCalibration (`OLSetup.ini` names `...\AutoCalibration\UniversalAutoCalibrationv3.vbs`, an older install's path): is the script on this PC, and can the bridge run it (`instrument autocal_info`)? | T4.9 |
 | Q43 | LabSpec 6.7's constants read a motor's positions with 100+i (value) and 200+i (name); the 2018 manual's 10+i / 20+i worked here for motors of up to ten positions. ls6t uses 100+/200+ beyond ten: check such a motor's labels, if any. | T1.1 |
@@ -190,19 +190,21 @@ Use *Start > ls6t PowerShell* (installer), or a PowerShell with the venv active 
 
 ## T1. Discovery (no laser, no motion)
 
-**T1.1 The discovery script.** The bridge records the instrument's inventory each time it starts; this script adds
-the self-tests. In LabSpec: *Processing > Scripts*, add `ls6t_discover.vbs`, run it. A small window appears and
-closes by itself; a message box gives the dump's path.
+**T1.1 The discovery script (optional).** The bridge records the instrument's inventory each time it starts, and
+the profile comes from that; this script adds the self-tests of the bridge's design. It only reads (no LabSpec data
+is created) and logs each step in `%USERPROFILE%\ls6t\discovery_progress.txt`. On 2026-11-20 the .21 discovery
+crashed LabSpec on one account (an *About NFActiveX Control* box, then a crash); if LabSpec shows any unexpected
+dialog or stops, **do not run it again**: send `discovery_progress.txt` (its last `begin` line is the step) to the
+ls6t maintainer; a later run skips that step (`discovery_skip.txt`). In LabSpec: *Processing > Scripts*, add
+`ls6t_discover.vbs`, run it. A small window appears and closes by itself; a message box gives the dump's path.
 
 Pass:
-- the dump file exists (**Q1**);
+- the dump file exists (**Q1**), and `discovery_progress.txt` ends with `finished`;
 - in the dump: `selftest.pause=1`, `selftest.popup_open=-1`, `selftest.popup_closed=0`, `selftest.status_bar=1`, and
   record `selftest.stop_button` (**Q2**);
 - `system=XploRA Plus`, `detector_temp_c` close to LabSpec's display;
 - `video.id_now` > 0 if the live video was running (start it first to check), and no `video.error` (**Q13**);
-- the methods beyond the manual (record each): `selftest.last_error_info` (1), `selftest.get_value_ex` (0, **Q40**),
-  `selftest.get_value_simple_part_values` (**Q35**: `4,5,...,11` means values; anything else keeps chunked export
-  off), `selftest.get_config_param` (**Q37**); any motor with more than ten positions has right labels (**Q43**).
+- `selftest.last_error_info=1`; any motor with more than ten positions has right labels (**Q43**).
 
 **T1.2 Review the profile.** ls6t already uses a profile made automatically from the bridge's inventory and LabSpec's
 `OLConfig.ini`: the real lasers, gratings, filters, objectives (with their NA), holes, slits, cameras and polarisers,
@@ -679,7 +681,7 @@ With the LLM app connected (test mode off), in a new chat:
 | T0.2 | | | | | |
 | T0.3 | | | | | |
 | T0.4 | | | | | |
-| T1.1 | | | | Q2 (stop button): Q35 (ramp values): Q43: | discovery dump |
+| T1.1 | | | | Q2 (stop button): Q43: | discovery dump, discovery_progress.txt |
 | T1.2 | | | | Q15 (shutter confirmed): caps per laser: | profile.json |
 | T1.3 | | | | Q34 (after a LabSpec update only): | labspec_commands.md |
 | T1.4 | | | | Q36 (config contents, motors moved?): Q38 (actions logged): | configs\before_tests.ini, script_motor_log.txt |

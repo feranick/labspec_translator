@@ -1,5 +1,5 @@
 """bridge.py — the Python side of the LabSpec bridge: commands as files in a folder the bridge script watches.
-Version: 2026.11.20.21
+Version: 2026.11.20.22
 
 Protocol 1 (the same for ls6t_bridge.vbs inside LabSpec and for sim.py):
 
@@ -25,6 +25,69 @@ from pathlib import Path
 
 from . import config
 from .profile import escape, parse_kv, read_text
+
+
+def labspec_windows() -> dict | None:
+    """LabSpec's visible top-level windows on this PC (Windows only; None elsewhere or when they cannot be listed):
+    {"running": bool, "dialogs": [titles of its dialog boxes], "windows": [other titles]}. A dialog box of LabSpec's
+    (class #32770: message boxes, About boxes...) blocks every LabSpec script while it is open."""
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+        u32, k32 = ctypes.windll.user32, ctypes.windll.kernel32
+        out = {"running": False, "dialogs": [], "windows": []}
+        names: dict = {}
+
+        def exe(pid):
+            if pid not in names:
+                h = k32.OpenProcess(0x1000, False, pid)          # PROCESS_QUERY_LIMITED_INFORMATION
+                name = ""
+                if h:
+                    buf = ctypes.create_unicode_buffer(1024)
+                    size = wintypes.DWORD(1024)
+                    if k32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
+                        name = os.path.basename(buf.value).lower()
+                    k32.CloseHandle(h)
+                names[pid] = name
+            return names[pid]
+
+        @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        def each(hwnd, _):
+            if not u32.IsWindowVisible(hwnd):
+                return True
+            pid = wintypes.DWORD()
+            u32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if not exe(pid.value).startswith("labspec"):
+                return True
+            out["running"] = True
+            title = ctypes.create_unicode_buffer(512)
+            u32.GetWindowTextW(hwnd, title, 512)
+            cls = ctypes.create_unicode_buffer(256)
+            u32.GetClassNameW(hwnd, cls, 256)
+            (out["dialogs"] if cls.value == "#32770" else out["windows"]).append(title.value or "(no title)")
+            return True
+
+        u32.EnumWindows(each, 0)
+        return out
+    except Exception:          # noqa: BLE001 - a hint only
+        return None
+
+
+def labspec_hint() -> str:
+    """What to tell the operator when the bridge stops answering: LabSpec's open dialog by its title, or that
+    LabSpec is not running any more."""
+    w = labspec_windows()
+    if w is not None and not w["running"]:
+        return ("LabSpec is not running any more (it closed or crashed): restart it, then ls6t_bridge.vbs. If it "
+                f"crashed, send {config.home() / 'discovery_progress.txt'} (when a discovery ran) and the request's "
+                "runner.log to the ls6t maintainer.")
+    if w and w["dialogs"]:
+        return ("LabSpec shows a dialog that blocks its scripts: " + "; ".join(f"'{t}'" for t in w["dialogs"]) +
+                ". The operator closes it; the bridge then goes on (or restart ls6t_bridge.vbs).")
+    return ("LabSpec may be showing a dialog or message box: its scripts wait while one is open, so the operator "
+            "closes it; otherwise the operator restarts ls6t_bridge.vbs")
 
 
 class BridgeError(RuntimeError):
@@ -149,9 +212,7 @@ class Bridge:
             if not self.alive():
                 self._withdraw(cmd)
                 raise BridgeGone(f"{verb}: the LabSpec bridge stopped answering (heartbeat older than "
-                                 f"{config.heartbeat_s():.0f} s). If LabSpec shows a dialog or message box, the "
-                                 "operator closes it (LabSpec's scripts wait while one is open); otherwise the "
-                                 "operator restarts ls6t_bridge.vbs")
+                                 f"{config.heartbeat_s():.0f} s). " + labspec_hint())
             time.sleep(poll_s)
 
     def _withdraw(self, cmd: Path):

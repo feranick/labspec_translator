@@ -946,12 +946,17 @@ def test_native_map_export_and_discovery_probes(tmp_path):
     assert st["studies"]["m"]["reliable"]
     S.ensure(config.active_bridge_dir())
     r = bridge.Bridge().call("discover", timeout_s=10, out=str(tmp_path / "dump.txt"))
-    prof, notes = P.import_discovery(P.read_text(tmp_path / "dump.txt"))
+    # discovery no longer probes these (2026.11.20.22): dumps from older bridges still carry them
+    old = (tmp_path / "dump.txt").read_text() + "\n".join([
+        "selftest.get_value_ex=0", "selftest.get_value_simple_part=1", "selftest.get_value_simple_part_size=8",
+        "selftest.get_value_simple_part_values=4,5,6,7,8,9,10,11", "selftest.get_config_param=1",
+        "config_param.0.name=Delay", "config_param.0.unit=s", "config_param.0.type=double",
+        "config_param.0.value=0"]) + "\n"
+    prof, notes = P.import_discovery(old)
     assert prof["discovered"]["methods"] == {"GetLastErrorInfo": True, "GetValueEx": False,
                                              "GetValueSimplePart": True, "GetConfigParam": True}
     assert prof["discovered"]["config_params"][0]["name"] == "Delay" and prof["mapping"]["export_chunk"] == 65536
-    text = (tmp_path / "dump.txt").read_text().replace("selftest.get_value_simple_part=1",
-                                                        "selftest.get_value_simple_part=0")
+    text = old.replace("selftest.get_value_simple_part=1", "selftest.get_value_simple_part=0")
     prof, notes = P.import_discovery(text)
     assert prof["mapping"]["export_chunk"] == 0 and any("read whole" in n for n in notes)
 
@@ -967,7 +972,7 @@ def test_vbs_new_methods(tmp_path):
     sm = Path(files["ls6t_script_motor.vbs"]).read_text()
     assert "LabSpec.GetMotorAction(action, position)" in sm and "LabSpec.SetMotorInfo(" in sm
     disc = Path(files["ls6t_discover.vbs"]).read_text()
-    assert "LabSpec.GetConfigParam" in disc and "LabSpec.SetConfigParam" not in disc
+    assert "LabSpec.GetConfigParam" not in disc and "LabSpec.SetConfigParam" not in disc   # discovery only reads
 
 
 # --------------------------------------------------------------------------------------------- Windows installer
@@ -1432,3 +1437,50 @@ def test_polarisers_in_the_setup(tmp_path):
                            "acquire": {"center_cm1": 520, "exposure_s": 0.5}}})
     moves = st["studies"]["s"]["setup"]["moves"]
     assert any(m["motor"] == "RamanPol" and m["ok"] for m in moves)
+
+
+def test_discovery_is_read_only_logged_and_skips_a_crash(tmp_path, monkeypatch):
+    """2026-11-20: discovery's probes crashed LabSpec (About NFActiveX, then a crash) on one account. Discovery now
+    only reads, logs each step, and skips a step that stopped LabSpec before; jobs lists the attempt."""
+    br = Path(api.install_bridge(tmp_path / "vbs")["files"]["ls6t_bridge.vbs"]).read_text()
+    body = br[br.index("Function DiscoverTo("):]
+    body = body[:body.index("End Function")]
+    for bad in ("CreateDataObject", "PutValue", "GetValueSimplePart", "GetValueEx", "GetConfigParam", ".Exec ",
+                "LaserSwitch", "E-Cal_Neon"):
+        assert bad not in body, bad
+    assert 'DStep("motor." & name)' in body and "discovery_skip.txt" in br and "DiscoverTo(GetP(" in br
+    S.ensure(config.active_bridge_dir())
+    (config.active_bridge_dir() / "sim_discover_crash").write_text("video")
+    r = api.instrument("discover")
+    assert not r["ok"] and r["stopped_in"] == "video" and "skips it" in r["next"]
+    (config.active_bridge_dir() / "sim_discover_crash").unlink()
+    r = api.instrument("discover")
+    assert r["ok"] and any("video" in n for n in r["notes"]) and "profile.proposed.json" in r["next"]
+    assert api.discovery_progress()["finished"] and api.discovery_progress()["skip"] == ["video"]
+    acts = api.jobs()["instrument_actions"]
+    assert [a["action"] for a in acts[:2]] == ["discover", "discover"] and acts[1]["stopped_in"] == "video"
+    assert "dialog" in bridge.labspec_hint()
+
+
+def test_profile_import_reviewed_json_and_no_defaults_on_the_instrument(tmp_path, monkeypatch):
+    prof = P.load()
+    prop = tmp_path / "profile.proposed.json"
+    P.save(dict(prof, lasers={"637.75": {"nm": 637.75, "label": "637.75", "power_mw": 20, "max_filter_pct": None}}),
+           prop)
+    with pytest.raises(ValueError, match="max_filter_pct"):
+        P.import_reviewed(prop)
+    P.save(dict(prof, auto={"x": 1}, lasers={"637.75": {"nm": 637.75, "label": "637.75", "power_mw": None,
+                                                        "max_filter_pct": 5}}), prop)
+    data, notes = P.import_reviewed(prop)
+    assert "auto" not in data and data["lasers"]["637.75"]["max_filter_pct"] == 5
+    assert any("power_mw" in n for n in notes)
+    from labspec_translator import cli
+    assert cli.main(["profile", "import", str(prop)]) == 0
+    assert P.load()["lasers"]["637.75"]["max_filter_pct"] == 5 and not P.load().get("auto")
+    # the built-in generic profile is never used on the instrument
+    config.profile_path().unlink()
+    monkeypatch.setenv("LS6T_MODE", "labspec")
+    st = json.loads((Path(__file__).parent.parent / "examples" / "studies.json").read_text())
+    name = next(iter(st))
+    r = api.validate({name: st[name]})[name]
+    assert not r["ok"] and any("generic XploRA" in e for e in r["errors"])

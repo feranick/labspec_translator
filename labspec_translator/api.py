@@ -1,5 +1,5 @@
 """api.py — the functions behind the command line and the MCP server (JSON in, JSON out).
-Version: 2026.11.20.21
+Version: 2026.11.20.22
 """
 from __future__ import annotations
 
@@ -246,15 +246,74 @@ def jobs(limit: int = 20, active: bool = False) -> dict:
             if len(rows) >= limit:
                 break
     lock = runner.read_json(runner.lock_path(), None)
-    return {"requests": rows, "instrument_busy": lock.get("request") if lock else None}
+    return {"requests": rows, "instrument_actions": action_log(10),
+            "instrument_busy": lock.get("request") if lock else None}
 
 
 # --------------------------------------------------------------------------------------------- the instrument
 
+QUIET_ACTIONS = ("status", "last_error", "autocal_info")      # reads that do not go to the action log
+
+
+def discovery_progress() -> dict:
+    """The last discovery's step log (LS6T_HOME/discovery_progress.txt, written by the bridge step by step): the
+    step it was in when it stopped, whether it finished, and the steps skipped because they crashed LabSpec
+    before (discovery_skip.txt)."""
+    home = config.home()
+    out = {"log": str(home / "discovery_progress.txt"), "finished": False, "stopped_in": None, "skip": []}
+    try:
+        lines = [ln.strip() for ln in P.read_text(home / "discovery_progress.txt").splitlines()]
+    except OSError:
+        lines = []
+    for ln in lines:
+        if ln.startswith("begin "):
+            out["stopped_in"] = ln[6:]
+        elif ln.startswith("end ") or ln == "finished":
+            out["stopped_in"] = None
+    out["finished"] = "finished" in lines
+    try:
+        out["skip"] = [s.strip() for s in P.read_text(home / "discovery_skip.txt").splitlines() if s.strip()]
+    except OSError:
+        pass
+    return out
+
+
+def action_log(limit: int = 10) -> list:
+    """The latest instrument actions (discover, set, laser, camera, autocal...), newest first."""
+    p = config.home() / "instrument_log.jsonl"
+    try:
+        rows = [json.loads(x) for x in p.read_text(encoding="utf-8").splitlines() if x.strip()]
+    except (OSError, ValueError):
+        return []
+    return rows[::-1][:limit]
+
+
 def instrument(action: str = "status", camera=None, setup: dict | None = None, seconds: float | None = None) -> dict:
     """status: the bridge's ping and the instrument's state. discover: the discovery dump and a proposed profile
-    (written next to the profile as profile.proposed.json; a person applies it with `ls6t profile import`).
-    resume: asks the operator in LabSpec to lift a halt."""
+    (written next to the profile as profile.proposed.json; a person reviews it and applies it with `ls6t profile
+    import <profile.proposed.json>`). resume: asks the operator in LabSpec to lift a halt. Every action but the
+    reads goes to LS6T_HOME/instrument_log.jsonl (shown by jobs)."""
+    t0 = time.time()
+    r = _instrument(action, camera, setup, seconds)
+    if action not in QUIET_ACTIONS:
+        row = {"time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t0)), "action": action,
+               "ok": bool(r.get("ok", True)) if isinstance(r, dict) else None,
+               "seconds": round(time.time() - t0, 1)}
+        if isinstance(r, dict) and r.get("error"):
+            row["error"] = str(r["error"])[:300]
+        if action == "discover" and isinstance(r, dict):
+            row.update({k: r[k] for k in ("dump", "stopped_in") if r.get(k)})
+        try:
+            p = config.home() / "instrument_log.jsonl"
+            p.parent.mkdir(parents=True, exist_ok=True)
+            with open(p, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(row) + "\n")
+        except OSError:
+            pass
+    return r
+
+
+def _instrument(action, camera, setup, seconds) -> dict:
     b = Bridge()
     if config.mode() == "sim":
         from . import sim as S
@@ -266,15 +325,21 @@ def instrument(action: str = "status", camera=None, setup: dict | None = None, s
         if action == "discover":
             dump = config.home() / f"discovery_{time.strftime('%Y%m%d_%H%M%S')}.txt"
             dump.parent.mkdir(parents=True, exist_ok=True)
-            r = b.call("discover", timeout_s=120, out=str(dump))
+            try:
+                r = b.call("discover", timeout_s=120, out=str(dump))
+            except BridgeError as exc:
+                return _discover_failed(str(exc))
             if not r["ok"]:
-                return {"ok": False, "error": r.get("error")}
+                return _discover_failed(r.get("error"))
             prof, notes = P.import_discovery(P.read_text(dump))
             prop = config.profile_path().with_name("profile.proposed.json")
             P.save(prof, prop)
+            prog = discovery_progress()
+            if prog["skip"]:
+                notes.append("skipped (they stopped LabSpec before): " + ", ".join(prog["skip"]))
             return {"ok": True, "dump": str(dump), "proposed_profile": str(prop), "notes": notes,
-                    "next": "a person reviews the proposal and the limits, then runs: ls6t profile import "
-                            f"\"{dump}\""}
+                    "next": "a person reviews the proposal (lasers' power_mw and max_filter_pct, limits), edits "
+                            f"it, then runs: ls6t profile import \"{prop}\""}
         if action == "resume":
             return b.call("resume", timeout_s=600)
         if action == "last_error":
@@ -305,6 +370,19 @@ def instrument(action: str = "status", camera=None, setup: dict | None = None, s
         return {"ok": False, "error": str(exc)}
     raise ValueError(f"action {action!r}: status, set, laser_on, laser_off, camera_on, camera_off, calibration, "
                      "autocal_info, autocal_run, discover, resume or last_error")
+
+
+def _discover_failed(error) -> dict:
+    prog = discovery_progress()
+    out = {"ok": False, "error": error, "progress": prog}
+    if prog["stopped_in"]:
+        out["stopped_in"] = prog["stopped_in"]
+        out["next"] = (f"LabSpec stopped in discovery step '{prog['stopped_in']}': the next discovery skips it "
+                       f"({config.home() / 'discovery_skip.txt'}). Restart LabSpec and the bridge; send "
+                       f"{prog['log']} to the ls6t maintainer. The bridge's own inventory "
+                       f"({config.home() / 'discovery_latest.txt'}) already gives the profile: discovery is not "
+                       "needed to use ls6t.")
+    return out
 
 
 SET_KEYS = ("filter", "laser_nm", "grating", "objective", "hole_um", "slit_um", "laser_pol", "raman_pol")

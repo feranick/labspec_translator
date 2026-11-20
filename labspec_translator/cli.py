@@ -1,5 +1,5 @@
 """cli.py — the command line. Every command prints JSON; '-' reads the studies from stdin.
-Version: 2026.11.20.21
+Version: 2026.11.20.22
 
   ls6t status [REQUEST] [--wait S]   versions, the bridge, the profile; or a request's studies
   ls6t format                        the study format
@@ -20,7 +20,7 @@ Version: 2026.11.20.21
   ls6t bridge install [--dest DIR]   write the LabSpec scripts configured for this machine
   ls6t bridge call VERB [k=v ...]    one bridge command, for the maintainer's tests (TESTING.md); acquire and
                                      autofocus fire the laser and need --laser
-  ls6t profile show|default|import DUMP
+  ls6t profile show|default|import FILE   import: a reviewed profile (.json) or a discovery dump (.txt)
   ls6t profile set KEY VALUE         one value (JSON), e.g. video.laser_offset_um "[1.4, -0.6]"
   ls6t profile ini [OLConfig.ini]    what LabSpec's own configuration says (cameras, objectives, motors)
   ls6t alignment status              per laser: baseline, last check, age
@@ -111,7 +111,8 @@ def main(argv=None) -> int:
     s.add_argument("--laser", action="store_true", help="allow acquire and autofocus (the laser fires)")
     s = sub.add_parser("profile")
     s.add_argument("action", choices=["show", "default", "import", "set", "ini"])
-    s.add_argument("dump", nargs="?", help="import: the discovery dump; set: the key")
+    s.add_argument("dump", nargs="?", help="import: a reviewed profile (.json, e.g. profile.proposed.json) or a "
+                   "discovery dump (.txt); set: the key")
     s.add_argument("value", nargs="?", help="set: the value (JSON)")
     s = sub.add_parser("references")
     s.add_argument("action", choices=["show", "clear"])
@@ -231,8 +232,20 @@ def main(argv=None) -> int:
             _print(api.profile_set(a.dump, a.value))
         else:
             if not a.dump:
-                ap.error("profile import needs the discovery dump file")
-            prof, notes = P.import_discovery(P.read_text(a.dump))
+                ap.error("profile import needs a reviewed profile (.json) or a discovery dump (.txt)")
+            src = Path(a.dump)
+            if src.suffix.lower() == ".json":
+                try:
+                    prof, notes = P.import_reviewed(src)
+                except ValueError as exc:
+                    _print({"ok": False, "error": str(exc)})
+                    return 1
+            else:
+                prof, notes = P.import_discovery(P.read_text(src))
+                prop = config.profile_path().with_name("profile.proposed.json")
+                if prop.is_file() and src.is_file() and prop.stat().st_mtime > src.stat().st_mtime:
+                    notes.append(f"{prop} is newer than this dump: if it holds your edits (power_mw, caps), import "
+                                 f"it instead: ls6t profile import \"{prop}\"")
             _print({"ok": True, "written": str(P.save(prof)), "notes": notes})
     elif a.cmd == "references":
         if a.action == "show":

@@ -271,135 +271,192 @@ Function Bit(b)
 End Function
 
 ' ---------------------------------------------------------------- discovery (no laser, no movement)
+' Discovery only reads: it never creates, writes or removes LabSpec data, and it asks LabSpec only for what the
+' profile needs (the motors below, a few values, the detector, the video, the status bar). Each step is logged to
+' LS6T_HOME\discovery_progress.txt before it runs ("begin <step>") and after ("end <step>"), the file closed each
+' time, so if LabSpec crashes the log names the step it was in. A step begun and never ended goes to
+' LS6T_HOME\discovery_skip.txt, and every later discovery skips it (delete that file to try it again).
+Dim gDiscProg, gDiscSkip, gDiscSkipped
+
+Sub DiscAppend(path, line)
+    Dim ts
+    On Error Resume Next
+    Set ts = fso.OpenTextFile(path, 8, True, -1)          ' 8: append, created if missing, Unicode
+    ts.WriteLine line
+    ts.Close
+    Err.Clear
+    On Error GoTo 0
+End Sub
+
+Sub DiscStart()
+    Dim ts, line, lastStep, skipPath
+    On Error Resume Next
+    EnsureFolder LS6T_HOME_DIR
+    gDiscProg = LS6T_HOME_DIR & "\discovery_progress.txt"
+    skipPath = LS6T_HOME_DIR & "\discovery_skip.txt"
+    Set gDiscSkip = CreateObject("Scripting.Dictionary")
+    gDiscSkip.CompareMode = 1
+    gDiscSkipped = ""
+    If fso.FileExists(gDiscProg) Then
+        lastStep = ""
+        Set ts = fso.OpenTextFile(gDiscProg, 1, False, -1)
+        Do While Not ts.AtEndOfStream
+            line = ts.ReadLine
+            If Left(line, 6) = "begin " Then lastStep = Mid(line, 7)
+            If Left(line, 4) = "end " Or line = "finished" Then lastStep = ""
+        Loop
+        ts.Close
+        If lastStep <> "" Then DiscAppend skipPath, lastStep         ' LabSpec ended inside it last time
+    End If
+    If fso.FileExists(skipPath) Then
+        Set ts = fso.OpenTextFile(skipPath, 1, False, -1)
+        Do While Not ts.AtEndOfStream
+            line = Trim(ts.ReadLine)
+            If line <> "" Then gDiscSkip(line) = 1
+        Loop
+        ts.Close
+    End If
+    If fso.FileExists(gDiscProg) Then fso.DeleteFile gDiscProg, True
+    Err.Clear
+    On Error GoTo 0
+    DiscAppend gDiscProg, "start " & Now & " " & LS6T_VERSION
+End Sub
+
+' True: run the step (logged as begun); False: it crashed LabSpec before, skip it
+Function DStep(name)
+    If gDiscSkip.Exists(name) Then
+        If gDiscSkipped <> "" Then gDiscSkipped = gDiscSkipped & ","
+        gDiscSkipped = gDiscSkipped & name
+        DStep = False
+    Else
+        DiscAppend gDiscProg, "begin " & name
+        DStep = True
+    End If
+End Function
+
+Sub DEnd(name)
+    DiscAppend gDiscProg, "end " & name
+End Sub
+
+Sub DiscMotor(d, name)
+    Dim size, n, j
+    size = MotorSize(name)
+    If size = -1 Then Exit Sub
+    d("motor." & name & ".present") = 1
+    d("motor." & name & ".size") = size
+    On Error Resume Next
+    If size > 0 Then
+        n = size
+        If n > 60 Then n = 60
+        For j = 0 To n - 1
+            ' 10+i / 20+i (the 2018 manual) overlap past 10 positions: LabSpec 6.7's 100+i / 200+i then
+            If size <= 10 Then
+                d("motor." & name & ".value." & j) = LabSpec.GetMotorPosition(name, LS_MOTOR_INDEXTOVALUE + j)
+                d("motor." & name & ".label." & j) = LabSpec.GetMotorPosition(name, LS_MOTOR_INDEXTOSTRING + j)
+            Else
+                d("motor." & name & ".value." & j) = LabSpec.GetMotorPosition(name, LS_MOTOR_INDEXTOVALUE100 + j)
+                d("motor." & name & ".label." & j) = LabSpec.GetMotorPosition(name, LS_MOTOR_INDEXTOSTRING200 + j)
+            End If
+            If Err.Number <> 0 Then Err.Clear
+        Next
+        If size > 60 Then d("motor." & name & ".truncated") = 1
+        d("motor." & name & ".current") = LabSpec.GetMotorPosition(name, LS_MOTOR_INDEX)
+        d("motor." & name & ".current_label") = MotorLabel(name)
+    Else
+        d("motor." & name & ".current") = LabSpec.GetMotorPosition(name, LS_MOTOR_VALUE)
+    End If
+    If Err.Number <> 0 Then
+        d("motor." & name & ".error") = Err.Description
+        Err.Clear
+    End If
+    On Error GoTo 0
+End Sub
+
 ' withPopup: also test the non-blocking window (not from the bridge: it would close the bridge's own window)
-Function DiscoverTo(outPath, withPopup, withProbes)
-    Dim d, names, i, j, name, size, n, okPopup, ret, e0, probe, part, cpN, cpU, cpT, cpV, ramp, s
+Function DiscoverTo(outPath, withPopup)
+    Dim d, names, i, name, ret
+    DiscStart
     Set d = CreateObject("Scripting.Dictionary")
     d("time") = Year(Now) & "-" & Right("0" & Month(Now), 2) & "-" & Right("0" & Day(Now), 2) & "T" & _
                 Right("0" & Hour(Now), 2) & ":" & Right("0" & Minute(Now), 2) & ":" & Right("0" & Second(Now), 2)
     d("protocol") = LS6T_PROTOCOL
     d("bridge_version") = LS6T_VERSION
-    d("system") = LSValue(0, "SystemName")
-    d("labspec_path") = LSValue(0, "LabSpecPath")
-    d("user_level") = LSValue(0, "UserLevel")
-    d("exposure_s") = LSValue(0, "LabSpecExposureTime")
-    d("accumulations") = LSValue(0, "LabSpecAccumulation")
-    d("shutter_mode") = LSValue(0, "ShutterMode")
-    d("detector_temp_c") = DetectorTemp()
+    If DStep("values") Then
+        d("system") = LSValue(0, "SystemName")
+        d("labspec_path") = LSValue(0, "LabSpecPath")
+        d("user_level") = LSValue(0, "UserLevel")
+        d("exposure_s") = LSValue(0, "LabSpecExposureTime")
+        d("accumulations") = LSValue(0, "LabSpecAccumulation")
+        d("shutter_mode") = LSValue(0, "ShutterMode")
+        DEnd "values"
+    End If
+    If DStep("detector") Then
+        d("detector_temp_c") = DetectorTemp()
+        DEnd "detector"
+    End If
     d("decimal_separator") = gSep
+    ' the motors a profile uses (names seen on HORIBA instruments); nothing that switches the laser or a lamp
     names = Array("Laser", "Grating", "Filter", "Density", "ND", "Attenuator", "Objective", "Objectives", _
                   "Microscope", "Nosepiece", "Hole", "Slit", "Spectro", "Premono", "X", "Y", "Z", "XT", "YT", _
                   "XL", "YL", "Polarizer", "Raman Polarizer", "Laser Polarizer", "DetectorShutter", _
-                  "Shutter", "LaserShutter", "Laser Shutter", "Laser shutter", "LaserPol", "RamanPol", _
-                  "LaserFilter", "FilterV", "DuoPos", "Output", "Microscope", "IlluminatorV", "LaserSwitch", _
-                  "Fiber", "E-Cal_Neon")
+                  "Shutter", "LaserShutter", "Laser Shutter", "Laser shutter", "LaserPol", "RamanPol")
     For i = 0 To UBound(names)
         name = names(i)
-        size = MotorSize(name)
-        If size <> -1 Then
-            d("motor." & name & ".present") = 1
-            d("motor." & name & ".size") = size
-            On Error Resume Next
-            If size > 0 Then
-                n = size
-                If n > 60 Then n = 60
-                For j = 0 To n - 1
-                    ' 10+i / 20+i (the 2018 manual) overlap past 10 positions: LabSpec 6.7's 100+i / 200+i then
-                    If size <= 10 Then
-                        d("motor." & name & ".value." & j) = LabSpec.GetMotorPosition(name, LS_MOTOR_INDEXTOVALUE + j)
-                        d("motor." & name & ".label." & j) = LabSpec.GetMotorPosition(name, LS_MOTOR_INDEXTOSTRING + j)
-                    Else
-                        d("motor." & name & ".value." & j) = LabSpec.GetMotorPosition(name, LS_MOTOR_INDEXTOVALUE100 + j)
-                        d("motor." & name & ".label." & j) = LabSpec.GetMotorPosition(name, LS_MOTOR_INDEXTOSTRING200 + j)
-                    End If
-                    If Err.Number <> 0 Then Err.Clear
-                Next
-                If size > 60 Then d("motor." & name & ".truncated") = 1
-                d("motor." & name & ".current") = LabSpec.GetMotorPosition(name, LS_MOTOR_INDEX)
-                d("motor." & name & ".current_label") = MotorLabel(name)
-            Else
-                d("motor." & name & ".current") = LabSpec.GetMotorPosition(name, LS_MOTOR_VALUE)
-            End If
-            If Err.Number <> 0 Then
-                d("motor." & name & ".error") = Err.Description
-                Err.Clear
-            End If
-            On Error GoTo 0
+        If DStep("motor." & name) Then
+            DiscMotor d, name
+            DEnd "motor." & name
         End If
     Next
-    ' self-tests for the bridge's design (no laser, no motion)
+    ' self-tests for the bridge's design (no laser, no motion, no LabSpec data created)
     On Error Resume Next
-    LabSpec.Pause 10
-    d("selftest.pause") = Bit(Err.Number = 0)
-    Err.Clear
+    If DStep("selftest.pause") Then
+        LabSpec.Pause 10
+        d("selftest.pause") = Bit(Err.Number = 0)
+        Err.Clear
+        DEnd "selftest.pause"
+    End If
     If withPopup Then
-        ret = LabSpec.Message("ls6t discovery: this window tests the bridge's stop window. It closes by itself.", _
-                              LS_MB_NON_BLOCKING)
-        LabSpec.Pause 300
-        d("selftest.popup_open") = LabSpec.Message("", LS_MB_NON_BLOCKING)        ' -1 while open
-        LabSpec.Message "#", LS_MB_NON_BLOCKING
-        LabSpec.Pause 300
-        d("selftest.popup_closed") = LabSpec.Message("", LS_MB_NON_BLOCKING)      ' 0 once closed
-        d("selftest.popup_error") = Err.Description
-        Err.Clear
-    End If
-    d("selftest.stop_button") = LabSpec.MessageEx("", LS_MB_STOP)
-    d("selftest.stop_button_error") = Err.Description
-    Err.Clear
-    d("video.active_camera") = LabSpec.Video(LS_GET_ACTIVE_CAMERA)
-    d("video.id_now") = LabSpec.Video(LS_GET_VIDEO_ID)          ' > 0 when the live video runs
-    d("video.error") = Err.Description
-    Err.Clear
-    ret = LabSpec.GetLastErrorInfo()                            ' not in the 2018 manual; in the type library
-    d("selftest.last_error_info") = Bit(Err.Number = 0)
-    Err.Clear
-    ' methods found in the type library (or in the manual but missing from some builds): read-only probes, not
-    ' when the bridge takes its inventory at start (the scratch spectrum would flash a window)
-    If withProbes Then
-    ret = LabSpec.GetValueEx(0, "SystemName", e0, LS_VT_BSTR)
-    d("selftest.get_value_ex") = Bit(Err.Number = 0)
-    Err.Clear
-    probe = LabSpec.CreateDataObject("Spectrum", 16, 0, -1)       ' a scratch spectrum, removed below
-    If Err.Number = 0 And probe > 0 Then
-        ' values 0..15, so the part read shows the units of StartAt and DataSize (values or bytes)
-        ReDim ramp(15)
-        For j = 0 To 15
-            ramp(j) = CSng(j)
-        Next
-        LabSpec.PutValue probe, "Data", ramp
-        d("selftest.put_value_ramp") = Bit(Err.Number = 0)
-        Err.Clear
-        part = LabSpec.GetValueSimplePart(probe, "Data", 0, LS_VT_R4, 4, 8)
-        d("selftest.get_value_simple_part") = Bit(Err.Number = 0 And IsArray(part))
-        If IsArray(part) Then
-            d("selftest.get_value_simple_part_size") = UBound(part) - LBound(part) + 1
-            s = ""
-            For j = LBound(part) To UBound(part)
-                If s <> "" Then s = s & ","
-                s = s & Fmt(part(j))
-            Next
-            d("selftest.get_value_simple_part_values") = s
+        If DStep("selftest.popup") Then
+            ret = LabSpec.Message("ls6t discovery: this window tests the bridge's stop window. It closes by itself.", _
+                                  LS_MB_NON_BLOCKING)
+            LabSpec.Pause 300
+            d("selftest.popup_open") = LabSpec.Message("", LS_MB_NON_BLOCKING)        ' -1 while open
+            LabSpec.Message "#", LS_MB_NON_BLOCKING
+            LabSpec.Pause 300
+            d("selftest.popup_closed") = LabSpec.Message("", LS_MB_NON_BLOCKING)      ' 0 once closed
+            d("selftest.popup_error") = Err.Description
+            Err.Clear
+            DEnd "selftest.popup"
         End If
+    End If
+    If DStep("selftest.stop_button") Then
+        d("selftest.stop_button") = LabSpec.MessageEx("", LS_MB_STOP)
+        d("selftest.stop_button_error") = Err.Description
         Err.Clear
-        LabSpec.Exec probe, LS_REMOVE_DATA, ret
+        DEnd "selftest.stop_button"
     End If
-    Err.Clear
-    LabSpec.GetConfigParam cpN, cpU, cpT, cpV
-    d("selftest.get_config_param") = Bit(Err.Number = 0)
-    If Err.Number = 0 And IsArray(cpN) Then
-        For j = LBound(cpN) To UBound(cpN)
-            d("config_param." & j & ".name") = CStr(cpN(j))
-            If IsArray(cpU) Then d("config_param." & j & ".unit") = CStr(cpU(j))
-            If IsArray(cpT) Then d("config_param." & j & ".type") = CStr(cpT(j))
-            If IsArray(cpV) Then d("config_param." & j & ".value") = CStr(cpV(j))
-        Next
+    If DStep("video") Then
+        d("video.active_camera") = LabSpec.Video(LS_GET_ACTIVE_CAMERA)
+        d("video.id_now") = LabSpec.Video(LS_GET_VIDEO_ID)          ' > 0 when the live video runs
+        d("video.error") = Err.Description
+        Err.Clear
+        DEnd "video"
     End If
-    Err.Clear
+    If DStep("selftest.last_error_info") Then
+        ret = LabSpec.GetLastErrorInfo()                            ' not in the 2018 manual; in the type library
+        d("selftest.last_error_info") = Bit(Err.Number = 0)
+        Err.Clear
+        DEnd "selftest.last_error_info"
     End If
-    LabSpec.Message "ls6t discovery running", LS_MB_STATUS_BAR
-    d("selftest.status_bar") = Bit(Err.Number = 0)
-    Err.Clear
+    If DStep("selftest.status_bar") Then
+        LabSpec.Message "ls6t discovery running", LS_MB_STATUS_BAR
+        d("selftest.status_bar") = Bit(Err.Number = 0)
+        Err.Clear
+        DEnd "selftest.status_bar"
+    End If
     On Error GoTo 0
+    If gDiscSkipped <> "" Then d("discovery.skipped") = gDiscSkipped
     WriteKV outPath, d
+    DiscAppend gDiscProg, "finished"
     DiscoverTo = outPath
 End Function

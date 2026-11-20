@@ -213,12 +213,13 @@ with a newer inventory (a new objective, say).
 
 **Reviewing it** (TESTING.md T1.2), with the maintainer:
 
-1. In LabSpec, run **`ls6t_discover.vbs`**. A message box shows where it wrote the dump, e.g.
-   `C:\Users\<you>\ls6t\discovery_20261120_101500.txt`.
+1. The instrument's list is already there: the bridge's inventory, `%USERPROFILE%\ls6t\discovery_latest.txt`,
+   written each time `ls6t_bridge.vbs` starts. (`ls6t_discover.vbs` adds a few self-tests of the bridge's design;
+   it is not needed for the profile. If LabSpec crashes during it, do not repeat it: see *Troubleshooting*.)
 2. Import it:
 
    ```powershell
-   ls6t profile import "C:\Users\<you>\ls6t\discovery_20261120_101500.txt"
+   ls6t profile import "$HOME\ls6t\discovery_latest.txt"
    ```
 
    The output lists what was found and what to check by hand.
@@ -242,7 +243,13 @@ with a newer inventory (a new objective, say).
      `statusbar`.
 
    Only a person edits this file. Studies cannot change it, and the MCP tools can only *propose* a profile
-   (`instrument(action="discover")` writes `profile.proposed.json`).
+   (`instrument(action="discover")` writes `profile.proposed.json`). To use a proposal, edit it (caps, `power_mw`,
+   limits) and import **the edited JSON**: `ls6t profile import "$HOME\ls6t\profile.proposed.json"`. Importing the
+   `.txt` dump instead would rebuild the lasers from it and lose those edits; importing a JSON with a laser's
+   `nm` or `max_filter_pct` blank is refused.
+
+   Without any profile (no inventory, no import), ls6t refuses studies on the instrument: its built-in defaults are
+   a generic XploRA for the simulator (other laser lines, an x50, no caps), not this instrument.
 
 ## 8. Connect an LLM app
 
@@ -298,7 +305,9 @@ them. ls6t's instructions forbid it, but on the instrument PC also make the app 
 Answer *No* to any command that touches LabSpec, `NFActiveX` or the `ls6t\bridge` folder. If the LLM says it cannot
 do something with ls6t's tools, tell the ls6t maintainer: that is a missing tool, not a reason to go around it.
 
-By hand (Claude, JSON; backslashes doubled):
+By hand (Claude, JSON; backslashes doubled). Prefer `ls6t connect`, which writes this PC's real paths: a
+`<you>` left from the example below makes the app fail with `spawn ... ENOENT`, and `tools\ls6t_diagnose.ps1`
+reports such placeholders and commands that do not exist.
 
 ```json
 {
@@ -373,6 +382,7 @@ pip install --no-index --find-links wheels -e ".[mcp,render,test,windows]"
 
 | Symptom | Cause and fix |
 |---|---|
+| LabSpec shows *About NFActiveX Control* during discovery, then crashes | Seen with 2026.11.20.21's discovery (its write probe of a scratch spectrum is the suspect; removed in .22). Do not repeat discovery on that account: the bridge's inventory (`discovery_latest.txt`) already gives the profile. From .22 each step is logged in `%USERPROFILE%\ls6t\discovery_progress.txt` (send it to the ls6t maintainer), and a step that stopped LabSpec is skipped by later runs (`discovery_skip.txt`; delete it to try again). |
 | The LLM app does not show ls6t's tools | Copy `tools\ls6t_diagnose.ps1` to the PC and run `powershell -ExecutionPolicy Bypass -File .\ls6t_diagnose.ps1` as the user who runs the app. It changes nothing and writes `ls6t_diagnose.txt` on the Desktop: which configuration file Claude reads, whether the ls6t entry is there and valid, whether the server starts and answers, and Claude's MCP logs. With ls6t 2026.11.20.8 or later, `ls6t connect check` does the main checks too. If the report shows the Claude file Claude reads (`READS:`) without an `ls6t` entry: `tools\ls6t_fix_claude.ps1` (same way) waits for Claude to be closed and adds it there. |
 | `ls6t : The term 'ls6t' is not recognized` | The venv is not active: `.\.venv\Scripts\Activate.ps1`, or use the full path `.\.venv\Scripts\ls6t.exe`. |
 | `Activate.ps1 cannot be loaded` | `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` (once). |

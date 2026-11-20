@@ -1,5 +1,5 @@
 """profile.py — the machine profile: what the instrument has (from the discovery script) and the limits a person sets.
-Version: 2026.11.20.21
+Version: 2026.11.20.22
 
 The profile is a JSON file (LS6T_PROFILE, default ~/ls6t/profile.json). Studies never change it: an LLM can only
 ask for what the profile allows. Without a file, the built-in XploRA defaults below apply and every result says so
@@ -20,7 +20,9 @@ PROFILE_VERSION = 1
 
 DEFAULT_PROFILE: dict = {
     "profile_version": PROFILE_VERSION,
-    "source": "built-in XploRA defaults (not measured: run the discovery script)",
+    # a generic XploRA for the simulator and the tests: refused on the instrument (format.validate), where the
+    # profile comes from the bridge's inventory or a person's import
+    "source": "built-in generic XploRA defaults (simulator only; not this instrument)",
     "system": "XploRA",
     # LabSpec motor names, from the discovery script. Filter and objective names vary by configuration.
     "motors": {"laser": "Laser", "grating": "Grating", "filter": "Filter", "objective": "Objective",
@@ -292,6 +294,36 @@ def _num(s) -> float | None:
         return None
 
 
+def import_reviewed(path: Path) -> tuple[dict, list[str]]:
+    """A profile a person reviewed and edited (profile.proposed.json from `instrument discover`, or a copy of
+    profile.json): checked and returned ready to save. Refused (ValueError) when it is not a profile or when a
+    laser lacks its line (nm) or its cap (max_filter_pct): the caps are what a person decides."""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"{path}: not a readable JSON profile ({exc})") from None
+    if not isinstance(data, dict) or not isinstance(data.get("lasers"), dict) or not data["lasers"]:
+        raise ValueError(f"{path}: no 'lasers': not an ls6t profile")
+    missing, notes = [], []
+    for k, v in data["lasers"].items():
+        v = v if isinstance(v, dict) else {}
+        nm, cap = _num(v.get("nm")), _num(v.get("max_filter_pct"))
+        if nm is None or nm <= 0:
+            missing.append(f"lasers.{k}.nm")
+        if cap is None or not 0 < cap <= 100:
+            missing.append(f"lasers.{k}.max_filter_pct (0-100)")
+        if v.get("power_mw") in (None, ""):
+            notes.append(f"lasers.{k}.power_mw not set (only shown in results; set it when known)")
+    if missing:
+        raise ValueError(f"{path}: fill in before importing: " + ", ".join(missing))
+    for k in ("auto", "measured", "path"):
+        data.pop(k, None)
+    data["source"] = f"reviewed {Path(path).name} {time.strftime('%Y-%m-%d %H:%M')}"
+    notes.insert(0, "lasers and caps: " + ", ".join(f"{float(v['nm']):g} nm at most {float(v['max_filter_pct']):g} %"
+                                                     for v in data["lasers"].values()))
+    return data, notes
+
+
 def import_discovery(text: str, base: dict | None = None) -> tuple[dict, list[str]]:
     """A profile from the discovery script's dump, keeping the limits and timing of `base` (the current profile).
     Returns (profile, notes): the notes say what was found and what a person should check."""
@@ -307,6 +339,8 @@ def import_discovery(text: str, base: dict | None = None) -> tuple[dict, list[st
     names = {k[len("motor."):-len(".present")] for k, v in d.items()
              if k.startswith("motor.") and k.endswith(".present") and v == "1"}
     notes.append("motors found: " + ", ".join(sorted(names)))
+    if d.get("discovery.skipped"):
+        notes.append("discovery skipped steps that stopped LabSpec before: " + d["discovery.skipped"])
 
     las = _motor(d, prof["motors"]["laser"])
     if las and las["size"] > 0:

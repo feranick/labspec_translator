@@ -97,6 +97,8 @@ foreach ($f in $cands) {
             Say ("   ---- entry '" + $n + "' ----")
             foreach ($l in (($e | ConvertTo-Json -Depth 6) -split "`n")) { Say ("   | " + $l.TrimEnd()) }
             if ($e.command -and -not (Test-Path ([string]$e.command))) { Say ("   PROBLEM: command not found: " + $e.command) }
+            $json = ($e | ConvertTo-Json -Depth 6 -Compress)
+            foreach ($m in [regex]::Matches($json, '<[A-Za-z _-]+>')) { Say ("   PROBLEM: placeholder " + $m.Value + " left in the entry (copied from the docs): run 'ls6t connect claude' or put the real path") }
             $ls6tEntries += ,@($f, $e)
         }
     }

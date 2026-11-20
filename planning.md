@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.20.21)
+## Architecture (version 2026.11.20.22)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -313,6 +313,20 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   before T6.5-6.7; Q table numeric; results table complete). Redundant: T5b.4's hand copy of the offset (spot.json
   keeps it per objective and laser) reduced to a repeatability check; T1.3 only after a LabSpec update. New: T3.10
   polarisers, T3.11 cameras, T8.6 direct requests. 73 steps, 43 questions. 106 tests.
+- 2026-11-20, 2026.11.20.22: report from the instrument: discovery (instrument discover twice, ls6t_discover.vbs
+  once with the bridge stopped) opened LabSpec's About NFActiveX Control box and LabSpec crashed seconds after it was
+  dismissed; a run on another Windows account worked. That run was bridge 2026.11.20.7, not .21: the account is
+  probably not the cause, the version is. The bridge's start inventory (DiscoverTo without probes) ran fine on the
+  failing account, so the crash is in the probe block, whose new part since .7 is the ramp probe (CreateDataObject,
+  PutValue of a VBScript Variant array into the scratch spectrum's Data, GetValueSimplePart). Heap damage from that
+  write would fit a crash a few seconds later; nothing in discovery calls AboutBox by name. Not confirmed on the
+  instrument. Fix: discovery only reads (probe block removed; Q35 left open, Q37/Q40 already answered), motor names
+  trimmed (no LaserSwitch = laser power, E-Cal_Neon = a lamp device, Fiber, Output, DuoPos, IlluminatorV, LaserFilter,
+  FilterV); step log discovery_progress.txt (begin/end per step, file closed each time) and discovery_skip.txt (a step
+  begun and never ended is skipped by later runs); bridge.labspec_hint names LabSpec's #32770 dialogs or says LabSpec
+  is gone (EnumWindows, Windows only); api.instrument logs actions to instrument_log.jsonl, jobs shows them; discover
+  failures report stopped_in; profile import takes a reviewed JSON (import_reviewed: nm and max_filter_pct required);
+  format refuses the built-in profile in labspec mode; diagnose flags placeholders. 108 tests.
 
 ## To do next
 

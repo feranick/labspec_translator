@@ -1805,7 +1805,7 @@ Sub HandleFile(path)
             Case "status": VStatus cmd, res
             Case "discover"
                 On Error Resume Next
-                res("out") = DiscoverTo(GetP(cmd, "out", LS6T_BRIDGE_DIR & "\discovery.txt"), False, True)
+                res("out") = DiscoverTo(GetP(cmd, "out", LS6T_BRIDGE_DIR & "\discovery.txt"), False)
                 If Err.Number <> 0 Then Fail res, ErrText("discover")
                 Err.Clear
                 On Error GoTo 0
@@ -1884,7 +1884,7 @@ Sub BridgeMain()
     ' machine profile from it
     On Error Resume Next
     Beat "busy", True
-    DiscoverTo LS6T_HOME_DIR & "\discovery_latest.txt", False, False
+    DiscoverTo LS6T_HOME_DIR & "\discovery_latest.txt", False
     Err.Clear
     On Error GoTo 0
     Beat "idle", True

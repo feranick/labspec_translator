@@ -1,5 +1,5 @@
 """sim.py — a simulated LabSpec + XploRA behind the same bridge protocol as ls6t_bridge.vbs.
-Version: 2026.11.20.21
+Version: 2026.11.20.22
 
 It answers every verb of the bridge with the same keys, so the runner, the checks and the MCP server are tested
 without the instrument (LS6T_MODE=sim, and the tests). The simulated sample is a silicon wafer with a graphene
@@ -32,7 +32,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import __version__, BRIDGE_PROTOCOL
+from . import __version__, BRIDGE_PROTOCOL, config
 from .bridge import decode, encode
 from .profile import DEFAULT_PROFILE, filter_pct, read_text
 
@@ -338,11 +338,37 @@ class SimLabSpec:
                 lines += [f"motor.{name}.current={m['i']}", f"motor.{name}.current_label={m['labels'][m['i']]}"]
             else:
                 lines += [f"motor.{name}.size=0", f"motor.{name}.current={m['value']}"]
-        lines += ["selftest.last_error_info=1", "selftest.get_value_ex=0", "selftest.get_value_simple_part=1",
-                  "selftest.get_value_simple_part_size=8",
-                  "selftest.get_value_simple_part_values=4,5,6,7,8,9,10,11", "selftest.get_config_param=1",
-                  "config_param.0.name=Delay", "config_param.0.unit=s", "config_param.0.type=double",
-                  "config_param.0.value=0"]
+        lines += ["selftest.pause=1", "selftest.last_error_info=1", "selftest.status_bar=1"]
+        # the bridge's step log (common.vbs DiscStart/DStep): a step begun and never ended is skipped next time
+        prog = config.home() / "discovery_progress.txt"
+        prog.parent.mkdir(parents=True, exist_ok=True)
+        steps = ["values", "detector"] + [f"motor.{n}" for n in self.m] + ["selftest.pause", "video",
+                                                                            "selftest.last_error_info",
+                                                                            "selftest.status_bar"]
+        cf = self.dir / "sim_discover_crash"           # a test: LabSpec "crashes" in the step this file names
+        crash = cf.read_text(encoding="utf-8").strip() if cf.exists() else None
+        skip_f = prog.with_name("discovery_skip.txt")
+        last = None
+        for ln in (read_text(prog).splitlines() if prog.exists() else []):
+            last = ln[6:] if ln.startswith("begin ") else (None if ln.startswith("end ") or ln == "finished" else last)
+        if last:
+            with open(skip_f, "a", encoding="utf-8") as fh:
+                fh.write(last + "\n")
+        skip = {s.strip() for s in read_text(skip_f).splitlines()} if skip_f.exists() else set()
+        log = [f"start {time.strftime('%Y-%m-%d %H:%M:%S')} simulated"]
+        skipped = []
+        for s in steps:
+            if s in skip:
+                skipped.append(s)
+                continue
+            log.append(f"begin {s}")
+            if s == crash:
+                prog.write_text("\n".join(log) + "\n", encoding="utf-8")
+                return {"ok": 0, "error": f"simulated crash in {s}"}
+            log.append(f"end {s}")
+        prog.write_text("\n".join(log + ["finished"]) + "\n", encoding="utf-8")
+        if skipped:
+            lines.append("discovery.skipped=" + ",".join(skipped))
         out = Path(p["out"])
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text("\n".join(lines) + "\n", encoding="utf-8")
