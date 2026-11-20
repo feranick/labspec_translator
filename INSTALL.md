@@ -4,12 +4,77 @@ How to install ls6t on the instrument PC: the Windows 11 computer that runs HORI
 Claude desktop app. What ls6t is and how it is used: [README.md](README.md). The first measurements with the
 instrument's maintainer: [TESTING.md](TESTING.md).
 
-**Contents:** [1. Python and Git](#1-python-and-git) · [2. Folders](#2-choose-the-folders-and-keep-them-out-of-onedrive) · [3. The code](#3-get-the-code) · [4. The package](#4-a-virtual-environment-and-the-package) · [5. Check](#5-check-the-install-no-instrument-needed) · [6. LabSpec scripts](#6-install-the-labspec-scripts) · [7. Machine profile](#7-the-machine-profile) · [8. Claude app](#8-connect-the-claude-desktop-app) · [9. Check with the instrument](#9-check-with-the-instrument) · [Updating](#updating) · [Offline install](#offline-install) · [Troubleshooting](#troubleshooting-windows)
+**Contents:** [The installer](#the-installer-recommended) · [1. Python and Git](#1-python-and-git) · [2. Folders](#2-choose-the-folders-and-keep-them-out-of-onedrive) · [3. The code](#3-get-the-code) · [4. The package](#4-a-virtual-environment-and-the-package) · [5. Check](#5-check-the-install-no-instrument-needed) · [6. LabSpec scripts](#6-install-the-labspec-scripts) · [7. Machine profile](#7-the-machine-profile) · [8. Claude app](#8-connect-the-claude-desktop-app) · [9. Check with the instrument](#9-check-with-the-instrument) · [Updating](#updating) · [Offline install](#offline-install) · [Troubleshooting](#troubleshooting-windows)
 
 Everything is installed on the **instrument PC**: the Windows 11 computer that runs LabSpec 6. The Claude desktop app
 runs there too. The steps below use **PowerShell** (Start, type *PowerShell*, open *Windows PowerShell* or
 *Terminal*). Use your normal Windows account, the **same account that runs LabSpec**, so both programs can read and
 write the bridge folder. Administrator rights are needed only for installing Python and Git, if they are missing.
+
+## The installer (recommended)
+
+`ls6t-setup-<version>.exe` installs everything for your Windows account. It needs no administrator rights and no
+network: it carries its own Python with every package. Use it unless you develop ls6t itself.
+
+1. **Get it**: from the repository's *Releases* page (it is built for every version, see
+   [Building the installer](#building-the-installer)), or build it yourself. Copy it to the instrument PC.
+2. **Log in with the Windows account that runs LabSpec**, and quit the Claude app (right-click its icon in the
+   taskbar's notification area, *Quit*).
+3. **Run it.** The installer is not code-signed, so Windows SmartScreen may say *"Windows protected your PC"*: *More
+   info > Run anyway*. Choose the components:
+
+   | Component | Default | What it does |
+   |---|---|---|
+   | ls6t | always | The commands, the MCP server, a private Python, the guides; writes the LabSpec scripts to `%USERPROFILE%\ls6t\vbs` |
+   | Connect to the Claude app | on | Adds the `ls6t` server to `claude_desktop_config.json` (backed up first; other servers and your ls6t settings are kept) |
+   | Add ls6t to PATH | on | `ls6t`, `ls6t-mcp`, `ls6t-typelib` in any new PowerShell window |
+   | Start menu shortcuts | on | *ls6t PowerShell*, *LabSpec scripts (ls6t)*, *ls6t guides*, *Uninstall ls6t* |
+   | Simulator connection | off | Also adds `ls6t-sim`, the same tools on the built-in simulator, to practise |
+
+   It checks that everything loads and precompiles the packages (a minute or two).
+4. **Then** continue with: adding the scripts in LabSpec (step [6](#6-install-the-labspec-scripts), from *"In LabSpec
+   6"*), the machine profile (step [7](#7-the-machine-profile)), restarting the Claude app, and the check with the
+   instrument (step [9](#9-check-with-the-instrument)). Steps 1–5 and 8 are done. Use *Start > ls6t PowerShell* (or
+   any new PowerShell window) for the `ls6t` commands.
+
+| Where | What |
+|---|---|
+| `%LOCALAPPDATA%\Programs\ls6t` | the program: `python\`, `bin\` (launchers), `docs\` (these guides, also as HTML), `examples\`, `install.log` |
+| `%USERPROFILE%\ls6t` | your data, kept by updates and by uninstalling: profile, bridge folder, LabSpec scripts, discovery dumps |
+| `%USERPROFILE%\ls6t_runs` | the results |
+
+**Updating:** quit the Claude app, let any measurement finish, and run the new setup over the old one. It replaces
+the program and rewrites the LabSpec scripts; the profile and the results stay. Then, in LabSpec, stop the bridge and
+start the new `ls6t_bridge.vbs`, and start the Claude app again. (If ls6t is still running, the setup says so and
+waits.)
+
+**Uninstalling:** *Settings > Apps > Installed apps > labspec-translator (ls6t) > Uninstall*, or *Start > ls6t >
+Uninstall ls6t*. It removes the program, the PATH entry and the Claude app's `ls6t` entries; your data stays.
+
+**Silent install** (for IT): `ls6t-setup-<version>.exe /S` installs with the defaults; `/D=C:\path\ls6t` (last on the
+line) changes the folder.
+
+### Building the installer
+
+`installer/build_installer.py` stages python.org's embeddable Python 3.12 for 64-bit Windows, installs the package
+and its dependencies into it as Windows wheels, adds the launchers and the guides, and runs NSIS on
+`installer/ls6t.nsi`. It runs on macOS, Windows or Linux, with network access:
+
+```bash
+brew install makensis                    # macOS  (Windows: winget install NSIS.NSIS;  Linux: apt install nsis)
+python3 installer/build_installer.py     # -> dist/ls6t-setup-<version>.exe and its .sha256
+```
+
+`--no-nsis` stages the files only (`build/installer/stage`); `--python 3.12.10` chooses the embeddable Python;
+`--sign "signtool sign /a /fd sha256 {file}"` signs the result if you have a code-signing certificate.
+
+On GitHub, `.github/workflows/installer.yml` does this for every version tag on a clean Windows machine. It also
+installs the result silently, runs three benchmarks on the simulator with the installed copy, uninstalls it, and
+attaches the setup to the tag's release. *Actions > installer > Run workflow* builds one by hand.
+
+## From source (developers)
+
+The steps below install ls6t from its source code instead, in a virtual environment you manage yourself.
 
 ## 1. Python and Git
 

@@ -1,5 +1,5 @@
 """api.py — the functions behind the command line and the MCP server (JSON in, JSON out).
-Version: 2026.11.20.1
+Version: 2026.11.20.2
 """
 from __future__ import annotations
 

@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.20.1)
+## Architecture (version 2026.11.20.2)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -145,6 +145,19 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   ls6t_script_motor.vbs: virtual script motor logging GetMotorAction / SetMotorInfo (Q38). Deliberately not called:
   SetConfigParam, SetScriptPath (change the script set-up, semantics unknown), GUI/OperVar/PutGUI/PutArrGUI.
   TESTING Q35-Q40, T1.4, T5b.6. 84 tests.
+- 2026-11-20, 2026.11.20.2: Windows installer. installer/ls6t.nsi (NSIS 3, MUI2, per user, RequestExecutionLevel
+  user, %LOCALAPPDATA%\Programs\ls6t, HKCU uninstall key); installer/build_installer.py stages python.org's embeddable
+  Python 3.12.10 (._pth 'import site' enabled), pip-installs the wheel [mcp,render,windows] + Windows-only deps
+  (comtypes, pywin32, colorama: markers are evaluated for the build OS) with --platform win_amd64 --only-binary into
+  Lib/site-packages (numpy/scipy/matplotlib tests dropped; ~215 MB staged), the .cmd launchers and a PowerShell
+  shell (installer/bin), docs as md + HTML, examples; then makensis. labspec_translator/winsetup.py (run by the
+  installer with the installed Python): check imports, compileall, `bridge install` (with LS6T_HOME/BRIDGE_DIR of an
+  existing Claude entry), HKCU PATH + WM_SETTINGCHANGE, Claude config merge (APPDATA and the Store package folder;
+  backup; existing env kept; entry = python.exe -m labspec_translator.mcp_server; optional ls6t-sim); uninstall
+  removes only entries pointing at this Python. Running ls6t (python.exe open for write fails) blocks an update with
+  Retry/Cancel. .github/workflows/installer.yml builds on windows-latest per tag, installs /S, runs winsetup check
+  and three sim benchmarks, uninstalls, attaches to the release. Staging tested here (Linux, fake embeddable zip);
+  the NSIS script itself is not compiled yet: first compile on the user's Mac (brew makensis) or in CI. 86 tests.
 
 ## To do next
 

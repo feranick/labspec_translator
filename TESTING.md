@@ -12,7 +12,7 @@ stops and cancel on the simulator, and `ls6t bench` gives known answers. What re
 LabSpec and hardware. The plan goes from no laser and no motion to Claude driving a full map, in stages. Each stage
 starts only when the previous one passed.
 
-Version under test: 2026.11.20.1 (bridge protocol 1).
+Version under test: 2026.11.20.2 (bridge protocol 1).
 
 ---
 
@@ -117,7 +117,10 @@ to Q1–Q12, and the measured times, and lists anything to change.
 
 ## T0. Software on the instrument PC (no LabSpec needed)
 
-| Step | Command (PowerShell, venv active) | Pass |
+Install with `ls6t-setup-<version>.exe` (INSTALL.md), then use *Start > ls6t PowerShell*; or from source with the venv
+active. With the installer, T0.4 is already done (check the files are there).
+
+| Step | Command (PowerShell) | Pass |
 |---|---|---|
 | T0.1 | `ls6t status` | versions listed; `settings.LS6T_MODE` is `labspec`; `bridge.running` false |
 | T0.2 | `ls6t bench` | `"failed": []` (all six benchmarks pass on this PC) |

@@ -1,6 +1,6 @@
 # labspec-translator (ls6t): what it can do
 
-This is the complete list of functions in version 2026.11.20.1. It covers:
+This is the complete list of functions in version 2026.11.20.2. It covers:
 
 - what a study can ask for;
 - the tools an LLM sees;
@@ -99,6 +99,7 @@ trusting numbers, the safety rules and the polling etiquette.
 | `ls6t sim [--seconds S]` | Run the simulator by hand |
 | `ls6t-typelib [--path F] [--format text/markdown/json] [--out F] [--list]` | (a separate program, any OS) Read LabSpec's ActiveX type library straight from the file and list every method and property of the installed version; `NEW` marks those not in the 2018 manual, and words of interest are flagged. Read-only: nothing starts or moves |
 | `ls6t run-request FOLDER` | What the detached runner runs (internal) |
+| `ls6t-setup-<version>.exe` | The Windows installer: per user, offline, with its own Python; the LabSpec scripts, PATH, Start menu and the Claude app's configuration; updates in place; uninstalls keeping the data (INSTALL.md) |
 
 Only the command line can record alignment baselines, change the profile, or clear what is remembered. An LLM can
 read them, not change them.
@@ -243,5 +244,5 @@ profile. The shutter mode is restored on every path.
   - `si_calibration`, `graphene_map`, `extended_range`, `saturation`, `series`;
   - `guided_focus`, `focus_scan`, `spot_raman`, `spot_video`;
   - `depth_profile`, `calibration_zero`, `white_light`, `native_map`, `operator_stop`.
-- **Test suite** (`pytest`, 84 tests), which also checks the LabSpec scripts' structure.
+- **Test suite** (`pytest`, 86 tests), which also checks the LabSpec scripts' structure.
 - **Instrument tests** with the maintainer: [TESTING.md](TESTING.md).

@@ -2,6 +2,7 @@
 import json
 import os
 import re
+import sys
 import time
 from pathlib import Path
 
@@ -961,3 +962,64 @@ def test_vbs_new_methods(tmp_path):
     assert "LabSpec.GetMotorAction(action, position)" in sm and "LabSpec.SetMotorInfo(" in sm
     disc = Path(files["ls6t_discover.vbs"]).read_text()
     assert "LabSpec.GetConfigParam" in disc and "LabSpec.SetConfigParam" not in disc
+
+
+# --------------------------------------------------------------------------------------------- Windows installer
+
+def test_winsetup_path_and_claude_config(tmp_path, monkeypatch):
+    from labspec_translator import winsetup as W
+    new, ch = W.path_add(r"C:\a;C:\b", r"C:\ls6t\bin")
+    assert ch and new.endswith(r";C:\ls6t\bin")
+    assert W.path_add(new, r"C:\ls6t\bin\\") == (new, False)
+    assert W.path_remove(new, r"C:\ls6t\bin") == (r"C:\a;C:\b", True)
+    py = str(tmp_path / "python" / "python.exe")
+    cfg = {"mcpServers": {"other": {"command": "x"},
+                          "ls6t": {"command": "old.exe", "env": {"LS6T_OUT": "D:\\runs", "LS6T_CONFIRM": "study"}}},
+           "globalShortcut": "x"}
+    cfg2, note = W.merge_server(cfg, "ls6t", py, {"LS6T_CONFIRM": "request"})
+    e = cfg2["mcpServers"]["ls6t"]
+    assert "replaced" in note and e["command"] == py and e["args"] == ["-m", "labspec_translator.mcp_server"]
+    assert e["env"] == {"LS6T_OUT": "D:\\runs", "LS6T_CONFIRM": "study"}          # the person's settings kept
+    assert cfg2["mcpServers"]["other"] == {"command": "x"} and cfg2["globalShortcut"] == "x"
+    cfg3, _ = W.merge_server(cfg2, "ls6t-sim", py, {"LS6T_OUT": "s"}, forced={"LS6T_MODE": "sim"})
+    assert cfg3["mcpServers"]["ls6t-sim"]["env"] == {"LS6T_OUT": "s", "LS6T_MODE": "sim"}
+    cfg4, gone = W.remove_server(cfg3, "ls6t", py)
+    assert gone and "ls6t" not in cfg4["mcpServers"]
+    assert W.remove_server(cfg, "ls6t", py) == (cfg, False)                       # another install's entry stays
+    monkeypatch.setenv("APPDATA", str(tmp_path / "Roaming"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "Local"))
+    store = tmp_path / "Local" / "Packages" / "Claude_abc" / "LocalCache" / "Roaming" / "Claude"
+    store.mkdir(parents=True)
+    assert W.claude_configs(create=False) == [store / "claude_desktop_config.json"]
+    paths = W.claude_configs(create=True)
+    assert paths[0] == tmp_path / "Roaming" / "Claude" / "claude_desktop_config.json"
+    paths[0].parent.mkdir(parents=True)
+    paths[0].write_text(json.dumps(cfg), encoding="utf-8")
+    backup = W._write_cfg(paths[0], cfg2)
+    assert backup and json.loads(backup.read_text()) == cfg and W._read_cfg(paths[0]) == cfg2
+
+
+def test_installer_files(tmp_path):
+    import zipfile
+    sys.path.insert(0, str(ROOT / "installer"))
+    try:
+        import build_installer as B
+    finally:
+        sys.path.pop(0)
+    z = tmp_path / "py.zip"
+    with zipfile.ZipFile(z, "w") as zf:
+        zf.writestr("python312._pth", "python312.zip\r\n.\r\n\r\n#import site\r\n")
+        zf.writestr("python.exe", "x")
+    assert B.stage_python(z, tmp_path / "py") == "312"
+    assert "import site" in (tmp_path / "py" / "python312._pth").read_text().splitlines()
+    assert B.version() == __import__("labspec_translator").__version__
+    nsi = (ROOT / "installer" / "ls6t.nsi").read_text()
+    for needle in ("labspec_translator.winsetup install", "labspec_translator.winsetup uninstall",
+                   "RequestExecutionLevel user", "ls6t-shell.ps1", "INSTALL.html"):
+        assert needle in nsi, needle
+    for f in ("ls6t.cmd", "ls6t-mcp.cmd", "ls6t-typelib.cmd", "ls6t-shell.ps1"):
+        raw = (ROOT / "installer" / "bin" / f).read_bytes()
+        assert all(b < 128 for b in raw), f
+    for f, mod in (("ls6t.cmd", "cli"), ("ls6t-mcp.cmd", "mcp_server"), ("ls6t-typelib.cmd", "typelib")):
+        raw = (ROOT / "installer" / "bin" / f).read_bytes()
+        assert f"-m labspec_translator.{mod} %*".encode() in raw and b"\r\n" in raw

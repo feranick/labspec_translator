@@ -1,0 +1,64 @@
+# Builds the Windows installer (dist/ls6t-setup-<version>.exe) for every version tag, tests it by installing it
+# silently on a clean Windows runner and running the simulator, and attaches it to the tag's GitHub release.
+# Also runs by hand (Actions > installer > Run workflow): the installer is then kept as a workflow artifact.
+name: installer
+
+on:
+  push:
+    tags: ["20*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: NSIS
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\NSIS\makensis.exe")) { choco install nsis -y --no-progress }
+
+      - name: Build the installer
+        run: python installer/build_installer.py
+
+      - name: Install silently and test
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem dist\ls6t-setup-*.exe | Select-Object -First 1
+          $p = Start-Process $exe.FullName -ArgumentList "/S" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "installer exit code $($p.ExitCode)" }
+          $dir = "$env:LOCALAPPDATA\Programs\ls6t"
+          Get-Content "$dir\install.log"
+          & "$dir\bin\ls6t.cmd" --version
+          & "$dir\python\python.exe" -m labspec_translator.winsetup check
+          if ($LASTEXITCODE -ne 0) { throw "winsetup check failed" }
+          $env:LS6T_MODE = "sim"
+          & "$dir\bin\ls6t.cmd" bench si_calibration graphene_map native_map
+          if ($LASTEXITCODE -ne 0) { throw "benchmarks failed" }
+          $cfg = Get-Content "$env:APPDATA\Claude\claude_desktop_config.json" | ConvertFrom-Json
+          if (-not $cfg.mcpServers.ls6t) { throw "no ls6t entry in the Claude configuration" }
+          $u = Start-Process "$dir\uninstall.exe" -ArgumentList "/S" -Wait -PassThru
+          Start-Sleep -Seconds 20
+          if (Test-Path "$dir\python") { throw "the uninstaller left the program files" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ls6t-setup
+          path: dist/ls6t-setup-*
+
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/ls6t-setup-*.exe
+            dist/ls6t-setup-*.exe.sha256

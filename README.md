@@ -16,7 +16,7 @@ it runs **locally**: on the instrument PC, next to the Claude desktop app. It ha
 machines. Unlike the other translators, the backend has no Python API: LabSpec is automated with VBScript
 (*LabSpec 5/6 Automation*, HORIBA, 2018). That is why the bridge script exists.
 
-First instrument: **XploRA** (LabSpec 6, Windows 11). Version 2026.11.20.1.
+First instrument: **XploRA** (LabSpec 6, Windows 11). Version 2026.11.20.2.
 
 **Scope of version 1**
 
@@ -69,10 +69,12 @@ detectors. See `planning.md`.
 
 ## Installation
 
-On the instrument PC (Windows 11, next to LabSpec 6 and the Claude desktop app): Python 3.10+ and Git, a venv,
-`pip install -e ".[mcp,render,test,windows]"`, `ls6t bridge install`, the discovery and bridge scripts in LabSpec, the discovery and
-the machine profile, then the MCP entry in the Claude app. The steps, the offline install, updating and
-troubleshooting are in **[INSTALL.md](INSTALL.md)**.
+On the instrument PC (Windows 11, next to LabSpec 6 and the Claude desktop app), run **`ls6t-setup-<version>.exe`**
+(from the repository's Releases, built for every version): per user, no administrator rights, no network; it brings its
+own Python, writes the LabSpec scripts, and connects the Claude app. Then add the scripts in LabSpec, run the
+discovery and set the machine profile. From source instead: Python 3.10+ and Git, a venv,
+`pip install -e ".[mcp,render,test,windows]"`, `ls6t bridge install`, and the MCP entry in the Claude app by hand.
+The steps, building the installer, the offline install, updating and troubleshooting are in **[INSTALL.md](INSTALL.md)**.
 
 ---
 
@@ -559,6 +561,8 @@ Claude app ──MCP──> ls6t-mcp ──> request folder + runner process (ls
 | `sim.py` | A simulated LabSpec + XploRA speaking the same protocol (`LS6T_MODE=sim`, tests, benchmarks) |
 | `bench.py` | The benchmarks |
 | `api.py`, `cli.py`, `mcp_server.py` | The functions, the command line, the MCP server |
+| `winsetup.py` | What the Windows installer does beyond copying files: checks, precompiling, the LabSpec scripts, PATH, the Claude app's configuration (and undoing them) |
+| `installer/` | The Windows installer: `ls6t.nsi` (NSIS), `build_installer.py`, the launchers (`bin/`) |
 | `vbs/common.vbs`, `vbs/bridge_main.vbs`, `vbs/discover_main.vbs`, `vbs/script_motor_main.vbs` | The LabSpec scripts' parts; `ls6t bridge install` puts them together (the script-motor logger is optional: TESTING.md T1.4) |
 
 **The bridge protocol (1).** ls6t writes a command as `inbox\<seq>.cmd`: `key=value` lines, UTF-16, written to a
@@ -634,8 +638,10 @@ labspec_translator/
   README.md  INSTALL.md  FUNCTIONALITY.md  TESTING.md  planning.md  pyproject.toml
   examples/studies.json          thirteen studies covering the scope
   labspec_translator/            the package (config, profile, format, plan, bridge, runner, spectra, render, spot,
-                                 xcal, background,
-                                 video, sim, bench, api, cli, mcp_server; vbs/ the LabSpec script parts)
+                                 xcal, background, video, sim, bench, api, cli, mcp_server, typelib, winsetup;
+                                 vbs/ the LabSpec script parts)
+  installer/                     the Windows installer: ls6t.nsi, build_installer.py, bin/ (launchers)
+  .github/workflows/installer.yml   builds, tests and publishes the installer for each version tag
   tests/test_ls6t.py
 ```
 
@@ -649,6 +655,7 @@ frames, LabSpec's image files, `snapshot.json`); a study's frames go to its `vid
 
 | Version | Changes |
 |---|---|
+| 2026.11.20.2 | A Windows installer, `ls6t-setup-<version>.exe` (NSIS): per user, no administrator rights, offline (python.org's embeddable Python 3.12 with every package preinstalled); launchers, Start menu, PATH, the LabSpec scripts, and the Claude app's configuration (backed up; an `ls6t-sim` entry optional); updates in place, uninstalls cleanly keeping the data. `installer/build_installer.py` builds it on macOS, Windows or Linux; a GitHub workflow builds, installs, tests and attaches it to each tagged release. |
 | 2026.11.20.1 | Methods from the installed LabSpec's type library. `SaveConfig`/`LoadConfig`: `ls6t instrument config save/load/list` and the profile's `session.restore_config` (LabSpec restored after each request). `GetValueSimplePart`: native maps written out in chunks (`mapping.export_chunk`). `GetValueEx` (manual only) as a fallback after `GetValue`, and for motor position names. `GetLastErrorInfo`: `ls6t instrument last-error` and in `status`. Extended video (`Video(3)`; `SetExtendedVideo` is missing from the build): `snapshot --extended`, off by default (`video.allow_extended`). Discovery probes `GetValueEx`, `GetValueSimplePart` and `GetConfigParam` (its parameters listed). `ls6t_script_motor.vbs`: a virtual script-controlled motor that logs `GetMotorAction`/`SetMotorInfo`, to learn the protocol. `SetConfigParam` and `SetScriptPath` are deliberately not called. TESTING Q35–Q40, T1.4, T5b.6. |
 | 2026.11.19.9 | `ls6t-typelib` reads the type library straight from the `.ocx` (its TYPELIB resource, MSFT format) in pure Python, on Windows, macOS or Linux; identical libraries are listed once. Read on the instrument's `NFActiveX.ocx` (32- and 64-bit builds, 2021): 60 methods, 15 not in the 2018 manual (see planning.md). The bridge adds LabSpec's own last error (`GetLastErrorInfo`) to its error messages; discovery tests it. |
 | 2026.11.19.8 | `ls6t-typelib`: a separate, read-only tool that reads LabSpec's ActiveX type library (comtypes or pywin32) and lists every method and property of the installed version, marking those not in the 2018 manual and those of interest (alignment, calibration, lamp, progress...); text, markdown or JSON; extra `windows`. |
