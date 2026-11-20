@@ -12,7 +12,7 @@ stops and cancel on the simulator, and `ls6t bench` gives known answers. What re
 LabSpec and hardware. The plan goes from no laser and no motion to Claude driving a full map, in stages. Each stage
 starts only when the previous one passed.
 
-Version under test: 2026.11.20.6 (bridge protocol 1).
+Version under test: 2026.11.20.7 (bridge protocol 1).
 
 ---
 
@@ -35,6 +35,11 @@ Version under test: 2026.11.20.6 (bridge protocol 1).
    The maintainer should try each of them during the plan (T2, T3, T4).
 6. **Stop the plan** at any unexpected motion, a move beyond what was asked, a dialog nobody understands, or LabSpec
    not responding. Record what happened (see [Recording](#recording)) before continuing.
+7. **The LLM reaches the instrument only through ls6t's tools.** An app that can also run commands on the PC
+   (ChatGPT desktop / Codex, Gemini CLI, Claude with a terminal) must not drive LabSpec by scripts, COM/ActiveX or
+   the bridge's files: that bypasses every check above and can freeze LabSpec (a 2026-11-20 session opened LabSpec's
+   *About NFActiveX Control* dialog this way and the bridge stopped). Set the app to ask before each command
+   (INSTALL.md, step 8) and refuse commands that touch LabSpec.
 
 ## What to prepare
 
@@ -207,6 +212,8 @@ With the maintainer, go through:
   with 500), `max_dz_um` (start with 20), `max_exposure_s`, `max_accumulations`, `max_points`, `max_minutes`,
   `stage.x_um` / `stage.y_um` if wanted, `detector.max_temp_c`.
 - `manual_objective`: true if LabSpec asks the operator to turn the turret.
+- `video.cameras`: LabSpec's cameras by the names people use, e.g. `{"top": 0}` (the active camera's number is
+  `video.active_camera` in the dump). Requests can then say *"the top camera"*.
 - `motors.laser_shutter` (**Q15**): the import proposes a motor named like a shutter. The maintainer confirms it
   is the **laser** shutter, not the detector's. Leave it `null` until then: snapshots with the laser are refused
   without it.

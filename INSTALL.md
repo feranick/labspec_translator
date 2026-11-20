@@ -261,6 +261,22 @@ again; the ls6t tools appear in a new chat or session. Notes per app:
   not reach ordinary chats in the Windows desktop app; Codex tasks do get them.
 - **Gemini CLI**: the entry keeps `trust: false`, so Gemini CLI asks before each tool call; `timeout` is one hour.
 
+**Apps that can also run commands on the PC.** The ChatGPT desktop app / Codex and Gemini CLI (and Claude with a
+terminal extension) can run shell commands. An LLM that cannot find what it wants in ls6t's tools may then try to
+drive LabSpec directly, with scripts, its ActiveX control or the bridge's files. That bypasses the operator's
+confirmations and ls6t's limits, and can freeze LabSpec: a modal dialog stops LabSpec's scripts, the bridge with
+them. ls6t's instructions forbid it, but on the instrument PC also make the app ask before every command:
+
+- Codex / ChatGPT desktop: in `%USERPROFILE%\.codex\config.toml`, `approval_policy = "on-request"` and
+  `sandbox_mode = "read-only"` (or choose the read-only, ask-first mode in the app's settings);
+- Gemini CLI: in `%USERPROFILE%\.gemini\settings.json`, `"tools": {"exclude": ["run_shell_command"]}` (no shell), or
+  at least `"tools": {"confirmationRequired": ["run_shell_command"]}`; never start it with `--yolo`;
+- Claude desktop app: do not add terminal or computer-control extensions on the instrument PC, or approve each
+  command.
+
+Answer *No* to any command that touches LabSpec, `NFActiveX` or the `ls6t\bridge` folder. If the LLM says it cannot
+do something with ls6t's tools, tell the ls6t maintainer: that is a missing tool, not a reason to go around it.
+
 By hand (Claude, JSON; backslashes doubled):
 
 ```json

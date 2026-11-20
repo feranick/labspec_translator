@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.20.6)
+## Architecture (version 2026.11.20.7)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -185,6 +185,15 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   `camera` (Video START/STOP/GET_VIDEO_ID, waits up to 5 s for the live id), `instrument camera_on/off`, status
   `live_video`; the instructions map direct requests to tools in two lines; in test mode the hardware_test
   description starts with the direct-request map and `move` takes roles (filter, grating, z...). 92 tests.
+- 2026-11-20, 2026.11.20.7: Nicola's screenshot: asked to turn on the top camera, the LLM "ran commands" (its own
+  shell) and drove NFActiveX directly: LabSpec showed "About NFActiveX Control" (AboutBox) and the bridge hung (a
+  modal dialog blocks LabSpec's script thread). ls6t never calls AboutBox. Changes: instructions (3 lines) and
+  hardware_test: only ls6t's tools reach the instrument, never scripts/shell/COM/bridge files, say so when no tool
+  fits; INSTALL step 8: make Codex (approval_policy on-request, sandbox_mode read-only), Gemini CLI (tools.exclude
+  run_shell_command or confirmationRequired) and Claude (no terminal extensions) ask before commands; TESTING ground
+  rule 7. Cameras by name: profile video.cameras {name: number}, P.camera_number, instrument(camera_on, camera),
+  status 'camera', study_format profile.cameras. BridgeGone mentions an open LabSpec dialog. Not done: a token in
+  bridge commands (an LLM with a shell could read it too). 93 tests.
 
 ## To do next
 

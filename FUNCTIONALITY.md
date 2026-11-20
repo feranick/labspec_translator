@@ -1,6 +1,6 @@
 # labspec-translator (ls6t): what it can do
 
-This is the complete list of functions in version 2026.11.20.6. It covers:
+This is the complete list of functions in version 2026.11.20.7. It covers:
 
 - what a study can ask for;
 - the tools an LLM sees;
@@ -60,7 +60,7 @@ A request is `{name: study}`; each study has a `kind`.
 | `study_status` | A request's results, or its progress |
 | `cancel` | Stops a request: the acquisition or move in progress stops |
 | `jobs` | Recent requests, and which one holds the instrument |
-| `instrument` | `status` (bridge and instrument now, with LabSpec's last error and whether the live camera view is on), `camera_on` / `camera_off` (LabSpec's live view), `discover` (proposes a machine profile), `resume` (after an operator halt), `last_error` |
+| `instrument` | `status` (bridge and instrument now, with LabSpec's last error and whether the live camera view is on), `camera_on` / `camera_off` (LabSpec's live view; `camera` by name from the profile's `video.cameras`, e.g. "top", or number), `discover` (proposes a machine profile), `resume` (after an operator halt), `last_error` |
 | `snapshot` | A video frame now, returned as an image: the beam's position marked, small features numbered; `with_laser` shows the beam and measures its offset; `extended` takes LabSpec's extended video (a stitched still over the area set in LabSpec; the stage moves; only when the profile allows it, after the operator's Yes) |
 | `references` | Spectral corrections, white-light backgrounds, beam offsets, alignment state and saved LabSpec configurations (read-only) |
 | `hardware_test` | Only in test mode (`ls6t connect APP --test`): TESTING.md with the maintainer. `plan`, `step`, `call` (one bridge command, with guards and the operator's Yes for the laser), `record`, `report`, `status`, `last_error`, `config` |
@@ -248,5 +248,5 @@ profile. The shutter mode is restored on every path.
   - `si_calibration`, `graphene_map`, `extended_range`, `saturation`, `series`;
   - `guided_focus`, `focus_scan`, `spot_raman`, `spot_video`;
   - `depth_profile`, `calibration_zero`, `white_light`, `native_map`, `operator_stop`.
-- **Test suite** (`pytest`, 92 tests), which also checks the LabSpec scripts' structure.
+- **Test suite** (`pytest`, 93 tests), which also checks the LabSpec scripts' structure.
 - **Instrument tests** with the maintainer: [TESTING.md](TESTING.md).

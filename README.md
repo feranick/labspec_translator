@@ -16,7 +16,7 @@ it runs **locally**: on the instrument PC, next to the Claude desktop app. It ha
 machines. Unlike the other translators, the backend has no Python API: LabSpec is automated with VBScript
 (*LabSpec 5/6 Automation*, HORIBA, 2018). That is why the bridge script exists.
 
-First instrument: **XploRA** (LabSpec 6, Windows 11). Version 2026.11.20.6.
+First instrument: **XploRA** (LabSpec 6, Windows 11). Version 2026.11.20.7.
 
 **Scope of version 1**
 
@@ -662,6 +662,7 @@ frames, LabSpec's image files, `snapshot.json`); a study's frames go to its `vid
 
 | Version | Changes |
 |---|---|
+| 2026.11.20.7 | After a session where the LLM ran its own commands against LabSpec's ActiveX (it opened *About NFActiveX Control* and the bridge stopped): the instructions now say that only ls6t's tools reach the instrument (no scripts, shell, COM or bridge files; say so when no tool fits); INSTALL.md says how to make Codex, Gemini CLI and Claude ask before every command. Cameras by name: profile `video.cameras` (e.g. `{"top": 0}`), `instrument camera_on camera="top"`, status reports the active camera, study_format lists the names. A stalled bridge's error says a LabSpec dialog may be open. |
 | 2026.11.20.6 | Less searching by the LLM: direct requests are mapped in the server's instructions and in `hardware_test`'s description (camera, one motor by its role, the stage, a spectrum, the state), so it acts at once instead of looking things up. New bridge verb `camera` (LabSpec's live view on/off) and `instrument camera_on` / `camera_off`; `status` reports `live_video`; `hardware_test call move` takes roles (`filter`, `grating`, `z`...). |
 | 2026.11.20.5 | Test mode: TESTING.md from the chat. `ls6t connect APP --test` adds the `hardware_test` tool (plan, step, call, record, report, status, last_error, config): the LLM reads each test, guides the maintainer, runs single bridge commands with guards (limits, filter caps, the operator's Yes in LabSpec for anything that can fire the laser, files confined, no `quit`, nothing during a request) and records results and answers in `LS6T_HOME\testing` (log and the results table filled in). `ls6t test plan / step / record / report` from the command line. Off by default. |
 | 2026.11.20.4 | Not only Claude: `ls6t connect` and the installer find the LLM apps on the PC (Claude desktop app; ChatGPT desktop app, Codex CLI and IDE extension, which share `~/.codex/config.toml`; Gemini CLI, `~/.gemini/settings.json`) and add the MCP server to those chosen, sharing one `LS6T_HOME`; TOML edited in place (the rest of the file untouched), backups, other settings kept; uninstalling removes only this install's entries. Installer: one component per app, ticked when found; silent `/CLAUDE /CODEX /GEMINI /NOAPPS /SIM`. The Gemini app and ChatGPT on the web take only internet servers and are not supported. |
