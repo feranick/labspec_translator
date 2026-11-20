@@ -1,5 +1,5 @@
 """sim.py — a simulated LabSpec + XploRA behind the same bridge protocol as ls6t_bridge.vbs.
-Version: 2026.11.20.17
+Version: 2026.11.20.18
 
 It answers every verb of the bridge with the same keys, so the runner, the checks and the MCP server are tested
 without the instrument (LS6T_MODE=sim, and the tests). The simulated sample is a silicon wafer with a graphene
@@ -241,6 +241,17 @@ class SimLabSpec:
             return {"ok": 0, "error": "laser on needs m_laser_shutter and seconds"}
         self.laser_until = time.time() + float(p["seconds"])
         return {"open": 1, "seconds": p["seconds"]}
+
+    def v_calib_params(self, p):
+        """LabSpec's spectrometer calibration per grating (OperVar ACT_INSTRUMENT[...]): made-up, XploRA-like."""
+        out = {"gratings": len(self.m["Grating"]["values"]), "grating_index": self.m["Grating"]["i"]}
+        for i, _ in enumerate(self.m["Grating"]["values"]):
+            xs = self._xshift()                         # the operator's correction moves the zero (BF here)
+            out.update({f"g{i}.AF": 1.0475e-05, f"g{i}.BF": 62486.0 + 150000 * i + (round(xs[0] * 10) if xs else 0),
+                        f"g{i}.Diode": 0,
+                        f"g{i}.Focal": 198.8, f"g{i}.Angle": 12.2, f"g{i}.Gamma": 8.0, f"g{i}.SpMin": 0,
+                        f"g{i}.SpMax": 1100})
+        return out
 
     def v_labels(self, p):
         m = self.m.get(p.get("motor"))

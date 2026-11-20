@@ -249,7 +249,39 @@ Sub VStatus(cmd, res)
     On Error GoTo 0
 End Sub
 
-' A motor's named positions (labels and values; the first ten, see MotorLabel) and the current one
+' LabSpec's spectrometer calibration per grating, read with OperVar under the names HORIBA's own service scripts
+' use (ACT_INSTRUMENT[<name>][<grating index>]): AF, BF, Diode, Focal, Angle, Gamma, SpMin, SpMax. Read only.
+Sub VCalibParams(cmd, res)
+    Dim names, n, i, j, v, g
+    names = Array("AF", "BF", "Diode", "Focal", "Angle", "Gamma", "SpMin", "SpMax")
+    g = GetP(cmd, "m_grating", "Grating")
+    n = MotorSize(g)
+    If n < 1 Then n = 1
+    If n > 10 Then n = 10
+    res("gratings") = n
+    On Error Resume Next
+    res("grating_index") = LabSpec.GetMotorPosition(g, LS_MOTOR_INDEX)
+    Err.Clear
+    For i = 0 To n - 1
+        For j = 0 To UBound(names)
+            v = Empty
+            LabSpec.OperVar 0, "ACT_INSTRUMENT[" & names(j) & "][" & i & "]", v, 0
+            If Err.Number = 0 Then
+                If IsNumeric(v) And Not IsEmpty(v) Then
+                    res("g" & i & "." & names(j)) = Fmt(v)
+                Else
+                    res("g" & i & "." & names(j)) = CStr(v)
+                End If
+            Else
+                res("g" & i & "." & names(j) & ".error") = Err.Description
+            End If
+            Err.Clear
+        Next
+    Next
+    On Error GoTo 0
+End Sub
+
+' A motor's named positions (labels and values, up to 60) and the current one
 Sub VLabels(cmd, res)
     Dim motor, n, i
     motor = GetP(cmd, "motor", "")
@@ -259,11 +291,16 @@ Sub VLabels(cmd, res)
         Exit Sub
     End If
     res("size") = n
-    If n > 10 Then n = 10
+    If n > 60 Then n = 60
     On Error Resume Next
     For i = 0 To n - 1
-        res("label." & i) = LabSpec.GetMotorPosition(motor, LS_MOTOR_INDEXTOSTRING + i)
-        res("value." & i) = LabSpec.GetMotorPosition(motor, LS_MOTOR_INDEXTOVALUE + i)
+        If res("size") <= 10 Then
+            res("label." & i) = LabSpec.GetMotorPosition(motor, LS_MOTOR_INDEXTOSTRING + i)
+            res("value." & i) = LabSpec.GetMotorPosition(motor, LS_MOTOR_INDEXTOVALUE + i)
+        Else
+            res("label." & i) = LabSpec.GetMotorPosition(motor, LS_MOTOR_INDEXTOSTRING200 + i)
+            res("value." & i) = LabSpec.GetMotorPosition(motor, LS_MOTOR_INDEXTOVALUE100 + i)
+        End If
         Err.Clear
     Next
     res("current") = MotorLabel(motor)
@@ -1763,6 +1800,7 @@ Sub HandleFile(path)
             Case "video": VVideo cmd, res
             Case "camera": VCamera cmd, res
             Case "labels": VLabels cmd, res
+            Case "calib_params": VCalibParams cmd, res
             Case "map_native": VMapNative cmd, res
             Case "config": VConfig cmd, res
             Case "last_error": res("info") = LabSpecError()

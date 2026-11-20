@@ -1,5 +1,5 @@
 """runner.py — runs a request's studies on the instrument, one command at a time, and checks every result.
-Version: 2026.11.20.17
+Version: 2026.11.20.18
 
 A request runs in its own process (`ls6t run-request FOLDER`, started detached by api.start), so it outlives the
 MCP call that started it. One request at a time holds the instrument (a lock file under LS6T_HOME); others wait
@@ -295,7 +295,7 @@ def _setup(name: str, study: dict, ctx: Ctx, warnings: list, unreliable: list, c
         if step["mode"] == "label":
             # LabSpec's own name for the position ('x100' -> 'x100_VIS' when the profile is not from discovery)
             lr = ctx.call("labels", timeout_s=30, motor=step["motor"])
-            labs = [lr.get(f"label.{i}", "") for i in range(min(int(float(lr.get("size") or 0)), 10))] \
+            labs = [lr.get(f"label.{i}", "") for i in range(min(int(float(lr.get("size") or 0)), 60))] \
                 if lr.get("ok") else []
             if labs:
                 lab, err = P.match_label(step["value"], labs)
@@ -990,11 +990,13 @@ def run_calibration(name: str, study: dict, ctx: Ctx) -> dict:
     sd.mkdir(parents=True, exist_ok=True)
     attempts, res = [], None
     n_max = 1 + int(prof.get("calibration", {}).get("max_retries", 2))
+    params_before = _labspec_params(ctx)
     for k in range(1, n_max + 1):
         res = run_study(name, study, ctx, sd / f"attempt{k}")
         cal = res.get("calibration") or {}
         attempts.append({"attempt": k, "pass": cal.get("pass"), "offset_cm1": cal.get("offset_cm1"),
-                         "worst_error_cm1": cal.get("worst_error_cm1"), "correction": cal.get("correction")})
+                         "worst_error_cm1": cal.get("worst_error_cm1"), "correction": cal.get("correction"),
+                         "labspec_parameters": _labspec_params(ctx)})
         if cal.get("pass") or k == n_max or not cal.get("lines_used"):
             break
         laser = (res.get("instrument") or {}).get("laser_nm") or 532.0
@@ -1014,6 +1016,10 @@ def run_calibration(name: str, study: dict, ctx: Ctx) -> dict:
     result = dict(res or {})
     cal = dict(result.get("calibration") or {})
     cal["attempts"] = attempts
+    after = attempts[-1].get("labspec_parameters") if attempts else None
+    if params_before and after:
+        changed = {k: [params_before.get(k), after.get(k)] for k in after if after.get(k) != params_before.get(k)}
+        cal["labspec_parameters"] = {"before": params_before, "after": after, "changed": changed}
     if cal.get("pass") and len(attempts) > 1:
         inst = result.get("instrument") or {}
         n = xcal.clear(inst.get("laser_nm"), inst.get("grating"))
@@ -1022,6 +1028,32 @@ def run_calibration(name: str, study: dict, ctx: Ctx) -> dict:
                                                      "laser and grating was dropped")
     result["calibration"] = cal
     return _finish(sd, name, result)
+
+
+def _labspec_params(ctx: Ctx) -> dict | None:
+    """LabSpec's calibration parameters for the grating in use (read only), or None when the bridge cannot read
+    them."""
+    try:
+        r = ctx.call("calib_params", timeout_s=60, m_grating=ctx.prof["motors"]["grating"])
+    except Stop:
+        raise
+    except Exception:  # noqa: BLE001
+        return None
+    if not r.get("ok"):
+        return None
+    i = r.get("grating_index")
+    try:
+        i = int(float(i))
+    except (TypeError, ValueError):
+        return None
+    out = {}
+    for k, v in r.items():
+        if k.startswith(f"g{i}.") and not k.endswith(".error"):
+            try:
+                out[k[len(f"g{i}."):]] = float(v)
+            except (TypeError, ValueError):
+                out[k[len(f"g{i}."):]] = v
+    return out or None
 
 
 def run_background(name: str, study: dict, ctx: Ctx) -> dict:

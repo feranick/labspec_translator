@@ -1,5 +1,5 @@
 """format.py — the study format and its static checks (no instrument needed).
-Version: 2026.11.20.17
+Version: 2026.11.20.18
 """
 from __future__ import annotations
 

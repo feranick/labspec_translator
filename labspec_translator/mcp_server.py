@@ -1,5 +1,5 @@
 """mcp_server.py — MCP server: lets LLM-based tools run Raman measurements on a HORIBA instrument through LabSpec 6.
-Version: 2026.11.20.17
+Version: 2026.11.20.18
 
 Tools (all JSON):
   study_format      the study format, the profile's choices and limits, the bridge's state. Read it first.
@@ -160,7 +160,7 @@ def instrument(action: str = "status", camera: str | int | None = None, setup: d
     laser_off. camera_on / camera_off (camera: a number, or a name in study_format's profile.cameras such as
     "top"; none: the active one): LabSpec's live view; for a picture use snapshot. discover: runs the discovery
     and proposes a machine profile (a person applies it). resume: asks the operator to lift a halt. last_error:
-    LabSpec's last error."""
+    LabSpec's last error. calibration: LabSpec's spectrometer calibration per grating (read only)."""
     return api.instrument(action, camera, setup, seconds)
 
 

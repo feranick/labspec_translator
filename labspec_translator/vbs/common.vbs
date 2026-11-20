@@ -21,6 +21,9 @@ Const LS_MOTOR_STOP = 6
 Const LS_MOTOR_NO_WAIT = 10
 Const LS_MOTOR_INDEXTOVALUE = 10
 Const LS_MOTOR_INDEXTOSTRING = 20
+' LabSpec 6.7's own constants (macros\constants.vbm): the same reads for any number of positions
+Const LS_MOTOR_INDEXTOVALUE100 = 100
+Const LS_MOTOR_INDEXTOSTRING200 = 200
 Const LS_START_AUTOFOCUS = 0
 Const LS_GET_AUTOFOCUS_STATUS = 1
 Const LS_LASER_AUTOFOCUS = 10
@@ -183,8 +186,12 @@ Function MotorLabel(name)
     On Error Resume Next
     If LabSpec.GetMotorPosition(name, LS_MOTOR_SIZE) > 0 Then
         idx = LabSpec.GetMotorPosition(name, LS_MOTOR_INDEX)
-        ' INDEXTOSTRING (20+i) runs into FULL_INDEXTOVALUE (30) past index 9
-        If idx >= 0 And idx <= 9 Then MotorLabel = LabSpec.GetMotorPosition(name, LS_MOTOR_INDEXTOSTRING + idx)
+        ' INDEXTOSTRING (20+i) runs into FULL_INDEXTOVALUE (30) past index 9: LabSpec 6.7's 200+i beyond
+        If idx >= 0 And idx <= 9 Then
+            MotorLabel = LabSpec.GetMotorPosition(name, LS_MOTOR_INDEXTOSTRING + idx)
+        ElseIf idx > 9 Then
+            MotorLabel = LabSpec.GetMotorPosition(name, LS_MOTOR_INDEXTOSTRING200 + idx)
+        End If
     End If
     If Err.Number <> 0 Then
         Err.Clear
@@ -295,13 +302,19 @@ Function DiscoverTo(outPath, withPopup, withProbes)
             On Error Resume Next
             If size > 0 Then
                 n = size
-                If n > 10 Then n = 10      ' INDEXTOVALUE (10+i) and INDEXTOSTRING (20+i) overlap past 10
+                If n > 60 Then n = 60
                 For j = 0 To n - 1
-                    d("motor." & name & ".value." & j) = LabSpec.GetMotorPosition(name, LS_MOTOR_INDEXTOVALUE + j)
-                    d("motor." & name & ".label." & j) = LabSpec.GetMotorPosition(name, LS_MOTOR_INDEXTOSTRING + j)
+                    ' 10+i / 20+i (the 2018 manual) overlap past 10 positions: LabSpec 6.7's 100+i / 200+i then
+                    If size <= 10 Then
+                        d("motor." & name & ".value." & j) = LabSpec.GetMotorPosition(name, LS_MOTOR_INDEXTOVALUE + j)
+                        d("motor." & name & ".label." & j) = LabSpec.GetMotorPosition(name, LS_MOTOR_INDEXTOSTRING + j)
+                    Else
+                        d("motor." & name & ".value." & j) = LabSpec.GetMotorPosition(name, LS_MOTOR_INDEXTOVALUE100 + j)
+                        d("motor." & name & ".label." & j) = LabSpec.GetMotorPosition(name, LS_MOTOR_INDEXTOSTRING200 + j)
+                    End If
                     If Err.Number <> 0 Then Err.Clear
                 Next
-                If size > 10 Then d("motor." & name & ".truncated") = 1
+                If size > 60 Then d("motor." & name & ".truncated") = 1
                 d("motor." & name & ".current") = LabSpec.GetMotorPosition(name, LS_MOTOR_INDEX)
                 d("motor." & name & ".current_label") = MotorLabel(name)
             Else

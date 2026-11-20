@@ -1,6 +1,6 @@
 # labspec-translator (ls6t): what it can do
 
-This is the complete list of functions in version 2026.11.20.17. It covers:
+This is the complete list of functions in version 2026.11.20.18. It covers:
 
 - what a study can ask for;
 - the tools an LLM sees;
@@ -12,7 +12,7 @@ How it all fits together: [README.md](README.md). Installation: [INSTALL.md](INS
 [TESTING.md](TESTING.md).
 
 Everything below runs on the built-in simulator and is covered by tests and benchmarks. Nothing has run on the
-instrument yet: TESTING.md lists what remains to be confirmed there (Q1–Q42).
+instrument yet: TESTING.md lists what remains to be confirmed there (Q1–Q43).
 
 ---
 
@@ -60,7 +60,7 @@ A request is `{name: study}`; each study has a `kind`.
 | `study_status` | A request's results, or its progress |
 | `cancel` | Stops a request: the acquisition or move in progress stops |
 | `jobs` | Recent requests, and which one holds the instrument |
-| `instrument` | `status` (bridge and instrument now, with LabSpec's last error and whether the live camera view is on), `laser_on` / `laser_off` (the laser shutter open for viewing, at most `limits.max_laser_on_s`, after the operator's Yes; closed by the bridge when the time is up, at a halt, or before any other command), `set` (laser, grating, filter, objective, hole, slit now, without measuring: filter within the caps, the objective after the operator's Yes, read-back), `camera_on` / `camera_off` (LabSpec's live view; `camera` by name from the profile's `video.cameras`, e.g. "top", or number), `discover` (proposes a machine profile), `resume` (after an operator halt), `last_error` |
+| `instrument` | `status` (bridge and instrument now, with LabSpec's last error and whether the live camera view is on), `laser_on` / `laser_off` (the laser shutter open for viewing, at most `limits.max_laser_on_s`, after the operator's Yes; closed by the bridge when the time is up, at a halt, or before any other command), `calibration` (LabSpec's spectrometer calibration per grating, read only), `set` (laser, grating, filter, objective, hole, slit now, without measuring: filter within the caps, the objective after the operator's Yes, read-back), `camera_on` / `camera_off` (LabSpec's live view; `camera` by name from the profile's `video.cameras`, e.g. "top", or number), `discover` (proposes a machine profile), `resume` (after an operator halt), `last_error` |
 | `snapshot` | A video frame now, returned as an image: the beam's position marked, small features numbered; `with_laser` shows the beam and measures its offset; `extended` takes LabSpec's extended video (a stitched still over the area set in LabSpec; the stage moves; only when the profile allows it, after the operator's Yes) |
 | `references` | Spectral corrections, white-light backgrounds, beam offsets, alignment state and saved LabSpec configurations (read-only) |
 | `hardware_test` | Only in test mode (`ls6t connect APP --test`): TESTING.md with the maintainer. `plan`, `step`, `call` (one bridge command, with guards and the operator's Yes for the laser), `record`, `report`, `status`, `last_error`, `config` |
@@ -129,6 +129,7 @@ read them, not change them.
 | `config` | Save or load LabSpec's configuration file (`SaveConfig` / `LoadConfig`) |
 | `last_error` | LabSpec's last error (`GetLastErrorInfo`); also added to every error the bridge reports |
 | `camera` | LabSpec's live camera view: `on`, `off`, `status` (optionally the camera's number) |
+| `calib_params` | LabSpec's spectrometer calibration per grating, read with `OperVar` (`ACT_INSTRUMENT[AF/BF/Diode/Focal/Angle/Gamma/SpMin/SpMax][i]`) |
 | `laser` | `on` (seconds, the shutter motor) / `off`: the laser shutter open in manual mode for viewing; the bridge closes it itself (time up, halt, stop, any other command but quick reads) |
 | `labels` | A motor's named positions and the current one (position names are matched to these: `x100` finds `x100_VIS`) |
 | `guide` | The fast loop of a guided adjustment: short acquisitions, the line's signal, LabSpec's dialog (or the status bar), STOP |

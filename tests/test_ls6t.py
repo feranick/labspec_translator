@@ -754,6 +754,9 @@ def test_calibration_guided_labspec_adjustment():
     cal = st["studies"]["c"]["calibration"]
     assert [a["pass"] for a in cal["attempts"]] == [False, True] and cal["pass"]
     assert st["studies"]["c"]["reliable"]
+    assert list(cal["labspec_parameters"]["changed"]) == ["BF"]          # which parameter the operator changed
+    r = api.instrument("calibration")
+    assert r["ok"] and r["grating_in_use"] == "1800" and r["gratings"]["600"]["Focal"] == 198.8
 
 
 def test_calibration_polystyrene_offset_and_scale():

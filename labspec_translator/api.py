@@ -1,5 +1,5 @@
 """api.py — the functions behind the command line and the MCP server (JSON in, JSON out).
-Version: 2026.11.20.17
+Version: 2026.11.20.18
 """
 from __future__ import annotations
 
@@ -283,6 +283,8 @@ def instrument(action: str = "status", camera=None, setup: dict | None = None, s
             return set_instrument(setup or {})
         if action in ("laser_on", "laser_off"):
             return laser(action == "laser_on", seconds)
+        if action == "calibration":
+            return labspec_calibration(b)
         if action in ("camera_on", "camera_off"):
             prof = P.load()
             num, err = P.camera_number(prof, camera)
@@ -297,11 +299,40 @@ def instrument(action: str = "status", camera=None, setup: dict | None = None, s
             return r
     except BridgeError as exc:
         return {"ok": False, "error": str(exc)}
-    raise ValueError(f"action {action!r}: status, set, laser_on, laser_off, camera_on, camera_off, discover, resume "
-                     "or last_error")
+    raise ValueError(f"action {action!r}: status, set, laser_on, laser_off, camera_on, camera_off, calibration, "
+                     "discover, resume or last_error")
 
 
 SET_KEYS = ("filter", "laser_nm", "grating", "objective", "hole_um", "slit_um")
+
+
+def labspec_calibration(b: Bridge | None = None) -> dict:
+    """LabSpec's own spectrometer calibration per grating, read only (OperVar ACT_INSTRUMENT[...], the names HORIBA's
+    service scripts use): AF, BF, Diode, Focal, Angle, Gamma, SpMin, SpMax; the grating in use is marked. Which of
+    them the Maintenance dialog calls zero and coefficient is what calibration studies record (TESTING Q27)."""
+    prof = P.load()
+    b = b or Bridge()
+    r = b.call("calib_params", timeout_s=60, m_grating=prof["motors"]["grating"])
+    if not r.get("ok"):
+        return {"ok": False, "error": r.get("error")}
+    labs, _ = _labels(b, prof["motors"]["grating"])
+    out, cur = {}, r.get("grating_index")
+    for i in range(int(float(r.get("gratings") or 0))):
+        g = labs[i] if i < len(labs) else str(i)
+        vals = {}
+        for k, v in r.items():
+            if k.startswith(f"g{i}."):
+                try:
+                    vals[k[len(f"g{i}."):]] = float(v)
+                except (TypeError, ValueError):
+                    vals[k[len(f"g{i}."):]] = v
+        out[g] = vals
+    try:
+        cur_label = labs[int(float(cur))] if labs else None
+    except (TypeError, ValueError, IndexError):
+        cur_label = None
+    return {"ok": True, "gratings": out, "grating_in_use": cur_label,
+            "note": "read only; names as in HORIBA's service scripts (meanings: TESTING Q27, Q41)"}
 
 
 def laser(on: bool, seconds: float | None = None) -> dict:
@@ -359,7 +390,7 @@ def _labels(b: Bridge, motor: str) -> tuple:
     r = b.call("labels", timeout_s=30, motor=motor)
     if not r.get("ok"):
         return [], []
-    n = min(int(float(r.get("size") or 0)), 10)
+    n = min(int(float(r.get("size") or 0)), 60)
     return [r.get(f"label.{i}", "") for i in range(n)], [r.get(f"value.{i}") for i in range(n)]
 
 

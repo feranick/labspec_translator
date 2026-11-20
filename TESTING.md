@@ -12,7 +12,7 @@ stops and cancel on the simulator, and `ls6t bench` gives known answers. What re
 LabSpec and hardware. The plan goes from no laser and no motion to Claude driving a full map, in stages. Each stage
 starts only when the previous one passed.
 
-Version under test: 2026.11.20.17 (bridge protocol 1).
+Version under test: 2026.11.20.18 (bridge protocol 1).
 
 ---
 
@@ -84,7 +84,8 @@ The vendor manual (2018) leaves these open. Each is answered by the test listed.
 | Q23 | Does the live video keep updating during a Raman acquisition (so a frame half-way through shows the beam), on this XploRA? | T5e.1 |
 | Q24 | Does the Raman spot scan over a small feature agree with the beam seen on the video (T5b.3 / T5e.1)? Which features work (dust on Si, a gold dot, a pit)? | T5e.2 |
 | Q26 | Which Z direction focuses deeper into the sample (`stage.z_into_sample`)? Does a depth profile through a film of known thickness give it back with the refractive index? | T6.3 |
-| Q27 | What are LabSpec's spectral calibration settings on this system (Zero, Koeff, laser wavelength...) and where are they? Does correcting them as ls6t says bring the line back? | T4.7 |
+| Q27 | What are LabSpec's spectral calibration settings on this system (Zero, Koeff, laser wavelength...) and where are they? Does correcting them as ls6t says bring the line back? HORIBA's own service scripts read and write them with `OperVar` under `ACT_INSTRUMENT[AF / BF / Diode / Focal / Angle / Gamma / SpMin / SpMax][grating index]`; `instrument calibration` reads them, and a `calibration` study with `adjust: labspec` records them before and after the operator's correction (`calibration.labspec_parameters.changed`): that shows which one the dialog's zero and coefficient are. | T4.7 |
+| Q43 | LabSpec 6.7's own constants read a motor's positions with 100+i (value) and 200+i (name); the 2018 manual's 10+i / 20+i still worked on this XploRA. ls6t uses 100+/200+ only for motors with more than ten positions: check the labels of such a motor, if any. | T1.1 |
 | Q28 | Can the white light stay on during acquisitions, and does a background with the laser off (shutter, or *Laser Off*) remove it cleanly? | T4.8 |
 | Q29 | Native maps: does `SetMappingParams` take absolute stage positions or offsets (`mapping.positions`)? Does the map have the asked points? | T6.7 |
 | Q30 | Native maps: does `Acq(ACQ_SPECTRAL_IMAGE, -1, ...)` use the interface's exposure and accumulations set by `PutValue`, or does it need them in `Acq` (`mapping.acq_time`)? Which spectral window does it use? | T6.7 |

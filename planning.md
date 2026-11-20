@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.20.17)
+## Architecture (version 2026.11.20.18)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -264,6 +264,25 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   (an older install's path). HORIBA's own calibration is a VBS script: reading it may show how to adjust LabSpec's
   zero/coefficient from a script (Q42, ask Nicola for it). labspec_ini.find knows both paths;
   setup_summary(presets, autocalibration_script) goes into profile.labspec_config.
+- 2026-11-20, 2026.11.20.18: Nicola shared the LabSpec 6.7.1 program folder (SERVICE: ~195 HORIBA service/QC
+  VBS scripts for LabRAM Soleil, HR Evolution, XploRA PLUS, T64000; macros\constants.vbm and horiba.vbm; SCRIPTS\
+  SERVICE\pixelunit.vbs). Read, not copied (HORIBA's code). Learned:
+  * calls used (count): Dialog 6715 (VBS-only custom dialogs), GetValue, GetMotorPosition, MoveMotor, PutValue,
+    Message, Exec, GetMotorStatus, PutDataInfo, Acq, Treat, OperVar 57, GUI 9, SetSingleScriptParam,
+    SetScriptParamOptions, Get/SetDetectorZone, SetAutoExposure, MoveXY, MapEx, Send ("RS232", "HTTP_POST");
+  * OperVar(mode 0 read / 1 write / 2 ?, "name", value, 0): the instrument calibration per grating is
+    ACT_INSTRUMENT[AF|BF|Diode|Focal|Angle|Gamma|SpMin|SpMax][grating index]; pixelunit.vbs (the service "pixel
+    unit" panel) treats AF/BF as the Spectro motor's coefficients and sets Diode from the Spectro position; the
+    Soleil calibration script computes Angle/Focal/Gamma from neon lines and writes them after a Yes. OLConfig's
+    per-grating arrays (198.8, 12.2...) are these. Other OperVar names: G[Params][OLAccessory][...],
+    G[Params][OLMapping][MapType][i], GLOBAL[Datas][id][Type], ActMotor, OldMotor, MotorStep, MotorDelta.
+  * The XploRA spectro QC uses a neon lamp under the objective (RaiesCalibration_XPL.csv: Ne lines in nm per
+    grating and centre) with LabSpec's PeakFitting Treat; ShutterMode 1 = manual (laser), CCDShutter has its own
+    0/1/2; GetMotorPosition codes in 6.7: INDEXTOVALUE 100, INDEXTOSTRING 200, FULL_* 300/400, INDEXTOSTEP 500.
+  Changes: bridge verb calib_params (read), api.labspec_calibration / instrument calibration, run_calibration
+  (adjust labspec) records labspec_parameters before/after/changed; labels and discovery use 100+/200+ codes for
+  motors with more than ten positions. Writing LabSpec's calibration (OperVar 1) stays off until Q27 says which
+  parameter to change and the maintainer agrees. 101 tests.
 
 ## To do next
 
