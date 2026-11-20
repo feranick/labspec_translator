@@ -16,7 +16,7 @@ it runs **locally**: on the instrument PC, next to the Claude desktop app. It ha
 machines. Unlike the other translators, the backend has no Python API: LabSpec is automated with VBScript
 (*LabSpec 5/6 Automation*, HORIBA, 2018). That is why the bridge script exists.
 
-First instrument: **XploRA** (LabSpec 6, Windows 11). Version 2026.11.20.14.
+First instrument: **XploRA** (LabSpec 6, Windows 11). Version 2026.11.20.15.
 
 **Scope of version 1**
 
@@ -663,6 +663,7 @@ frames, LabSpec's image files, `snapshot.json`); a study's frames go to its `vid
 
 | Version | Changes |
 |---|---|
+| 2026.11.20.15 | The installer's last page and INSTALL.md: start the bridge in LabSpec and the profile is built from its inventory (running the discovery script separately is optional). |
 | 2026.11.20.14 | The laser on for viewing: `instrument laser_on` (seconds, at most `limits.max_laser_on_s`, default 60) / `laser_off`, `ls6t instrument laser-on/laser-off`: the laser shutter open so the beam shows on the camera, only with the shutter motor confirmed in the profile, the filter within the caps and the operator's Yes in LabSpec; the bridge closes it when the time is up, at a halt or stop, when it ends, and before any command other than quick reads (`status` shows `laser_open`, `laser_left_s`). Cameras: `instrument camera_on` takes a number as well as a name (a number was rejected). |
 | 2026.11.20.13 | The machine profile from discovery, automatically: the bridge records the instrument's inventory each time it starts (`discovery_latest.txt`: motors, positions, detector; no probes, nothing moves); with no reviewed profile, ls6t builds `profile.json` from it (every laser capped at 10 %, no laser shutter) and follows later inventories until a person imports or sets it; then differences are reported (`status` → `profile.drift`), never applied. The installer uses an existing inventory too. `GetValueSimplePart`: the instrument's discovery showed its sizes are not counts of values (8 asked, 2 returned: bytes?): chunked map export is off by default and turned on only when the probe (now on a 0..15 ramp) shows plain values; the bridge checks every chunk's length. Tested on the XploRA Plus's real discovery dump (`tests/data`). |
 | 2026.11.20.12 | Switching the set-up directly: `instrument set` (MCP) / `ls6t instrument set --laser-nm 532 --grating 1800 --filter 10% --objective x100` changes laser, grating, filter, objective, hole and slit without measuring: filter within the caps of the laser in use, the objective turret only after the operator's Yes in LabSpec, nothing fires the laser, read-back returned, refused during a request. Position names are matched to LabSpec's own (`x100` finds `x100_VIS`; new bridge verb `labels`), in studies too. |

@@ -33,10 +33,14 @@ network: it carries its own Python with every package. Use it unless you develop
 
    It checks that everything loads and precompiles the packages (a minute or two). An app installed after ls6t:
    `ls6t connect auto` ([step 8](#8-connect-an-llm-app)).
-4. **Then** continue with: adding the scripts in LabSpec (step [6](#6-install-the-labspec-scripts), from *"In LabSpec
-   6"*), the machine profile (step [7](#7-the-machine-profile)), restarting the connected apps, and the check with the
-   instrument (step [9](#9-check-with-the-instrument)). Steps 1–5 and 8 are done. Use *Start > ls6t PowerShell* (or
-   any new PowerShell window) for the `ls6t` commands.
+4. **Then** start `ls6t_bridge.vbs` in LabSpec (step [6](#6-install-the-labspec-scripts), from *"In LabSpec 6"*). When
+   it starts, it reads the instrument's inventory and ls6t builds the machine profile from it by itself (cautious
+   until reviewed: step [7](#7-the-machine-profile)); running `ls6t_discover.vbs` separately is optional. Restart
+   the connected apps, and check with the instrument (step [9](#9-check-with-the-instrument)). Steps 1–5 and 8 are
+   done. Use *Start > ls6t PowerShell* (or any new PowerShell window) for the `ls6t` commands.
+
+   The installer itself cannot discover the instrument: only a script running inside LabSpec can read it. On a
+   reinstall, an inventory already on the PC is used at once.
 
 | Where | What |
 |---|---|
