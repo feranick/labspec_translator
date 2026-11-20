@@ -1,5 +1,5 @@
 """plan.py — a study as bridge commands: the setup moves, the points, the acquisitions; and the time estimate.
-Version: 2026.11.19.5
+Version: 2026.11.19.6
 
 Everything here is computed from the study and the profile alone: wavelengths from Raman shifts, the number of
 detector windows, the stage positions (always offsets from where the operator left the stage, Z from the
@@ -83,7 +83,11 @@ def acq_range(study: dict, prof: dict, laser: float | None) -> dict:
         g = prof.get("gratings", {}).get(f"{float(grating):g}")
         win_nm = float(g["window_nm"]) if g and g.get("window_nm") else None
     if study.get("kind") == "calibration" and not acq.get("range_cm1") and acq.get("center_cm1") is None:
-        acq = dict(acq, center_cm1=prof["checks"]["si_cm1"])
+        lines = calibration_lines(study, prof, None)
+        if len(lines) > 1:
+            acq = dict(acq, range_cm1=[max(50.0, min(lines) - 60.0), max(lines) + 60.0])
+        else:
+            acq = dict(acq, center_cm1=lines[0] if lines else prof["checks"]["si_cm1"])
     if acq.get("range_cm1"):
         lo, hi = sorted(float(v) for v in acq["range_cm1"])
         out = {"from_cm1": lo, "to_cm1": hi, "single": False}
@@ -177,6 +181,42 @@ def acquire_seconds(study: dict, prof: dict, rng: dict) -> float:
 
 SCAN_DEFAULTS = {"range_um": 10.0, "step_um": 1.0, "window_cm1": 30.0, "exposure_s": 0.5}
 AUTOFOCUS = ("laser", "raman", "video", "scan")
+
+
+def calibration_lines(study: dict, prof: dict, rng: dict | None) -> list[float]:
+    """The reference lines of a calibration (calibration.lines_cm1, or a named reference), within the range
+    measured (15 cm-1 inside its ends) when the range is known."""
+    from .xcal import REFERENCES
+    cal = study.get("calibration") or {}
+    lines = cal.get("lines_cm1") or REFERENCES.get(cal.get("reference", "si"), [prof["checks"]["si_cm1"]])
+    if cal.get("reference", "si") == "si" and not cal.get("lines_cm1"):
+        lines = [prof["checks"]["si_cm1"]]
+    lines = sorted(float(v) for v in lines)
+    if rng and rng.get("from_cm1") is not None and rng.get("to_cm1") is not None:
+        lines = [v for v in lines if rng["from_cm1"] + 15 <= v <= rng["to_cm1"] - 15]
+    return lines
+
+
+def into_sign(prof: dict) -> tuple[int, bool]:
+    """+1 when a larger Z focuses deeper into the sample, -1 the other way (profile stage.z_into_sample); the
+    second value says whether the profile states it (otherwise +1 is assumed)."""
+    v = str(prof.get("stage", {}).get("z_into_sample") or "").strip()
+    if v in ("+", "+1", "1", "up", "increasing"):
+        return 1, True
+    if v in ("-", "-1", "down", "decreasing"):
+        return -1, True
+    return 1, False
+
+
+def depth_as_map(study: dict, prof: dict) -> dict:
+    """A depth profile as the map that measures it: Z offsets from the focus, in the order given (from_um first),
+    nominal depths (stage displacement into the sample) converted with the profile's Z direction."""
+    d = study.get("depth", {})
+    sgn, _ = into_sign(prof)
+    a, b, st = float(d.get("from_um", -5.0)), float(d.get("to_um", 20.0)), float(d.get("step_um", 1.0))
+    derived = {k: v for k, v in study.items() if k not in ("depth", "kind")}
+    derived.update(kind="map", map={"z_um": [sgn * a, sgn * b, st], "snake": False})
+    return derived
 
 
 def scan_params(study: dict, prof: dict) -> dict:
@@ -281,6 +321,8 @@ def estimate(study: dict, prof: dict) -> dict:
             (float(prof.get("video", {}).get("settle_s", 1.5)) + 5 if m.get("snapshot", True) else 0)
         return {"minutes": round(total / 60.0, 2), "points": 0, "windows": 0,
                 "seconds": {"setup": 0.0, "per_acquisition": 0.0, "total": round(total, 1)}}
+    if study.get("kind") == "depth":
+        return estimate(depth_as_map(study, prof), prof)
     if study.get("kind") == "spot":
         sp = spot_params(study, prof)
         base = estimate(spot_spectrum_study(study, prof), prof)
@@ -354,6 +396,10 @@ def estimate(study: dict, prof: dict) -> dict:
 
 def inputs(study: dict, prof: dict, max_steps: int = 40) -> dict:
     """The bridge commands of one study, without running: setup, then the first points' commands."""
+    if study.get("kind") == "depth":
+        inner = inputs(depth_as_map(study, prof), prof, max_steps)
+        inner["note"] = "a depth profile: Z offsets from the focus (stage.z_into_sample gives the direction)"
+        return inner
     if study.get("kind") == "move":
         m = study.get("move", {})
         steps = [{"verb": "status"}]

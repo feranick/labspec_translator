@@ -1,5 +1,5 @@
 """profile.py — the machine profile: what the instrument has (from the discovery script) and the limits a person sets.
-Version: 2026.11.19.5
+Version: 2026.11.19.6
 
 The profile is a JSON file (LS6T_PROFILE, default ~/ls6t/profile.json). Studies never change it: an LLM can only
 ask for what the profile allows. Without a file, the built-in XploRA defaults below apply and every result says so
@@ -38,7 +38,8 @@ DEFAULT_PROFILE: dict = {
     "holes_um": None,              # null: any value LabSpec accepts
     "slits_um": None,
     "detector": {"full_scale": 65535, "max_temp_c": -50.0, "pixels": 1024},
-    "stage": {"x_um": None, "y_um": None, "z_um": None},   # absolute limits [min, max]; null: only the relative ones
+    "stage": {"x_um": None, "y_um": None, "z_um": None,    # absolute limits [min, max]; null: only the relative ones
+              "z_into_sample": None},                     # "+" or "-": which Z direction focuses deeper (TESTING)
     "limits": {"max_xy_um": 5000.0,          # farthest a study may move from where the operator left the stage
                "max_dz_um": 100.0,           # farthest from the operator's focus (Z is always relative)
                "max_exposure_s": 600.0, "max_accumulations": 500, "max_points": 10000,
@@ -63,6 +64,9 @@ DEFAULT_PROFILE: dict = {
     # the laser spot (kind 'spot'): offsets larger than max_offset_um are not remembered; a change larger than
     # drift_warn_um from the previous record is reported; records older than max_age_h are flagged stale
     "spot": {"max_offset_um": 10.0, "drift_warn_um": 1.0, "max_age_h": 24.0},
+    # spectral calibration: corrections older than max_age_h are flagged; guided LabSpec adjustments repeat at most
+    # max_retries times
+    "calibration": {"max_age_h": 24.0, "max_retries": 2},
     "checks": {"min_snr": 10.0, "detect_snr": 5.0, "si_cm1": 520.7, "si_tol_cm1": 1.0, "saturation_frac": 0.98},
 }
 

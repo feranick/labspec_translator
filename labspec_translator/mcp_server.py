@@ -1,5 +1,5 @@
 """mcp_server.py — MCP server: lets LLM-based tools run Raman measurements on a HORIBA instrument through LabSpec 6.
-Version: 2026.11.19.5
+Version: 2026.11.19.6
 
 Tools (all JSON):
   study_format      the study format, the profile's choices and limits, the bridge's state. Read it first.
@@ -12,6 +12,7 @@ Tools (all JSON):
   snapshot          a video frame now, with the laser position marked (optionally with the beam showing)
   alignment_status  per laser: the alignment baseline, the last check, its age
   spot_status       the beam's remembered offsets per objective and laser
+  references        spectral corrections, white-light backgrounds, beam offsets, alignment state (read-only)
   get_inputs        the bridge commands of one study, without running
   run_benchmarks    the benchmarks on the simulator (known answers)
   get_file          a written file as base64
@@ -39,36 +40,32 @@ except ImportError:  # 1.x
     from mcp.server.fastmcp.exceptions import ToolError
     _V2 = False
 
-INSTRUCTIONS = """labspec-translator runs Raman measurements on a HORIBA instrument (an XploRA) through LabSpec 6:
-single spectra and multi-point sets, maps (XY grids and depth profiles), time series and a silicon calibration
-check. A small script inside LabSpec (the bridge) carries out each command, so the operator sees every move and
-spectrum in LabSpec, confirms before the first laser exposure and can stop everything there. Peak fits, bands and
-map images are computed here from the exported spectra.
-Workflow: call study_format once (it shows the lasers, gratings, filters, objectives and limits of this instrument,
-and whether the bridge is running); write {name: study}; validate_studies and fix every error; run_studies, then
-study_status until done. Run the 'calibration' study on a silicon reference at the start of a session.
-Before trusting numbers check 'reliable' (false: say why from 'unreliable_because' and do not report the numbers
-as results), 'warnings', 'checks' (saturation, detector temperature, setup read-back, range, calibration) and each
-peak's 'snr'. A saturated spectrum needs a stronger filter or a shorter exposure; a weak one longer exposure or
-more accumulations.
-Stage and focus: a 'move' study (no laser) goes to an offset and shows a video frame; with stay it becomes the
-new home spot. A 'focus' study (or focus.autofocus 'scan') finds the focus by the Raman line. At the end of a
-request Z returns to the focus, then the stage to the home spot. The beam drifts from LabSpec's marker: a 'spot'
-study finds it (video with the beam, or the Raman signal over a small feature: snapshots list 'features') and
-remembers it; move.to_um then puts the beam on a point picked in a snapshot.
-Safety: positions are offsets (µm) from where the operator left the stage, Z from the operator's focus; the
-filter (laser power) is capped per laser and lower for samples marked sensitive. Ask the user before raising power
-or running long maps. If the bridge is not running, ask the user to start ls6t_bridge.vbs in LabSpec.
-Polling costs tokens: run_studies returns 'pending' with an estimate for long runs; when a run needs more than
-about 5 minutes, tell the user when it should finish and stop; collect it later with study_status.
-Alignment: before using a laser, check alignment_status; if stale or failed, run an 'alignment' study (it
-guides the operator through AutoAlignment), then 'calibration'. Manual adjustments (laser power at the source,
-focus, a knob): a 'guide' study; ls6t watches the signal several times a second and tells the operator STOP in
-LabSpec when the goal is met; report its result afterwards.
-Pictures: "images": true in a study writes PNGs (results images.<name>.path); get_image shows each. Video: the
-snapshot tool shows the sample with the laser position marked; a study's "video" key takes frames during the run
-(on by default for calibration): look at them to check the beam is on the intended spot.
-Units: Raman shift cm-1, positions µm, time s, intensities counts."""
+INSTRUCTIONS = """labspec-translator runs Raman measurements on a HORIBA XploRA through LabSpec 6. A script inside LabSpec (the
+bridge) carries out each command: the operator sees every move and spectrum, confirms the first laser exposure and
+can stop everything there. Fits, bands, maps and depth profiles are computed here from the exported spectra.
+Workflow: study_format once (this instrument's lasers, gratings, filters, objectives, limits; is the bridge
+running); write {name: study}; validate_studies and fix every error; run_studies, then study_status until done.
+Kinds: spectrum (points), map (XY/Z grids), depth (spectra down through the sample, interfaces, refractive-index
+correction), series, calibration, alignment, spot, focus, move (no laser), guide, background.
+Start of a session: alignment_status / an 'alignment' study per laser (guides the operator through AutoAlignment);
+a 'calibration' on Si or polystyrene (offset and scale of the spectral zero; adjust 'labspec' guides the operator,
+'ls6t' remembers a correction applied to later spectra); a 'spot' study if the beam must hit small features;
+a 'background' (white light on, laser off) to subtract with acquire.subtract_background. references shows them.
+Before trusting numbers check 'reliable' (false: say why from 'unreliable_because'; do not report those numbers),
+'warnings', 'checks' (saturation, detector temperature, set-up read-back, range, calibration) and peaks' 'snr'.
+Saturated: a stronger filter or shorter exposure; weak: longer exposure or more accumulations.
+Stage and focus: offsets (µm) from the home spot (where the operator left the stage, or where a 'move' stayed); Z
+from the focus (operator's, autofocus, or a 'focus' scan on the Raman line); at the end Z returns to the focus,
+then XY home. The beam drifts from LabSpec's marker: 'spot' finds and remembers it (video with the beam, or the
+Raman signal over a small feature: snapshots list 'features'); move.to_um then aims the beam at a picked point.
+Manual adjustments (power at the source, focus by hand): a 'guide' study; the bridge measures several times a
+second and shows the operator STOP in LabSpec when the goal is met; report the result afterwards.
+Safety: the filter (power) is capped per laser and lower for samples marked sensitive; moves are limited; ask the
+user before raising power or long maps. If the bridge is not running, ask the user to start ls6t_bridge.vbs.
+Polling costs tokens: when a run needs more than about 5 minutes, tell the user when it should finish and stop;
+collect it later with study_status.
+Pictures: "images": true writes PNGs (images.<name>.path); get_image shows them; the snapshot tool shows the
+sample with the beam marked. Units: Raman shift cm-1, positions µm, time s, intensities counts."""
 
 server = _Server("labspec-translator", instructions=INSTRUCTIONS)
 
@@ -161,6 +158,14 @@ def snapshot(with_laser: bool = False):
     if not r.get("ok") or not r.get("path"):
         return r
     return [Image(path=r["path"]), json.dumps({k: v for k, v in r.items() if k != "what"}, default=str)]
+
+
+@server.tool()
+def references() -> dict:
+    """What ls6t keeps between sessions: the spectral corrections per laser and grating (from 'calibration' with
+    adjust 'ls6t'), the white-light backgrounds by name (for acquire.subtract_background), the beam offsets, and the
+    last alignment check per laser. Read-only."""
+    return api.references()
 
 
 @server.tool()

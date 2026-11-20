@@ -1,5 +1,5 @@
 """api.py — the functions behind the command line and the MCP server (JSON in, JSON out).
-Version: 2026.11.19.5
+Version: 2026.11.19.6
 """
 from __future__ import annotations
 
@@ -472,6 +472,41 @@ def spot_status() -> dict:
     """The beam's remembered offsets per objective and laser: value, method, age, drift since the first record."""
     from . import spot as SP
     return SP.status(P.load())
+
+
+def references() -> dict:
+    """What ls6t keeps between sessions besides the profile: the spectral corrections (per laser and grating), the
+    white-light backgrounds, the beam offsets, and the last alignment check per laser."""
+    from . import background as BG
+    from . import spot as SP
+    from . import xcal
+    corr = {k: {**v, "age_h": xcal.age_h(v)} for k, v in xcal.load().items()}
+    return {"spectral_corrections": corr, "backgrounds": BG.index(),
+            "beam_offsets": SP.status(P.load())["records"],
+            "alignment": {k: v.get("last_check") for k, v in alignment_status()["lasers"].items()}}
+
+
+def references_clear(what: str, name: str | None = None) -> dict:
+    """A person's clean-up: what = correction (all, or laser@grating), background (a name), spot (all)."""
+    from . import background as BG
+    from . import spot as SP
+    from . import xcal
+    if what == "correction":
+        if name:
+            las, gr = name.split("@")
+            return {"cleared": xcal.clear(float(las), float(gr))}
+        return {"cleared": xcal.clear()}
+    if what == "background":
+        idx = BG.index()
+        if not name or name not in idx:
+            raise ValueError(f"background {name!r}: stored are {', '.join(idx) or 'none'}")
+        Path(idx[name]["file"]).unlink(missing_ok=True)
+        idx.pop(name)
+        (BG.folder() / "index.json").write_text(json.dumps(idx, indent=1), encoding="utf-8")
+        return {"deleted": name}
+    if what == "spot":
+        return SP.forget()
+    raise ValueError("what: correction, background or spot")
 
 
 def spot_forget(objective: str | None = None, laser_nm: float | None = None) -> dict:

@@ -12,7 +12,7 @@ stops and cancel on the simulator, and `ls6t bench` gives known answers. What re
 LabSpec and hardware. The plan goes from no laser and no motion to Claude driving a full map, in stages. Each stage
 starts only when the previous one passed.
 
-Version under test: 2026.11.19.5 (bridge protocol 1).
+Version under test: 2026.11.19.6 (bridge protocol 1).
 
 ---
 
@@ -38,7 +38,7 @@ Version under test: 2026.11.19.5 (bridge protocol 1).
 
 ## What to prepare
 
-- The instrument PC with ls6t installed as in README *Installation on Windows 11* (steps 1–6), and the Claude desktop
+- The instrument PC with ls6t installed as in [INSTALL.md](INSTALL.md) (steps 1–6), and the Claude desktop
   app connected (step 8).
 - **Samples**:
   - a silicon wafer piece (calibration: 520.7 cm⁻¹);
@@ -78,6 +78,9 @@ The vendor manual (2018) leaves these open. Each is answered by the test listed.
 | Q19 | Does LabSpec's dynamic `Dialog` stay open, update and answer Done/Abort while short acquisitions run? How long is one reading (`period_s`) at 0.2 s exposure? | T5d.1 |
 | Q23 | Does the live video keep updating during a Raman acquisition (so a frame half-way through shows the beam), on this XploRA? | T5e.1 |
 | Q24 | Does the Raman spot scan over a small feature agree with the beam seen on the video (T5b.3 / T5e.1)? Which features work (dust on Si, a gold dot, a pit)? | T5e.2 |
+| Q26 | Which Z direction focuses deeper into the sample (`stage.z_into_sample`)? Does a depth profile through a film of known thickness give it back with the refractive index? | T6.3 |
+| Q27 | What are LabSpec's spectral calibration settings on this system (Zero, Koeff, laser wavelength...) and where are they? Does correcting them as ls6t says bring the line back? | T4.7 |
+| Q28 | Can the white light stay on during acquisitions, and does a background with the laser off (shutter, or *Laser Off*) remove it cleanly? | T4.8 |
 | Q25 | How much does the beam drift from LabSpec's marker over a day, between objectives, after AutoAlignment? | T5e.3 |
 | Q21 | Does the focus scan find the same focus as the maintainer (and as LabSpec's autofocus) on Si and on a real sample? Is 1 µm a good step at x100, and what at x50 and x10? | T6.5 |
 | Q22 | Does the stage return home and Z to the focus at the end of a request, and does a `move` with `stay` change the next request's start? | T6.6 |
@@ -248,6 +251,30 @@ exposure LabSpec chose appears in the file's `acq.*` lines (record the line's na
 (tol 2) via `peaks_by_name`. Pass: LabSpec stitches several windows; `checks.range.pass`; the expected values pass.
 Compare with the maintainer's own spectrum of the same sample.
 
+**T4.7 The spectral zero (Q27).** On silicon:
+
+1. `{"c": {"kind": "calibration", "sample": {"name": "Si"}, "setup": {...}}}`. Record `offset_cm1`.
+2. The maintainer shows where LabSpec keeps the calibration (*Maintenance > Instrument calibration*: names of the
+   zero and coefficient settings, per grating?). Record them, so the message ls6t shows can name them exactly.
+3. Run it with `"calibration": {"adjust": "labspec"}`. If the offset is beyond 1 cm⁻¹, follow LabSpec's message.
+   Pass: the next check passes. If the offset is already small, set `tol_cm1` to 0.2 to exercise the loop.
+4. With polystyrene: `"calibration": {"reference": "polystyrene"}` on the 600 gr/mm grating. Pass: at least 4
+   lines found; `correction.b` within 0.001 of 1 after LabSpec is calibrated.
+5. `"adjust": "ls6t"` once, then a spectrum study. Pass: its warnings say the correction is applied, and the Si line
+   is at 520.7 ± 0.3. Clear it with `ls6t references clear correction` afterwards, unless the maintainer wants to
+   keep it.
+
+**T4.8 White-light background (Q28).** With the maintainer: the white light on as for routine measurements.
+
+1. Run `{"bg": {"kind": "background", "sample": {"name": "lamp"}, "setup": {... grating 600 ...}, "acquire":
+   {"range_cm1": [200, 1800], "exposure_s": 1, "accumulations": 2}, "background": {"name": "lamp_x100"}}}`
+   (`laser_off` defaults to `shutter` with a shutter motor, else `operator`: block the laser when asked). Pass:
+   no warning about narrow lines; the laser shutter mode is back to normal afterwards.
+2. On silicon, with the white light still on: the same spectrum with and without
+   `"subtract_background": "lamp_x100"`. Pass: the broad lamp background is gone in the second, and the Si line is
+   unchanged.
+3. Note the white light's own stability: repeat the background 10 minutes later and compare (`max_cps`).
+
 ## T5. Autofocus (LASER, Q8)
 
 On silicon, defocus by about 10 µm by hand. Run a calibration study with `"focus": {"autofocus": "laser"}`. Repeat
@@ -413,9 +440,20 @@ Pass:
 current acquisition stops; the result has `complete: false`, `reliable: false` and the measured points; the request
 is `cancelled`. Resume afterwards.
 
-**T6.3 Depth profile.** Optional, with a film on Si. A map with `z_um` [-10, 10, 1] (maintainer checks the
-clearance at -10 first). Pass: the Si signal peaks near dz = 0; Z returns within 1 µm of the start at the end of the
-next study.
+**T6.3 Depth profile (Q26).** First the Z direction: from focus on Si, move Z by +2 µm
+(`ls6t bridge call move motor=Z mode=value value=<Z+2>`) and watch on the video whether the stage moves towards the
+objective (the focus goes into the sample) or away. Set `ls6t profile set stage.z_into_sample "+"` (or `"-"`).
+Then, with a transparent film of known thickness on Si (a polymer film, or a coverslip on Si), with the maintainer
+checking the clearance:
+`{"d": {"kind": "depth", "sample": {"name": "film on Si"}, "setup": {...}, "acquire": {"range_cm1": [400, 1700],
+"exposure_s": 1}, "depth": {"from_um": -5, "to_um": 30, "step_um": 1, "refractive_index": <n>},
+"process": {"peaks": [{"name": "Si", "near_cm1": 520.7}, {"name": "film", "near_cm1": <a strong film line>}]},
+"images": true}}` (raise `limits.max_dz_um` if needed).
+Pass:
+- the film's line rises at the surface and falls where the Si rises;
+- `interfaces_by.Si.height.rise` is close to the known thickness (record it, and the nominal value);
+- Z is back at the focus at the end;
+- LabSpec showed the profile growing.
 
 **T6.5 Focus scan (Q21).** On silicon, the maintainer focuses by hand and notes Z. Then:
 
@@ -450,7 +488,7 @@ LabSpec (**Q10**); `series.t_s` is about 0, 20, 40, 60, 80; the Si position is s
 
 ## T8. Claude end to end (LASER)
 
-With the Claude desktop app connected (README step 8):
+With the Claude desktop app connected ([INSTALL.md](INSTALL.md) step 8):
 
 | Step | Ask Claude | Pass |
 |---|---|---|
@@ -493,6 +531,8 @@ With the Claude desktop app connected (README step 8):
 | T4.4 | | | | | |
 | T4.5 | | | | Q7: | |
 | T4.6 | | | | | |
+| T4.7 | | | | Q27 (names in LabSpec, offset before/after): | |
+| T4.8 | | | | Q28: | |
 | T5 | | | | Q8: | |
 | T5b.1 | | | | Q13 (formats saved): | |
 | T5b.2 | | | | Q14 (order, packing, axes): | |
@@ -512,7 +552,7 @@ With the Claude desktop app connected (README step 8):
 | T5e.3 | | | | Q25 drift: | |
 | T6.1 | | | | Q10: | |
 | T6.2 | | | | | |
-| T6.3 | | | | | |
+| T6.3 | | | | Q26 (direction, thickness found vs known): | |
 | T6.4 | | | | Q11: s/point, memory | |
 | T6.5 | | | | Q21: Z found vs maintainer, step at x50/x10: | |
 | T6.6 | | | | Q22: | |

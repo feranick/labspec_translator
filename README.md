@@ -16,16 +16,18 @@ it runs **locally**: on the instrument PC, next to the Claude desktop app. It ha
 machines. Unlike the other translators, the backend has no Python API: LabSpec is automated with VBScript
 (*LabSpec 5/6 Automation*, HORIBA, 2018). That is why the bridge script exists.
 
-First instrument: **XploRA** (LabSpec 6, Windows 11). Version 2026.11.19.5.
+First instrument: **XploRA** (LabSpec 6, Windows 11). Version 2026.11.19.6.
 
 **Scope of version 1**
 
 | Kind | What |
 |---|---|
 | `spectrum` | One spectrum at the current spot, or one per entry of `points` (offsets in µm) |
-| `map` | A grid of spectra: XY maps, line scans, depth (Z) profiles, or XYZ |
+| `map` | A grid of spectra: XY maps, line scans, Z stacks, or XYZ |
 | `series` | Repeated spectra at one spot: a time series |
-| `calibration` | A spectrum of a silicon reference; fits the Si line and checks it against 520.7 ± 1 cm⁻¹ |
+| `calibration` | The zero of the spectral scale: a reference sample's lines (Si 520.7 cm⁻¹ by default; polystyrene, cyclohexane, naphthalene, diamond, or your own) against their true positions: the offset, and the scale with several lines. ls6t guides the operator to correct LabSpec's zero and measures again, or keeps its own correction for later spectra |
+| `depth` | A depth profile at the current spot: spectra at Z steps from above the surface down into the sample; each peak and band against depth, the interfaces (where a layer starts or ends), the depth corrected for the refractive index |
+| `background` | A white-light background: a spectrum with the white light on and the laser off, stored by name and subtracted from later spectra taken with the same light |
 | `alignment` | Is the system aligned for this laser? The Si reference at the laser's fixed settings, compared with the baseline recorded after the last AutoAlignment. If it fails, the operator is guided through LabSpec's AutoAlignment and the check repeats; then the beam's offset is measured again |
 | `focus` | Find the focus by the Raman signal: Z steps across a range around the current focus, a short acquisition at each, a Gaussian through the best points; the focus found serves the rest of the request |
 | `move` | No laser: the stage to an offset (and Z to an offset from the focus), or the **beam** onto a point picked in a snapshot (`to_um`), then a video snapshot. With `stay` (default) that spot becomes home for later studies and the next request |
@@ -41,7 +43,7 @@ detectors. See `planning.md`.
 
 **Contents:**
 
-- [Installation on Windows 11](#installation-on-windows-11)
+- [Installation](#installation) (the steps: [INSTALL.md](INSTALL.md))
 - [First session at the instrument](#first-session-at-the-instrument)
 - [Use](#use)
 - [A study](#a-study)
@@ -49,6 +51,9 @@ detectors. See `planning.md`.
 - [Safety and the operator](#safety-and-the-operator)
 - [Video snapshots: where the beam is](#video-snapshots-where-the-beam-is)
 - [Stage and focus](#stage-and-focus)
+- [Depth profiles](#depth-profiles)
+- [The spectral zero: calibration](#the-spectral-zero-calibration)
+- [White-light background](#white-light-background)
 - [The laser spot: finding it and remembering it](#the-laser-spot-finding-it-and-remembering-it)
 - [Alignment and guided adjustments](#alignment-and-guided-adjustments)
 - [The checker](#the-checker)
@@ -61,234 +66,12 @@ detectors. See `planning.md`.
 
 ---
 
-## Installation on Windows 11
+## Installation
 
-Everything is installed on the **instrument PC**: the Windows 11 computer that runs LabSpec 6. The Claude desktop app
-runs there too. The steps below use **PowerShell** (Start, type *PowerShell*, open *Windows PowerShell* or
-*Terminal*). Use your normal Windows account, the **same account that runs LabSpec**, so both programs can read and
-write the bridge folder. Administrator rights are needed only for installing Python and Git, if they are missing.
-
-### 1. Python and Git
-
-ls6t needs Python 3.10 or newer (3.12 recommended) and Git.
-
-With **winget** (built into Windows 11):
-
-```powershell
-winget install -e --id Python.Python.3.12
-winget install -e --id Git.Git
-```
-
-Or install them from [python.org](https://www.python.org/downloads/windows/) and [git-scm.com](https://git-scm.com/download/win).
-In the Python installer, tick **"Add python.exe to PATH"** and keep the **py launcher**.
-
-Close and reopen PowerShell, then check:
-
-```powershell
-py -3.12 --version     # Python 3.12.x
-git --version
-```
-
-If `py` is not found, the launcher was not installed: run the Python installer again ("Modify") and select it.
-
-### 2. Choose the folders (and keep them out of OneDrive)
-
-Windows 11 often syncs **Documents** and **Desktop** to OneDrive. The bridge exchanges many small files every second,
-and a sync client renaming or locking them breaks the exchange. Keep everything in folders OneDrive does not sync:
-
-| What | Default | Notes |
-|---|---|---|
-| The code | `C:\Users\<you>\Software\labspec_translator` | anywhere outside OneDrive; short paths are easiest |
-| ls6t's home: profile, bridge folder, LabSpec scripts, discovery dumps | `C:\Users\<you>\ls6t` (`LS6T_HOME`) | your user folder itself is not synced by OneDrive |
-| Results (one folder per request) | `C:\Users\<you>\ls6t_runs` (`LS6T_OUT`) | can grow large with maps |
-
-To check what OneDrive syncs: OneDrive icon in the taskbar, Settings, *Sync and back up*, *Manage back up*.
-
-### 3. Get the code
-
-```powershell
-mkdir $HOME\Software -Force
-cd $HOME\Software
-git clone https://github.com/feranick/labspec_translator.git
-cd labspec_translator
-```
-
-(Without network access, copy the folder from another computer instead; see [Offline install](#offline-install).)
-
-### 4. A virtual environment and the package
-
-```powershell
-py -3.12 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-pip install -e ".[mcp,render,test]"
-```
-
-- **`Activate.ps1` cannot be loaded because running scripts is disabled**: allow local scripts for your account once,
-  then activate again:
-
-  ```powershell
-  Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
-  ```
-
-  Or skip activation and call the programs by their full path, e.g. `.\.venv\Scripts\ls6t.exe status`.
-- The extras: `mcp` (the server for the Claude app), `render` (PNG plots, matplotlib), `test` (pytest).
-- `-e` (editable) means a `git pull` updates the installed code; reinstall only when dependencies change.
-
-The install puts two programs in `.venv\Scripts`: `ls6t.exe` (the command line) and `ls6t-mcp.exe` (the MCP server).
-
-### 5. Check the install (no instrument needed)
-
-```powershell
-ls6t status            # versions, settings, "bridge": {"running": false} (normal for now)
-ls6t bench             # the benchmarks on the built-in simulator: "failed": []
-pytest -q              # optional: the test suite (about 30 s)
-```
-
-`ls6t bench` never touches the instrument. It runs on the simulator, which answers the same commands as LabSpec.
-
-### 6. Install the LabSpec scripts
-
-```powershell
-ls6t bridge install
-```
-
-This writes two scripts, configured with this PC's folders, to `C:\Users\<you>\ls6t\vbs\`:
-
-| Script | When |
-|---|---|
-| `ls6t_discover.vbs` | Once, and again after the hardware changes: lists the instrument for the profile. It does not use the laser and moves nothing. |
-| `ls6t_bridge.vbs` | Whenever ls6t should drive the instrument. It runs until stopped. |
-
-It also creates the bridge folder `C:\Users\<you>\ls6t\bridge\` (with `inbox` and `outbox`).
-
-In **LabSpec 6**: *Processing > Scripts*. Add both scripts (the manual's script manager allows adding, configuring and
-starting scripts). Run the scripts again after every `ls6t bridge install`, for example after an update.
-
-### 7. The machine profile
-
-The profile says what the instrument has: lasers, gratings, filters, objectives and stage axes. It also holds the
-limits a person sets. Until one exists, ls6t uses built-in XploRA defaults and says so in every result.
-
-1. In LabSpec, run **`ls6t_discover.vbs`**. A message box shows where it wrote the dump, e.g.
-   `C:\Users\<you>\ls6t\discovery_20261120_101500.txt`.
-2. Import it:
-
-   ```powershell
-   ls6t profile import "C:\Users\<you>\ls6t\discovery_20261120_101500.txt"
-   ```
-
-   The output lists what was found and what to check by hand.
-3. Edit the limits: `notepad $HOME\ls6t\profile.json`. In particular:
-   - `lasers.<nm>.max_filter_pct`: the highest filter transmission allowed per laser. `power_mw` is the power at the
-     sample at 100 %, if known (recorded with results).
-   - `filters`: every label's transmission in %. Labels that could not be parsed are listed by the import.
-   - `limits`: `max_xy_um`, how far a study may move from where the operator left the stage; `max_dz_um`, how far
-     from the operator's focus; `max_exposure_s`, `max_accumulations`, `max_points`, `max_minutes`;
-     `sensitive_max_filter_pct` for samples marked sensitive.
-   - `stage.x_um` / `stage.y_um`: absolute stage limits `[min, max]`, if wanted.
-   - `detector.max_temp_c`: warmer than this, results are unreliable (the CCD is not cooled down).
-   - `motors.laser_shutter`: the laser shutter's motor name, needed only for video snapshots with the laser on.
-     The import proposes one if it finds a shutter motor; confirm it with the maintainer.
-   - `video.laser_offset_um`: where the beam really is relative to LabSpec's laser position. It is measured with a
-     snapshot with the laser on (TESTING T5b).
-   - `alignment`: the alignment baselines and settings per laser are recorded later, with
-     `ls6t alignment record` (see [Alignment and guided adjustments](#alignment-and-guided-adjustments)).
-     `min_ratio`, `max_fwhm_ratio` and `max_age_h` set when a check fails or is stale.
-   - `guide`: `max_s` and `max_exposure_s` limit guided adjustments; `ui` is `dialog` (LabSpec's panel) or
-     `statusbar`.
-
-   Only a person edits this file. Studies cannot change it, and the MCP tools can only *propose* a profile
-   (`instrument(action="discover")` writes `profile.proposed.json`).
-
-### 8. Connect the Claude desktop app
-
-Install the Claude desktop app for Windows. In the app: *Settings > Developer > Edit Config* opens
-`claude_desktop_config.json`. That is usually `%APPDATA%\Claude\claude_desktop_config.json`; for the Microsoft Store
-version it sits under `%LOCALAPPDATA%\Packages\Claude_...\LocalCache\Roaming\Claude\`. Add the server (keep any other
-entries; backslashes are doubled in JSON):
-
-```json
-{
-  "mcpServers": {
-    "ls6t": {
-      "command": "C:\\Users\\<you>\\Software\\labspec_translator\\.venv\\Scripts\\ls6t-mcp.exe",
-      "env": {"LS6T_CONFIRM": "request"}
-    }
-  }
-}
-```
-
-Quit the app completely (right-click its icon in the taskbar's notification area, *Quit*) and start it again. The ls6t
-tools then appear in a new chat. Settings go in `env`, for example a different `LS6T_OUT`.
-
-To practise without the instrument, add a second entry that uses the simulator, and remove it later:
-
-```json
-    "ls6t-sim": {
-      "command": "C:\\Users\\<you>\\Software\\labspec_translator\\.venv\\Scripts\\ls6t-mcp.exe",
-      "env": {"LS6T_MODE": "sim", "LS6T_OUT": "C:\\Users\\<you>\\ls6t_sim_runs"}
-    }
-```
-
-### 9. Check with the instrument
-
-Start **`ls6t_bridge.vbs`** in LabSpec. A small window appears: *"ls6t (labspec-translator) is controlling the
-instrument. Close this window to STOP"*. LabSpec's status bar shows *"ls6t bridge … running"*. Then:
-
-```powershell
-ls6t status                 # "bridge": {"running": true, "heartbeat": {"state": "idle", "age_s": < 2}}
-ls6t instrument status      # laser, grating, filter, objective, stage X/Y/Z, detector temperature, as in LabSpec
-```
-
-The first measurements follow [TESTING.md](TESTING.md), with the instrument's maintainer.
-
-### Updating
-
-```powershell
-cd $HOME\Software\labspec_translator
-git pull
-.\.venv\Scripts\Activate.ps1
-pip install -e ".[mcp,render,test]"     # only needed when dependencies changed; harmless otherwise
-ls6t bridge install                      # the scripts must match the package's bridge protocol
-ls6t bench
-```
-
-Then, in LabSpec, stop the bridge (LabSpec's script stop button) and start the new `ls6t_bridge.vbs`, and restart
-the Claude app. A bridge of another protocol version is refused with a message saying to reinstall it.
-
-### Offline install
-
-Instrument PCs are often kept off the network. On a connected Windows computer with the same Python version:
-
-```powershell
-git clone https://github.com/feranick/labspec_translator.git
-cd labspec_translator
-py -3.12 -m pip download -d wheels ".[mcp,render,test]"
-```
-
-Copy the whole folder, `wheels` included, to the instrument PC. Then, in step 4, install with:
-
-```powershell
-pip install --no-index --find-links wheels -e ".[mcp,render,test]"
-```
-
-(The Claude app itself needs network access to reach Claude.)
-
-### Troubleshooting (Windows)
-
-| Symptom | Cause and fix |
-|---|---|
-| `ls6t : The term 'ls6t' is not recognized` | The venv is not active: `.\.venv\Scripts\Activate.ps1`, or use the full path `.\.venv\Scripts\ls6t.exe`. |
-| `Activate.ps1 cannot be loaded` | `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` (once). |
-| `ls6t status` shows the bridge not running while it runs in LabSpec | The two use different folders: the script's `LS6T_BRIDGE_DIR` line must match `ls6t status` → `settings.LS6T_BRIDGE_DIR`. Run `ls6t bridge install` with the same settings the server uses, then restart the script. LabSpec running under another Windows account also causes it. |
-| Errors about access to files in `ls6t\bridge` | Defender's *Controlled folder access* (ransomware protection) or another antivirus. Allow `python.exe` from the venv and LabSpec, or exclude `C:\Users\<you>\ls6t`. Scanning every small file also slows the bridge. |
-| SmartScreen or Defender warns about `ls6t.exe` / `ls6t-mcp.exe` | These are pip's standard launchers for the Python package; allow them, or start the server as `python.exe -m labspec_translator.mcp_server` in the Claude config. |
-| A request shows `interrupted` after the Claude app was closed | The request's runner is a separate process. Windows may end it with the app if the app does not allow processes to break away from its job. Keep the app open during long runs, or start long runs from PowerShell (`ls6t run studies.json`). Measured spectra stay in the request folder. |
-| Long runs stop when the PC sleeps | Settings > System > Power: never sleep while plugged in, at least during measurements. |
-| Paths longer than 260 characters | Unlikely with the default folders. If needed: enable *Win32 long paths* (Group Policy, or `LongPathsEnabled` in the registry). |
-| Numbers with a comma as decimal separator in LabSpec | Handled: the bridge converts every number to '.' itself, whatever the Windows locale. |
-| A folder name containing `"` | Not supported in the LabSpec scripts' folder constants: choose another folder. |
+On the instrument PC (Windows 11, next to LabSpec 6 and the Claude desktop app): Python 3.10+ and Git, a venv,
+`pip install -e ".[mcp,render,test]"`, `ls6t bridge install`, the two scripts in LabSpec, the discovery and
+the machine profile, then the MCP entry in the Claude app. The steps, the offline install, updating and
+troubleshooting are in **[INSTALL.md](INSTALL.md)**.
 
 ---
 
@@ -324,6 +107,8 @@ ls6t instrument snapshot [--laser]           # a video frame with the laser posi
 ls6t bridge call <verb> key=value ...        # one bridge command, for the maintainer (TESTING.md)
 ls6t profile show | default | import <dump>
 ls6t profile set <key> <JSON value>          # one profile value, e.g. video.laser_offset_um "[1.4, -0.6]"
+ls6t references show                         # spectral corrections, backgrounds, beam offsets, alignment
+ls6t references clear correction [LASER@GRATING] | background NAME | spot
 ls6t alignment status                        # per laser: baseline, last check, age
 ls6t alignment record <request> [--study NAME] [--attempt N]   # after AutoAlignment: the check becomes the baseline
 ls6t bench                                   # the benchmarks on the simulator
@@ -356,13 +141,16 @@ Studies are given as `{name: study}`; names use letters, digits, `_` and `-`. An
 | `kind` | `spectrum`, `map`, `series` or `calibration` |
 | `sample` | `{name, notes, sensitive}`; `sensitive: true` caps the filter at `limits.sensitive_max_filter_pct`. The name goes into the LabSpec file. |
 | `setup` | `{laser_nm, grating (gr/mm), filter (a profile label, e.g. "10%"), objective (label), hole_um, slit_um}`. A key left out keeps what LabSpec has; the result records what it was. |
-| `acquire` | `range_cm1: [from, to]` (extended range: LabSpec stitches windows) or `center_cm1` (one window); `exposure_s` (per accumulation) or `"auto"` with `auto_exposure: {target_counts, min_s, max_s, test_s}`; `accumulations`; `spike`: `labspec`, `none`, `single`, `double`, `double_auto`; `dark`: `labspec`, `true`, `false` |
+| `acquire` | `range_cm1: [from, to]` (extended range: LabSpec stitches windows) or `center_cm1` (one window); `exposure_s` (per accumulation) or `"auto"` with `auto_exposure: {target_counts, min_s, max_s, test_s}`; `accumulations`; `spike`: `labspec`, `none`, `single`, `double`, `double_auto`; `dark`: `labspec`, `true`, `false`; `subtract_background`: a stored white-light background's name |
 | `focus` | `{autofocus: laser, raman or video (LabSpec's routines), or scan (ls6t's focus scan on the Raman line), before the first point and every N points with every; dz_um; scan: {range_um (10), step_um (1), line_cm1 (Si), window_cm1 (30), exposure_s (0.5)}}` |
 | `move` | (kind `move`) `{x_um, y_um` or `to_um: [x, y]` (stage coordinates from a snapshot: the beam lands there), `dz_um, stay: true, snapshot: true}`; `setup` may only give the objective |
 | `spot` | (kind `spot`) `{method: auto, shutter, acquisition or raman; feature_um: [x, y] (from a snapshot) or "auto"; refine: true; range_um, step_um (by objective: x100 4 and 0.5 µm); line_cm1 (Si); exposure_s (0.3); acq_exposure_s (2); remember: true}`; `setup` needs `laser_nm` and `objective` |
 | `points` | (spectrum) `[{x_um, y_um, dz_um}]`: offsets from where the operator left the stage |
 | `map` | `{x_um, y_um, z_um: [from, to, step]}` offsets in µm; `snake: true` (default): alternate rows reversed |
 | `series` | `{count, interval_s}`: seconds from one start to the next |
+| `depth` | (kind `depth`) `{from_um (−5: above the focus), to_um (20), step_um (1), refractive_index}`: nominal depth is the stage displacement into the sample from the focus; with `setup`, `acquire`, `process`, `focus`, `images` as for a spectrum |
+| `calibration` | (kind `calibration`) `{reference: si, polystyrene, cyclohexane, naphthalene or diamond; lines_cm1: [...] (your own); tol_cm1 (1); adjust: none, labspec or ls6t}` |
+| `background` | (kind `background`) `{name, laser_off: shutter or operator}`; `acquire` as for the spectra it will correct (same grating and range) |
 | `process` | `baseline: {degree}` or `false` (default: iterative polynomial, degree 3); `peaks: [{name, near_cm1, window_cm1 (40), shape: pseudo_voigt, lorentz or gauss}]`; `auto_peaks: N` (when no `peaks`: the N strongest, default 3); `bands: [{name, from_cm1, to_cm1}]` |
 | `expect` | `[{quantity: "dotted.result.path", value, tol}]`, checked after the run |
 | `images` | `true`: PNGs (spectra with fits; one map image per peak quantity and band) |
@@ -391,7 +179,10 @@ a filter above the caps, exposures, accumulations or points above the limits, mo
 | `peaks`, `peaks_by_name`, `bands` | Of the first spectrum: `position_cm1`, `fwhm_cm1`, `height`, `area`, `eta`, `stderr_position_cm1`, `r2`, `snr` |
 | `map` | `nx, ny, nz`, axes, `summary.<peak or band>.<quantity>: {n, mean, std, min, max}`, files: `<name>_map.json` (grids), `<name>_map.npz` (all spectra on one axis), the LabSpec `.l6s` |
 | `series` | `t_s` and each quantity over time, with a summary |
-| `calibration` | `reference_cm1`, `measured_cm1`, `offset_cm1`, `fwhm_cm1`, `pass` |
+| `calibration` | `reference`, `lines` (each: reference, measured, error), `offset_cm1` (mean error), `worst_error_cm1`, `correction` (`true = a + b × measured`), `fit` (offset only, or offset and scale), `residual_cm1`, `pass`; with `adjust: labspec`, `attempts`; with `adjust: ls6t`, `stored_correction`. Also `reference_cm1`, `measured_cm1`, `fwhm_cm1` of the first line |
+| `depth` | `nominal_um` (stage displacement into the sample), `depth_um` (× n when given), `profiles` (each peak's height and area, each band's area, against depth), `interfaces` (`quantity`, `rise` or `fall`, `depth_um`, `width_10_90_um`) and `interfaces_by` (quantity → height/area → rise/fall → depth), the plot |
+| `background` | the stored background: `name`, `file`, settings, `max_cps`, `mean_cps` |
+| per spectrum | `x_correction` (the spectral correction applied) and `background` (what was subtracted) when used |
 | `alignment` | `passed` (true, false, or null without a baseline), `attempts` (per check: `counts_per_s`, `ratio` to the baseline, `fwhm_cm1`, `fwhm_ratio`, `position_cm1`, why it failed), `recommendation`, and the snapshot after it with `measured_offset_um` |
 | `focus` | (kind `focus`) `found`, `z_um`, `shift_um` from the starting focus, `best_signal`, `contrast`, the Z steps and the signal at each, the plot; why when no clear best (Z then goes back). Other kinds with `autofocus: scan`: `focus_scans` |
 | `move` | `stage_um`, `z_um`, `home_um`, `stay`, `beam` (with `to_um`: the point, the offset used and its source), the snapshot (`video.here`) |
@@ -474,6 +265,76 @@ Both are motorised on the XploRA and driven through LabSpec: `MoveXY` for the st
   request. With `stay: false`, the request ends back at the previous home.
 - **For the maintainer**: `ls6t bridge call move_xy x_um=... y_um=...` and `ls6t bridge call move motor=Z ...`, one
   command at a time.
+
+## Depth profiles
+
+A `depth` study stays at the current spot and measures down through the sample: Z steps from `from_um` (above the
+focus: negative) to `to_um` (deeper), in `step_um`. These *nominal* depths are stage displacements into the sample
+from the focus. The profile's `stage.z_into_sample` (`"+"` or `"-"`, TESTING T6.3) says which Z direction goes
+deeper; until it is set, `+` is assumed and the result says so.
+
+- Each peak's height and area, and each band's area, against depth: `depth.profiles`, and a plot.
+- **Interfaces** are where a profile crosses half-way between its lowest and highest value. Rising means a layer
+  starts (a substrate appears, or the surface of a film); falling means it ends. Each comes with its 10–90 % width,
+  which reflects the depth resolution.
+- **Refractive index.** Inside a transparent sample the focus goes deeper than the stage moves. With
+  `depth.refractive_index` n, depth = n × displacement (the paraxial approximation). At high numerical aperture the
+  real focus lies deeper still and spreads (Everall, *Appl. Spectrosc.* 54, 2000), so treat corrected depths as
+  estimates. A layer of known thickness, or an immersion objective, calibrates them.
+- **Safety.** The Z range stays within `limits.max_dz_um` of the focus. Z returns to the focus at the end. Check
+  the objective's working distance before going deep with the x100.
+- **Aiming first.** To measure at a feature, run a `move` with `to_um` (and `stay`) before the depth study.
+- **LabSpec's own depth mapping.** The automation interface can also run a native Z map (`SetMappingParams` on
+  `Z`). ls6t measures point by point instead: every spectrum is checked, the profile grows live in LabSpec, and
+  stops are immediate. Native maps remain an option for very long profiles (planning.md).
+
+On the simulator, a 12 µm polystyrene film (n = 1.59) on Si gives the Si rise at 12.6 µm and the film's fall at
+12.3 µm, against 12.
+
+## The spectral zero: calibration
+
+At the start of a session, measure a sample with strong, well-known lines and check the scale. A `calibration`
+study measures the reference lines (`reference`: `si`, 520.7 cm⁻¹, by default; or `polystyrene`, `cyclohexane`,
+`naphthalene`, `diamond`, the ASTM E1840 values; or `lines_cm1`).
+
+- **One line** gives the offset (the zero).
+- **Lines spread over 300 cm⁻¹ or more** give offset and scale: `true = a + b × measured`. The scale is the
+  dispersion coefficient LabSpec calls *Koeff*; the offset is its *Zero*.
+- **`pass`**: every line within `tol_cm1` (1 cm⁻¹).
+
+What happens next depends on `adjust`:
+
+| `adjust` | What happens |
+|---|---|
+| `none` (default) | The result says how far off the scale is; a failed check makes the result unreliable |
+| `labspec` | LabSpec shows the operator the error and how much the line must move (cm⁻¹ and nm). The operator corrects the zero (and the coefficient) in *Maintenance > Instrument calibration*, presses OK, and ls6t measures again, up to `calibration.max_retries` (2) times. Once LabSpec is right, any ls6t correction for that laser and grating is dropped |
+| `ls6t` | ls6t remembers the correction for this laser and grating (`xcal.json`) and applies it to every later spectrum's Raman shift. Each result says so (`x_correction`, a warning with its age). LabSpec itself is not changed |
+
+The automation interface has no command to change LabSpec's zero or coefficient, which is why `labspec` goes
+through the operator. On the simulator, a scale reading 1.5 cm⁻¹ high is measured at +1.52; with polystyrene and
+a 0.2 % scale error the fit gives the scale to within 0.0003.
+
+## White-light background
+
+When the white light (the video illumination) stays on during measurements, it adds a broad background to every
+spectrum. A `background` study takes it once, and later spectra subtract it.
+
+1. **Taking it.** Give the same grating, range and (ideally) exposure as the spectra it will correct.
+   - LabSpec asks the operator to turn the white light on as it will be during the measurements.
+   - The laser is kept off. With `laser_off: shutter` (needs the shutter motor in the profile), the bridge closes
+     the laser shutter for the acquisition and restores the shutter mode afterwards. With `operator`, LabSpec asks
+     the operator to block the laser (*Laser Off*), and to unblock it afterwards.
+   - The background is stored by `name` as counts per second per accumulation (`LS6T_HOME\backgrounds`), with its
+     settings.
+   - If it shows narrow lines, the laser was probably not blocked, and a warning says so.
+2. **Using it.** `acquire.subtract_background: "<name>"` in any study.
+   - Each spectrum gets the background scaled to its exposure, interpolated onto its axis, and subtracted before
+     baseline and fits.
+   - Raw files are kept. Results record what was subtracted (`background`), and warn when the grating or laser
+     differs.
+
+`references` (tool) / `ls6t references show` lists the backgrounds, the spectral corrections, the beam offsets and
+the alignment state. `ls6t references clear ...` removes them.
 
 ## The laser spot: finding it and remembering it
 
@@ -589,9 +450,13 @@ covered, a missing profile, and expected values out of tolerance.
 | `spot_raman` | the beam 1.1 / 0.6 µm from the marker, found by scanning over a dust particle on Si | 1.07 / 0.58 |
 | `focus_scan` | the sample's best focus is 2.3 µm above the operator's; the scan finds it | 2.293 |
 | `guided_focus` | the simulated operator passes the best focus at the 8th reading: STOP (`past_max`) comes right after | 12 readings |
+| `depth_profile` | a 12 µm polystyrene film (n = 1.59) on Si: Si rises and PS falls at 12 µm (corrected), PS rises at the surface | 12.63; 12.28; 0.31 |
+| `calibration_zero` | the scale reads 1.5 cm⁻¹ high; the operator corrects LabSpec's zero when asked; the second check passes | +1.52, then +0.04 |
+| `white_light` | a background with the white light on and the laser blocked by the operator: no Raman line in it | clean |
 | `operator_stop` | the operator stops after 4 of 10 map points: partial, unreliable, `stopped_by: operator` | as expected |
 
-On the instrument, the standing check is the `calibration` study on a silicon wafer, at the start of each session.
+On the instrument, the standing check is the `calibration` study on a silicon wafer (or polystyrene, for the scale
+too), at the start of each session.
 
 **Assumptions about LabSpec**, each with what checks it (TESTING.md lists the tests):
 
@@ -631,7 +496,10 @@ Claude app ──MCP──> ls6t-mcp ──> request folder + runner process (ls
 | `runner.py` | Runs a request in its own process: instrument lock, confirmation, set-up with read-back, points, live views, analysis, checks, results written atomically |
 | `spectra.py` | Spectrum files, Raman shift, baseline, noise, spikes, saturation, peak fits, bands |
 | `render.py` | PNG plots (optional extra `render`) |
-| `video.py` | Video frames: decoding, the laser marker, finding the spot, the PNG |
+| `video.py` | Video frames: decoding, the laser marker, features, finding the spot, the PNG |
+| `spot.py` | The beam's offsets per objective and laser, with history and drift |
+| `xcal.py` | Reference lines (ASTM E1840) and ls6t's spectral corrections per laser and grating |
+| `background.py` | White-light backgrounds: storing and subtracting them |
 | `sim.py` | A simulated LabSpec + XploRA speaking the same protocol (`LS6T_MODE=sim`, tests, benchmarks) |
 | `bench.py` | The benchmarks |
 | `api.py`, `cli.py`, `mcp_server.py` | The functions, the command line, the MCP server |
@@ -668,6 +536,7 @@ measured).
 | `cancel`, `jobs` | Stop a request; recent requests |
 | `instrument` | `status`, `discover` (proposes a profile), `resume` (after an operator halt) |
 | `alignment_status` | Per laser: the baseline, the last check, its age (read-only) |
+| `references` | Spectral corrections, white-light backgrounds, beam offsets, alignment state (read-only) |
 | `snapshot` | A video frame now, with the laser position marked; `with_laser` shows the beam and measures its offset. Returns the image. |
 | `get_inputs` | The commands of one study, without running |
 | `run_benchmarks` | The benchmarks on the simulator |
@@ -705,9 +574,10 @@ install the scripts again with the same settings.
 
 ```
 labspec_translator/
-  README.md  TESTING.md  planning.md  pyproject.toml
-  examples/studies.json          twelve studies covering the scope
-  labspec_translator/            the package (config, profile, format, plan, bridge, runner, spectra, render,
+  README.md  INSTALL.md  FUNCTIONALITY.md  TESTING.md  planning.md  pyproject.toml
+  examples/studies.json          thirteen studies covering the scope
+  labspec_translator/            the package (config, profile, format, plan, bridge, runner, spectra, render, spot,
+                                 xcal, background,
                                  video, sim, bench, api, cli, mcp_server; vbs/ the LabSpec script parts)
   tests/test_ls6t.py
 ```
@@ -722,6 +592,7 @@ frames, LabSpec's image files, `snapshot.json`); a study's frames go to its `vid
 
 | Version | Changes |
 |---|---|
+| 2026.11.19.6 | Depth profiles (kind `depth`: Z steps into the sample, profiles and interfaces, refractive-index correction; profile `stage.z_into_sample`; Z-only maps get the same analysis and a live profile in LabSpec), the spectral zero (kind `calibration` with `reference`, `lines_cm1`, `adjust: labspec` (guided correction of LabSpec's zero, then a new check) or `ls6t` (a remembered correction applied to later spectra), offset and scale fit), white-light backgrounds (kind `background`, `acquire.subtract_background`; bridge `acquire` with `laser_off`), tool and command `references`; INSTALL.md (the installation, out of the README) and FUNCTIONALITY.md; benchmarks `depth_profile`, `calibration_zero`, `white_light`. |
 | 2026.11.19.5 | The laser spot: kind `spot` (with the shutter, in a frame during an acquisition, or by the Raman signal over a small feature: grid scan, dip or peak, offset = feature − stage), remembered per objective and laser with drift (`spot.json`, `ls6t spot status/forget`, tool `spot_status`); snapshots list features to aim at and mark the beam with the remembered offset; `move.to_um` puts the beam on a picked point; bridge `video` takes `during_acq_s`; benchmarks `spot_video`, `spot_raman`. |
 | 2026.11.19.4 | Stage and focus: kind `move` (no laser; to an offset with a snapshot; `stay` makes it the home spot), kind `focus` and `focus.autofocus: "scan"` (focus by the Raman line: Z steps, Gaussian fit, back to the start without a clear best), the request's home spot and focus (Z then XY back to them at the end of a normal request), absolute Z limit (`stage.z_um`), the guided loop's metric robust to cosmic rays (3-point median), benchmark `focus_scan`. |
 | 2026.11.19.3 | Alignment and guided adjustments: kind `alignment` (Si check at the laser's fixed settings against the baseline recorded after AutoAlignment; guided AutoAlignment with HORIBA's checklist and a repeat check; the beam's offset measured again; log and readiness warnings), kind `guide` (a fast loop in the bridge with LabSpec's dynamic dialog: reach, drop or maximize a line's signal; STOP shown to the operator; saturation guard), bridge verbs `guide` and `notice`, `ls6t alignment status/record`, `ls6t profile set`, tool `alignment_status`, benchmark `guided_focus`. |

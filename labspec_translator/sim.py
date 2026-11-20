@@ -1,5 +1,5 @@
 """sim.py — a simulated LabSpec + XploRA behind the same bridge protocol as ls6t_bridge.vbs.
-Version: 2026.11.19.5
+Version: 2026.11.19.6
 
 It answers every verb of the bridge with the same keys, so the runner, the checks and the MCP server are tested
 without the instrument (LS6T_MODE=sim, and the tests). The simulated sample is a silicon wafer with a graphene
@@ -16,7 +16,10 @@ it), sim_autoalign_fails (AutoAlignment does not help), sim_notice_cancel (the o
 sim_guide_abort (the operator aborts a guided adjustment), sim_defocus (containing N: the sample's best focus is
 N µm from where the operator left Z), sim_spot_offset ('dx,dy': where the beam really is relative to LabSpec's
 laser position; default 1.5,-0.8). A dust particle (radius 1.5 µm) sits 15 µm to -X and 10 µm to +Y of the start:
-dark on the video, and it blocks the Raman signal where the beam hits it.
+dark on the video, and it blocks the Raman signal where the beam hits it. sim_xshift ('a,b': the spectral scale reads a + b x the true
+shift until the operator corrects LabSpec's zero, i.e. answers OK to a notice about the instrument calibration),
+sim_lamp (the white light is on: a broad spectrum in every acquisition). sim_film ('T,n'): a polystyrene film
+T µm thick with refractive index n covers the Si; +Z focuses deeper (depth profiles).
 """
 from __future__ import annotations
 
@@ -34,7 +37,8 @@ from .profile import DEFAULT_PROFILE, filter_pct, read_text
 
 FULL_SCALE = 65535.0
 PIXELS = 1024
-PEAKS = {"si": [(520.7, 3.5, 1.0)], "graphene": [(1585.0, 14.0, 0.35), (2680.0, 30.0, 0.7), (1350.0, 20.0, 0.04)]}
+PEAKS = {"ps": [(1001.4, 3.0, 0.6), (1031.8, 4.0, 0.2), (1602.3, 6.0, 0.3), (3054.3, 10.0, 0.4)],
+         "si": [(520.7, 3.5, 1.0)], "graphene": [(1585.0, 14.0, 0.35), (2680.0, 30.0, 0.7), (1350.0, 20.0, 0.04)]}
 
 
 class SimLabSpec:
@@ -69,6 +73,7 @@ class SimLabSpec:
         self.temp_c = -60.0
         self.laser_offset = (1.5, -0.8)     # where the beam really is, relative to LabSpec's laser position (µm)
         self.particle = (self.x0 - 15.0, self.y0 + 10.0, 1.5)   # a dust particle on the Si: dark, blocks Raman
+        self.laser_blocked = False
         self.moves = 0
         self.acquisitions = 0
 
@@ -356,6 +361,16 @@ class SimLabSpec:
     def v_notice(self, p):
         if (self.dir / "sim_notice_cancel").exists():
             return {"answer": "cancel"}
+        t_ = str(p.get("text", "")).lower()
+        if "unblock the laser" in t_:
+            self.laser_blocked = False
+        elif "block the laser" in t_:                     # the operator blocks the laser by hand
+            self.laser_blocked = True
+        if "instrument calibration" in str(p.get("text", "")).lower():    # the operator fixes LabSpec's zero
+            try:
+                (self.dir / "sim_xshift").unlink()
+            except FileNotFoundError:
+                pass
         if "autoalignment" in str(p.get("text", "")).lower():      # the operator runs AutoAlignment, then OK
             if not (self.dir / "sim_autoalign_fails").exists():
                 try:
@@ -503,6 +518,22 @@ class SimLabSpec:
         focus = math.exp(-(dz / (300.0 / mag)) ** 2)        # depth of focus: ~3 µm at x100, 30 µm at x10
         gr, _ = self._cur("Grating")
         res = 1.0 + 1800.0 / gr      # coarser gratings: broader lines
+        film = self._film()
+        if film:
+            # a transparent polymer film (thickness T, index n) on Si; +Z focuses deeper; the focus inside the
+            # medium sits n times deeper than the stage displacement and its axial response is n times longer
+            t_um, n_idx = film
+            zfoc = (self.m["Z"]["value"] - self._zf_true()) * n_idx
+            w = (300.0 / mag) * n_idx
+            r_film = 0.5 * (math.erf((t_um - zfoc) / w) - math.erf((0.0 - zfoc) / w))
+            r_si = 0.5 * (1.0 - math.erf((t_um - zfoc) / w))
+            sig = np.zeros_like(nm)
+            for kind_, amp in (("ps", r_film), ("si", r_si)):
+                for pos, wl, h in PEAKS[kind_]:
+                    w2 = math.hypot(wl, res)
+                    sig += amp * h * wl / w2 / (1 + 4 * ((shift - pos) / w2) ** 2)
+            fluo = 0.03 * r_film * np.exp(-((shift - 1800.0) / 2500.0) ** 2)
+            return 40000.0 * (fpct / 100.0) * self._align() * (sig + fluo)
         sig = np.zeros_like(nm)
         for pos, w, h in PEAKS["si"]:
             w2 = math.hypot(w, res)
@@ -525,6 +556,33 @@ class SimLabSpec:
             pass
         return self.laser_offset
 
+    def _film(self):
+        """sim_film 'T,n': a transparent film of T µm and refractive index n on the Si (depth profiles)."""
+        f = self.dir / "sim_film"
+        try:
+            if f.exists():
+                a, b = f.read_text().strip().split(",")
+                return float(a), float(b)
+        except ValueError:
+            pass
+        return None
+
+    def _xshift(self):
+        f = self.dir / "sim_xshift"
+        try:
+            if f.exists():
+                a, b = f.read_text().strip().split(",")
+                return float(a), float(b)
+        except ValueError:
+            pass
+        return None
+
+    def _lamp(self, nm):
+        """sim_lamp: the white light is on (a broad spectrum, counts/s)."""
+        if not (self.dir / "sim_lamp").exists():
+            return 0.0
+        return 900.0 * np.exp(-((nm - 600.0) / 140.0) ** 2) + 150.0 * np.exp(-((nm - 545.0) / 8.0) ** 2)
+
     def _align(self) -> float:
         f = self.dir / "sim_misaligned"
         try:
@@ -533,6 +591,9 @@ class SimLabSpec:
             return 1.0
 
     def v_acquire(self, p):
+        laser_off = str(p.get("laser_off", "0")) == "1"
+        if laser_off and p.get("m_laser_shutter", "") not in self.m:
+            return {"ok": 0, "error": "laser_off needs the laser shutter's motor name"}
         exp = float(p.get("exposure_s", 1.0))
         acc = max(1, int(float(p.get("accumulations", 1))))
         mode = int(float(p.get("mode", 10)))
@@ -542,7 +603,17 @@ class SimLabSpec:
         f_nm = float(p.get("from_nm") or 0) or 1e7 / (1e7 / las - 1000.0)
         t_nm = float(p.get("to_nm") or 0) or f_nm
         nm = self._axis_nm(f_nm, t_nm)
-        rate = self._signal_per_s(nm)
+        # a miscalibrated spectrometer (sim_xshift 'a,b'): the light LabSpec labels nm comes from elsewhere
+        xs_ = self._xshift()
+        if xs_:
+            a_, b_ = xs_
+            reported_shift = 1e7 / las - 1e7 / nm
+            true_shift = (reported_shift - a_) / b_
+            nm_true = 1e7 / (1e7 / las - true_shift)
+        else:
+            nm_true = nm
+        rate = np.zeros_like(nm) if laser_off or self.laser_blocked else self._signal_per_s(nm_true)
+        rate = rate + self._lamp(nm_true)
         if exp <= 0:   # auto exposure: reach the target at the peak, within [min, max]
             target = float(p.get("ae_target", 30000))
             peak = float(rate.max()) or 1.0

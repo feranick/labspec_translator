@@ -52,7 +52,7 @@ def test_examples_validate():
     ({"kind": "map", "setup": SETUP, "map": {"z_um": [-500, 500, 10]}}, "max_dz_um"),
     ({"kind": "spectrum", "setup": SETUP, "acquire": {"exposure_s": 9999}}, "max_exposure_s"),
     ({"kind": "spectrum", "setup": SETUP, "acquire": {"exposure_s": 1, "colour": 3}}, "unknown key 'colour'"),
-    ({"kind": "calibration", "setup": SETUP, "acquire": {"range_cm1": [1000, 2000]}}, "Si line"),
+    ({"kind": "calibration", "setup": SETUP, "acquire": {"range_cm1": [1000, 2000]}}, "no reference line"),
     ({"kind": "spectrum", "setup": SETUP, "points": [{"x_um": 1e5}]}, "max_xy_um"),
     ({"kind": "series", "setup": SETUP}, "series"),
     ({"kind": "map", "setup": SETUP, "map": {"x_um": [0, 10, 0]}}, "step must be > 0"),
@@ -686,3 +686,114 @@ def test_spot_validation():
     assert not r["ok"] and any("at most 441" in e for e in r["errors"])
     r = F.validate({"m": {"kind": "move", "move": {"to_um": [1, 2], "x_um": 3}}})["m"]
     assert not r["ok"]
+
+
+# --------------------------------------------------------------------------------------------- depth profiles
+
+def test_depth_profile_finds_the_film_interfaces():
+    bdir = config.active_bridge_dir()
+    S.ensure(bdir)
+    (bdir / "sim_film").write_text("12,1.59")
+    st = run_inline({"d": {"kind": "depth", "sample": {"name": "PS film on Si"}, "setup": dict(SETUP, grating=600),
+                           "acquire": {"range_cm1": [400, 1700], "exposure_s": 0.5},
+                           "depth": {"from_um": -4, "to_um": 16, "step_um": 1, "refractive_index": 1.59},
+                           "process": {"peaks": [{"name": "Si", "near_cm1": 520.7, "window_cm1": 30},
+                                                 {"name": "PS", "near_cm1": 1001.4, "window_cm1": 20}]},
+                           "images": True}})
+    r = st["studies"]["d"]
+    assert r["kind"] == "depth" and r["reliable"]
+    by = r["depth"]["interfaces_by"]
+    assert by["Si"]["height"]["rise"] == pytest.approx(12.0, abs=0.8)
+    assert by["PS"]["height"]["fall"] == pytest.approx(12.0, abs=0.8)
+    assert by["PS"]["height"]["rise"] == pytest.approx(0.0, abs=0.8)
+    assert r["depth"]["depth_um"][0] == pytest.approx(-4 * 1.59)
+    assert Path(r["images"]["depth"]["path"]).exists()
+    # Z is back at the focus at the end
+    start = json.loads((Path(st["request"]) / "start.json").read_text())["status"]
+    assert float(api.instrument("status")["status"]["z_um"]) == pytest.approx(float(start["z_um"]), abs=0.01)
+
+
+def test_depth_direction_and_validation():
+    prof = P.load()
+    prof["stage"]["z_into_sample"] = "-"
+    P.save(prof)
+    m = plan.depth_as_map({"kind": "depth", "depth": {"from_um": -2, "to_um": 6, "step_um": 2}}, P.load())
+    assert m["map"]["z_um"] == [2.0, -6.0, 2.0]
+    assert plan.axis_values(m["map"]["z_um"]) == [2.0, 0.0, -2.0, -4.0, -6.0]
+    r = F.validate({"d": {"kind": "depth", "setup": SETUP, "depth": {"from_um": 0, "to_um": 500, "step_um": 1}}})["d"]
+    assert not r["ok"] and any("max_dz_um" in e for e in r["errors"])
+    r = F.validate({"d": {"kind": "depth", "setup": SETUP, "depth": {"refractive_index": 9}}})["d"]
+    assert not r["ok"] and any("refractive_index" in e for e in r["errors"])
+
+
+# --------------------------------------------------------------------------------------------- spectral zero
+
+def test_calibration_offset_and_ls6t_correction():
+    bdir = config.active_bridge_dir()
+    S.ensure(bdir)
+    (bdir / "sim_xshift").write_text("1.5,1.0")         # the scale reads 1.5 cm-1 high
+    st = run_inline({"c": {"kind": "calibration", "sample": {"name": "Si"}, "setup": SETUP,
+                           "calibration": {"adjust": "ls6t"}},
+                     "s": {"kind": "spectrum", "sample": {"name": "Si"}, "setup": SETUP,
+                           "acquire": {"center_cm1": 520},
+                           "process": {"peaks": [{"name": "Si", "near_cm1": 520.7, "window_cm1": 30}]}}})
+    cal = st["studies"]["c"]["calibration"]
+    assert cal["offset_cm1"] == pytest.approx(1.5, abs=0.25) and cal["stored_correction"]
+    assert st["studies"]["s"]["peaks_by_name"]["Si"]["position_cm1"] == pytest.approx(520.7, abs=0.25)
+    assert any("spectral correction applied" in w for w in st["studies"]["s"]["warnings"])
+
+
+def test_calibration_guided_labspec_adjustment():
+    bdir = config.active_bridge_dir()
+    S.ensure(bdir)
+    (bdir / "sim_xshift").write_text("2.0,1.0")
+    st = run_inline({"c": {"kind": "calibration", "sample": {"name": "Si"}, "setup": SETUP,
+                           "calibration": {"adjust": "labspec"}}})
+    cal = st["studies"]["c"]["calibration"]
+    assert [a["pass"] for a in cal["attempts"]] == [False, True] and cal["pass"]
+    assert st["studies"]["c"]["reliable"]
+
+
+def test_calibration_polystyrene_offset_and_scale():
+    bdir = config.active_bridge_dir()
+    S.ensure(bdir)
+    (bdir / "sim_xshift").write_text("2.0,1.002")
+    (bdir / "sim_film").write_text("50,1.59")
+    st = run_inline({"p": {"kind": "calibration", "sample": {"name": "PS"}, "setup": dict(SETUP, grating=600),
+                           "calibration": {"reference": "polystyrene"},
+                           "acquire": {"exposure_s": 2, "accumulations": 2}}})
+    cal = st["studies"]["p"]["calibration"]
+    assert cal["lines_used"] >= 3 and "scale" in cal["fit"]
+    assert cal["correction"]["b"] == pytest.approx(1 / 1.002, abs=0.0015)
+    assert not cal["pass"]
+
+
+# --------------------------------------------------------------------------------------------- white-light background
+
+def test_white_light_background_is_subtracted(tmp_path):
+    _profile_with_shutter(tmp_path)
+    bdir = config.active_bridge_dir()
+    (bdir / "sim_lamp").write_text("on")
+    acq = {"range_cm1": [200, 1800], "exposure_s": 1, "accumulations": 2}
+    setup = dict(SETUP, grating=600)
+    st = run_inline({"bg": {"kind": "background", "sample": {"name": "lamp"}, "setup": setup, "acquire": acq,
+                            "background": {"name": "lamp_x100"}}})
+    r = st["studies"]["bg"]
+    assert r["reliable"] and r["background"]["max_cps"] > 500 and not r["warnings"]
+    st = run_inline({"raw": {"kind": "spectrum", "sample": {"name": "Si"}, "setup": setup, "acquire": acq},
+                     "sub": {"kind": "spectrum", "sample": {"name": "Si"}, "setup": setup,
+                             "acquire": dict(acq, subtract_background="lamp_x100")}})
+    levels = {}
+    for k in ("raw", "sub"):
+        d = spectra.read(st["studies"][k]["spectra"][0]["file"].replace(".txt", ".shift.txt"))
+        sel = (d["x"] > 1100) & (d["x"] < 1400)
+        levels[k] = float(d["y"][sel].mean())
+    assert levels["raw"] > 1000 and levels["sub"] < 0.2 * levels["raw"]
+    assert st["studies"]["sub"]["spectra"][0]["peaks"]
+
+
+def test_background_validation():
+    r = F.validate({"x": {"kind": "spectrum", "setup": SETUP, "acquire": {"subtract_background": "nope"}}})["x"]
+    assert not r["ok"] and any("no such background" in e for e in r["errors"])
+    r = F.validate({"b": {"kind": "background", "setup": SETUP, "background": {"name": "a b"}}})["b"]
+    assert not r["ok"] and any("background.name" in e for e in r["errors"])

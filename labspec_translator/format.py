@@ -1,5 +1,5 @@
 """format.py — the study format and its static checks (no instrument needed).
-Version: 2026.11.19.5
+Version: 2026.11.19.6
 """
 from __future__ import annotations
 
@@ -8,9 +8,14 @@ import math
 from . import config, plan
 from .profile import filter_pct, laser_key
 
-KINDS = ("spectrum", "map", "series", "calibration", "alignment", "guide", "focus", "move", "spot")
+KINDS = ("spectrum", "map", "series", "calibration", "alignment", "guide", "focus", "move", "spot", "depth",
+         "background")
 TOP_KEYS = {"kind", "sample", "setup", "acquire", "focus", "points", "map", "series", "process", "expect",
-            "images", "save_native", "notes", "video", "alignment", "guide", "move", "spot"}
+            "images", "save_native", "notes", "video", "alignment", "guide", "move", "spot", "depth",
+            "calibration", "background"}
+CAL_KEYS = {"reference", "lines_cm1", "tol_cm1", "adjust"}
+BG_KEYS = {"name", "laser_off"}
+DEPTH_KEYS = {"from_um", "to_um", "step_um", "refractive_index"}
 MOVE_KEYS = {"x_um", "y_um", "to_um", "dz_um", "stay", "snapshot"}
 SPOT_KEYS = {"method", "feature_um", "refine", "range_um", "step_um", "line_cm1", "window_cm1", "exposure_s",
              "acq_exposure_s", "remember"}
@@ -22,7 +27,8 @@ GUIDE_KEYS = {"instruction", "mode", "target", "line_cm1", "center_cm1", "window
 GUIDE_MODES = ("reach", "drop", "maximize")
 VIDEO_KEYS = {"before", "after", "with_laser"}
 SETUP_KEYS = {"laser_nm", "grating", "filter", "objective", "hole_um", "slit_um"}
-ACQ_KEYS = {"range_cm1", "center_cm1", "exposure_s", "accumulations", "auto_exposure", "spike", "dark"}
+ACQ_KEYS = {"range_cm1", "center_cm1", "exposure_s", "accumulations", "auto_exposure", "spike", "dark",
+            "subtract_background"}
 AE_KEYS = {"target_counts", "min_s", "max_s", "test_s"}
 FOCUS_KEYS = {"autofocus", "every", "dz_um", "scan"}
 MAP_KEYS = {"x_um", "y_um", "z_um", "snake"}
@@ -59,8 +65,13 @@ def study_format(status: dict | None = None) -> dict:
             "spectrum": "one spectrum at the current spot, or one per entry of 'points'",
             "map": "a grid of spectra: map.x_um / y_um / z_um = [from, to, step] (offsets, µm)",
             "series": "repeated spectra at one spot: series.count, series.interval_s (time series)",
-            "calibration": "a spectrum of a silicon reference: fits the Si line and checks it against "
-                           f"{prof['checks']['si_cm1']} ± {prof['checks']['si_tol_cm1']} cm-1",
+            "calibration": "the zero of the spectral scale: a reference sample's lines (Si 520.7 by default; "
+                           "polystyrene, cyclohexane, naphthalene, diamond, or your own lines) against their true "
+                           "positions -> offset (and scale with several lines); adjust 'labspec' guides the "
+                           "operator to correct LabSpec's zero and measures again, 'ls6t' remembers the correction "
+                           "and applies it to later spectra",
+            "background": "a white-light background: a spectrum with the white light on and the laser off, stored "
+                          "by name and subtracted from later spectra (acquire.subtract_background)",
             "alignment": "is the system aligned for this laser? The Si reference with the laser's fixed settings, "
                          "compared with the baseline recorded after the last AutoAlignment; if it fails (guided), "
                          "the operator runs AutoAlignment in LabSpec and the check repeats; then a video snapshot "
@@ -74,6 +85,9 @@ def study_format(status: dict | None = None) -> dict:
                     "move.to_um (a point picked in a snapshot, using the remembered beam offset), and Z to dz_um "
                     "from the focus, then a video snapshot; stay: true (default) makes that spot home for later "
                     "studies and the next request",
+            "depth": "a depth profile at the current spot: spectra at Z steps from above the surface into the "
+                     "sample; each peak and band against depth, the interfaces (where a layer starts or ends), "
+                     "and with depth.refractive_index the depth corrected for the medium",
             "spot": "find where the beam really is and remember it (per objective and laser): a video frame with "
                     "the beam (shutter, or during an acquisition), or the Raman signal while the beam scans over "
                     "a small feature seen on the video (dust, a particle); snapshots then mark the beam there and "
@@ -85,13 +99,21 @@ def study_format(status: dict | None = None) -> dict:
             "acquire": "{range_cm1: [from, to] (extended range: LabSpec stitches windows) | center_cm1 (one "
                        "window), exposure_s (s per accumulation, or 'auto' with auto_exposure: {target_counts, "
                        "min_s, max_s, test_s}), accumulations, spike: labspec | none | single | double | "
-                       "double_auto, dark: labspec | true | false}",
+                       "double_auto, dark: labspec | true | false, subtract_background: a stored background's "
+                       "name}",
             "focus": "{autofocus: laser | raman | video (LabSpec's routines) | scan (ls6t's focus scan on the "
                      "Raman line) (before the first point; map: also every N points with 'every'), dz_um: Z "
                      "offset from the focus (spectrum, series), scan: {range_um (10), step_um (1), line_cm1 (Si), "
                      "window_cm1 (30), exposure_s (0.5)}}",
             "move": "(kind move) {x_um, y_um | to_um: [x, y] (absolute, from a snapshot), dz_um, stay: true, "
                     "snapshot: true}; setup may only give the objective",
+            "calibration": "(kind calibration) {reference: si | polystyrene | cyclohexane | naphthalene | "
+                           "diamond, lines_cm1: [...] (your own), tol_cm1 (1), adjust: none | labspec | ls6t}",
+            "background": "(kind background) {name, laser_off: shutter | operator}; acquire as for the spectra "
+                          "it will correct (same grating and range)",
+            "depth": "(kind depth) {from_um (-5: above the focus), to_um (20), step_um (1): nominal depth, the "
+                     "stage displacement into the sample from the focus; refractive_index (optional: depth = n x "
+                     "displacement, paraxial)}; with setup, acquire, process, focus, images as for a spectrum",
             "spot": "(kind spot) {method: auto | shutter | acquisition | raman, feature_um: [x, y] (from a "
                     "snapshot's 'features' or its axes) | 'auto', refine: true, range_um, step_um (by objective), "
                     "line_cm1 (Si), exposure_s (0.3), acq_exposure_s (2), remember: true}; setup needs laser_nm and "
@@ -170,6 +192,80 @@ def validate_study(name: str, study: dict, prof: dict) -> dict:
         return _validate_move(name, study, prof, errors, warnings)
     if kind == "spot":
         return _validate_spot(name, study, prof, errors, warnings)
+    if study.get("calibration") is not None and kind != "calibration":
+        errors.append("calibration: only with kind 'calibration'")
+    if study.get("background") is not None and kind != "background":
+        errors.append("background: only with kind 'background'")
+    if kind == "calibration":
+        cal = study.get("calibration") or {}
+        if not isinstance(cal, dict):
+            errors.append("calibration: {reference, lines_cm1, tol_cm1, adjust}")
+            cal = {}
+        _unknown(cal, CAL_KEYS, "calibration", errors)
+        from .xcal import REFERENCES
+        if cal.get("reference") is not None and cal["reference"] not in REFERENCES:
+            errors.append(f"calibration.reference {cal['reference']!r}: {', '.join(REFERENCES)} (or lines_cm1)")
+        if cal.get("lines_cm1") is not None and not (isinstance(cal["lines_cm1"], list) and cal["lines_cm1"]
+                                                     and all(_num(v) for v in cal["lines_cm1"])):
+            errors.append("calibration.lines_cm1: a list of Raman shifts (cm-1)")
+        if cal.get("adjust", "none") not in ("none", "labspec", "ls6t"):
+            errors.append("calibration.adjust: none, labspec or ls6t")
+        if cal.get("tol_cm1") is not None and (not _num(cal["tol_cm1"]) or cal["tol_cm1"] <= 0):
+            errors.append("calibration.tol_cm1: > 0")
+    if kind == "background":
+        bgk = study.get("background")
+        if not isinstance(bgk, dict):
+            errors.append("background: {name, laser_off: shutter | operator}")
+            bgk = {}
+        _unknown(bgk, BG_KEYS, "background", errors)
+        from . import background as BG
+        if not BG.valid_name(bgk.get("name", "")):
+            errors.append("background.name: letters, digits, _ and - (up to 60)")
+        lo = bgk.get("laser_off", "shutter" if prof["motors"].get("laser_shutter") else "operator")
+        if lo not in ("shutter", "operator"):
+            errors.append("background.laser_off: shutter or operator")
+        elif lo == "shutter" and not prof["motors"].get("laser_shutter"):
+            errors.append("background.laser_off 'shutter': no laser shutter motor in the profile; use 'operator' "
+                          "(the operator blocks the laser)")
+        for k in ("points", "map", "series", "process", "video", "focus"):
+            if study.get(k) is not None:
+                errors.append(f"{k}: not with kind 'background'")
+    sb = (study.get("acquire") or {}).get("subtract_background") if isinstance(study.get("acquire"), dict) else None
+    if sb is not None:
+        from . import background as BG
+        if not BG.valid_name(sb):
+            errors.append("acquire.subtract_background: a background's name")
+        elif sb not in BG.index():
+            errors.append(f"acquire.subtract_background {sb!r}: no such background (stored: "
+                          f"{', '.join(BG.index()) or 'none'}); a 'background' study makes it")
+    if kind == "depth":
+        dp = study.get("depth")
+        if not isinstance(dp, dict):
+            errors.append("depth: {from_um, to_um, step_um, refractive_index}")
+            return {"ok": False, "errors": errors, "warnings": warnings}
+        _unknown(dp, DEPTH_KEYS, "depth", errors)
+        for k in ("from_um", "to_um", "step_um"):
+            if dp.get(k) is not None and not _num(dp[k]):
+                errors.append(f"depth.{k}: a number (µm)")
+        if dp.get("step_um") is not None and _num(dp["step_um"]) and dp["step_um"] <= 0:
+            errors.append("depth.step_um: > 0")
+        n = dp.get("refractive_index")
+        if n is not None and (not _num(n) or not 1.0 <= n <= 4.5):
+            errors.append("depth.refractive_index: between 1.0 and 4.5 (e.g. 1.33 water, 1.46 silica, 1.59 PS)")
+        for k in ("points", "map", "series"):
+            if study.get(k) is not None:
+                errors.append(f"{k}: not with kind 'depth' (it stays at the current spot; aim first with a 'move')")
+        if errors:
+            return {"ok": False, "errors": errors, "warnings": warnings}
+        inner = validate_study(name, plan.depth_as_map(study, prof), prof)
+        inner["errors"] = [e.replace("map.z_um", "depth (from_um / to_um)") for e in inner["errors"]]
+        if not plan.into_sign(prof)[1]:
+            inner["warnings"].append("the profile does not say which Z direction goes into the sample "
+                                     "(stage.z_into_sample): + is assumed")
+        if inner["ok"] and inner["estimate"]["points"] < 3:
+            inner["errors"].append("depth: at least 3 steps")
+            inner["ok"] = False
+        return _merge({}, inner, errors, warnings)
     if kind == "focus":
         for k in ("points", "map", "series", "acquire", "guide", "alignment", "process", "move"):
             if study.get(k) is not None:
@@ -436,11 +532,10 @@ def validate_study(name: str, study: dict, prof: dict) -> dict:
             warnings.append(f"the range needs about {rng['windows']} detector windows: a coarser grating "
                             "covers it in fewer")
     if kind == "calibration":
-        si = prof["checks"]["si_cm1"]
-        lo, hi = rng.get("from_cm1"), rng.get("to_cm1")
-        if lo is not None and hi is not None and not lo + 20 <= si <= hi - 20:
-            errors.append(f"calibration: the range {lo:g}-{hi:g} cm-1 must include the Si line ({si} cm-1) "
-                          "with 20 cm-1 to spare")
+        if not plan.calibration_lines(study, prof, rng):
+            lo, hi = rng.get("from_cm1"), rng.get("to_cm1")
+            errors.append(f"calibration: no reference line inside the range {lo}-{hi} cm-1 (with 15 cm-1 to "
+                          "spare): widen acquire.range_cm1 or choose the lines")
     est = plan.estimate(study, prof)
     if est["points"] > lim["max_points"]:
         errors.append(f"{est['points']} points: above limits.max_points = {lim['max_points']}")

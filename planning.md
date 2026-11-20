@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.19.5)
+## Architecture (version 2026.11.19.6)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -89,13 +89,25 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   update the record. move.to_um aims the beam (stage = point - offset). Simulator: Raman follows the real beam
   (stage + offset), a dust particle 15 µm -X / 10 µm +Y of the start, sim_spot_offset. 65 tests; 10/10
   benchmarks (spot_raman 1.073/0.584 for 1.1/0.6; spot_video 1.52/-0.80 for 1.5/-0.8). TESTING T5e, Q23-Q25.
+- 2026-11-19, 2026.11.19.6: depth profiles (kind depth -> a Z-only map, depth_result: profiles vs nominal and
+  n-corrected depth, interfaces at half-way crossings with 10-90 % widths, interfaces_by; stage.z_into_sample;
+  live profile in LabSpec; Everall caveat), the spectral zero (kind calibration: reference si/polystyrene/
+  cyclohexane/naphthalene/diamond or lines_cm1; offset, or offset and scale with lines >= 300 cm-1 apart;
+  adjust labspec = notice with the shift in cm-1 and nm, re-check up to max_retries, then drop ls6t's correction;
+  adjust ls6t = xcal.json per laser@grating applied to later spectra with a warning; no automation command for
+  LabSpec's Zero/Koeff), white-light backgrounds (kind background: notices for the lamp and, without a shutter
+  motor, for blocking the laser; bridge acquire laser_off closes the shutter in manual mode; stored as cps per
+  accumulation; acquire.subtract_background scales by exposure and interpolates; narrow lines in a background
+  warn). Tool/command references. INSTALL.md split from the README; FUNCTIONALITY.md. Simulator: sim_film,
+  sim_xshift, sim_lamp, laser blocked by the operator. 72 tests; 13/13 benchmarks. TESTING T4.7, T4.8, T6.3,
+  Q26-Q28.
 
 ## To do next
 
-1. **At the instrument**: carry out TESTING.md (T0-T9, T5b-T5d) with the maintainer; record the answers to Q1-Q25 here and
+1. **At the instrument**: carry out TESTING.md (T0-T9, T5b-T5d) with the maintainer; record the answers to Q1-Q28 here and
    change the code where they differ from the assumptions (README "Assumptions about LabSpec").
 2. Put the measured times in the profile's `timing` (T3, T7.2).
-3. Later: native LabSpec maps (SetMappingParams + ACQ_SPECTRAL_IMAGE) for large fast maps; Linkam temperature
+3. Later: native LabSpec maps (SetMappingParams + ACQ_SPECTRAL_IMAGE, also on Z) for large fast maps; Linkam temperature
    series (ManageTemperature has rates only: set points need RS232 through Send); a translators.json entry
    (llmt's bin/ scripts are bash: decide how a Windows install fits llm-translators).
 

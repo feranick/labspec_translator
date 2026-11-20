@@ -1,5 +1,5 @@
 """bench.py — benchmarks with known answers, run on the simulator (the instrument is never touched).
-Version: 2026.11.19.5
+Version: 2026.11.19.6
 
 They check the chain end to end: the commands, wavelength <-> Raman shift, the extended range, fits, map assembly,
 the saturation check and an operator stop. On the instrument itself, the 'calibration' study on a silicon wafer is
@@ -76,6 +76,32 @@ CASES = {
                           "spot": {"method": "acquisition"}}},
         "checks": [("v", "spot.found", True, None), ("v", "spot.offset_um.0", 1.5, 0.1),
                    ("v", "spot.offset_um.1", -0.8, 0.1)]},
+    "depth_profile": {
+        "studies": {"d": {"kind": "depth", "sample": {"name": "polystyrene film on Si"},
+                          "setup": dict(SETUP, grating=600),
+                          "acquire": {"range_cm1": [400, 1700], "exposure_s": 0.5},
+                          "depth": {"from_um": -4, "to_um": 18, "step_um": 1, "refractive_index": 1.59},
+                          "process": {"peaks": [{"name": "Si", "near_cm1": 520.7, "window_cm1": 30},
+                                                {"name": "PS", "near_cm1": 1001.4, "window_cm1": 20}]}}},
+        # a 12 µm film (n = 1.59) on Si: the Si rises and the polystyrene falls at 12 µm (corrected depth)
+        "sim_files": {"sim_film": "12,1.59"},
+        "checks": [("d", "depth.interfaces_by.Si.height.rise", 12.0, 0.8),
+                   ("d", "depth.interfaces_by.PS.height.fall", 12.0, 0.8),
+                   ("d", "depth.interfaces_by.PS.height.rise", 0.0, 0.8)]},
+    "calibration_zero": {
+        "studies": {"c": {"kind": "calibration", "sample": {"name": "Si"}, "setup": SETUP,
+                          "calibration": {"adjust": "labspec"}}},
+        # the scale reads 1.5 cm-1 high; the operator corrects LabSpec's zero when asked; the second check passes
+        "sim_files": {"sim_xshift": "1.5,1.0"},
+        "checks": [("c", "calibration.attempts.0.offset_cm1", 1.5, 0.25), ("c", "calibration.pass", True, None),
+                   ("c", "calibration.attempts.1.offset_cm1", 0.0, 0.25)]},
+    "white_light": {
+        "studies": {"b": {"kind": "background", "sample": {"name": "lamp"}, "setup": dict(SETUP, grating=600),
+                          "acquire": {"range_cm1": [200, 1800], "exposure_s": 1, "accumulations": 2},
+                          "background": {"name": "lamp", "laser_off": "operator"}}},
+        # the white light on; the operator blocks the laser: the background holds the lamp only (no Raman line)
+        "sim_files": {"sim_lamp": "on"},
+        "checks": [("b", "reliable", True, None), ("b", "warnings", [], None)]},
     "operator_stop": {
         "studies": {"o": {"kind": "map", "sample": {"name": "Si"}, "setup": SETUP,
                           "acquire": {"center_cm1": 520, "exposure_s": 1, "accumulations": 1},

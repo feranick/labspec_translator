@@ -310,5 +310,51 @@
    ],
    "stay": true
   }
+ },
+ "film_depth": {
+  "kind": "depth",
+  "sample": {
+   "name": "polymer film on Si"
+  },
+  "setup": {
+   "laser_nm": 532,
+   "grating": 600,
+   "filter": "25%",
+   "objective": "x100",
+   "hole_um": 100
+  },
+  "acquire": {
+   "range_cm1": [
+    400,
+    1700
+   ],
+   "exposure_s": 1,
+   "accumulations": 2,
+   "spike": "double"
+  },
+  "depth": {
+   "from_um": -5,
+   "to_um": 20,
+   "step_um": 1,
+   "refractive_index": 1.59
+  },
+  "focus": {
+   "autofocus": "scan"
+  },
+  "process": {
+   "peaks": [
+    {
+     "name": "Si",
+     "near_cm1": 520.7,
+     "window_cm1": 30
+    },
+    {
+     "name": "PS",
+     "near_cm1": 1001.4,
+     "window_cm1": 20
+    }
+   ]
+  },
+  "images": true
  }
 }

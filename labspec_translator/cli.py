@@ -1,5 +1,5 @@
 """cli.py — the command line. Every command prints JSON; '-' reads the studies from stdin.
-Version: 2026.11.19.5
+Version: 2026.11.19.6
 
   ls6t status [REQUEST] [--wait S]   versions, the bridge, the profile; or a request's studies
   ls6t format                        the study format
@@ -18,6 +18,8 @@ Version: 2026.11.19.5
   ls6t profile set KEY VALUE         one value (JSON), e.g. video.laser_offset_um "[1.4, -0.6]"
   ls6t alignment status              per laser: baseline, last check, age
   ls6t spot status | forget [--objective O --laser NM]   the beam's remembered offsets
+  ls6t references show | clear correction [LASER@GRATING] | clear background NAME
+                                     spectral corrections, white-light backgrounds, beam offsets, alignment
   ls6t alignment record REQUEST [--study NAME] [--attempt N]
                                      after a successful AutoAlignment: the check becomes the laser's baseline
   ls6t sim [--seconds S]             run the simulator in the foreground (LS6T_MODE=sim tests by hand)
@@ -81,6 +83,10 @@ def main(argv=None) -> int:
     s.add_argument("action", choices=["show", "default", "import", "set"])
     s.add_argument("dump", nargs="?", help="import: the discovery dump; set: the key")
     s.add_argument("value", nargs="?", help="set: the value (JSON)")
+    s = sub.add_parser("references")
+    s.add_argument("action", choices=["show", "clear"])
+    s.add_argument("what", nargs="?", choices=["correction", "background", "spot"])
+    s.add_argument("name", nargs="?")
     s = sub.add_parser("spot")
     s.add_argument("action", choices=["status", "forget"])
     s.add_argument("--objective")
@@ -163,6 +169,13 @@ def main(argv=None) -> int:
                 ap.error("profile import needs the discovery dump file")
             prof, notes = P.import_discovery(P.read_text(a.dump))
             _print({"ok": True, "written": str(P.save(prof)), "notes": notes})
+    elif a.cmd == "references":
+        if a.action == "show":
+            _print(api.references())
+        else:
+            if not a.what:
+                ap.error("references clear needs: correction [LASER@GRATING] | background NAME | spot")
+            _print(api.references_clear(a.what, a.name))
     elif a.cmd == "spot":
         _print(api.spot_status() if a.action == "status" else api.spot_forget(a.objective, a.laser))
     elif a.cmd == "alignment":

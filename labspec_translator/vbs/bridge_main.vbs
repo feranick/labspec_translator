@@ -384,7 +384,45 @@ Function WriteSpectrum(id, outPath, res)
     WriteSpectrum = True
 End Function
 
+' With laser_off=1 the acquisition runs with the laser shutter (m_laser_shutter) closed in manual shutter mode, for
+' a white-light background; the shutter mode is restored afterwards on every path.
 Sub VAcquire(cmd, res)
+    Dim shutter, oldMode, newMode
+    If GetP(cmd, "laser_off", "0") <> "1" Then
+        VAcquireInner cmd, res
+        Exit Sub
+    End If
+    shutter = GetP(cmd, "m_laser_shutter", "")
+    If shutter = "" Then
+        Fail res, "laser_off needs the laser shutter's motor name"
+        Exit Sub
+    End If
+    oldMode = LSValue(0, "ShutterMode")
+    On Error Resume Next
+    newMode = LS_SHUTTER_MANUAL
+    LabSpec.PutValue 0, "ShutterMode", newMode
+    LabSpec.MoveMotor shutter, 0, "", LS_MOTOR_VALUE
+    If Err.Number <> 0 Then
+        Fail res, ErrText("closing the laser shutter")
+        Err.Clear
+        newMode = oldMode
+        LabSpec.PutValue 0, "ShutterMode", newMode
+        Err.Clear
+        Exit Sub
+    End If
+    On Error GoTo 0
+    VAcquireInner cmd, res
+    On Error Resume Next
+    If CStr(oldMode) <> "" Then
+        newMode = oldMode
+        LabSpec.PutValue 0, "ShutterMode", newMode
+    End If
+    Err.Clear
+    On Error GoTo 0
+    res("laser_off") = 1
+End Sub
+
+Sub VAcquireInner(cmd, res)
     Dim mode, ex, acc, f, t, outPath, native, sample, id, t0, started, who, tmo, r
     mode = CLng(ParseNum(GetP(cmd, "mode", "10")))
     ex = ParseNum(GetP(cmd, "exposure_s", "1"))

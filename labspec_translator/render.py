@@ -1,5 +1,5 @@
 """render.py — PNG pictures of a study's results (matplotlib, optional extra 'render').
-Version: 2026.11.19.5
+Version: 2026.11.19.6
 
 spectrum / calibration / series: the spectrum (or the first and last of a series) with its baseline and fitted
 peaks; map: one image per peak quantity and band (position, FWHM, height or area), positions in µm offsets.
@@ -97,6 +97,34 @@ def spot_png(path: Path, rs: dict, feature, prior) -> dict:
     return {"path": str(path), "what": "the Raman spot scan: signal against the stage position"}
 
 
+def depth_png(path: Path, dp: dict, name: str) -> dict:
+    """A depth profile: each peak's height (and each band's area), normalised, against depth; interfaces marked."""
+    plt = _plt()
+    fig, ax = plt.subplots(figsize=(7, 4), dpi=110)
+    d = dp["depth_um"]
+    for key, vals in dp["profiles"].items():
+        if not key.endswith(".height") and not (key.endswith(".area") and not any(
+                k.startswith(key.rsplit(".", 1)[0] + ".height") for k in dp["profiles"])):
+            continue
+        v = np.array([np.nan if a is None else a for a in vals], float)
+        if np.nanmax(v) > 0:
+            ax.plot(d, v / np.nanmax(v), marker="o", ms=3, label=key)
+    for it in [i for i in dp.get("interfaces", []) if i["quantity"].endswith(".height")]:
+        ax.axvline(it["depth_um"], color="0.5", ls="--", lw=0.8)
+        ax.annotate(f"{it['quantity'].split('.')[0]} {it['direction']} {it['depth_um']:.1f}", (it["depth_um"], 1.02),
+                    rotation=90, fontsize=7, va="bottom", ha="center")
+    ax.set_xlabel("depth (µm)" + (f", n = {dp['refractive_index']}" if dp.get("refractive_index")
+                                  else " (stage displacement)"))
+    ax.set_ylabel("normalised signal")
+    ax.set_ylim(-0.05, 1.25)
+    ax.set_title(f"{name}: depth profile", fontsize=9)
+    ax.legend(fontsize=7, loc="lower right")
+    fig.tight_layout()
+    fig.savefig(path)
+    plt.close(fig)
+    return {"path": str(path), "what": "depth profile: normalised peak heights against depth; interfaces dashed"}
+
+
 def focus_png(path: Path, fs: dict) -> dict:
     """A focus scan: the line's signal against Z, with the focus chosen."""
     plt = _plt()
@@ -149,6 +177,9 @@ def study_images(name: str, study: dict, result: dict, sd: Path) -> dict:
     laser = result.get("instrument", {}).get("laser_nm")
     out: dict = {}
     kind = study.get("kind", "spectrum")
+    if kind == "map" and result.get("depth"):
+        out["depth"] = depth_png(img / "depth.png", result["depth"], name)
+        return out
     if kind == "map":
         import json
         mj = json.loads(Path(result["map"]["files"]["json"]).read_text(encoding="utf-8"))

@@ -1,5 +1,5 @@
 """runner.py — runs a request's studies on the instrument, one command at a time, and checks every result.
-Version: 2026.11.19.5
+Version: 2026.11.19.6
 
 A request runs in its own process (`ls6t run-request FOLDER`, started detached by api.start), so it outlives the
 MCP call that started it. One request at a time holds the instrument (a lock file under LS6T_HOME); others wait
@@ -271,7 +271,7 @@ def _progress(sd: Path, **kw):
 
 
 def _setup(name: str, study: dict, ctx: Ctx, warnings: list, unreliable: list, checks: dict,
-           n_points: int) -> dict:
+           n_points: int, confirm: bool = True) -> dict:
     """The set-up moves with read-back, the detector check, and the operator's go-ahead before the first exposure.
     Returns {before, after, laser, temp, readback, rng}."""
     prof = ctx.prof
@@ -306,7 +306,7 @@ def _setup(name: str, study: dict, ctx: Ctx, warnings: list, unreliable: list, c
 
     # ---- the operator's go-ahead
     policy = config.confirm_policy()
-    if policy == "study" or (policy == "request" and not ctx.confirmed):
+    if confirm and (policy == "study" or (policy == "request" and not ctx.confirmed)):
         what = (f"ls6t is about to expose '{study.get('sample', {}).get('name', name)}' ({kind}, {n_points} "
                 f"point(s)) with laser {laser:g} nm, filter {after.get('filter')}, objective {after.get('objective')}."
                 f" Continue?")
@@ -325,6 +325,15 @@ def run_any(name: str, study: dict, ctx: Ctx) -> dict:
         return run_focus(name, study, ctx)
     if kind == "spot":
         return run_spot(name, study, ctx)
+    if kind == "calibration" and (study.get("calibration") or {}).get("adjust") == "labspec":
+        return run_calibration(name, study, ctx)
+    if kind == "background":
+        return run_background(name, study, ctx)
+    if kind == "depth":
+        derived = plan.depth_as_map(study, ctx.prof)
+        derived["_kind"] = "depth"
+        derived["_depth"] = dict(study.get("depth", {}))
+        return run_study(name, derived, ctx)
     if kind == "guide":
         return run_guide(name, study, ctx)
     if kind == "alignment":
@@ -453,19 +462,22 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
             per_point.append(rec)
             # live view in LabSpec: the map or the series grows as it is measured
             if kind in ("map", "series") and r.get("id"):
+                zonly = kind == "map" and plan.map_shape(study)[:2] == (1, 1)     # a depth profile
+                vval = rec["t"] if kind == "series" else p["dz_um"]
                 try:
                     if view is None:
                         vr = ctx.call("view", timeout_s=30, action="create", name=name, vfrom=rng.get("from_nm"),
                                       vto=rng.get("to_nm"),
-                                      kind="map" if kind == "map" else "profile", id=r["id"],
-                                      x=p["x_um"], y=p["y_um"], value=rec["t"],
-                                      label="time" if kind == "series" else "XY", unit="s" if kind == "series" else "um")
+                                      kind="map" if kind == "map" and not zonly else "profile", id=r["id"],
+                                      x=p["x_um"], y=p["y_um"], value=vval,
+                                      label="time" if kind == "series" else ("Z" if zonly else "XY"),
+                                      unit="s" if kind == "series" else "um")
                         view = vr.get("view") if vr["ok"] else False
                         if not vr["ok"]:
                             warnings.append(f"live view in LabSpec not available: {vr.get('error')}")
                     elif view:
                         vr = ctx.call("view", timeout_s=30, action="add", name=name, id=r["id"],
-                                      x=p["x_um"], y=p["y_um"], value=rec["t"], vfrom=rng.get("from_nm"),
+                                      x=p["x_um"], y=p["y_um"], value=vval, vfrom=rng.get("from_nm"),
                                       vto=rng.get("to_nm"))
                         if not vr["ok"]:
                             warnings.append(f"live view: {vr.get('error')}")
@@ -491,7 +503,9 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
     # ---- analysis and checks
     t_an = time.time()
     _progress(sd, stage="analysing")
-    result = analyse(name, study, per_point, prof, laser, rng, sd, warnings, unreliable, checks)
+    result = analyse(name, study, per_point, prof, laser, rng, sd, warnings, unreliable, checks,
+                     grating=_f(after.get("grating")) or _f(study.get("setup", {}).get("grating")),
+                     request=str(ctx.folder))
     if stop_exc is not None:
         if stop_exc.by in ("cancel", "operator", "bridge", "timeout"):
             unreliable.append(f"stopped after {len(per_point)} of {len(pts)} points: {stop_exc.why}")
@@ -500,7 +514,7 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
     result.update(
         ok=bool(per_point), complete=len(per_point) == len(pts) and stop_exc is None,
         reliable=bool(per_point) and not unreliable, unreliable_because=unreliable, warnings=warnings,
-        checks=checks, kind=kind, sample=study.get("sample", {}),
+        checks=checks, kind=study.get("_kind", kind), sample=study.get("sample", {}),
         setup={"requested": study.get("setup", {}), "before": before, "after": after, "moves": readback},
         instrument={"laser_nm": laser, "detector_temp_c": temp, "system": after.get("system"),
                     "filter": after.get("filter"), "objective": after.get("objective"),
@@ -919,6 +933,124 @@ def run_spot(name: str, study: dict, ctx: Ctx) -> dict:
     return _finish(sd, name, result)
 
 
+# --------------------------------------------------------------------------------------------- spectral zero, background
+
+def run_calibration(name: str, study: dict, ctx: Ctx) -> dict:
+    """calibration.adjust 'labspec': measure; if the lines are off, the operator corrects LabSpec's spectral zero
+    (Maintenance > Instrument calibration) as LabSpec shows, presses OK, and ls6t measures again (at most
+    calibration.max_retries times). Once LabSpec is right, ls6t's own correction for this laser and grating is
+    dropped."""
+    from . import xcal
+    from .profile import shift_to_nm
+    prof = ctx.prof
+    sd = ctx.folder / name
+    sd.mkdir(parents=True, exist_ok=True)
+    attempts, res = [], None
+    n_max = 1 + int(prof.get("calibration", {}).get("max_retries", 2))
+    for k in range(1, n_max + 1):
+        res = run_study(name, study, ctx, sd / f"attempt{k}")
+        cal = res.get("calibration") or {}
+        attempts.append({"attempt": k, "pass": cal.get("pass"), "offset_cm1": cal.get("offset_cm1"),
+                         "worst_error_cm1": cal.get("worst_error_cm1"), "correction": cal.get("correction")})
+        if cal.get("pass") or k == n_max or not cal.get("lines_used"):
+            break
+        laser = (res.get("instrument") or {}).get("laser_nm") or 532.0
+        ref, meas = cal["reference_cm1"], cal["measured_cm1"]
+        err = meas - ref
+        nm = shift_to_nm(ref, laser)
+        dnm = -err * nm * nm / 1e7
+        txt = (f"ls6t: the {'Si' if cal.get('reference') == 'si' else cal.get('reference')} line at {ref} cm-1 is measured at {meas:.2f} cm-1 "
+               f"({err:+.2f} cm-1).\n\nCorrect the spectral zero in LabSpec (Maintenance > Instrument calibration, "
+               f"for this grating): the line must move by {-err:+.2f} cm-1, about {dnm:+.4f} nm."
+               + (f" With several lines, the coefficient (dispersion) too: scale {cal['correction']['b']:.6f}."
+                  if cal.get("correction") and abs(cal["correction"]["b"] - 1) > 1e-5 else "")
+               + "\n\nPress OK to measure again, or Cancel to stop.")
+        ans = ctx.call("notice", timeout_s=7200, text=txt)
+        if ans.get("answer") != "ok":
+            break
+    result = dict(res or {})
+    cal = dict(result.get("calibration") or {})
+    cal["attempts"] = attempts
+    if cal.get("pass") and len(attempts) > 1:
+        inst = result.get("instrument") or {}
+        n = xcal.clear(inst.get("laser_nm"), inst.get("grating"))
+        if n:
+            result.setdefault("warnings", []).append("LabSpec is calibrated again: ls6t's own correction for this "
+                                                     "laser and grating was dropped")
+    result["calibration"] = cal
+    return _finish(sd, name, result)
+
+
+def run_background(name: str, study: dict, ctx: Ctx) -> dict:
+    """A white-light background: the white light on (the operator), the laser off (the shutter closed by the bridge,
+    or blocked by the operator), one acquisition with the given settings; stored by name as counts per second per
+    accumulation for later subtraction."""
+    from . import background as BG
+    prof = ctx.prof
+    sd = ctx.folder / name
+    (sd / "spectra").mkdir(parents=True, exist_ok=True)
+    t_start = time.time()
+    warnings: list[str] = []
+    unreliable: list[str] = []
+    checks: dict = {}
+    bgk = study.get("background") or {}
+    bname = bgk["name"]
+    off = bgk.get("laser_off", "shutter" if prof["motors"].get("laser_shutter") else "operator")
+    _progress(sd, state="running", stage="setup", started=t_start)
+    su = _setup(name, study, ctx, warnings, unreliable, checks, 1, confirm=False)
+    laser, rng = su["laser"], su["rng"]
+    txt = (f"ls6t: white-light background '{bname}'.\n\nTurn the white light on, as it will be during the "
+           "measurements" + (", and block the laser (LabSpec: Laser Off, or close its shutter by hand)"
+                             if off == "operator" else " (ls6t keeps the laser shutter closed)")
+           + ".\n\nPress OK when ready, or Cancel.")
+    if ctx.call("notice", timeout_s=3600, text=txt).get("answer") != "ok":
+        raise Stop("the operator cancelled the background", "study")
+    acq = plan.acquire_step(study, prof, rng)
+    acq.pop("verb", None)
+    out = sd / "spectra" / "background.txt"
+    params = dict(acq, out=str(out), sample=f"white-light background {bname}",
+                  native=str(sd / "spectra" / "background.l6s") if study.get("save_native", True) else None)
+    if off == "shutter":
+        params.update(laser_off=1, m_laser_shutter=prof["motors"]["laser_shutter"])
+    r = ctx.call("acquire", timeout_s=_acq_timeout(study, prof, rng), **params)
+    if off == "operator":
+        ctx.call("notice", timeout_s=3600, text="ls6t: the background is taken. Unblock the laser when you want "
+                                                 "to measure again. OK.")
+    if not r["ok"]:
+        raise Stop(f"background acquisition failed: {r.get('error')}", "study")
+    sp = spectra.read(out)
+    ex = _f(r.get("exposure_s")) or float(acq.get("exposure_s") or 1.0)
+    per_s = sp["meta"].get("y_unit", "cnt").lower().startswith("cnt/s")
+    cps = sp["y"] if per_s else sp["y"] / ex
+    sat = spectra.saturation(sp["y"] if not per_s else sp["y"] * ex, prof["detector"]["full_scale"],
+                             prof["checks"]["saturation_frac"])
+    if sat["saturated"]:
+        unreliable.append("the background is saturated: a shorter exposure, or less white light")
+    # narrow lines in a background mean the laser was not blocked
+    try:
+        shift, _ = spectra.to_shift(sp["x"], sp["meta"].get("x_unit", "nm"), laser)
+        xs, ysr = spectra.sort_xy(shift, sp["y"])
+        yc = ysr - spectra.baseline(xs, ysr, 3)
+        narrow = spectra.find_peaks(xs, yc, 3, None, 25.0)
+        if narrow:
+            warnings.append(f"the background has narrow lines at {', '.join(f'{v:.0f}' for v in narrow)} cm-1: was "
+                            "the laser blocked? (a Raman line in the background would be subtracted from samples)")
+    except ValueError:
+        pass
+    meta = {"name": bname, "laser_nm": laser, "grating": _f(su["after"].get("grating")),
+            "objective": su["after"].get("objective"), "exposure_s": ex,
+            "accumulations": int(_f(r.get("accumulations")) or 1), "range": rng, "request": str(ctx.folder),
+            "laser_off": off}
+    stored = BG.save(bname, sp["x"], cps, sp["meta"].get("x_unit", "nm"), meta)
+    result = {"ok": True, "complete": True, "reliable": not unreliable, "unreliable_because": unreliable,
+              "warnings": warnings, "checks": checks, "kind": "background", "sample": study.get("sample", {}),
+              "background": {**stored, "max_cps": round(float(np.max(cps)), 3), "mean_cps": round(float(np.mean(cps)), 3)},
+              "spectra": [{"file": str(out), "exposure_s": ex, "max_counts": sat["max_counts"]}],
+              "instrument": {"laser_nm": laser, "grating": meta["grating"], "objective": meta["objective"]},
+              "seconds": {"total": round(time.time() - t_start, 2)}}
+    return _finish(sd, name, result)
+
+
 # --------------------------------------------------------------------------------------------- guided adjustment
 
 def _finish(sd: Path, name: str, result: dict) -> dict:
@@ -1246,11 +1378,35 @@ def _stats(vals) -> dict:
             "max": float(a.max())}
 
 
-def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreliable, checks) -> dict:
+def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreliable, checks, grating=None,
+            request=None) -> dict:
+    from . import background as BG
+    from . import xcal
     kind = study.get("kind", "spectrum")
     process = dict(study.get("process", {}))
+    ref_lines = plan.calibration_lines(study, prof, rng) if kind == "calibration" else []
     if kind == "calibration" and not process.get("peaks"):
-        process["peaks"] = [{"name": "Si", "near_cm1": prof["checks"]["si_cm1"], "window_cm1": 30}]
+        process["peaks"] = [{"name": f"ref{i}" if len(ref_lines) > 1 else "Si", "near_cm1": c, "window_cm1": 20
+                             if len(ref_lines) > 1 else 30} for i, c in enumerate(ref_lines)]
+    # ls6t's own spectral correction (from an earlier calibration), never on a calibration itself
+    corr = xcal.get(laser, grating) if kind != "calibration" else None
+    if corr:
+        age = xcal.age_h(corr)
+        warnings.append(f"spectral correction applied: true = {corr['a']:+.3f} + {corr['b']:.6f} x measured "
+                        f"(calibration {corr['time']}, {corr['reference']})")
+        if age is not None and age > float(prof.get("calibration", {}).get("max_age_h", 24)):
+            warnings.append(f"the spectral correction is {age:.0f} h old: run a calibration")
+    bgname = study.get("acquire", {}).get("subtract_background")
+    bg = BG.load(bgname) if bgname else None
+    if bgname and bg is None:
+        unreliable.append(f"the white-light background {bgname!r} is not stored (a 'background' study makes it)")
+    elif bg:
+        bm = bg["meta"]
+        if grating and bm.get("grating") and abs(float(bm["grating"]) - float(grating)) > 0.5:
+            warnings.append(f"the background {bgname!r} was taken with the {bm['grating']:g} gr/mm grating, this "
+                            f"spectrum with {grating:g}")
+        if laser and bm.get("laser_nm") and abs(float(bm["laser_nm"]) - float(laser)) > 1:
+            warnings.append(f"the background {bgname!r} was taken with the {bm['laser_nm']:g} nm laser selected")
     fs = prof["detector"]["full_scale"]
     frac = prof["checks"]["saturation_frac"]
     min_snr = prof["checks"]["min_snr"]
@@ -1270,6 +1426,17 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
         else:
             y_counts = y
         sat = spectra.saturation(y_counts, fs, frac)
+        if corr:
+            shift = corr["a"] + corr["b"] * shift
+            rec["x_correction"] = {"a": corr["a"], "b": corr["b"]}
+        if bg:
+            per_s = sp["meta"].get("y_unit", "cnt").lower().startswith("cnt/s")
+            y, info = BG.subtract(sp["x"], y, sp["meta"].get("x_unit", "nm"),
+                                  1.0 if per_s else (rec.get("exposure_s") or 1.0), bg, laser)
+            rec["background"] = info
+            if info["covered_fraction"] < 0.98:
+                warnings.append(f"point {rec['point']}: the background covers {info['covered_fraction']:.0%} of the "
+                                "spectrum")
         a = spectra.analyze(shift, y, process, min_snr, prof["checks"].get("detect_snr", 5.0))
         rec.update(max_counts=sat["max_counts"], saturated=sat["saturated"], saturated_pixels=sat["pixels"],
                    noise_sigma=a["noise_sigma"], spikes=len(a["spikes"]), from_cm1=a["from_cm1"],
@@ -1293,9 +1460,9 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
         unreliable.append(f"saturated in {len(sat_points)} of {n} spectra: choose a stronger filter or a shorter "
                           "exposure")
     checks["spikes"] = {"points": spike_points[:50], "count": len(spike_points)}
-    if spike_points:
-        warnings.append(f"cosmic-ray spikes left in {len(spike_points)} spectra"
-                        + (" (spike removal is off: use 'double')" if spike_mode == "none" else ""))
+    if spike_points and spike_mode == "none":
+        # with LabSpec's spike removal on, what remains is usually a narrow Raman line, not a cosmic ray
+        warnings.append(f"cosmic-ray spikes left in {len(spike_points)} spectra (spike removal is off: use 'double')")
     checks["range"] = {"pass": not cover_short, "points": cover_short[:50]}
     if cover_short:
         warnings.append(f"{len(cover_short)} spectra do not cover the whole range asked for")
@@ -1315,6 +1482,8 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
     if kind == "map":
         out["map"] = _map_result(name, study, per_point, axes, ys, sd, process)
         out["files"]["map"] = out["map"]["files"]
+        if out["map"]["nx"] == 1 and out["map"]["ny"] == 1 and out["map"]["nz"] > 1:
+            out["depth"] = depth_result(study, out["map"], prof, sd, warnings)
         if failed:
             warnings.append(f"a peak fit failed at {len(set(failed))} of {n} map points (null in the map)")
     elif kind == "series":
@@ -1328,27 +1497,66 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
         out["peaks_by_name"] = {pk["name"]: pk for pk in first.get("peaks", []) if pk.get("name")}
         out["bands"] = first.get("bands", {})
     if kind == "calibration" and per_point:
-        pk = per_point[0]["peaks"][0] if per_point[0].get("peaks") else {}
-        ref, tol = prof["checks"]["si_cm1"], prof["checks"]["si_tol_cm1"]
-        if pk.get("ok"):
-            off = pk["position_cm1"] - ref
-            out["calibration"] = {"reference_cm1": ref, "measured_cm1": pk["position_cm1"],
-                                  "offset_cm1": round(off, 4), "fwhm_cm1": pk["fwhm_cm1"], "tol_cm1": tol,
-                                  "snr": pk.get("snr"), "pass": abs(off) <= tol}
-            checks["calibration"] = {"pass": abs(off) <= tol, "offset_cm1": round(off, 4), "tol_cm1": tol}
-            if abs(off) > tol:
-                unreliable.append(f"the Si line is at {pk['position_cm1']:.2f} cm-1, {off:+.2f} from {ref}: "
-                                  "calibrate the spectrometer in LabSpec (zero order and Si offset)")
-        else:
-            out["calibration"] = {"reference_cm1": ref, "pass": False, "why": pk.get("why", "no Si peak")}
-            checks["calibration"] = {"pass": False}
-            unreliable.append("no Si line found: check the sample is silicon and in focus")
+        out["calibration"] = _calibration_result(study, prof, per_point[0], ref_lines, laser, grating, request,
+                                                 checks, unreliable, warnings)
     return out
+
+
+def _calibration_result(study, prof, rec, ref_lines, laser, grating, request, checks, unreliable, warnings) -> dict:
+    """The reference lines measured against their true positions: the offset (the zero) and, with lines far enough
+    apart, the scale (the dispersion coefficient): true = a + b x measured. adjust 'ls6t' remembers it and applies
+    it to later spectra (same laser and grating)."""
+    from . import xcal
+    cal = study.get("calibration") or {}
+    refname = cal.get("reference", "si")
+    tol = float(cal.get("tol_cm1", prof["checks"]["si_tol_cm1"]))
+    lines = []
+    for ref, pk in zip(ref_lines, rec.get("peaks") or []):
+        lines.append({"reference_cm1": ref, "measured_cm1": pk.get("position_cm1") if pk.get("ok") else None,
+                      "error_cm1": round(pk["position_cm1"] - ref, 4) if pk.get("ok") else None,
+                      "fwhm_cm1": pk.get("fwhm_cm1"), "snr": pk.get("snr"), "why": pk.get("why")})
+    ok = [l for l in lines if l["measured_cm1"] is not None]
+    res: dict = {"reference": refname, "lines": lines, "tol_cm1": tol, "adjust": cal.get("adjust", "none")}
+    if not ok:
+        res.update(pass_=False, why="no reference line found: check the sample and its focus")
+        res["pass"] = res.pop("pass_")
+        checks["calibration"] = {"pass": False}
+        unreliable.append(f"no {refname} line found: check the sample and its focus")
+        return res
+    meas = np.array([l["measured_cm1"] for l in ok])
+    refs = np.array([l["reference_cm1"] for l in ok])
+    if len(ok) >= 2 and refs.max() - refs.min() >= 300:
+        b, a = np.polyfit(meas, refs, 1)
+        res["fit"] = "offset and scale (zero and dispersion)"
+    else:
+        a, b = float(np.mean(refs - meas)), 1.0
+        res["fit"] = "offset only (one line, or lines too close together for the scale)"
+    worst = float(np.max(np.abs(meas - refs)))
+    resid = refs - (a + b * meas)
+    first = ok[0]
+    res.update(reference_cm1=first["reference_cm1"], measured_cm1=first["measured_cm1"],
+               offset_cm1=round(float(np.mean(meas - refs)), 4), fwhm_cm1=first["fwhm_cm1"], snr=first["snr"],
+               worst_error_cm1=round(worst, 4), correction={"a": round(float(a), 5), "b": round(float(b), 7)},
+               residual_cm1=round(float(np.max(np.abs(resid))), 4), lines_used=len(ok), **{"pass": worst <= tol})
+    res["zero_shift_cm1"] = round(float(a + (b - 1.0) * float(np.mean(refs))), 4)   # the shift at the lines' centre
+    checks["calibration"] = {"pass": res["pass"], "offset_cm1": res["offset_cm1"], "worst_error_cm1": res["worst_error_cm1"],
+                             "tol_cm1": tol}
+    if res["adjust"] == "ls6t":
+        st = xcal.store(laser, grating, a, b, refname, lines, request)
+        res["stored_correction"] = st
+        warnings.append(f"ls6t now corrects later spectra ({xcal.key(laser, grating)}): true = {a:+.3f} + "
+                        f"{b:.6f} x measured")
+    elif not res["pass"]:
+        unreliable.append(f"the {'Si' if refname == 'si' else refname} line is at {first['measured_cm1']:.2f} cm-1, "
+                          f"{first['measured_cm1'] - first['reference_cm1']:+.2f} from {first['reference_cm1']}: "
+                          "adjust the zero in LabSpec (calibration.adjust 'labspec' guides it), or let ls6t correct "
+                          "(adjust 'ls6t')")
+    return res
 
 
 def _point_summary(r: dict) -> dict:
     keys = ("point", "offset", "stage", "file", "native", "t", "exposure_s", "accumulations", "max_counts",
-            "saturated", "noise_sigma", "spikes", "from_cm1", "to_cm1", "peaks", "bands")
+            "saturated", "noise_sigma", "spikes", "from_cm1", "to_cm1", "peaks", "bands", "x_correction", "background")
     return {k: r.get(k) for k in keys}
 
 
@@ -1363,6 +1571,78 @@ def _quantities(per_point, process) -> dict:
             q.setdefault(bn, {}).setdefault("area", []).append(val)
         q.setdefault("max_counts", {}).setdefault("value", []).append(r.get("max_counts"))
     return q
+
+
+def _crossings(d: np.ndarray, u: np.ndarray, level: float) -> list[tuple[float, int]]:
+    """Where u crosses `level` between samples: (interpolated d, +1 rising / -1 falling with d)."""
+    out = []
+    for i in range(len(u) - 1):
+        a, b = u[i], u[i + 1]
+        if not (np.isfinite(a) and np.isfinite(b)) or a == b:
+            continue
+        if (a - level) * (b - level) <= 0 and not (a == level and i > 0):
+            t = (level - a) / (b - a)
+            out.append((float(d[i] + t * (d[i + 1] - d[i])), 1 if b > a else -1))
+    return out
+
+
+def depth_result(study: dict, mres: dict, prof: dict, sd: Path, warnings: list) -> dict:
+    """A depth profile's view of a Z-only map: each peak's height and area and each band's area against the nominal
+    depth (stage displacement into the sample from the focus) and, with a refractive index, the corrected depth
+    (paraxial: depth = n x displacement); the interfaces, where a profile crosses half-way between its lowest and
+    highest value (rising: a layer starts; falling: it ends), with the 10-90 % width."""
+    sgn, stated = plan.into_sign(prof)
+    dp = study.get("_depth") or {}
+    n = dp.get("refractive_index")
+    z = np.asarray(mres["z_um"], float)
+    nominal = sgn * z
+    depth = nominal * float(n) if n else nominal
+    grids = json.loads(Path(mres["files"]["json"]).read_text(encoding="utf-8"))["grids"]
+    profiles, interfaces = {}, []
+    for key, g in grids.items():
+        qn, f = key.rsplit(".", 1)
+        if f not in ("height", "area"):
+            continue
+        v = np.array([np.nan if row[0][0] is None else row[0][0] for row in g], float)
+        if not np.isfinite(v).any():
+            continue
+        profiles[key] = [None if not np.isfinite(a) else round(float(a), 3) for a in v]
+        fin = v[np.isfinite(v)]
+        lo, hi = float(fin.min()), float(fin.max())
+        if hi <= 0 or (hi - lo) < 0.3 * hi:
+            continue
+        u = (np.nan_to_num(v, nan=lo) - lo) / (hi - lo)
+        order = np.argsort(depth)
+        dd, uu = depth[order], u[order]
+        for x50, direction in _crossings(dd, uu, 0.5):
+            near = [c for c, dr in _crossings(dd, uu, 0.1) + _crossings(dd, uu, 0.9) if dr == direction]
+            lo_c = max([c for c in near if c <= x50], default=None)
+            hi_c = min([c for c in near if c >= x50], default=None)
+            interfaces.append({"quantity": key, "direction": "rise" if direction > 0 else "fall",
+                               "depth_um": round(x50, 3),
+                               "nominal_um": round(x50 / float(n), 3) if n else round(x50, 3),
+                               "width_10_90_um": round(hi_c - lo_c, 3) if lo_c is not None and hi_c is not None
+                               else None})
+    out = {"into_sign": sgn, "direction_stated": stated, "nominal_um": [round(float(a), 3) for a in nominal],
+           "refractive_index": n, "depth_um": [round(float(a), 3) for a in depth], "profiles": profiles,
+           "interfaces": sorted(interfaces, key=lambda i: i["depth_um"])}
+    by: dict = {}
+    for it in out["interfaces"]:                     # the first rise and the first fall of each quantity
+        q, f = it["quantity"].rsplit(".", 1)
+        by.setdefault(q, {}).setdefault(f, {}).setdefault(it["direction"], it["depth_um"])
+    out["interfaces_by"] = by
+    if n:
+        out["note"] = ("depth = n x stage displacement (paraxial). With high-NA objectives the real focus lies deeper "
+                       "and spreads (Everall, Appl. Spectrosc. 54, 2000): treat depths as estimates; an oil- or "
+                       "water-immersion objective or a known layer thickness calibrates them")
+    else:
+        out["note"] = ("depths are stage displacements; inside a transparent sample the focus goes about n times "
+                       "deeper (give depth.refractive_index to correct)")
+    if not stated:
+        warnings.append("the profile does not say which Z direction goes into the sample (stage.z_into_sample): "
+                        "+ was assumed")
+    write_json(sd / "depth.json", clean(out))
+    return out
 
 
 def _map_result(name, study, per_point, axes, ys, sd: Path, process) -> dict:
