@@ -203,29 +203,31 @@ limits a person sets.
 **Automatic at first.** Each time `ls6t_bridge.vbs` starts in LabSpec, it records the instrument's inventory
 (motors and their positions, the detector; nothing moves, no laser) in `%USERPROFILE%\ls6t\discovery_latest.txt`.
 While no person has reviewed a profile, ls6t builds `profile.json` from it automatically and keeps it in step with
-later inventories. An automatic profile is cautious:
-- every laser is capped at a 10 % filter;
-- the laser shutter is not used, so snapshots with the laser stay off.
+later inventories. An automatic profile is enough to set up the instrument (laser line, grating, filter, objective,
+cameras) and move the stage, but **the laser does not fire** with it: no studies that acquire, no `laser_on`, no
+snapshots with the laser. Every laser is also capped at a 10 % filter and the laser shutter is not used.
 
 `ls6t status` and `study_format` say when the profile is automatic. Once a person runs `ls6t profile import` or
 `ls6t profile set`, the profile is theirs: it is never replaced again, and `ls6t status` reports any difference
-with a newer inventory (a new objective, say).
+with a newer inventory (a new objective, say). The laser fires once the profile is **reviewed** (steps below), with
+every laser's `nm`, `max_filter_pct` and `power_mw` filled in. `ls6t status` shows `profile.reviewed`.
 
 **Reviewing it** (TESTING.md T1.2), with the maintainer:
 
 1. The instrument's list is already there: the bridge's inventory, `%USERPROFILE%\ls6t\discovery_latest.txt`,
    written each time `ls6t_bridge.vbs` starts. (`ls6t_discover.vbs` adds a few self-tests of the bridge's design;
    it is not needed for the profile. If LabSpec crashes during it, do not repeat it: see *Troubleshooting*.)
-2. Import it:
+2. Make a proposal from it:
 
    ```powershell
-   ls6t profile import "$HOME\ls6t\discovery_latest.txt"
+   ls6t profile propose
    ```
 
-   The output lists what was found and what to check by hand.
-3. Edit the limits: `notepad $HOME\ls6t\profile.json`. In particular:
-   - `lasers.<nm>.max_filter_pct`: the highest filter transmission allowed per laser. `power_mw` is the power at the
-     sample at 100 %, if known (recorded with results).
+   It writes `%USERPROFILE%\ls6t\profile.proposed.json` (keeping the current limits) and lists what was found and
+   what to fill in. The profile in use does not change.
+3. Edit the proposal: `notepad $HOME\ls6t\profile.proposed.json`. In particular:
+   - `lasers.<nm>.max_filter_pct`: the highest filter transmission allowed per laser, and `power_mw`, the power at
+     the sample at 100 % (measured with a power meter; recorded with results). Both are required.
    - `filters`: every label's transmission in %. Labels that could not be parsed are listed by the import.
    - `limits`: `max_xy_um`, how far a study may move from where the operator left the stage; `max_dz_um`, how far
      from the operator's focus; `max_exposure_s`, `max_accumulations`, `max_points`, `max_minutes`;
@@ -243,10 +245,10 @@ with a newer inventory (a new objective, say).
      `statusbar`.
 
    Only a person edits this file. Studies cannot change it, and the MCP tools can only *propose* a profile
-   (`instrument(action="discover")` writes `profile.proposed.json`). To use a proposal, edit it (caps, `power_mw`,
-   limits) and import **the edited JSON**: `ls6t profile import "$HOME\ls6t\profile.proposed.json"`. Importing the
-   `.txt` dump instead would rebuild the lasers from it and lose those edits; importing a JSON with a laser's
-   `nm` or `max_filter_pct` blank is refused.
+   (`instrument(action="discover")` writes `profile.proposed.json`).
+4. Import it, which checks it and marks the profile reviewed: `ls6t profile import
+   "$HOME\ls6t\profile.proposed.json"`. A laser with `nm`, `max_filter_pct` or `power_mw` blank is refused. Later
+   changes: `ls6t profile set KEY VALUE`, or the same propose / edit / import.
 
    Without any profile (no inventory, no import), ls6t refuses studies on the instrument: its built-in defaults are
    a generic XploRA for the simulator (other laser lines, an x50, no caps), not this instrument.
@@ -382,7 +384,7 @@ pip install --no-index --find-links wheels -e ".[mcp,render,test,windows]"
 
 | Symptom | Cause and fix |
 |---|---|
-| LabSpec shows *About NFActiveX Control* during discovery, then crashes | Seen with 2026.11.20.21's discovery (its write probe of a scratch spectrum is the suspect; removed in .22). Do not repeat discovery on that account: the bridge's inventory (`discovery_latest.txt`) already gives the profile. From .22 each step is logged in `%USERPROFILE%\ls6t\discovery_progress.txt` (send it to the ls6t maintainer), and a step that stopped LabSpec is skipped by later runs (`discovery_skip.txt`; delete it to try again). |
+| LabSpec shows *About NFActiveX Control* during discovery, then crashes | Seen with 2026.11.20.21's discovery (its write probe of a scratch spectrum is the suspect; removed in .22). Why the About box opened is not known: ls6t never calls `AboutBox`. If it opens again on .22 or later, even without a crash, note what ran (`discovery_progress.txt`, `ls6t jobs`) and tell the ls6t maintainer. Do not repeat discovery on that account: the bridge's inventory (`discovery_latest.txt`) already gives the profile. From .22 each step is logged in `%USERPROFILE%\ls6t\discovery_progress.txt` (send it to the ls6t maintainer), and a step that stopped LabSpec is skipped by later runs (`discovery_skip.txt`; delete it to try again). |
 | The LLM app does not show ls6t's tools | Copy `tools\ls6t_diagnose.ps1` to the PC and run `powershell -ExecutionPolicy Bypass -File .\ls6t_diagnose.ps1` as the user who runs the app. It changes nothing and writes `ls6t_diagnose.txt` on the Desktop: which configuration file Claude reads, whether the ls6t entry is there and valid, whether the server starts and answers, and Claude's MCP logs. With ls6t 2026.11.20.8 or later, `ls6t connect check` does the main checks too. If the report shows the Claude file Claude reads (`READS:`) without an `ls6t` entry: `tools\ls6t_fix_claude.ps1` (same way) waits for Claude to be closed and adds it there. |
 | `ls6t : The term 'ls6t' is not recognized` | The venv is not active: `.\.venv\Scripts\Activate.ps1`, or use the full path `.\.venv\Scripts\ls6t.exe`. |
 | `Activate.ps1 cannot be loaded` | `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` (once). |

@@ -1,5 +1,5 @@
 """runner.py — runs a request's studies on the instrument, one command at a time, and checks every result.
-Version: 2026.11.20.22
+Version: 2026.11.20.23
 
 A request runs in its own process (`ls6t run-request FOLDER`, started detached by api.start), so it outlives the
 MCP call that started it. One request at a time holds the instrument (a lock file under LS6T_HOME); others wait
@@ -1653,7 +1653,8 @@ def _snapshot(ctx: Ctx, name: str, sd: Path, tag: str, with_laser: bool, warning
     settle = float(v.get("settle_s", 1.5))
     r = ctx.call("video", timeout_s=90 + settle + laser_s + 2 * during_acq_s, out=str(base), settle_s=settle,
                  laser_s=laser_s, during_acq_s=during_acq_s or None, acq_from_nm=acq_nm, acq_to_nm=acq_nm,
-                 formats=",".join(v.get("formats", [])), camera=v.get("camera"), **motor_args(ctx.prof))
+                 formats=",".join(v.get("formats", [])), camera=v.get("camera"),
+                 stop_video=int(bool(v.get("stop_from_script"))), **motor_args(ctx.prof))
     if not r["ok"]:
         warnings.append(f"video snapshot ({tag}) failed: {r.get('error')}")
         return None

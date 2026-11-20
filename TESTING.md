@@ -12,7 +12,7 @@ stops and cancel on the simulator, and `ls6t bench` gives known answers. What re
 LabSpec and hardware. The plan goes from no laser and no motion to an LLM app driving a full map, in stages. Each
 stage starts only when the previous one passed.
 
-Version under test: 2026.11.20.22 (bridge protocol 1).
+Version under test: 2026.11.20.23 (bridge protocol 1).
 
 **Already known** (2026-11-20, from the instrument's discovery dump, its `NFActiveX.ocx`, `OLConfig.ini`,
 `OLSetup.ini` and LabSpec 6.7.1's service scripts): the motors and their positions (lasers 532, 637.75, 785.04 nm;
@@ -195,7 +195,8 @@ the profile comes from that; this script adds the self-tests of the bridge's des
 is created) and logs each step in `%USERPROFILE%\ls6t\discovery_progress.txt`. On 2026-11-20 the .21 discovery
 crashed LabSpec on one account (an *About NFActiveX Control* box, then a crash); if LabSpec shows any unexpected
 dialog or stops, **do not run it again**: send `discovery_progress.txt` (its last `begin` line is the step) to the
-ls6t maintainer; a later run skips that step (`discovery_skip.txt`). In LabSpec: *Processing > Scripts*, add
+ls6t maintainer; a later run skips that step (`discovery_skip.txt`). Why the About box opened is not known (ls6t
+never calls `AboutBox`): if it appears again, even without a crash, record it. In LabSpec: *Processing > Scripts*, add
 `ls6t_discover.vbs`, run it. A small window appears and closes by itself; a message box gives the dump's path.
 
 Pass:
@@ -206,29 +207,37 @@ Pass:
 - `video.id_now` > 0 if the live video was running (start it first to check), and no `video.error` (**Q13**);
 - `selftest.last_error_info=1`; any motor with more than ten positions has right labels (**Q43**).
 
-**T1.2 Review the profile.** ls6t already uses a profile made automatically from the bridge's inventory and LabSpec's
-`OLConfig.ini`: the real lasers, gratings, filters, objectives (with their NA), holes, slits, cameras and polarisers,
-every laser capped at a 10 % filter, and no laser shutter. `ls6t status` says so (`profile.automatic`). Make it the
-maintainer's:
+**T1.2 Review the profile (before any LASER stage).** ls6t already uses a profile made automatically from the
+bridge's inventory and LabSpec's `OLConfig.ini`: the real lasers, gratings, filters, objectives (with their NA),
+holes, slits, cameras and polarisers, every laser capped at a 10 % filter, and no laser shutter. `ls6t status` says
+so (`profile.automatic`). With it the instrument can be set up and the stage moved (T2, T3), but **the laser does
+not fire** on the instrument until a person reviews the profile. Make it the maintainer's:
 
 ```powershell
-ls6t profile import "<the dump's path>"        # or: ls6t profile show, then ls6t profile set ...
-notepad $HOME\ls6t\profile.json
+ls6t profile propose                                    # profile.proposed.json from the bridge's inventory
+notepad $HOME\ls6t\profile.proposed.json
 ```
 
 With the maintainer, go through:
 - `motors`, `lasers`, `gratings`, `filters`, `objectives`, `holes_um`, `slits_um`, `polarizers`,
   `video.cameras`: as on the instrument (they came from LabSpec; check, don't retype);
-- **limits, decided by the maintainer**: `max_filter_pct` per laser (the automatic profile's 10 % until now),
-  `sensitive_max_filter_pct`, `max_xy_um` (start with 500), `max_dz_um` (start with 20), `max_laser_on_s`,
-  `max_exposure_s`, `max_accumulations`, `max_points`, `max_minutes`, `stage.x_um` / `stage.y_um` if wanted,
-  `detector.max_temp_c`; `power_mw` per laser if known;
+- **per laser, required**: `max_filter_pct` (the automatic profile's 10 % until now) and `power_mw`, the power at the
+  sample at 100 %, measured with a power meter;
+- **limits, decided by the maintainer**: `sensitive_max_filter_pct`, `max_xy_um` (start with 500), `max_dz_um`
+  (start with 20), `max_laser_on_s`, `max_exposure_s`, `max_accumulations`, `max_points`, `max_minutes`,
+  `stage.x_um` / `stage.y_um` if wanted, `detector.max_temp_c`;
 - `manual_objective`: true if LabSpec asks the operator to turn the turret;
-- `motors.laser_shutter` (**Q15**): the maintainer confirms that `LaserShutter` is the **laser** shutter, then
-  `ls6t profile set motors.laser_shutter '"LaserShutter"'`. Until then snapshots with the laser and `laser_on` are
-  refused.
+- `motors.laser_shutter` (**Q15**): only once the maintainer has confirmed that `LaserShutter` is the **laser**
+  shutter, set it to `"LaserShutter"`. Until then snapshots with the laser and `laser_on` are refused.
 
-Pass: `ls6t format` shows the instrument's choices and the limits agreed; `ls6t status` no longer says automatic.
+Then import the edited file, which checks it and marks it reviewed:
+
+```powershell
+ls6t profile import "$HOME\ls6t\profile.proposed.json"
+```
+
+Pass: a laser with `nm`, `max_filter_pct` or `power_mw` blank is refused (try once); after the import, `ls6t status`
+shows `profile.reviewed: true`; `ls6t format` shows the instrument's choices and the limits agreed.
 
 **T1.3 The installed LabSpec's commands (Q34).** Done on 2026-11-20 from the `.ocx` (planning.md). Repeat only after
 a LabSpec update: `ls6t-typelib --format markdown --out labspec_commands.md`, and compare.
@@ -682,7 +691,7 @@ With the LLM app connected (test mode off), in a new chat:
 | T0.3 | | | | | |
 | T0.4 | | | | | |
 | T1.1 | | | | Q2 (stop button): Q43: | discovery dump, discovery_progress.txt |
-| T1.2 | | | | Q15 (shutter confirmed): caps per laser: | profile.json |
+| T1.2 | | | | Q15 (shutter confirmed): caps and power_mw per laser: reviewed: | profile.json |
 | T1.3 | | | | Q34 (after a LabSpec update only): | labspec_commands.md |
 | T1.4 | | | | Q36 (config contents, motors moved?): Q38 (actions logged): | configs\before_tests.ini, script_motor_log.txt |
 | T2.1 | | | | | |

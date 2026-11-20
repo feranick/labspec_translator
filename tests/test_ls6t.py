@@ -946,7 +946,7 @@ def test_native_map_export_and_discovery_probes(tmp_path):
     assert st["studies"]["m"]["reliable"]
     S.ensure(config.active_bridge_dir())
     r = bridge.Bridge().call("discover", timeout_s=10, out=str(tmp_path / "dump.txt"))
-    # discovery no longer probes these (2026.11.20.22): dumps from older bridges still carry them
+    # discovery no longer probes these (2026.11.20.23): dumps from older bridges still carry them
     old = (tmp_path / "dump.txt").read_text() + "\n".join([
         "selftest.get_value_ex=0", "selftest.get_value_simple_part=1", "selftest.get_value_simple_part_size=8",
         "selftest.get_value_simple_part_values=4,5,6,7,8,9,10,11", "selftest.get_config_param=1",
@@ -1181,9 +1181,11 @@ def test_camera_on_off_and_roles(monkeypatch):
     assert api.instrument("status")["status"]["live_video"] == "0"
     r = api.instrument("camera_on")
     assert r["ok"] and r["live"] == "1" and api.instrument("status")["status"]["live_video"] == "1"
-    assert api.instrument("camera_off")["live"] == "0"
+    r = api.instrument("camera_off")                  # not from a script by default: it hung the bridge
+    assert not r["ok"] and r["live"] == "1"
     monkeypatch.setenv("LS6T_TEST_MODE", "1")
     assert T.hardware_test("call", verb="camera", params={"action": "on"})["live"] == "1"
+    assert not T.hardware_test("call", verb="camera", params={"action": "off", "stop_video": 1})["ok"]
     r = T.hardware_test("call", verb="move", params={"motor": "grating", "mode": "value", "value": 600})
     assert r["ok"] and r["motor"] == "Grating"
 
@@ -1471,12 +1473,34 @@ def test_profile_import_reviewed_json_and_no_defaults_on_the_instrument(tmp_path
         P.import_reviewed(prop)
     P.save(dict(prof, auto={"x": 1}, lasers={"637.75": {"nm": 637.75, "label": "637.75", "power_mw": None,
                                                         "max_filter_pct": 5}}), prop)
+    with pytest.raises(ValueError, match="power_mw"):
+        P.import_reviewed(prop)
+    P.save(dict(prof, auto={"x": 1}, lasers={"637.75": {"nm": 637.75, "label": "637.75", "power_mw": 12,
+                                                        "max_filter_pct": 5}}), prop)
     data, notes = P.import_reviewed(prop)
-    assert "auto" not in data and data["lasers"]["637.75"]["max_filter_pct"] == 5
-    assert any("power_mw" in n for n in notes)
+    assert "auto" not in data and data["lasers"]["637.75"]["max_filter_pct"] == 5 and data["reviewed"]
+    assert any("laser_shutter" in n for n in notes)
     from labspec_translator import cli
     assert cli.main(["profile", "import", str(prop)]) == 0
     assert P.load()["lasers"]["637.75"]["max_filter_pct"] == 5 and not P.load().get("auto")
+    # on the instrument the laser fires only with a reviewed profile, still complete
+    monkeypatch.setenv("LS6T_MODE", "labspec")
+    name = "s"
+    st = {name: {"kind": "spectrum", "sample": {"name": "Si"},
+                 "setup": {"laser_nm": 637.75, "grating": 1800, "filter": "1%", "objective": "x100"},
+                 "acquire": {"center_cm1": 520, "exposure_s": 1}}}
+    assert api.validate(st)[name]["ok"], api.validate(st)[name]["errors"]
+    move = {"kind": "move", "move": {"x_um": 5, "y_um": 0}}
+    assert P.review_gate(P.load()) is None
+    P.save(dict(P.load(), reviewed=None))
+    errs = api.validate({name: st[name]})[name]["errors"]
+    assert any("laser fires only with a reviewed profile" in e for e in errs), errs
+    assert not any("reviewed" in e for e in api.validate({"m": move})["m"]["errors"])
+    assert "reviewed" in api.laser(True, 5)["error"]
+    assert "reviewed" in api.snapshot(with_laser=True)["error"]
+    P.save(dict(P.load(), auto={"from": "x"}))
+    assert "automatic" in P.review_gate(P.load())
+    monkeypatch.setenv("LS6T_MODE", "sim")
     # the built-in generic profile is never used on the instrument
     config.profile_path().unlink()
     monkeypatch.setenv("LS6T_MODE", "labspec")
@@ -1484,3 +1508,46 @@ def test_profile_import_reviewed_json_and_no_defaults_on_the_instrument(tmp_path
     name = next(iter(st))
     r = api.validate({name: st[name]})[name]
     assert not r["ok"] and any("generic XploRA" in e for e in r["errors"])
+
+
+def test_profile_propose_is_the_one_review_route(tmp_path):
+    S.ensure(config.active_bridge_dir())
+    assert api.instrument("discover")["ok"]
+    shutil_src = config.home() / "discovery_latest.txt"
+    if not shutil_src.exists():
+        r = bridge.Bridge().call("discover", timeout_s=10, out=str(shutil_src))
+    before = P.load()
+    r = api.profile_propose()
+    assert r["ok"] and r["proposed_profile"].endswith("profile.proposed.json") and "profile import" in r["next"]
+    assert any("power_mw" in m for m in r["to_fill_in"])
+    assert P.load().get("source") == before.get("source")          # the profile in use is unchanged
+    assert "profile propose" in P.review_gate(P.load()) and "profile propose" in P.REVIEW_STEPS
+    if P.load().get("auto"):
+        assert P.load()["auto"]["review"] == P.REVIEW_STEPS
+
+
+def test_camera_switch_is_checked_and_video_stop_is_not_from_script(tmp_path):
+    """2026-11-20: camera_on reported success while LabSpec stayed on camera 1; camera_off hung the bridge in
+    Video(STOP_VIDEO)."""
+    br = Path(api.install_bridge(tmp_path / "vbs")["files"]["ls6t_bridge.vbs"]).read_text()
+    cam = br[br.index("Sub VCamera("):]
+    cam = cam[:cam.index("End Sub")]
+    assert 'GetP(cmd, "stop_video", "0") <> "1"' in cam and "SetCamera(" in cam
+    assert cam.index('"stop_video"') < cam.index("LS_STOP_VIDEO")
+    vid = br[br.index("Sub VVideo("):]
+    vid = vid[:vid.index("End Sub")]
+    assert 'If GetP(cmd, "stop_video", "0") = "1" Then' in vid and "SetCamera(" in vid
+    assert "after = LabSpec.Video(LS_GET_ACTIVE_CAMERA)" in br
+    S.ensure(config.active_bridge_dir())
+    P.save(dict(P.load(), video=dict(P.load()["video"], cameras={"top": 0, "internal": 1})))
+    assert api.instrument("camera_on", camera="internal")["camera_name"] == "internal"
+    (config.active_bridge_dir() / "sim_camera_locked").write_text("1")
+    r = api.instrument("camera_on", camera="top")
+    assert not r["ok"] and "stayed on camera 1" in r["error"]
+    r = api.instrument("camera_off")
+    assert not r["ok"] and "video button" in r["error"]
+    P.save(dict(P.load(), video=dict(P.load()["video"], stop_from_script=True)))
+    assert api.instrument("camera_off")["ok"]
+    assert api.instrument("camera_on", camera="top")["camera_name"] == "top"     # switched with the video off
+    assert "stuck inside a LabSpec call" not in bridge.labspec_hint("camera")      # not Windows here: generic
+    assert "camera" in bridge.labspec_hint("camera")

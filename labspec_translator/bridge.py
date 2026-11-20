@@ -1,5 +1,5 @@
 """bridge.py — the Python side of the LabSpec bridge: commands as files in a folder the bridge script watches.
-Version: 2026.11.20.22
+Version: 2026.11.20.23
 
 Protocol 1 (the same for ls6t_bridge.vbs inside LabSpec and for sim.py):
 
@@ -75,9 +75,9 @@ def labspec_windows() -> dict | None:
         return None
 
 
-def labspec_hint() -> str:
-    """What to tell the operator when the bridge stops answering: LabSpec's open dialog by its title, or that
-    LabSpec is not running any more."""
+def labspec_hint(verb: str | None = None) -> str:
+    """What to tell the operator when the bridge stops answering: LabSpec's open dialog by its title, that LabSpec
+    is not running any more, or (no dialog) that the bridge is stuck inside a LabSpec call."""
     w = labspec_windows()
     if w is not None and not w["running"]:
         return ("LabSpec is not running any more (it closed or crashed): restart it, then ls6t_bridge.vbs. If it "
@@ -86,8 +86,14 @@ def labspec_hint() -> str:
     if w and w["dialogs"]:
         return ("LabSpec shows a dialog that blocks its scripts: " + "; ".join(f"'{t}'" for t in w["dialogs"]) +
                 ". The operator closes it; the bridge then goes on (or restart ls6t_bridge.vbs).")
+    if w is not None:
+        return (f"LabSpec runs and shows no dialog: the bridge is stuck inside a LabSpec call"
+                + (f" (command '{verb}')" if verb else "") + ". The operator stops the bridge with LabSpec's script "
+                "stop button and starts ls6t_bridge.vbs again; if LabSpec does not respond, restart LabSpec. Tell "
+                "the ls6t maintainer which command it was.")
     return ("LabSpec may be showing a dialog or message box: its scripts wait while one is open, so the operator "
-            "closes it; otherwise the operator restarts ls6t_bridge.vbs")
+            "closes it; otherwise the operator restarts ls6t_bridge.vbs"
+            + (f" (it was running '{verb}')" if verb else ""))
 
 
 class BridgeError(RuntimeError):
@@ -212,7 +218,7 @@ class Bridge:
             if not self.alive():
                 self._withdraw(cmd)
                 raise BridgeGone(f"{verb}: the LabSpec bridge stopped answering (heartbeat older than "
-                                 f"{config.heartbeat_s():.0f} s). " + labspec_hint())
+                                 f"{config.heartbeat_s():.0f} s). " + labspec_hint(verb))
             time.sleep(poll_s)
 
     def _withdraw(self, cmd: Path):

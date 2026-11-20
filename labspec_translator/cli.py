@@ -1,5 +1,5 @@
 """cli.py — the command line. Every command prints JSON; '-' reads the studies from stdin.
-Version: 2026.11.20.22
+Version: 2026.11.20.23
 
   ls6t status [REQUEST] [--wait S]   versions, the bridge, the profile; or a request's studies
   ls6t format                        the study format
@@ -20,7 +20,9 @@ Version: 2026.11.20.22
   ls6t bridge install [--dest DIR]   write the LabSpec scripts configured for this machine
   ls6t bridge call VERB [k=v ...]    one bridge command, for the maintainer's tests (TESTING.md); acquire and
                                      autofocus fire the laser and need --laser
-  ls6t profile show|default|import FILE   import: a reviewed profile (.json) or a discovery dump (.txt)
+  ls6t profile propose [DUMP]        profile.proposed.json from the bridge's inventory, to edit with the maintainer
+  ls6t profile import FILE           the edited profile.proposed.json: checked, marked reviewed (the laser may fire)
+  ls6t profile show|default
   ls6t profile set KEY VALUE         one value (JSON), e.g. video.laser_offset_um "[1.4, -0.6]"
   ls6t profile ini [OLConfig.ini]    what LabSpec's own configuration says (cameras, objectives, motors)
   ls6t alignment status              per laser: baseline, last check, age
@@ -110,9 +112,9 @@ def main(argv=None) -> int:
     s.add_argument("--timeout", type=float, default=120)
     s.add_argument("--laser", action="store_true", help="allow acquire and autofocus (the laser fires)")
     s = sub.add_parser("profile")
-    s.add_argument("action", choices=["show", "default", "import", "set", "ini"])
-    s.add_argument("dump", nargs="?", help="import: a reviewed profile (.json, e.g. profile.proposed.json) or a "
-                   "discovery dump (.txt); set: the key")
+    s.add_argument("action", choices=["show", "default", "propose", "import", "set", "ini"])
+    s.add_argument("dump", nargs="?", help="propose: a discovery dump (default: the bridge's inventory); import: the "
+                   "edited profile.proposed.json (or a dump); set: the key")
     s.add_argument("value", nargs="?", help="set: the value (JSON)")
     s = sub.add_parser("references")
     s.add_argument("action", choices=["show", "clear"])
@@ -226,6 +228,10 @@ def main(argv=None) -> int:
                 _print({"ok": False, "error": "OLConfig.ini not found: give its path (it is in LabSpec's folder)"})
                 return 1
             _print({"ok": True, "file": str(p), **L.summary(L.read(p))})
+        elif a.action == "propose":
+            r = api.profile_propose(a.dump)
+            _print(r)
+            return 0 if r["ok"] else 1
         elif a.action == "set":
             if not a.dump or a.value is None:
                 ap.error("profile set needs KEY VALUE")
@@ -246,6 +252,8 @@ def main(argv=None) -> int:
                 if prop.is_file() and src.is_file() and prop.stat().st_mtime > src.stat().st_mtime:
                     notes.append(f"{prop} is newer than this dump: if it holds your edits (power_mw, caps), import "
                                  f"it instead: ls6t profile import \"{prop}\"")
+                notes.append("not reviewed: the laser does not fire on the instrument until a person imports the "
+                             "edited JSON (" + P.REVIEW_STEPS + ")")
             _print({"ok": True, "written": str(P.save(prof)), "notes": notes})
     elif a.cmd == "references":
         if a.action == "show":

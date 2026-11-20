@@ -1,5 +1,5 @@
 """sim.py — a simulated LabSpec + XploRA behind the same bridge protocol as ls6t_bridge.vbs.
-Version: 2026.11.20.22
+Version: 2026.11.20.23
 
 It answers every verb of the bridge with the same keys, so the runner, the checks and the MCP server are tested
 without the instrument (LS6T_MODE=sim, and the tests). The simulated sample is a silicon wafer with a graphene
@@ -286,8 +286,21 @@ class SimLabSpec:
         action = p.get("action", "status")
         if action not in ("on", "off", "status"):
             return {"ok": 0, "error": "camera action: on, off or status"}
-        if p.get("camera") not in (None, ""):
-            self.camera = int(float(p["camera"]))
+        # as on the instrument (2026-11-20): ls6t does not stop the live video unless allowed (Video(STOP) hung);
+        # sim_camera_locked: LabSpec keeps its camera while the live video runs, whatever is asked
+        if action == "off" and self.live and str(p.get("stop_video", "0")) != "1":
+            return {"ok": 0, "live": 1, "camera": self.camera,
+                    "error": "ls6t does not stop LabSpec's live video (it hung the bridge on this instrument): the "
+                             "operator stops it with LabSpec's video button"}
+        if p.get("camera") not in (None, "") and action != "off":
+            want = int(float(p["camera"]))
+            if want != self.camera:
+                if self.live and (self.dir / "sim_camera_locked").exists():
+                    return {"ok": 0, "live": 1, "camera_before": self.camera, "camera_after": self.camera,
+                            "camera_set_returned": 0,
+                            "error": f"LabSpec stayed on camera {self.camera} (asked {want}) while the live video "
+                                     "runs: the operator stops the live video in LabSpec, then asks again"}
+                self.camera = want
         if action != "status":
             self.live = action == "on"
         return {"live": int(self.live), "video_id": 900 if self.live else 0, "camera": self.camera}

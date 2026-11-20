@@ -1,12 +1,12 @@
 """format.py — the study format and its static checks (no instrument needed).
-Version: 2026.11.20.22
+Version: 2026.11.20.23
 """
 from __future__ import annotations
 
 import math
 
 from . import config, plan
-from .profile import filter_pct, laser_key, match_label
+from .profile import filter_pct, laser_key, match_label, review_gate
 
 KINDS = ("spectrum", "map", "series", "calibration", "alignment", "guide", "focus", "move", "spot", "depth",
          "background", "filters", "cutoff")
@@ -614,12 +614,21 @@ def validate_study(name: str, study: dict, prof: dict) -> dict:
     if est["minutes"] > cap:
         errors.append(f"estimated {est['minutes']:g} min: above the ceiling of {cap:g} min "
                       "(limits.max_minutes or LS6T_MAX_MINUTES); fewer points, shorter exposures or two studies")
+    # the laser fires in every kind but move, background and a white-light cutoff, and in a video with_laser
+    vd_ = study.get("video") if isinstance(study.get("video"), dict) else {}
+    cut_ = study.get("cutoff") if isinstance(study.get("cutoff"), dict) else {}
+    fires = (kind not in ("move", "background") and not (kind == "cutoff" and cut_.get("light", "white") != "laser")) \
+        or bool(vd_.get("with_laser"))
+    if fires and prof.get("measured") and config.mode() == "labspec":
+        gate = review_gate(prof)
+        if gate:
+            errors.append(gate)
     if not prof.get("measured"):
         if config.mode() == "labspec":
             errors.append("no machine profile: the built-in defaults are a generic XploRA for the simulator (laser "
                           "lines, objectives and caps not this instrument's) and are never used on the instrument. "
                           "Start ls6t_bridge.vbs in LabSpec once (it reads the instrument and ls6t builds a cautious "
-                          "profile from it), or import a reviewed profile: ls6t profile import <profile.json>")
+                          "profile from it), then review it: ls6t profile propose, edit, ls6t profile import")
         else:
             warnings.append("no machine profile yet: the built-in XploRA defaults are used (simulator)")
     out.update(ok=not errors, errors=errors, warnings=warnings, estimate=est,

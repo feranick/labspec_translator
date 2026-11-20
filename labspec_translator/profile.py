@@ -1,9 +1,10 @@
 """profile.py — the machine profile: what the instrument has (from the discovery script) and the limits a person sets.
-Version: 2026.11.20.22
+Version: 2026.11.20.23
 
 The profile is a JSON file (LS6T_PROFILE, default ~/ls6t/profile.json). Studies never change it: an LLM can only
 ask for what the profile allows. Without a file, the built-in XploRA defaults below apply and every result says so
-in a warning; run the discovery script in LabSpec and `ls6t profile import <dump>` to replace them.
+in a warning. The one route to a person's profile: `ls6t profile propose` (profile.proposed.json from the bridge's
+inventory, keeping the current limits), edit it, `ls6t profile import profile.proposed.json` (checked, reviewed).
 """
 from __future__ import annotations
 
@@ -59,6 +60,9 @@ DEFAULT_PROFILE: dict = {
     "video": {"laser_offset_um": [0.0, 0.0], "marker": "stage", "packing": "colorref", "order": "x_fastest",
               "formats": ["png", "jpg", "bmp", "tif"], "settle_s": 1.5, "laser_s": 1.0, "max_laser_s": 5.0,
               "camera": None, "allow_extended": False, "extended_max_s": 600.0,
+              # Video(STOP_VIDEO) from a script hung the bridge on the instrument (2026-11-20): ls6t never stops the
+              # live video unless a person turns this on after trying it with the maintainer (TESTING T3.11)
+              "stop_from_script": False,
               # LabSpec's cameras by name, as a person sees them, e.g. {"top": 0, "side": 1}: requests may name them
               "cameras": {}},
     # alignment checks (kind 'alignment'): per laser the fixed settings and the baseline the maintainer recorded
@@ -108,6 +112,11 @@ def _merge(base: dict, over: dict) -> dict:
 
 
 AUTO_MAX_FILTER_PCT = 10.0     # per laser, in a profile built automatically, until a person sets the caps
+# the one way a person makes the profile theirs (ls6t status, review_gate, the docs say the same)
+REVIEW_STEPS = ("ls6t profile propose (writes profile.proposed.json from the bridge's inventory, keeping the current "
+                "limits); with the maintainer, fill in every laser's power_mw and max_filter_pct, the limits, and "
+                "motors.laser_shutter once confirmed; then ls6t profile import profile.proposed.json (checks it and "
+                "marks it reviewed)")
 
 
 def latest_dump() -> Path | None:
@@ -130,8 +139,7 @@ def auto_profile(dump: Path) -> dict:
         prof["motors"]["laser_shutter"] = None
     prof["auto"] = {"from": str(dump), "dump_time": prof.get("discovered", {}).get("time"),
                     "max_filter_pct": AUTO_MAX_FILTER_PCT, "notes": notes,
-                    "review": "a person reviews it: ls6t profile import \"" + str(dump) + "\" (then sets the "
-                              "caps and limits), or ls6t profile set <key> <value>"}
+                    "review": REVIEW_STEPS}
     prof["source"] = f"automatic, from the bridge's inventory {prof['auto']['dump_time']}"
     return prof
 
@@ -294,33 +302,61 @@ def _num(s) -> float | None:
         return None
 
 
+def laser_problems(prof: dict) -> list[str]:
+    """What a person still has to fill in per laser: its line (nm), its filter cap (max_filter_pct, 0-100) and its
+    power at the sample at 100 % (power_mw > 0)."""
+    out = []
+    for k, v in (prof.get("lasers") or {}).items():
+        v = v if isinstance(v, dict) else {}
+        nm, cap, mw = _num(v.get("nm")), _num(v.get("max_filter_pct")), _num(v.get("power_mw"))
+        if nm is None or nm <= 0:
+            out.append(f"lasers.{k}.nm")
+        if cap is None or not 0 < cap <= 100:
+            out.append(f"lasers.{k}.max_filter_pct (0-100)")
+        if mw is None or mw <= 0:
+            out.append(f"lasers.{k}.power_mw (at the sample at 100 %, measured)")
+    if not prof.get("lasers"):
+        out.append("lasers")
+    return out
+
+
+def review_gate(prof: dict) -> str | None:
+    """Why the laser may not fire on the instrument with this profile, or None. It may only with a profile a person
+    reviewed (`ls6t profile import <profile.json>`) that still has every laser's line, cap and power."""
+    if not prof.get("reviewed"):
+        what = "automatic (from the bridge's inventory)" if prof.get("auto") else "not reviewed"
+        return f"the profile is {what}: the laser fires only with a reviewed profile: " + REVIEW_STEPS
+    missing = laser_problems(prof)
+    if missing:
+        return ("the reviewed profile lacks " + ", ".join(missing) + ": fill them in (ls6t profile set, or edit "
+                "profile.json and ls6t profile import it)")
+    return None
+
+
 def import_reviewed(path: Path) -> tuple[dict, list[str]]:
-    """A profile a person reviewed and edited (profile.proposed.json from `instrument discover`, or a copy of
-    profile.json): checked and returned ready to save. Refused (ValueError) when it is not a profile or when a
-    laser lacks its line (nm) or its cap (max_filter_pct): the caps are what a person decides."""
+    """A profile a person reviewed and edited (profile.proposed.json from `instrument discover`, profile.json
+    itself, or a copy): checked and returned ready to save, marked reviewed. Refused (ValueError) when it is not a
+    profile or when a laser lacks its line (nm), its cap (max_filter_pct) or its power (power_mw): what a person
+    decides or measures."""
     try:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         raise ValueError(f"{path}: not a readable JSON profile ({exc})") from None
     if not isinstance(data, dict) or not isinstance(data.get("lasers"), dict) or not data["lasers"]:
         raise ValueError(f"{path}: no 'lasers': not an ls6t profile")
-    missing, notes = [], []
-    for k, v in data["lasers"].items():
-        v = v if isinstance(v, dict) else {}
-        nm, cap = _num(v.get("nm")), _num(v.get("max_filter_pct"))
-        if nm is None or nm <= 0:
-            missing.append(f"lasers.{k}.nm")
-        if cap is None or not 0 < cap <= 100:
-            missing.append(f"lasers.{k}.max_filter_pct (0-100)")
-        if v.get("power_mw") in (None, ""):
-            notes.append(f"lasers.{k}.power_mw not set (only shown in results; set it when known)")
+    missing = laser_problems(data)
     if missing:
         raise ValueError(f"{path}: fill in before importing: " + ", ".join(missing))
+    notes = []
+    if not (data.get("motors") or {}).get("laser_shutter"):
+        notes.append("motors.laser_shutter not set: laser_on and snapshots with the laser stay off (set it once the "
+                     "maintainer confirmed which motor is the laser shutter)")
     for k in ("auto", "measured", "path"):
         data.pop(k, None)
     data["source"] = f"reviewed {Path(path).name} {time.strftime('%Y-%m-%d %H:%M')}"
-    notes.insert(0, "lasers and caps: " + ", ".join(f"{float(v['nm']):g} nm at most {float(v['max_filter_pct']):g} %"
-                                                     for v in data["lasers"].values()))
+    data["reviewed"] = {"time": time.strftime("%Y-%m-%d %H:%M:%S"), "from": str(path)}
+    notes.insert(0, "lasers: " + ", ".join(f"{float(v['nm']):g} nm, at most {float(v['max_filter_pct']):g} %, "
+                                           f"{float(v['power_mw']):g} mW at 100 %" for v in data["lasers"].values()))
     return data, notes
 
 
@@ -332,6 +368,7 @@ def import_discovery(text: str, base: dict | None = None) -> tuple[dict, list[st
     prof.pop("auto", None)
     prof.pop("measured", None)
     prof.pop("path", None)
+    prof.pop("reviewed", None)          # rebuilt from a dump: a person reviews it again
     notes: list[str] = []
     prof["source"] = f"discovery {d.get('time', '')} (LabSpec {d.get('labspec_version', '?')})".strip()
     if d.get("system"):

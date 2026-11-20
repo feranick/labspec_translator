@@ -1,5 +1,5 @@
 """api.py — the functions behind the command line and the MCP server (JSON in, JSON out).
-Version: 2026.11.20.22
+Version: 2026.11.20.23
 """
 from __future__ import annotations
 
@@ -56,14 +56,19 @@ def tool_status() -> dict:
     prof = P.load()
     out["profile"] = {"path": prof.get("path"), "measured": prof.get("measured"), "source": prof.get("source")}
     if prof.get("auto"):
-        out["profile"]["automatic"] = {"note": f"made from the bridge's inventory without a person: every laser is "
-                                               f"capped at {prof['auto'].get('max_filter_pct')} % and snapshots with "
-                                               "the laser are off until a person reviews it",
+        out["profile"]["automatic"] = {"note": "made from the bridge's inventory without a person: on the "
+                                               "instrument the laser does not fire (studies, laser_on, snapshots "
+                                               "with the laser) until a person reviews it; set-up and stage moves "
+                                               "work",
                                        "review": prof["auto"].get("review"), "notes": prof["auto"].get("notes")}
+    gate = P.review_gate(prof) if prof.get("measured") else None
+    out["profile"]["reviewed"] = gate is None and bool(prof.get("measured"))
+    if gate and not prof.get("auto"):
+        out["profile"]["review_needed"] = gate
     d = P.drift(prof)
     if d:
-        out["profile"]["drift"] = d + ["the profile was reviewed by a person: they import the new inventory "
-                                       f"(ls6t profile import \"{P.latest_dump()}\") if it is right"]
+        out["profile"]["drift"] = d + ["the profile is a person's: if the new inventory is right, they run ls6t "
+                                       "profile propose, check profile.proposed.json and ls6t profile import it"]
     lock = runner.read_json(runner.lock_path(), None)
     out["instrument_busy"] = lock.get("request") if lock else None
     return out
@@ -331,15 +336,11 @@ def _instrument(action, camera, setup, seconds) -> dict:
                 return _discover_failed(str(exc))
             if not r["ok"]:
                 return _discover_failed(r.get("error"))
-            prof, notes = P.import_discovery(P.read_text(dump))
-            prop = config.profile_path().with_name("profile.proposed.json")
-            P.save(prof, prop)
+            out = profile_propose(dump)
             prog = discovery_progress()
             if prog["skip"]:
-                notes.append("skipped (they stopped LabSpec before): " + ", ".join(prog["skip"]))
-            return {"ok": True, "dump": str(dump), "proposed_profile": str(prop), "notes": notes,
-                    "next": "a person reviews the proposal (lasers' power_mw and max_filter_pct, limits), edits "
-                            f"it, then runs: ls6t profile import \"{prop}\""}
+                out["notes"].append("skipped (they stopped LabSpec before): " + ", ".join(prog["skip"]))
+            return {**out, "dump": str(dump)}
         if action == "resume":
             return b.call("resume", timeout_s=600)
         if action == "last_error":
@@ -359,7 +360,9 @@ def _instrument(action, camera, setup, seconds) -> dict:
             num, err = P.camera_number(prof, camera)
             if err:
                 return {"ok": False, "error": err}
-            r = b.call("camera", timeout_s=30, action=action[7:], **({"camera": num} if num is not None else {}))
+            r = b.call("camera", timeout_s=30, action=action[7:],
+                       stop_video=int(bool(prof.get("video", {}).get("stop_from_script"))),
+                       **({"camera": num} if num is not None else {}))
             names = {int(v): k for k, v in (prof.get("video", {}).get("cameras") or {}).items()}
             try:
                 r["camera_name"] = names.get(int(float(r.get("camera"))))
@@ -370,6 +373,24 @@ def _instrument(action, camera, setup, seconds) -> dict:
         return {"ok": False, "error": str(exc)}
     raise ValueError(f"action {action!r}: status, set, laser_on, laser_off, camera_on, camera_off, calibration, "
                      "autocal_info, autocal_run, discover, resume or last_error")
+
+
+def profile_propose(dump=None) -> dict:
+    """profile.proposed.json from a discovery dump (default: the bridge's inventory, discovery_latest.txt), keeping the
+    current profile's limits and per-laser caps and power. A person edits it and imports it (P.REVIEW_STEPS); the
+    profile in use does not change."""
+    src = Path(dump) if dump else P.latest_dump()
+    if src is None or not Path(src).is_file():
+        return {"ok": False, "error": "no discovery dump: start ls6t_bridge.vbs in LabSpec once (it writes "
+                                      f"{config.home() / 'discovery_latest.txt'}), or give the dump's path"}
+    prof, notes = P.import_discovery(P.read_text(src))
+    prop = config.profile_path().with_name("profile.proposed.json")
+    P.save(prof, prop)
+    missing = P.laser_problems(prof)
+    return {"ok": True, "from": str(src), "proposed_profile": str(prop), "notes": notes,
+            "to_fill_in": missing,
+            "next": f"with the maintainer, edit {prop} (" + (", ".join(missing) + "; " if missing else "") +
+                    f"the limits; motors.laser_shutter once confirmed), then: ls6t profile import \"{prop}\""}
 
 
 def _discover_failed(error) -> dict:
@@ -478,6 +499,9 @@ def laser(on: bool, seconds: float | None = None) -> dict:
     try:
         if not on:
             return b.call("laser", timeout_s=30, state="off")
+        gate = P.review_gate(prof) if config.mode() == "labspec" else None
+        if gate:
+            return {"ok": False, "error": gate}
         if not shutter:
             return {"ok": False, "error": "no laser shutter motor in the profile: a person confirms it with the "
                                           "maintainer and sets it (ls6t profile set motors.laser_shutter "
@@ -746,6 +770,9 @@ def snapshot(with_laser: bool = False, extended: bool = False) -> dict:
     v = prof.get("video", {})
     if extended and with_laser:
         return {"ok": False, "error": "an extended video takes no laser"}
+    gate = P.review_gate(prof) if with_laser and config.mode() == "labspec" else None
+    if gate:
+        return {"ok": False, "error": gate}
     if extended and not v.get("allow_extended"):
         return {"ok": False, "error": "extended video is off in the profile (video.allow_extended): a person turns it "
                                       "on once it was tried at the instrument (TESTING.md T5b.6)"}
@@ -785,7 +812,8 @@ def snapshot(with_laser: bool = False, extended: bool = False) -> dict:
         settle = float(v.get("settle_s", 1.5))
         r = b.call("video", timeout_s=60 + settle + laser_s + (float(v.get("extended_max_s", 600)) if extended else 0),
                    out=str(base), settle_s=settle, laser_s=laser_s, extended=int(extended),
-                   formats=",".join(v.get("formats", [])), camera=v.get("camera"), **runner.motor_args(prof))
+                   formats=",".join(v.get("formats", [])), camera=v.get("camera"),
+                   stop_video=int(bool(v.get("stop_from_script"))), **runner.motor_args(prof))
     except BridgeError as exc:
         return {"ok": False, "error": str(exc)}
     if not r["ok"]:
@@ -889,7 +917,7 @@ def profile_set(key: str, value_json: str) -> dict:
     P.set_key(prof, key, value)
     was_auto = bool(prof.pop("auto", None))
     if was_auto:
-        prof["source"] = str(prof.get("source", "")).replace("automatic", "reviewed by a person; first automatic", 1)
+        prof["source"] = str(prof.get("source", "")).replace("automatic", "changed by a person; first automatic", 1)
     out = {"ok": True, "key": key, "old": old, "new": value, "profile": str(P.save(prof))}
     if was_auto:
         out["note"] = "the profile is now a person's: newer inventories from the bridge no longer replace it"

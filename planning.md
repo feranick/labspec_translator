@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.20.22)
+## Architecture (version 2026.11.20.23)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -327,6 +327,18 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   is gone (EnumWindows, Windows only); api.instrument logs actions to instrument_log.jsonl, jobs shows them; discover
   failures report stopped_in; profile import takes a reviewed JSON (import_reviewed: nm and max_filter_pct required);
   format refuses the built-in profile in labspec mode; diagnose flags placeholders. 108 tests.
+- 2026-11-20, 2026.11.20.23: Nicola's review of .22: power_mw required at import too; the laser may fire on the
+  instrument only with a reviewed profile (also laser_on and snapshots with the laser, keeping the unconfirmed
+  LaserShutter out of play); the About box stays unexplained (ls6t never calls AboutBox; possibly an early symptom of
+  the same corruption): watch for it on .22+; both Windows accounts to run the same version (the installer is per
+  user). profile.laser_problems / review_gate; import_reviewed sets 'reviewed' {time, from}; import_discovery drops
+  it; format.validate_study refuses laser-firing kinds (all but move, background, white-light cutoff; or
+  video.with_laser) in labspec mode without review; api.laser / snapshot(with_laser) likewise; tool_status
+  profile.reviewed / review_needed. One review route (P.REVIEW_STEPS, used by the automatic profile's hint,
+  review_gate, drift, discovery's message box and the docs): `ls6t profile propose` (api.profile_propose: the dump
+  or discovery_latest.txt -> profile.proposed.json, current limits kept; also what instrument discover does), edit,
+  `ls6t profile import` it. Editing profile.json in place is not the route: an automatic profile.json is rebuilt at
+  the next bridge start. 109 tests.
 
 ## To do next
 

@@ -1,6 +1,6 @@
 # labspec-translator (ls6t): what it can do
 
-This is the complete list of functions in version 2026.11.20.22. It covers:
+This is the complete list of functions in version 2026.11.20.23. It covers:
 
 - what a study can ask for;
 - the tools an LLM sees;
@@ -97,7 +97,7 @@ trusting numbers, the safety rules and the polling etiquette.
 | `ls6t bridge install [--dest DIR]` | Write the LabSpec scripts for this PC: the bridge, the discovery, and the optional script-motor logger |
 | `ls6t bridge call VERB key=value ... [--laser]` | One bridge command, for the maintainer's tests |
 | `ls6t profile ini [FILE]` | What LabSpec's own configuration (`OLConfig.ini`) says: the instrument, cameras (names, numbers, models), objectives (NA, field of view), every motor and its positions. Profiles made from discovery take the camera names and objectives from it |
-| `ls6t profile show / default / import DUMP / set KEY VALUE` | The machine profile: view, create, import the discovery, change one value. Until a person does, the profile is built automatically from the inventory the bridge records when it starts (lasers capped at 10 %, no laser shutter) |
+| `ls6t profile show / default / propose / import FILE / set KEY VALUE` | The machine profile: view, create, propose one from the bridge's inventory (`profile.proposed.json`), import the edited proposal (checked, marked reviewed), change one value. Until a person does, the profile is built automatically from the inventory the bridge records when it starts (lasers capped at 10 %, no laser shutter). On the instrument the laser fires only with a reviewed profile (every laser's nm, max_filter_pct and power_mw) |
 | `ls6t alignment status` / `record REQUEST [--study] [--attempt]` | Alignment state; record a baseline after AutoAlignment (person only) |
 | `ls6t spot status / forget [--objective --laser]` | The beam's offsets |
 | `ls6t references show / clear correction [LASER@GRATING] / clear background NAME / clear spot` | Everything ls6t remembers between sessions |
@@ -233,7 +233,7 @@ profile. The shutter mode is restored on every path.
 
 | What | Where | Written by | Used for |
 |---|---|---|---|
-| Machine profile: instrument, limits, timing, video and alignment settings | `LS6T_HOME\profile.json` | a person (`profile import/set`) | everything |
+| Machine profile: instrument, limits, timing, video and alignment settings | `LS6T_HOME\profile.json` | a person (`profile propose`, then `profile import`; `profile set`) | everything |
 | Alignment baselines and settings per laser | in the profile | a person (`alignment record`) | `alignment` checks |
 | Alignment checks | `alignment_log.jsonl` | every `alignment` study | readiness warnings, drift |
 | Beam offsets per objective and laser | `spot.json` | `spot` studies, lit snapshots | the marker, `move.to_um` |

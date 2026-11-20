@@ -13,7 +13,8 @@ Sub DiscoverMain()
     outPath = LS6T_HOME_DIR & "\discovery_" & stamp & ".txt"
     DiscoverTo outPath, True
     LabSpec.Message "ls6t discovery written to:" & vbCrLf & outPath & vbCrLf & vbCrLf & _
-                    "On this PC, run:  ls6t profile import """ & outPath & """", LS_MB_OK
+                    "To make a profile from it:  ls6t profile propose """ & outPath & """" & vbCrLf & _
+                    "then edit profile.proposed.json and run:  ls6t profile import profile.proposed.json", LS_MB_OK
 End Sub
 
 DiscoverMain
