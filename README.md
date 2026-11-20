@@ -16,7 +16,7 @@ it runs **locally**: on the instrument PC, next to the Claude desktop app. It ha
 machines. Unlike the other translators, the backend has no Python API: LabSpec is automated with VBScript
 (*LabSpec 5/6 Automation*, HORIBA, 2018). That is why the bridge script exists.
 
-First instrument: **XploRA** (LabSpec 6, Windows 11). Version 2026.11.20.20.
+First instrument: **XploRA** (LabSpec 6, Windows 11). Version 2026.11.20.21.
 
 **Scope of version 1**
 
@@ -664,6 +664,7 @@ frames, LabSpec's image files, `snapshot.json`); a study's frames go to its `vid
 | Version | Changes |
 |---|---|
 | 2026.11.20.20 | Instrument checks (ideas from HORIBA's service scripts, code of ls6t's own). Kind `filters`: each filter's real transmission from the Si line through every filter within the caps (flags those off nominal; proposes the profile change for a person). Kind `cutoff`: the edge filter's 10/50/90 % points from a spectrum across the laser line (white light, laser off); later ranges below it are warned. Focus scans report the depth resolution (`axial_fwhm_um`), calibrations the spectral resolution (the line's width, against its first measurement and the profile's `performance.resolution_cm1`). All remembered in `performance.json` (`references` shows them). Polarisers: `setup.laser_pol` / `raman_pol` (and `instrument set`), from discovery's LaserPol/RamanPol. |
+| 2026.11.20.21 | TESTING.md brought up to date: the installer and any LLM app, the automatic profile, `instrument set` for set-up, polariser and camera steps, answers already known marked on the open questions, the beam offset no longer copied by hand, steps in order. |
 | 2026.11.20.19 | Calibration: ls6t checks, LabSpec's own AutoCalibration corrects. `calibration.adjust: "auto"`: when the check fails and the profile enables it (`calibration.autocal`, after TESTING T4.9), the bridge runs LabSpec's AutoCalibration script (new verb `run_vbs`, only for a .vbs in LabSpec's folder, after the operator's Yes) and measures again; otherwise the operator is guided as with `labspec`. `instrument autocal_info` finds the script and says from its text whether it can run inside the bridge and whether it asks the operator; `instrument autocal_run` runs it once and lists the calibration values it changed. The CI prints which benchmark failed and keeps `bench.json`. |
 | 2026.11.20.18 | From LabSpec's own service scripts (read on the instrument PC, not copied): LabSpec's spectrometer calibration per grating is reachable with `OperVar` (`ACT_INSTRUMENT[AF / BF / Diode / Focal / Angle / Gamma / SpMin / SpMax][grating]`). New bridge verb `calib_params` (read only), `instrument calibration`, and `calibration` studies with `adjust: labspec` record the parameters before and after the operator's correction and which changed. Motors with more than ten positions are read with LabSpec 6.7's codes (100+i, 200+i). TESTING Q27 (updated), Q43. |
 | 2026.11.20.17 | LabSpec's files found where they are: `Parameters\ACQUISITION\OLConfig.ini` and `Parameters\COMMON\OLSetup.ini` in LabSpec's folder. From `OLSetup.ini`, ls6t records LabSpec's OneClick presets (per laser: grating, range) and the AutoCalibration script LabSpec runs (`UniversalAutoCalibrationv3.vbs`), leaving users and licences out. TESTING Q42. |

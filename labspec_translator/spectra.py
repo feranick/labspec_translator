@@ -1,5 +1,5 @@
 """spectra.py — reading the bridge's spectrum files, and the analysis done here rather than in LabSpec.
-Version: 2026.11.20.20
+Version: 2026.11.20.21
 
 Raman shift from wavelength with the laser line read back from the instrument; an iterative polynomial baseline;
 noise from second differences; spikes; peak fits (pseudo-Voigt, Lorentz, Gauss with a local linear background);

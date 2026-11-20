@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.20.20)
+## Architecture (version 2026.11.20.21)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -306,6 +306,13 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   resolution_tol and performance.resolution_cm1 {grating}. Polarisers: profile motors.laser_pol/raman_pol and
   polarizers{} from discovery (LaserPol/RamanPol), setup keys (match_label), plan.setup_steps, instrument set, status.
   Sim: edge filter (45 cm-1, sim_edge_cm1), sim_filter_actual, LaserPol/RamanPol motors. 106 tests, 14/14 bench.
+- 2026-11-20, 2026.11.20.21: Nicola: TESTING.md audited against the code. Stale: T0.2 (14 benchmarks), installer
+  and any LLM app (not only Claude), T1.1 (GetValueSimplePart ramp probe), T1.2 (the automatic profile), T3 (via
+  `instrument set`; no x50 here), T4.1 placeholder path; Q1, Q5, Q13, Q15, Q27, Q34, Q35, Q37, Q40, Q41, Q43 marked
+  with what the 2026-11-20 files already answered. Order fixed (T4.8 before T4.9-4.11, T5b.6 before T5b.7, T6.4
+  before T6.5-6.7; Q table numeric; results table complete). Redundant: T5b.4's hand copy of the offset (spot.json
+  keeps it per objective and laser) reduced to a repeatability check; T1.3 only after a LabSpec update. New: T3.10
+  polarisers, T3.11 cameras, T8.6 direct requests. 73 steps, 43 questions. 106 tests.
 
 ## To do next
 

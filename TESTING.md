@@ -1,7 +1,7 @@
 # Testing labspec-translator on the instrument
 
-This is the plan for the first sessions on the real instrument (XploRA, LabSpec 6, Windows 11). It is carried out by
-two people:
+This is the plan for the first sessions on the real instrument (XploRA Plus, LabSpec 6, Windows 11). It is carried
+out by two people:
 
 - the **maintainer**: the person responsible for the instrument, who knows its hardware, its laser safety rules and
   its normal use;
@@ -9,10 +9,16 @@ two people:
 
 Everything ls6t does without the instrument is already tested: `pytest` covers format, protocol, analysis, full runs,
 stops and cancel on the simulator, and `ls6t bench` gives known answers. What remains can only be learnt on the real
-LabSpec and hardware. The plan goes from no laser and no motion to Claude driving a full map, in stages. Each stage
-starts only when the previous one passed.
+LabSpec and hardware. The plan goes from no laser and no motion to an LLM app driving a full map, in stages. Each
+stage starts only when the previous one passed.
 
-Version under test: 2026.11.20.20 (bridge protocol 1).
+Version under test: 2026.11.20.21 (bridge protocol 1).
+
+**Already known** (2026-11-20, from the instrument's discovery dump, its `NFActiveX.ocx`, `OLConfig.ini`,
+`OLSetup.ini` and LabSpec 6.7.1's service scripts): the motors and their positions (lasers 532, 637.75, 785.04 nm;
+gratings 600/1200/1800/2400; filters 100–0.1 %; objectives x100_VIS, x10_VIS, x5_VIS, no x50; hole, slit,
+LaserShutter Off/On, laser and Raman polarisers), the cameras (Top = 0, Internal = 1), the methods beyond the 2018
+manual, and where LabSpec keeps its calibration. The open questions below say what is answered and what remains.
 
 ---
 
@@ -24,10 +30,11 @@ Version under test: 2026.11.20.20 (bridge protocol 1).
    Stages marked **LASER** fire the laser.
 3. **Start gentle**: the lowest useful filter (1 % or 10 %), short exposures, silicon first. Raise power only with the
    maintainer's agreement.
-4. **Stage moves**: start with the lowest-magnification objective (x10, longest working distance) and moves of a few
-   µm. Before any Z move, the maintainer checks the clearance between objective and sample.
+4. **Stage moves**: start with the lowest-magnification objective (x5 or x10, longest working distance) and moves of a
+   few µm. Before any Z move, and before turning the turret, the maintainer checks the clearance between objective and
+   sample.
 5. **How to stop**, in order of preference:
-   - close the ls6t window in LabSpec (stops the current command, halts the bridge);
+   - close the ls6t window in LabSpec (stops the current command, halts the bridge, closes the laser shutter);
    - cancel the acquisition in LabSpec;
    - LabSpec's script stop button (ends the bridge);
    - the instrument's own stop or emergency controls.
@@ -43,68 +50,71 @@ Version under test: 2026.11.20.20 (bridge protocol 1).
 
 ## What to prepare
 
-- The instrument PC with ls6t installed as in [INSTALL.md](INSTALL.md) (steps 1–6), and the Claude desktop
-  app connected (step 8).
+- The instrument PC with ls6t installed with `ls6t-setup-<version>.exe` ([INSTALL.md](INSTALL.md), *The installer*)
+  and an LLM app connected (`ls6t connect`; `ls6t connect check` lists its tools).
 - **Samples**:
   - a silicon wafer piece (calibration: 520.7 cm⁻¹);
   - polystyrene (a bead or film; reference lines 620.9, 1001.4, 1031.8, 1155.3, 1583.1, 1602.3, 2852.4, 2904.5,
     3054.3 cm⁻¹, ASTM E1840);
   - a sample with lateral contrast for maps, ideally one the maintainer already knows: graphene on SiO₂/Si, a
     patterned Si/SiO₂ chip, or a polymer bead on Si;
-  - a transparent film on silicon for a depth profile (optional).
+  - a transparent film on silicon for a depth profile (optional);
+  - the white light (for backgrounds and the edge filter's cut-off), and a matt white sample if the maintainer has one.
 - The maintainer's usual settings for these samples (laser, grating, filter, objective, exposure). They are the
   reference for what ls6t should reproduce.
-- About **4.5 hours** for stages T0–T6 (including T5b–T5d; T5c needs the maintainer to run AutoAlignment), and 1 hour for T7–T9 (they can be another day).
+- About **5.5 hours** for stages T0–T6 (T5c needs the maintainer to run AutoAlignment), and 1 hour for T7–T9 (they can
+  be another day).
 
 ## Open questions this plan answers
 
-The vendor manual (2018) leaves these open. Each is answered by the test listed.
+The vendor manual (2018) leaves these open. Each is answered by the test listed; **Known** gives what the 2026-11-20
+files already showed.
 
 | ID | Question | Test |
 |---|---|---|
-| Q1 | Can LabSpec scripts use `Scripting.FileSystemObject` and `Scripting.Dictionary` (file access)? Without it the bridge cannot work as designed. | T1.1 |
-| Q2 | Does the non-blocking window (`Message(..., 8)`) open, report -1 while open and 0 once closed? Does `MessageEx("", 14)` see LabSpec's script stop button? | T1.1, T2.3, T2.4 |
+| Q1 | Can LabSpec scripts use `Scripting.FileSystemObject` and `Scripting.Dictionary` (file access)? Without it the bridge cannot work as designed. **Known: yes** (the bridge wrote the discovery dump). | T1.1 |
+| Q2 | Does the non-blocking window (`Message(..., 8)`) open, report -1 while open and 0 once closed? Does `MessageEx("", 14)` see LabSpec's script stop button? (The bridge's discovery gave `selftest.stop_button` empty, not 0: check what it returns when pressed.) | T1.1, T2.3, T2.4 |
 | Q3 | Does LabSpec stay usable (live video, menus) while the bridge loops? | T2.2 |
 | Q4 | Do `MoveMotor(..., +10)` and `GetMotorStatus` behave as assumed? Does `MoveXY` return at once or block until the move ends? | T3 |
-| Q5 | What are the motor names and position labels of the filter wheel and the objective turret? Is the turret manual (LabSpec prompts the operator)? | T1.2, T3.2 |
+| Q5 | What are the motor names and position labels of the filter wheel and the objective turret? Is the turret manual (LabSpec prompts the operator)? **Known: names and labels** (Filter 100 %–0.1 %; Objective x100_VIS, x10_VIS, x5_VIS); motorised or manual is still to see. | T3.2 |
 | Q6 | In which unit does `GetValue(id, "XYData")` give x (nm or cm⁻¹)? How is `AcqInfo` laid out (a header row)? Where is the exposure that auto-exposure chose? | T4.1, T4.3 |
 | Q7 | Does `GetAcqID` report -2 after a cancel, and does that state persist into the next acquisition? | T4.5 |
 | Q8 | Does autofocus leave a spectrum behind (a data ID), and does it keep the new focus or restore the old one? | T5 |
-| Q9 | Does `Save(id, "...l6s", "")` write a file LabSpec reopens? | T4.1, T6.1 |
+| Q9 | Does `Save(id, "...l6s", "")` write a file LabSpec reopens? | T4.2, T6.1 |
 | Q10 | Do the live views (`Map`, `Profile`) appear and fill in? Are the axis units right ("mkm")? What do Map's From/To limits do? | T6.1, T7.1 |
 | Q11 | How does LabSpec's memory behave with large maps built point by point? | T6.4 |
-| Q12 | Does a request survive closing the Claude app (the runner process breaking away from the app's job)? | T9.1 |
-| Q13 | Video: does `Video(2)` return the live frame's id from a script, and does `Exec(id, 3)` clone it? Which image formats does `Save` write for a frame? | T1.1, T5b.1 |
+| Q12 | Does a request survive closing the LLM app (the runner process breaking away from the app's job)? | T9.1 |
+| Q13 | Video: does `Video(2)` return the live frame's id from a script, and does `Exec(id, 3)` clone it? Which image formats does `Save` write for a frame? **Known: the active camera is read** (`video.active_camera`); with the video off, `id_now` was 0. | T5b.1 |
 | Q14 | Video pixels: which axis varies fastest, how are colours packed (COLORREF 0x00BBGGRR or RGB), and are the axes stage coordinates in µm? | T5b.2 |
-| Q15 | Which motor is the laser shutter, and do `PutValue(0, "ShutterMode", 1)` plus moving it to 1 / 0 open and close it? | T1.2, T5b.3 |
-| Q16 | How far is the beam from LabSpec's laser position, per objective (`video.laser_offset_um`)? | T5b.4 |
+| Q15 | Is `LaserShutter` the laser shutter, and do `PutValue(0, "ShutterMode", 1)` (manual) plus moving it On / Off open and close it? **Known: a motor `LaserShutter` with Off/On**; that it is the laser's is for the maintainer to confirm. | T1.2, T5b.3 |
+| Q16 | How far is the beam from LabSpec's laser position, per objective, and how repeatable is the measurement? | T5b.4, T5e |
 | Q17 | Does this XploRA have HORIBA's AutoAlignment module (Maintenance tab)? Can its *Current status* be read from outside (Windows UI automation, read-only)? | T5c.1 |
 | Q18 | Does `Message(text, 1)` (OK/Cancel) return 0 for OK and wait while the operator runs AutoAlignment in the same LabSpec? | T5c.2 |
-| Q19 | Does LabSpec's dynamic `Dialog` stay open, update and answer Done/Abort while short acquisitions run? How long is one reading (`period_s`) at 0.2 s exposure? | T5d.1 |
+| Q19 | Does LabSpec's dynamic `Dialog` stay open, update and answer Done/Abort while short acquisitions run? How long is one reading (`period_s`) at 0.2 s exposure? (HORIBA's own scripts use `Dialog` throughout.) | T5d.1 |
+| Q20 | Is the guided loop fast enough for a person turning a knob (focus, power): does STOP come before the operator has gone too far? | T5d.2–T5d.3 |
+| Q21 | Does the focus scan find the same focus as the maintainer (and as LabSpec's autofocus) on Si and on a real sample? Is 1 µm a good step at x100, and what at x10 and x5? What depth resolution (`axial_fwhm_um`) does it report? | T6.5 |
+| Q22 | Does the stage return home and Z to the focus at the end of a request, and does a `move` with `stay` change the next request's start? | T6.6 |
 | Q23 | Does the live video keep updating during a Raman acquisition (so a frame half-way through shows the beam), on this XploRA? | T5e.1 |
 | Q24 | Does the Raman spot scan over a small feature agree with the beam seen on the video (T5b.3 / T5e.1)? Which features work (dust on Si, a gold dot, a pit)? | T5e.2 |
+| Q25 | How much does the beam drift from LabSpec's marker over a day, between objectives, after AutoAlignment? | T5e.3 |
 | Q26 | Which Z direction focuses deeper into the sample (`stage.z_into_sample`)? Does a depth profile through a film of known thickness give it back with the refractive index? | T6.3 |
-| Q27 | What are LabSpec's spectral calibration settings on this system (Zero, Koeff, laser wavelength...) and where are they? Does correcting them as ls6t says bring the line back? HORIBA's own service scripts read and write them with `OperVar` under `ACT_INSTRUMENT[AF / BF / Diode / Focal / Angle / Gamma / SpMin / SpMax][grating index]`; `instrument calibration` reads them, and a `calibration` study with `adjust: labspec` records them before and after the operator's correction (`calibration.labspec_parameters.changed`): that shows which one the dialog's zero and coefficient are. | T4.7 |
-| Q43 | LabSpec 6.7's own constants read a motor's positions with 100+i (value) and 200+i (name); the 2018 manual's 10+i / 20+i still worked on this XploRA. ls6t uses 100+/200+ only for motors with more than ten positions: check the labels of such a motor, if any. | T1.1 |
+| Q27 | Which of LabSpec's calibration values do *Maintenance > Instrument calibration*'s zero and coefficient change? **Known: the values** (`OperVar ACT_INSTRUMENT[AF / BF / Diode / Focal / Angle / Gamma / SpMin / SpMax][grating]`, read by `instrument calibration`); a `calibration` with `adjust: labspec` records which change (`calibration.labspec_parameters.changed`). | T4.7 |
 | Q28 | Can the white light stay on during acquisitions, and does a background with the laser off (shutter, or *Laser Off*) remove it cleanly? | T4.8 |
 | Q29 | Native maps: does `SetMappingParams` take absolute stage positions or offsets (`mapping.positions`)? Does the map have the asked points? | T6.7 |
 | Q30 | Native maps: does `Acq(ACQ_SPECTRAL_IMAGE, -1, ...)` use the interface's exposure and accumulations set by `PutValue`, or does it need them in `Acq` (`mapping.acq_time`)? Which spectral window does it use? | T6.7 |
 | Q31 | Native maps: does `GetAcqID` return the map when it ends, and does `ACQ_CANCEL` stop it? | T6.7 |
 | Q32 | Native maps: in which order are the values in `GetValue(map, "Data")` (`mapping.data_order`), and how long does writing out a 50 × 50 map take? Does `Save(map, "...txt", "txt")` write LabSpec's text export? | T6.7 |
-| Q34 | Which commands does the installed LabSpec's ActiveX offer beyond the 2018 manual? **Partly answered (2026-11-20)** from the instrument's `NFActiveX.ocx`: 15 methods not in the manual (planning.md), none named for alignment, calibration, lamp or map progress; no events. To ask HORIBA: what `GUI`, `PutGUI`, `PutArrGUI`, `OperVar`, `GetConfigParam`/`SetConfigParam`, `LoadConfig`/`SaveConfig` and `GetLastErrorInfo` do, and whether the VBS `LabSpec` object has the same methods. ls6t now uses `GetLastErrorInfo`, `SaveConfig`/`LoadConfig` and `GetValueSimplePart`, and probes `GetConfigParam` (Q35–Q38) | T1.3 |
 | Q33 | Is SWIFT available on this XploRA (`GetValue SWIFT`), and how much faster is it? Time per point native vs point by point (`mapping.native_point_s`) | T6.7 |
-| Q35 | `GetValueSimplePart(id, "Data", 0, VT_R4, start, size)` (type library only): does it return the map's values in the same order as `GetValue`, and is writing a map out in chunks faster (`mapping.export_chunk`)? | T1.1, T6.7 |
-| Q36 | `SaveConfig(ini, 0)` / `LoadConfig(ini, 0)` (type library only): what does the file hold (laser, grating, filter, hole, slit, acquisition settings, stage?), does `ShowDialog` 0 run without a dialog, and does loading move motors? Is it safe to restore it after each request (`session.restore_config`)? | T1.4 |
-| Q37 | `GetConfigParam` (type library only): what are the parameters it lists (the script's own configuration in *Processing > Scripts*?) and their types? `SetConfigParam` is not called until this is known. | T1.1 |
+| Q34 | Which commands does the installed LabSpec offer beyond the 2018 manual? **Known:** 15 methods in the `NFActiveX.ocx` type library (planning.md); HORIBA's scripts also use `Dialog`, `OperVar`, `GUI`, `SetSingleScriptParam`, `SetDetectorZone`, `SetAutoExposure`, `MoveXY`, `MapEx`, `Send`. Re-run `ls6t-typelib` after a LabSpec update. | T1.3 |
+| Q35 | `GetValueSimplePart(id, "Data", 0, VT_R4, start, size)`: in which units are start and size? **Known: not values** (size 8 gave 2 values: bytes?), so native maps are read whole (`mapping.export_chunk` 0). Discovery's ramp probe now records the values returned. | T1.1 |
+| Q36 | `SaveConfig(ini, 0)` / `LoadConfig(ini, 0)`: what does the file hold (laser, grating, filter, hole, slit, acquisition settings, stage?), does `ShowDialog` 0 run without a dialog, and does loading move motors? Is it safe to restore it after each request (`session.restore_config`)? | T1.4 |
+| Q37 | `GetConfigParam`: what parameters does it list? **Known: it works, and lists none** for the bridge (it is the script's own configuration). `SetConfigParam` is not used. | T1.1 |
 | Q38 | Script-controlled motors: when does LabSpec run the motor script, and what do `GetMotorAction`'s Action and Position hold for a move to a value, to a named position, and a stop? What does `SetMotorInfo`'s State mean? | T1.4 |
-| Q39 | Extended video (`Video(3)`): where is its area set, does the call return only when the image is complete, does it return the image's id, and where is the stage left? (`SetExtendedVideo`, which would set the area, is in the manual but not in this build.) | T5b.6 |
-| Q41 | LabSpec's `OLConfig.ini` (in its folder) keeps the hardware set-up under numeric keys. ls6t reads camera names, objectives' NA and (inferred) field of view from it. Per grating it also holds arrays that look like the spectrometer's calibration (about 198.8 for a focal length in mm, 12.2 for an angle in degrees, about 1.047e-5 for a coefficient, about 7.7–8 for an offset): which are LabSpec's *Zero* and *Koeff*? Copy the file before and after the adjustment in T4.7 and compare (`ls6t profile ini FILE`). Is the field of view right (a snapshot's `field_um`)? | T4.7, T5b.1 |
-| Q42 | LabSpec's `OLSetup.ini` (Parameters\COMMON) names an AutoCalibration script, `...\AutoCalibration\UniversalAutoCalibrationv3.vbs`. Is it in the installed LabSpec's folder? What LabSpec commands does it use to adjust the spectral zero and coefficient (perhaps the undocumented `GUI`/`OperVar`/`PutGUI`)? Send a copy to the ls6t maintainer: if it can be run from the bridge, `calibration` could adjust LabSpec's own zero instead of only guiding the operator (Q27). | T4.7 |
-| Q40 | `GetValueEx` is in the manual but not in this build's type library: confirm (`selftest.get_value_ex=0`). The bridge tries it after `GetValue` and for motor position names past index 9 (`CurrentPositionName:`), so nothing depends on it. | T1.1 |
-| Q25 | How much does the beam drift from LabSpec's marker over a day, between objectives, after AutoAlignment? | T5e.3 |
-| Q21 | Does the focus scan find the same focus as the maintainer (and as LabSpec's autofocus) on Si and on a real sample? Is 1 µm a good step at x100, and what at x50 and x10? | T6.5 |
-| Q22 | Does the stage return home and Z to the focus at the end of a request, and does a `move` with `stay` change the next request's start? | T6.6 |
-| Q20 | Is the guided loop fast enough for a person turning a knob (focus, power): does STOP come before the operator has gone too far? | T5d.2–T5d.3 |
+| Q39 | Extended video (`Video(3)`): where is its area set, does the call return only when the image is complete, does it return the image's id, and where is the stage left? | T5b.6 |
+| Q40 | `GetValueEx` is in the manual but not in this build. **Known: confirmed missing** (`selftest.get_value_ex=0`); nothing depends on it. | T1.1 |
+| Q41 | `OLConfig.ini` (`Parameters\ACQUISITION`): ls6t reads the camera names, the objectives' NA and their field of view (inferred) from it. Is the field of view right (a snapshot's `field_um`)? **Known:** cameras Top = 0 and Internal = 1, confirmed by switching in LabSpec. | T5b.1 |
+| Q42 | LabSpec's AutoCalibration (`OLSetup.ini` names `...\AutoCalibration\UniversalAutoCalibrationv3.vbs`, an older install's path): is the script on this PC, and can the bridge run it (`instrument autocal_info`)? | T4.9 |
+| Q43 | LabSpec 6.7's constants read a motor's positions with 100+i (value) and 200+i (name); the 2018 manual's 10+i / 20+i worked here for motors of up to ten positions. ls6t uses 100+/200+ beyond ten: check such a motor's labels, if any. | T1.1 |
 
 ---
 
@@ -114,17 +124,17 @@ For each test, record one line (in a copy of the table at the end, or in a noteb
 
 `ID | date and time | tester, maintainer | pass / fail / partial | what was seen | files`
 
-- **Files to keep**: the discovery dump, the request folders (`%USERPROFILE%\ls6t_runs\run_...`), and
+- **Files to keep**: the discovery dumps, the request folders (`%USERPROFILE%\ls6t_runs\run_...`), and
   `%USERPROFILE%\ls6t\bridge\heartbeat.txt` when something looks wrong.
 - **Screenshots** of LabSpec dialogs nobody expected.
-
-After the session, the tester adds a dated entry to `planning.md` (*State log*). It says what passed, the answers
-to Q1–Q40, and the measured times, and lists anything to change.
 
 **Or record from the command line:** `ls6t test record T4.1 pass --notes "Si line seen" --answers '{"Q6": "x in nm"}'`.
 Every record goes to `%USERPROFILE%\ls6t\testing\log.jsonl`, and `%USERPROFILE%\ls6t\testing\report.md` is
 this plan's results table filled in, with the answers to the open questions (`ls6t test report`; `ls6t test plan`
 shows what is done and what is next).
+
+After the session, the tester adds a dated entry to `planning.md` (*State log*). It says what passed, the answers to
+Q1–Q43, and the measured times, and lists anything to change.
 
 ---
 
@@ -133,7 +143,7 @@ shows what is done and what is next).
 The tests can also be run by talking to the LLM app (Claude, ChatGPT / Codex, Gemini CLI) instead of typing the
 commands. The LLM reads each test from this file, tells the maintainer what to do in LabSpec, checks what it can
 itself (the bridge's state, read-backs, spectra, snapshots), asks about what only a person can see, runs the
-single bridge commands, and records the result and the answers to the open questions in the same log and report.
+commands, and records the result and the answers to the open questions in the same log and report.
 
 1. Turn test mode on for the app (it is off by default; normal use never offers these commands):
 
@@ -143,12 +153,13 @@ single bridge commands, and records the result and the answers to the open quest
 
    Restart the app. A new tool, `hardware_test`, appears. `ls6t connect claude --no-test` turns it off again.
 2. Say, for example: *"We are testing ls6t on the instrument. Start with T0 and go in order."* or *"Let's do T3.4."*
-   Direct requests work too and are carried out at once: *"turn the camera on"*, *"filter to 1 %"*, *"grating
-   600"*, *"move the stage 10 µm in X"*, *"take a 1 s spectrum around 520 cm⁻¹"*, *"what is the state?"*.
+   Direct requests work too and are carried out at once: *"turn the internal camera on"*, *"filter to 1 %"*,
+   *"grating 600"*, *"move the stage 10 µm in X"*, *"take a 1 s spectrum around 520 cm⁻¹"*, *"what is the state?"*.
 3. For each test the LLM:
    - reads it (`hardware_test step`), and tells the maintainer what to prepare or do;
-   - runs the commands. `ls6t bridge call ...` in this plan becomes `hardware_test call`, and `ls6t instrument
-     snapshot` becomes the `snapshot` tool. Studies go through `validate_studies` / `run_studies`;
+   - runs the commands: `ls6t instrument ...` in this plan is the `instrument` tool, `ls6t bridge call ...` is
+     `hardware_test call`, `ls6t instrument snapshot` is the `snapshot` tool; studies go through `validate_studies` /
+     `run_studies`;
    - checks the pass criteria, asking the maintainer for what it cannot see (the video window, the stage moving);
    - records the result, the values and the answers (`hardware_test record`).
 
@@ -168,68 +179,57 @@ Turn test mode off when the tests are done.
 
 ## T0. Software on the instrument PC (no LabSpec needed)
 
-Install with `ls6t-setup-<version>.exe` (INSTALL.md), then use *Start > ls6t PowerShell*; or from source with the venv
-active. With the installer, T0.4 is already done (check the files are there).
+Use *Start > ls6t PowerShell* (installer), or a PowerShell with the venv active (from source).
 
 | Step | Command (PowerShell) | Pass |
 |---|---|---|
 | T0.1 | `ls6t status` | versions listed; `settings.LS6T_MODE` is `labspec`; `bridge.running` false |
-| T0.2 | `ls6t bench` | `"failed": []` (all six benchmarks pass on this PC) |
-| T0.3 | `pytest -q` | all tests pass |
-| T0.4 | `ls6t bridge install` | three scripts written to `%USERPROFILE%\ls6t\vbs` (bridge, discovery, the optional script-motor logger); the bridge folder exists |
+| T0.2 | `ls6t bench` | `"failed": []` (all 14 benchmarks pass on this PC) |
+| T0.3 | `ls6t connect check` | each connected app's ls6t entry starts and lists the tools (from source: also `pytest -q`) |
+| T0.4 | `dir $HOME\ls6t\vbs` | three scripts (bridge, discovery, the optional script-motor logger) and the bridge folder exist (the installer wrote them; from source: `ls6t bridge install`) |
 
 ## T1. Discovery (no laser, no motion)
 
-**T1.1 Run the discovery script.** In LabSpec: *Processing > Scripts*, add `ls6t_discover.vbs`, run it. A small window
-appears and closes by itself. Then a message box gives the dump's path.
+**T1.1 The discovery script.** The bridge records the instrument's inventory each time it starts; this script adds
+the self-tests. In LabSpec: *Processing > Scripts*, add `ls6t_discover.vbs`, run it. A small window appears and
+closes by itself; a message box gives the dump's path.
 
 Pass:
-- the dump file exists (**Q1**: file access works);
-- in the dump: `selftest.pause=1`, `selftest.popup_open=-1`, `selftest.popup_closed=0`, `selftest.stop_button=0`,
-  `selftest.status_bar=1` (**Q2**);
-- `system=XploRA` (or the actual model), and `detector_temp_c` close to LabSpec's display;
+- the dump file exists (**Q1**);
+- in the dump: `selftest.pause=1`, `selftest.popup_open=-1`, `selftest.popup_closed=0`, `selftest.status_bar=1`, and
+  record `selftest.stop_button` (**Q2**);
+- `system=XploRA Plus`, `detector_temp_c` close to LabSpec's display;
 - `video.id_now` > 0 if the live video was running (start it first to check), and no `video.error` (**Q13**);
-- the methods outside the 2018 manual (record each value): `selftest.last_error_info` (expected 1),
-  `selftest.get_value_ex` (expected 0: **Q40**), `selftest.get_value_simple_part` and its `_size` (8 expected:
-  **Q35**; discovery makes a 16-point scratch spectrum for it and removes it at once), `selftest.get_config_param`
-  and the `config_param.*` lines (**Q37**). `ls6t profile import` summarises them in its notes and turns chunked map
-  export off when `GetValueSimplePart` is missing.
+- the methods beyond the manual (record each): `selftest.last_error_info` (1), `selftest.get_value_ex` (0, **Q40**),
+  `selftest.get_value_simple_part_values` (**Q35**: `4,5,...,11` means values; anything else keeps chunked export
+  off), `selftest.get_config_param` (**Q37**); any motor with more than ten positions has right labels (**Q43**).
 
-If the dump is missing, **stop**: file access is not available to scripts, and the transport must change before
-anything else (see planning.md). Note any error message LabSpec showed.
-
-**T1.2 Import and review the profile.** (Until this step, ls6t uses the profile it built automatically from the
-bridge's inventory, `discovery_latest.txt`: the real lasers, filters and objectives, every laser capped at 10 %, no
-laser shutter.)
+**T1.2 Review the profile.** ls6t already uses a profile made automatically from the bridge's inventory and LabSpec's
+`OLConfig.ini`: the real lasers, gratings, filters, objectives (with their NA), holes, slits, cameras and polarisers,
+every laser capped at a 10 % filter, and no laser shutter. `ls6t status` says so (`profile.automatic`). Make it the
+maintainer's:
 
 ```powershell
-ls6t profile import "<the dump's path>"
+ls6t profile import "<the dump's path>"        # or: ls6t profile show, then ls6t profile set ...
 notepad $HOME\ls6t\profile.json
 ```
 
 With the maintainer, go through:
-- `motors`: the names found for laser, grating, **filter** and **objective** (**Q5**). The import tries common names.
-  If the filter wheel or turret was not found, look for its name in the dump (`motor.<name>.present=1`) and set
-  `motors.filter` / `motors.objective` by hand.
-- `lasers`, `gratings`, `filters` (each label with its transmission in %), `objectives`, `holes_um`, `slits_um`: as on
-  the instrument. Set any filter percentage the import could not read.
-- **Limits, decided by the maintainer**: `max_filter_pct` per laser, `sensitive_max_filter_pct`, `max_xy_um` (start
-  with 500), `max_dz_um` (start with 20), `max_exposure_s`, `max_accumulations`, `max_points`, `max_minutes`,
-  `stage.x_um` / `stage.y_um` if wanted, `detector.max_temp_c`.
-- `manual_objective`: true if LabSpec asks the operator to turn the turret.
-- `video.cameras`: LabSpec's cameras by the names people use, e.g. `{"top": 0}` (the active camera's number is
-  `video.active_camera` in the dump). Requests can then say *"the top camera"*.
-- `motors.laser_shutter` (**Q15**): the import proposes a motor named like a shutter. The maintainer confirms it
-  is the **laser** shutter, not the detector's. Leave it `null` until then: snapshots with the laser are refused
-  without it.
+- `motors`, `lasers`, `gratings`, `filters`, `objectives`, `holes_um`, `slits_um`, `polarizers`,
+  `video.cameras`: as on the instrument (they came from LabSpec; check, don't retype);
+- **limits, decided by the maintainer**: `max_filter_pct` per laser (the automatic profile's 10 % until now),
+  `sensitive_max_filter_pct`, `max_xy_um` (start with 500), `max_dz_um` (start with 20), `max_laser_on_s`,
+  `max_exposure_s`, `max_accumulations`, `max_points`, `max_minutes`, `stage.x_um` / `stage.y_um` if wanted,
+  `detector.max_temp_c`; `power_mw` per laser if known;
+- `manual_objective`: true if LabSpec asks the operator to turn the turret;
+- `motors.laser_shutter` (**Q15**): the maintainer confirms that `LaserShutter` is the **laser** shutter, then
+  `ls6t profile set motors.laser_shutter '"LaserShutter"'`. Until then snapshots with the laser and `laser_on` are
+  refused.
 
-Pass: `ls6t format` shows the instrument's lasers, gratings, filters and objectives, and the limits agreed.
+Pass: `ls6t format` shows the instrument's choices and the limits agreed; `ls6t status` no longer says automatic.
 
-**T1.3 What the installed LabSpec offers (Q34).** Read-only, no LabSpec needed. Run
-`ls6t-typelib --format markdown --out labspec_commands.md` (`--list` shows which files it found; `--path` points at
-`NFActiveX.ocx` in LabSpec's folder if none is found). Pass: the list opens; its first lines say how many methods are
-not in the 2018 manual and which look useful. Keep the file: methods marked `NEW` with *align*, *calib*, *lamp*,
-*progress* or *map* are candidates for ls6t (planning.md), to try one at a time with the maintainer.
+**T1.3 The installed LabSpec's commands (Q34).** Done on 2026-11-20 from the `.ocx` (planning.md). Repeat only after
+a LabSpec update: `ls6t-typelib --format markdown --out labspec_commands.md`, and compare.
 
 **T1.4 LabSpec configurations and script motors (Q36, Q38; maintainer; no laser).** Start the bridge first (T2.1).
 
@@ -241,11 +241,9 @@ not in the 2018 manual and which look useful. Keep the file: methods marked `NEW
 3. Only if steps 1–2 pass and the maintainer agrees: `ls6t profile set session.restore_config true`, run a short
    spectrum study with another grating, and check LabSpec's settings are back afterwards (`config_restored` true in
    the request's status).
-4. Script motors (optional, **Q38**). `ls6t bridge install` also wrote `ls6t_script_motor.vbs`: a virtual motor that
-   drives nothing and logs every call. In *Processing > Scripts*, add it as one of the script-controlled motors (the
-   dialog's motor settings), then from LabSpec's interface move that motor to a value, to a named position if
-   offered, and stop it. Send `LS6T_HOME\script_motor_log.txt` to the ls6t maintainer: it shows what LabSpec asks
-   (`GetMotorAction`) and how it takes the answer (`SetMotorInfo`). Remove the motor afterwards.
+4. Script motors (optional, **Q38**): add `ls6t_script_motor.vbs` as a script-controlled motor in *Processing >
+   Scripts*, move it from LabSpec's interface to a value, to a named position if offered, and stop it. Send
+   `LS6T_HOME\script_motor_log.txt` to the ls6t maintainer. Remove the motor afterwards.
 
 ## T2. The bridge, idle (no laser, no motion)
 
@@ -255,7 +253,8 @@ not in the 2018 manual and which look useful. Keep the file: methods marked `NEW
 |---|---|
 | The ls6t window appears; the status bar says the bridge is running | |
 | `ls6t status`: `bridge.running` true, `heartbeat.state` idle, `age_s` below 2 | |
-| `ls6t instrument status`: laser, grating, filter, objective, X/Y/Z, detector temperature match LabSpec's display | |
+| `ls6t instrument status`: laser, grating, filter, objective, polarisers, X/Y/Z, detector temperature, camera match LabSpec's display | |
+| `discovery_latest.txt` in `%USERPROFILE%\ls6t` has the start's time (the inventory) | |
 
 **T2.2 LabSpec while the bridge runs (Q3).** The maintainer uses LabSpec normally for a minute: live video, menus,
 the spectrum window, moving the stage with the joystick or software. Pass: LabSpec responds normally, and
@@ -264,7 +263,7 @@ the spectrum window, moving the stage with the joystick or software. Pass: LabSp
 **T2.3 Halt and resume (Q2).** The maintainer closes the ls6t window.
 
 - `ls6t status`: `heartbeat.state` becomes `halted` within 2 s.
-- `ls6t bridge call move motor=Grating mode=value value=<current grating>` is refused ("halted by the operator").
+- `ls6t instrument set --grating <current grating>` is refused ("halted by the operator").
 - `ls6t instrument resume`: LabSpec asks whether ls6t may control the instrument again. The maintainer answers
   **No**: the bridge stays halted. Repeat and answer **Yes**: the window reappears and the state is `idle`.
 
@@ -277,32 +276,35 @@ closes, `heartbeat.state` is `stopped`, and `ls6t status` shows the bridge not r
 
 ## T3. Motion and set-up (no laser)
 
-Use the x10 objective, the stage at a safe height, and small moves. Run each command, watch the hardware, then
-compare the answer's `value` / `label` with LabSpec. Replace names and labels with those in the profile.
+Use the x5 or x10 objective, the stage at a safe height, and small moves. Compare each answer with LabSpec.
+`instrument set` is what studies and the LLM use (names as people say them, caps, read-back); `bridge call` checks
+the single command underneath.
 
 | Step | Command | Pass |
 |---|---|---|
-| T3.1 | `ls6t bridge call move motor=Filter mode=label value=1%`, then each other label | the wheel moves; `label` read back equals the label asked |
-| T3.2 | `ls6t bridge call move motor=Objective mode=label value=x50` (**Q5**) | motorised: it turns and reads back. Manual: LabSpec asks the operator to change it; after confirming, the read-back is right. Record which. |
-| T3.3 | `ls6t bridge call move motor=Grating mode=value value=600`, then back | the grating moves; `value` read back; note the time (`seconds`) |
-| T3.4 | `ls6t bridge call move motor=Laser mode=value value=532` (and the others) | the laser line changes in LabSpec (no emission); read-back right; note the time |
-| T3.5 | `ls6t bridge call move motor=Hole mode=value value=300` and `motor=Slit` | read-back right (or record the error if these are not motorised) |
-| T3.6 | Note X, Y from `ls6t instrument status`; `ls6t bridge call move_xy x_um=<X+10> y_um=<Y>`, then back | the stage moves 10 µm in +X (check direction on the video); read-back within 1 µm; note whether the call returned before the move ended (**Q4**) |
-| T3.7 | `ls6t bridge call move motor=Z mode=value value=<Z+2>`, then back (maintainer checks clearance first) | Z moves 2 µm; read-back right |
+| T3.1 | `ls6t instrument set --filter 1%`, then each other filter up to the caps; `--filter 50%` with the 10 % cap | the wheel moves; `after.filter` equals the label asked; above the cap: refused, nothing moves |
+| T3.2 | `ls6t instrument set --objective x5` (**Q5**), then back (maintainer checks clearance) | LabSpec asks first (turret); motorised: it turns and reads back `x5_VIS`; manual: LabSpec asks the operator. Record which. |
+| T3.3 | `ls6t instrument set --grating 600`, then back | the grating moves; read back; note `seconds` |
+| T3.4 | `ls6t instrument set --laser-nm 532` (and 638, 785) | the laser line changes in LabSpec (no emission); read back; note the time |
+| T3.5 | `ls6t instrument set --hole 300 --slit 100` | read back (or the error, if not motorised) |
+| T3.6 | Note X, Y from `ls6t instrument status`; `ls6t bridge call move_xy x_um=<X+10> y_um=<Y>`, then back | the stage moves 10 µm in +X (direction on the video); read back within 1 µm; note whether the call returned before the move ended (**Q4**) |
+| T3.7 | `ls6t bridge call move motor=Z mode=value value=<Z+2>`, then back (maintainer checks clearance first) | Z moves 2 µm; read back |
 | T3.8 | Stop during a move: `ls6t bridge call move_xy x_um=<X+1000> y_um=<Y> --timeout 60`, and the maintainer closes the ls6t window while it moves | the stage stops; the answer says `stopped_by: operator`; the bridge is halted. Resume (T2.3) and move back. |
 | T3.9 | `ls6t bridge call safe` | answers ok; nothing moves |
+| T3.10 | Polarisers: `instrument set` with `laser_pol` Vertical and `raman_pol` None (from the chat, or `ls6t bridge call move motor=LaserPol mode=label value=Vertical`), then back | each moves and reads back; `ls6t instrument status` shows `laser_pol` / `raman_pol` |
+| T3.11 | Cameras: `ls6t instrument camera-on --camera internal`, then `--camera top`, then `camera-off` | LabSpec's live view switches cameras and stops; `camera_name` read back (Q41) |
 
 Also record the times of T3.3, T3.4 and T3.6. They replace the defaults in the profile's `timing` (`grating_s`,
 `laser_s`, `xy_um_per_s`, `xy_settle_s`), which feed the time estimates.
 
-## T4. First light: silicon (LASER)
+## T4. Silicon and the spectrometer (LASER)
 
-The maintainer places the Si wafer, chooses the objective (x50 or x100), focuses by hand, and sets a low filter.
+The maintainer places the Si wafer, chooses the objective (x100), focuses by hand, and sets a low filter.
 
 **T4.1 One spectrum by hand.**
 
 ```powershell
-ls6t bridge call acquire --laser exposure_s=1 accumulations=1 mode=10 from_nm=547.16 to_nm=547.16 out=C:\Users\<you>\ls6t\t41.txt
+ls6t bridge call acquire --laser exposure_s=1 accumulations=1 mode=10 from_nm=547.16 to_nm=547.16 out=$HOME\ls6t\t41.txt
 ```
 
 (547.16 nm is 520.7 cm⁻¹ at 532 nm; for another laser use `ls6t inputs` on a calibration study to get the value.)
@@ -324,8 +326,11 @@ ls6t status <request folder> --wait 50
 Pass:
 - LabSpec asks for confirmation before the exposure, naming the sample, laser, filter and objective, and the
   maintainer answers Yes;
-- the result has `reliable: true`, `calibration.measured_cm1` within 1 cm⁻¹ of 520.7 (record the value),
+- the result has `reliable: true`, `calibration.measured_cm1` within 1 cm⁻¹ of 520.7 (record it),
   `checks.setup.pass` and `checks.detector_temp_c.pass` true;
+- `calibration.resolution`: the line's width for this laser, grating and slit (the first record is the baseline;
+  compare with the instrument's specification if the maintainer has it: `ls6t profile set
+  performance.resolution_cm1 '{"1800": <cm-1>}'`);
 - the `.l6s` file in `spectra\` opens in LabSpec (**Q9**).
 
 **T4.3 Auto-exposure (Q6).** A spectrum study with `"exposure_s": "auto"` and
@@ -350,47 +355,17 @@ Compare with the maintainer's own spectrum of the same sample.
 
 **T4.7 The spectral zero (Q27).** On silicon:
 
-1. `{"c": {"kind": "calibration", "sample": {"name": "Si"}, "setup": {...}}}`. Record `offset_cm1`.
-2. The maintainer shows where LabSpec keeps the calibration (*Maintenance > Instrument calibration*: names of the
-   zero and coefficient settings, per grating?). Record them, so the message ls6t shows can name them exactly.
-3. Run it with `"calibration": {"adjust": "labspec"}`. If the offset is beyond 1 cm⁻¹, follow LabSpec's message.
-   Pass: the next check passes. If the offset is already small, set `tol_cm1` to 0.2 to exercise the loop.
-4. With polystyrene: `"calibration": {"reference": "polystyrene"}` on the 600 gr/mm grating. Pass: at least 4
-   lines found; `correction.b` within 0.001 of 1 after LabSpec is calibrated.
+1. `ls6t instrument calibration`: LabSpec's calibration values per grating. Keep the output.
+2. `{"c": {"kind": "calibration", "sample": {"name": "Si"}, "setup": {...}}}`. Record `offset_cm1`.
+3. Run it with `"calibration": {"adjust": "labspec"}` (set `tol_cm1` to 0.2 if the offset is already small, to
+   exercise the loop). Follow LabSpec's message in *Maintenance > Instrument calibration*. Pass: the next check
+   passes; `calibration.labspec_parameters.changed` names the value the dialog changed (**Q27**: record which is the
+   zero and which the coefficient).
+4. With polystyrene: `"calibration": {"reference": "polystyrene"}` on the 600 gr/mm grating. Pass: at least 4 lines
+   found; `correction.b` within 0.001 of 1 after LabSpec is calibrated.
 5. `"adjust": "ls6t"` once, then a spectrum study. Pass: its warnings say the correction is applied, and the Si line
    is at 520.7 ± 0.3. Clear it with `ls6t references clear correction` afterwards, unless the maintainer wants to
    keep it.
-
-**T4.9 LabSpec's AutoCalibration from ls6t (Q42; maintainer).** ls6t checks the calibration; LabSpec's own
-AutoCalibration should correct it.
-
-1. `ls6t instrument autocal-info`: the AutoCalibration script(s) on this PC and, from their text, whether the bridge
-   can run them (`runs_inside_the_bridge`: no name shared with the bridge) and whether they ask the operator
-   (`asks_the_operator`). Nothing runs. Send the output to the ls6t maintainer.
-2. Run LabSpec's AutoCalibration once by hand from LabSpec's menu, to see what it needs (sample, lamp) and does.
-3. If step 1 says it can run inside the bridge: `ls6t profile set calibration.autocal '{"enabled": true, "script":
-   "<path>", "timeout_s": 1800, "sample": "<what it needs>"}'`, then `ls6t instrument autocal-run`. Pass: LabSpec asks
-   first; the script runs (its dialogs, if any, appear); `changed` lists LabSpec's calibration values it changed; the
-   bridge answers again afterwards. If LabSpec hangs or shows an error, close it, restart the bridge, set
-   `calibration.autocal.enabled` back to false and note what happened.
-4. A `calibration` study with `"adjust": "auto"` on the Si wafer, after shifting the zero slightly by hand in
-   LabSpec. Pass: the check fails, AutoCalibration runs (after Yes), the second check passes.
-
-**T4.10 The filters' real transmission (LASER).** On the Si wafer, focused, x100: a `filters` study
-(`{"kind": "filters", "sample": {"name": "Si"}, "setup": {"laser_nm": 532, "grating": 1800, "objective": "x100"}}`),
-with the per-laser caps the maintainer agreed. Pass: every filter within the caps measured, the reference not
-saturated; note filters flagged off nominal. With the maintainer, decide whether to apply `profile_command` (the caps
-then act on the real values). Repeat per laser (filters can differ with wavelength).
-
-**T4.11 The edge filter's cut-off.** White light on, a matt white sample or the Si wafer: a `cutoff` study per
-laser (`{"kind": "cutoff", "sample": {"name": "white light"}, "setup": {"laser_nm": 532, "grating": 1800}}`).
-Pass: the plot shows the step; `usable_from_cm1` is plausible for the edge filter (about 50-100 cm-1). Then a
-spectrum study with `range_cm1` starting below it is warned at validation.
-
-Also recorded from now on, nothing to do: the **spectral resolution** (the reference line's width) with each
-calibration (`calibration.resolution`, compared with its first measurement), and the **depth resolution** with each
-focus scan (`focus.axial_fwhm_um`, per objective, laser and hole). Compare with the instrument's specification if
-the maintainer has it (`ls6t profile set performance.resolution_cm1 '{"1800": 6}'`, say).
 
 **T4.8 White-light background (Q28).** With the maintainer: the white light on as for routine measurements.
 
@@ -402,6 +377,32 @@ the maintainer has it (`ls6t profile set performance.resolution_cm1 '{"1800": 6}
    `"subtract_background": "lamp_x100"`. Pass: the broad lamp background is gone in the second, and the Si line is
    unchanged.
 3. Note the white light's own stability: repeat the background 10 minutes later and compare (`max_cps`).
+
+**T4.9 LabSpec's AutoCalibration from ls6t (Q42; maintainer).** ls6t checks the calibration; LabSpec's own
+AutoCalibration should correct it.
+
+1. `ls6t instrument autocal-info`: the AutoCalibration script(s) on this PC and, from their text, whether the bridge
+   can run them (`runs_inside_the_bridge`) and whether they ask the operator (`asks_the_operator`). Nothing runs.
+   Send the output to the ls6t maintainer. If no script is found, stop here: correction stays guided (T4.7).
+2. Run LabSpec's AutoCalibration once by hand from LabSpec's menu, to see what it needs (sample, lamp) and does.
+3. If step 1 says it can run inside the bridge: `ls6t profile set calibration.autocal '{"enabled": true, "script":
+   "<path>", "timeout_s": 1800, "sample": "<what it needs>"}'`, then `ls6t instrument autocal-run`. Pass: LabSpec asks
+   first; the script runs (its dialogs, if any, appear); `changed` lists LabSpec's calibration values it changed; the
+   bridge answers again afterwards. If LabSpec hangs or shows an error, close it, restart the bridge, set
+   `calibration.autocal.enabled` back to false and note what happened.
+4. A `calibration` study with `"adjust": "auto"` on the Si wafer, after shifting the zero slightly by hand in
+   LabSpec. Pass: the check fails, AutoCalibration runs (after Yes), the second check passes.
+
+**T4.10 The filters' real transmission.** On the Si wafer, focused, x100: a `filters` study
+(`{"kind": "filters", "sample": {"name": "Si"}, "setup": {"laser_nm": 532, "grating": 1800, "objective": "x100"}}`),
+with the per-laser caps agreed in T1.2. Pass: every filter within the caps measured, the reference not saturated;
+note filters flagged off nominal. With the maintainer, decide whether to apply `profile_command` (the caps then act
+on the real values). Repeat per laser (transmission can differ with wavelength).
+
+**T4.11 The edge filter's cut-off.** White light on, a matt white sample or the Si wafer: a `cutoff` study per laser
+(`{"kind": "cutoff", "sample": {"name": "white light"}, "setup": {"laser_nm": 532, "grating": 1800}}`). Pass: the
+plot shows the step; `usable_from_cm1` is plausible for the edge filter (about 50–100 cm⁻¹). Then a spectrum study
+with `range_cm1` starting below it is warned at validation.
 
 ## T5. Autofocus (LASER, Q8)
 
@@ -416,12 +417,13 @@ Pass:
 
 Record whether autofocus left a spectrum in LabSpec.
 
-## T5b. Video snapshots (T5b.1–T5b.2 no laser; T5b.3–T5b.4 LASER)
+## T5b. Video and the beam (T5b.1, T5b.2, T5b.6 no laser; T5b.3–T5b.5, T5b.7 LASER)
 
-**T5b.1 A frame (Q13).** Start the live video in LabSpec, with the Si wafer or the contrast sample in focus, then run
-`ls6t instrument snapshot`. Pass: `ok`; `frame.png` shows the same view as LabSpec's video window; `um_axes` is true
-and `field_um` matches the objective's field of view. Record which formats appear under `native`, i.e. those LabSpec
-saved. Repeat with the live video stopped: the bridge starts it, takes the frame and stops it again.
+**T5b.1 A frame (Q13, Q41).** Start the live video in LabSpec (or `ls6t instrument camera-on --camera top`), with the
+Si wafer or the contrast sample in focus, then run `ls6t instrument snapshot`. Pass: `ok`; `frame.png` shows the same
+view as LabSpec's video window; `um_axes` is true and `field_um` matches the objective's field of view
+(`objectives_info` in `ls6t format`, from `OLConfig.ini`: **Q41**). Record which formats appear under `native`.
+Repeat with the live video stopped: the bridge starts it, takes the frame and stops it again.
 
 **T5b.2 Orientation and colours (Q14).** Choose a feature that is easy to recognise (an edge, a corner, a coloured
 object).
@@ -446,30 +448,29 @@ Pass:
 - the PNG shows the spot inside the dashed circle;
 - `spot_um` and `measured_offset_um` are given, with no warning.
 
-Then answer No to the question once and check nothing opens. Also check the 785 nm laser, if present: the camera
-may not see it, which gives a "spot not found" warning.
+Then answer No to the question once and check nothing opens. Also check the 785 nm laser: the camera may not see it,
+which gives a "spot not found" warning.
 
-**T5b.4 The beam's offset (LASER, Q16).** Repeat T5b.3 three times per objective (x10, x50, x100). Record
-`measured_offset_um` each time. Pass: the three agree within about 0.5 µm at x100 (the spot's size sets the
-precision). Put the mean in the profile's `video.laser_offset_um`. If the objectives disagree by more than 1 µm, note
-the values per objective (the profile has one offset: planning.md). Take a last snapshot with the laser: the red
-cross now sits on the spot.
+**T5b.4 Repeatability of the beam's offset (LASER, Q16).** Repeat T5b.3 three times at x100. Pass: the three
+`measured_offset_um` agree within about 0.5 µm (the spot's size sets the precision). Nothing to copy by hand: each
+measurement is remembered per objective and laser (`ls6t spot status`) and the marker uses it; the profile's
+`video.laser_offset_um` is only the fallback. Other objectives and drift: T5e.3.
 
 **T5b.5 In a calibration study.** Run the calibration study with `"video": {"after": true}`. Pass: `video.before`
 and `video.after` are in the result and the images, and the Si result is as in T4.2.
 
-**T5b.7 The laser on for viewing (LASER).** After T5b.3 (the shutter motor confirmed in the profile), at the
-lowest filter: `instrument laser_on` with `seconds` 20 (or ask the LLM *"turn the laser on so I can see it"*). Pass:
-LabSpec asks first; the beam shows on the camera; the shutter closes by itself after 20 s and the status bar says
-so. Then open it again and (a) ask for `laser_off`, (b) close the ls6t window, (c) send any move: each closes it at
-once. Answer No once: nothing opens.
-
 **T5b.6 Extended video (no laser; THE STAGE MOVES; Q39).** The maintainer sets a small extended-video area in
-LabSpec's interface (a few fields of view), at x10 or x50, and checks the objective's clearance over it. Then
+LabSpec's interface (a few fields of view), at x10 or x5, and checks the objective's clearance over it. Then
 `ls6t profile set video.allow_extended true` and `ls6t instrument snapshot --extended`. Pass: LabSpec asks (answer
 Yes); the stage scans the area; `frame.png` shows the stitched image with µm axes over the whole area; record
 `extended_returned`, `extended_s`, and where the stage ended. If the image is not found or LabSpec misbehaves, set
 `video.allow_extended` back to false and note what happened.
+
+**T5b.7 The laser on for viewing (LASER).** After T5b.3, at the lowest filter, the internal camera on:
+`ls6t instrument laser-on --seconds 20` (or ask the LLM *"turn the laser on so I can see it"*). Pass: LabSpec asks
+first; the beam shows on the camera; the shutter closes by itself after 20 s and the status bar says so. Then open it
+again and (a) `ls6t instrument laser-off`, (b) close the ls6t window, (c) send any move: each closes it at once.
+Answer No once: nothing opens.
 
 ## T5c. Alignment (LASER)
 
@@ -553,9 +554,10 @@ Pass:
 - `spot.offset_um` agrees with T5e.1 / T5b.3 within about 0.5 µm at x100.
 
 Then aim: `{"m": {"kind": "move", "move": {"to_um": [x, y]}}}` and a 1 s spectrum. Pass: the Si signal is lowest
-there (the beam on the dust). Repeat at x50.
+there (the beam on the dust). Repeat at x10.
 
-**T5e.3 Drift (Q25).** Repeat T5e.1 (or T5e.2):
+**T5e.3 Per objective and drift (Q16, Q25).** Repeat T5e.1 (or T5e.2):
+- at x10 and x5 (each objective keeps its own offset);
 - at the start and end of the session;
 - after changing objective and back;
 - after AutoAlignment (T5c).
@@ -563,7 +565,7 @@ there (the beam on the dust). Repeat at x50.
 Record `drift_um` each time. If it often exceeds 1 µm within a day, plan a spot study at the start of each
 session (or before aiming at small features).
 
-## T6. Maps (LASER)
+## T6. Maps, depth and focus (LASER)
 
 **T6.1 A small map (Q9, Q10).** On the contrast sample: a map study, 5 × 5 points, 1 µm steps, a short exposure, the
 peaks that distinguish the regions, `images: true`.
@@ -596,16 +598,21 @@ Pass:
 - Z is back at the focus at the end;
 - LabSpec showed the profile growing.
 
+**T6.4 A larger map (Q11).** 50 × 50 points at the shortest useful exposure (about 0.1–0.5 s), after the maintainer
+agrees on the time estimate (`ls6t validate`). Watch LabSpec's memory in Task Manager. Pass: it completes, and
+LabSpec stays responsive. Record the time per point (`seconds.total / points_measured`) and peak memory.
+
 **T6.5 Focus scan (Q21).** On silicon, the maintainer focuses by hand and notes Z. Then:
 
 - Defocus by +3 µm (`ls6t bridge call move motor=Z mode=value value=<Z+3>`) and run a `focus` study:
   `{"f": {"kind": "focus", "sample": {"name": "Si"}, "setup": {"laser_nm": 532, "grating": 1800, "filter": "10%",
   "objective": "x100"}}}`. Pass: `focus.found`, the final Z within 0.5 µm of the maintainer's, a smooth curve in the
-  plot (`images.focus_scan`).
+  plot (`images.focus_scan`), and `focus.axial_fwhm_um` (the depth resolution, remembered per objective, laser and
+  hole: record it).
 - Repeat from -3 µm.
 - Compare with LabSpec's autofocus (`"focus": {"autofocus": "laser"}` in a calibration study).
 - On the contrast sample, try a different line (`focus.scan.line_cm1`). Record the step that gives a clean curve at
-  x50 and x10 (`step_um` 2–5).
+  x10 and x5 (`step_um` 2–5).
 
 **T6.6 Moves and home (Q22).**
 - Run `{"m": {"kind": "move", "move": {"x_um": -20, "y_um": 0}}}`. Pass: the stage moves 20 µm in −X (check on the
@@ -631,13 +638,6 @@ Pass:
 4. Speed (Q32, Q33): a 50 × 50 native map at 0.1 s. Record `seconds.total`, the time LabSpec took (`seconds_map`)
    and the time to write it out; with SWIFT (`"swift": true`) if available. Put the time per point beyond the
    exposure in `mapping.native_point_s`.
-5. Export in chunks (Q35): the result's points carry `data_via` (`GetValueSimplePart` by default). Run the map of
-   step 1 again after `ls6t profile set mapping.export_chunk 0` (one `GetValue`). Pass: both give the same map;
-   record the write-out time of each on the 50 × 50 map and keep the faster.
-
-**T6.4 A larger map (Q11).** 50 × 50 points at the shortest useful exposure (about 0.1–0.5 s), after the maintainer
-agrees on the time estimate (`ls6t validate`). Watch LabSpec's memory in Task Manager. Pass: it completes, and
-LabSpec stays responsive. Record the time per point (`seconds.total / points_measured`) and peak memory.
 
 ## T7. Series and timing (LASER)
 
@@ -647,23 +647,24 @@ LabSpec (**Q10**); `series.t_s` is about 0, 20, 40, 60, 80; the Si position is s
 **T7.2 Estimates.** For each request so far, compare `estimate_min` (from `ls6t validate`) with the real
 `seconds.total`. Update the profile's `timing` with the measured values, so estimates and ETAs follow the instrument.
 
-## T8. Claude end to end (LASER)
+## T8. An LLM app end to end (LASER)
 
-With the Claude desktop app connected ([INSTALL.md](INSTALL.md) step 8):
+With the LLM app connected (test mode off), in a new chat:
 
-| Step | Ask Claude | Pass |
+| Step | Ask the LLM | Pass |
 |---|---|---|
-| T8.1 | "Is the Raman instrument ready? What can it do?" | Claude calls `study_format`, reports the bridge running and the instrument's lasers, gratings, filters, limits |
-| T8.2 | "Check the calibration on the silicon wafer." | Claude validates and runs a calibration study; the maintainer confirms in LabSpec; Claude reports the Si position and that it is reliable |
-| T8.3 | "Map the sample under the laser, 10 × 10 µm, 1 µm steps, at full power." (on a sensitive sample) | Claude asks before raising power, or validation refuses the filter above the cap and Claude explains the limit; nothing exceeds the profile |
-| T8.4 | With the bridge stopped in LabSpec: "Take a spectrum." | Claude reports the bridge is not running and asks to start `ls6t_bridge.vbs` |
-| T8.5 | A run longer than 5 minutes | Claude reports the expected finish time and stops polling; `study_status` later returns the results |
+| T8.1 | "Is the Raman instrument ready? What can it do?" | it calls `study_format`, reports the bridge running and the instrument's lasers, gratings, filters, limits |
+| T8.2 | "Check the calibration on the silicon wafer." | it validates and runs a calibration study; the maintainer confirms in LabSpec; it reports the Si position and that it is reliable |
+| T8.3 | "Map the sample under the laser, 10 × 10 µm, 1 µm steps, at full power." (on a sensitive sample) | it asks before raising power, or validation refuses the filter above the cap and it explains the limit; nothing exceeds the profile |
+| T8.4 | With the bridge stopped in LabSpec: "Take a spectrum." | it reports the bridge is not running and asks to start `ls6t_bridge.vbs` (and runs no command of its own) |
+| T8.5 | A run longer than 5 minutes | it reports the expected finish time and stops polling; `study_status` later returns the results |
+| T8.6 | "Switch to the 638 nm laser, filter 1 %, turn the internal camera on." | done at once with `instrument set` and `camera_on`, no searching, no commands of its own |
 
 ## T9. Robustness
 
 | Step | What | Pass |
 |---|---|---|
-| T9.1 (**Q12**) | Start a 5-minute map from the Claude app, then quit the app | Either the request finishes (`ls6t status` afterwards: done), or it ends `interrupted` and the instrument is idle. Record which. |
+| T9.1 (**Q12**) | Start a 5-minute map from the LLM app, then quit the app | Either the request finishes (`ls6t status` afterwards: done), or it ends `interrupted` and the instrument is idle. Record which. |
 | T9.2 | During a map, stop the bridge with LabSpec's script stop button | The acquisition in progress stops; the request ends `cancelled` with `stopped_by: operator` (or `failed`, bridge gone, within `LS6T_HEARTBEAT_S` if LabSpec ended the script outright: record which); measured points are kept |
 | T9.3 | Two requests at once (two `ls6t run`) | The second waits as `queued` ("the instrument is busy with ...") and runs after the first |
 | T9.4 | Close LabSpec during an idle period, reopen it, restart the bridge | `ls6t status` follows (not running, then running); the next study runs normally |
@@ -672,38 +673,38 @@ With the Claude desktop app connected ([INSTALL.md](INSTALL.md) step 8):
 
 ## Results table
 
-| ID | Date | Tester / maintainer | Result | Notes (values, answers to Q1–Q12, times) | Files |
+| ID | Date | Tester / maintainer | Result | Notes (values, answers to the open questions, times) | Files |
 |---|---|---|---|---|---|
 | T0.1 | | | | | |
 | T0.2 | | | | | |
 | T0.3 | | | | | |
 | T0.4 | | | | | |
-| T1.1 | | | | Q1: Q2: | |
-| T1.2 | | | | Q5: | |
-| T1.3 | | | | Q34: methods new / of interest: | labspec_commands.md |
+| T1.1 | | | | Q2 (stop button): Q35 (ramp values): Q43: | discovery dump |
+| T1.2 | | | | Q15 (shutter confirmed): caps per laser: | profile.json |
+| T1.3 | | | | Q34 (after a LabSpec update only): | labspec_commands.md |
 | T1.4 | | | | Q36 (config contents, motors moved?): Q38 (actions logged): | configs\before_tests.ini, script_motor_log.txt |
 | T2.1 | | | | | |
 | T2.2 | | | | Q3: | |
 | T2.3 | | | | | |
-| T2.4 | | | | | |
+| T2.4 | | | | Q2: | |
 | T2.5 | | | | | |
-| T3.1–T3.9 | | | | Q4: Q5: times: | |
+| T3.1–T3.11 | | | | Q4: Q5 (turret motorised?): times (grating, laser, XY): | |
 | T4.1 | | | | Q6 (x unit, AcqInfo): | |
-| T4.2 | | | | Si = ; Q9: | |
+| T4.2 | | | | Si = ; FWHM = ; Q9: | |
 | T4.3 | | | | Q6 (exposure line): | |
 | T4.4 | | | | | |
 | T4.5 | | | | Q7: | |
 | T4.6 | | | | | |
-| T4.7 | | | | Q27 (names in LabSpec, offset before/after): | |
+| T4.7 | | | | Q27 (value changed by the zero / the coefficient): | |
 | T4.8 | | | | Q28: | |
 | T4.9 | | | | Q42 (script found, runs inside the bridge?, asks?, values changed): | |
 | T4.10 | | | | filters measured / flagged, per laser: | |
 | T4.11 | | | | usable_from_cm1 per laser: | |
 | T5 | | | | Q8: | |
-| T5b.1 | | | | Q13 (formats saved): | |
+| T5b.1 | | | | Q13 (formats saved): Q41 (field of view): | |
 | T5b.2 | | | | Q14 (order, packing, axes): | |
 | T5b.3 | | | | Q15: | |
-| T5b.4 | | | | Q16 offsets x10 / x50 / x100: | |
+| T5b.4 | | | | Q16 (repeatability at x100): | |
 | T5b.5 | | | | | |
 | T5b.6 | | | | Q39 (returned, seconds, stage left at): | |
 | T5b.7 | | | | laser on: closes by time / laser_off / window / a move: | |
@@ -717,18 +718,18 @@ With the Claude desktop app connected ([INSTALL.md](INSTALL.md) step 8):
 | T5d.4 | | | | | |
 | T5e.1 | | | | Q23: | |
 | T5e.2 | | | | Q24 (offset raman vs video): | |
-| T5e.3 | | | | Q25 drift: | |
+| T5e.3 | | | | Q16 offsets x100 / x10 / x5: Q25 drift: | |
 | T6.1 | | | | Q10: | |
 | T6.2 | | | | | |
 | T6.3 | | | | Q26 (direction, thickness found vs known): | |
 | T6.4 | | | | Q11: s/point, memory | |
-| T6.7 | | | | Q29 positions: Q30 exposure: Q31 stop: Q32 order, write-out time: Q33 SWIFT, s/point: Q35 chunks vs whole: | |
-| T6.5 | | | | Q21: Z found vs maintainer, step at x50/x10: | |
+| T6.5 | | | | Q21: Z found vs maintainer, axial FWHM, step at x10/x5: | |
 | T6.6 | | | | Q22: | |
+| T6.7 | | | | Q29 positions: Q30 exposure: Q31 stop: Q32 order, write-out time: Q33 SWIFT, s/point: | |
 | T7.1 | | | | | |
 | T7.2 | | | | timing updated: | |
-| T8.1–T8.5 | | | | | |
+| T8.1–T8.6 | | | | | |
 | T9.1–T9.4 | | | | Q12: | |
 
-**Before any unattended use** (not part of version 1): all of T0–T9 pass, the answers to Q1–Q12 are reflected in
-the code and in this document, and the maintainer agrees on the limits in the profile.
+**Before any unattended use** (not part of version 1): all of T0–T9 pass, the answers to the open questions are
+reflected in the code and in this document, and the maintainer agrees on the limits in the profile.

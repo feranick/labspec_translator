@@ -1110,7 +1110,7 @@ def test_hardware_test_tool(tmp_path, monkeypatch):
     plan = T.hardware_test("plan")
     assert plan["next"] == "T0.1" and len(plan["steps"]) > 60
     st = T.hardware_test("step", step="T3.4")
-    assert "Laser" in st["text"] and st["commands_in_chat"]
+    assert "laser-nm" in st["text"] and st["commands_in_chat"]
     with pytest.raises(ValueError):
         T.hardware_test("step", step="T99")
     assert "quit" in T.hardware_test("call", verb="quit")["error"]
