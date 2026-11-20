@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.20.4)
+## Architecture (version 2026.11.20.5)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -172,6 +172,14 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   checks each file, then that uninstall removed them. Not supported: the Gemini app and ChatGPT web (remote servers
   only). Known: a 2026 report that the ChatGPT Windows desktop app may not expose local stdio tools to ordinary chats
   (openai/codex #38162). tomli added for Python 3.10. 88 tests.
+- 2026-11-20, 2026.11.20.5: test mode. testmode.py parses TESTING.md (sections, bold-titled and table-row steps,
+  sections without steps as one step, the Q table; laser flag from LASER in the title/section) and offers
+  hardware_test (MCP, only with LS6T_TEST_MODE=1: `ls6t connect APP --test`): plan, step, call, record, report,
+  status, last_error, config. call = bridge_call plus guards: no quit, verb list, refused during a request, out/
+  native/path forced into LS6T_HOME/testing/files, filter by label within caps, X/Y/Z within limits of the current
+  position, laser verbs need filter within caps + exposure/accumulation limits + the operator's Yes in LabSpec every
+  time; acquire returns a spectrum summary; every call logged. record validates step/result/Q ids; report.md is the
+  results table filled in plus the answers to Q1-Q40. `ls6t test plan|step|record|report`. 91 tests.
 
 ## To do next
 

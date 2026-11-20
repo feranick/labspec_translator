@@ -12,7 +12,7 @@ stops and cancel on the simulator, and `ls6t bench` gives known answers. What re
 LabSpec and hardware. The plan goes from no laser and no motion to Claude driving a full map, in stages. Each stage
 starts only when the previous one passed.
 
-Version under test: 2026.11.20.4 (bridge protocol 1).
+Version under test: 2026.11.20.5 (bridge protocol 1).
 
 ---
 
@@ -111,7 +111,48 @@ For each test, record one line (in a copy of the table at the end, or in a noteb
 - **Screenshots** of LabSpec dialogs nobody expected.
 
 After the session, the tester adds a dated entry to `planning.md` (*State log*). It says what passed, the answers
-to Q1–Q12, and the measured times, and lists anything to change.
+to Q1–Q40, and the measured times, and lists anything to change.
+
+**Or record from the command line:** `ls6t test record T4.1 pass --notes "Si line seen" --answers '{"Q6": "x in nm"}'`.
+Every record goes to `%USERPROFILE%\ls6t\testing\log.jsonl`, and `%USERPROFILE%\ls6t\testing\report.md` is
+this plan's results table filled in, with the answers to the open questions (`ls6t test report`; `ls6t test plan`
+shows what is done and what is next).
+
+---
+
+## Running the tests from the chat (test mode)
+
+The tests can also be run by talking to the LLM app (Claude, ChatGPT / Codex, Gemini CLI) instead of typing the
+commands. The LLM reads each test from this file, tells the maintainer what to do in LabSpec, checks what it can
+itself (the bridge's state, read-backs, spectra, snapshots), asks about what only a person can see, runs the
+single bridge commands, and records the result and the answers to the open questions in the same log and report.
+
+1. Turn test mode on for the app (it is off by default; normal use never offers these commands):
+
+   ```powershell
+   ls6t connect claude --test         # or codex / gemini; add --sim to practise on the simulator first
+   ```
+
+   Restart the app. A new tool, `hardware_test`, appears. `ls6t connect claude --no-test` turns it off again.
+2. Say, for example: *"We are testing ls6t on the instrument. Start with T0 and go in order."* or *"Let's do T3.4."*
+3. For each test the LLM:
+   - reads it (`hardware_test step`), and tells the maintainer what to prepare or do;
+   - runs the commands. `ls6t bridge call ...` in this plan becomes `hardware_test call`, and `ls6t instrument
+     snapshot` becomes the `snapshot` tool. Studies go through `validate_studies` / `run_studies`;
+   - checks the pass criteria, asking the maintainer for what it cannot see (the video window, the stage moving);
+   - records the result, the values and the answers (`hardware_test record`).
+
+Guards, beyond those of `ls6t bridge call`:
+
+- every command that can fire the laser asks the operator in LabSpec, every time;
+- the filter only moves by label and within the profile's caps;
+- X/Y moves stay within `limits.max_xy_um` and Z within `limits.max_dz_um` of where the stage is;
+- nothing runs while a request holds the instrument, and `quit` is refused;
+- files go to `%USERPROFILE%\ls6t\testing\files`.
+
+What changes ls6t's own settings stays with a person: `ls6t profile set/import`, `ls6t alignment record`, `ls6t
+references clear`, `ls6t bridge install`, `ls6t-typelib`, `pytest`. The LLM gives the exact command to run.
+Turn test mode off when the tests are done.
 
 ---
 

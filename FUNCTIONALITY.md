@@ -1,6 +1,6 @@
 # labspec-translator (ls6t): what it can do
 
-This is the complete list of functions in version 2026.11.20.4. It covers:
+This is the complete list of functions in version 2026.11.20.5. It covers:
 
 - what a study can ask for;
 - the tools an LLM sees;
@@ -63,6 +63,7 @@ A request is `{name: study}`; each study has a `kind`.
 | `instrument` | `status` (bridge and instrument now, with LabSpec's last error), `discover` (proposes a machine profile), `resume` (after an operator halt) |
 | `snapshot` | A video frame now, returned as an image: the beam's position marked, small features numbered; `with_laser` shows the beam and measures its offset; `extended` takes LabSpec's extended video (a stitched still over the area set in LabSpec; the stage moves; only when the profile allows it, after the operator's Yes) |
 | `references` | Spectral corrections, white-light backgrounds, beam offsets, alignment state and saved LabSpec configurations (read-only) |
+| `hardware_test` | Only in test mode (`ls6t connect APP --test`): TESTING.md with the maintainer. `plan`, `step`, `call` (one bridge command, with guards and the operator's Yes for the laser), `record`, `report`, `status`, `last_error`, `config` |
 | `spot_status` | The beam's remembered offsets, their age and drift (read-only) |
 | `alignment_status` | Per laser: the alignment baseline, the last check and its age (read-only) |
 | `get_inputs` | The bridge commands one study would send, its range and time estimate, without running |
@@ -97,6 +98,7 @@ trusting numbers, the safety rules and the polling etiquette.
 | `ls6t spot status / forget [--objective --laser]` | The beam's offsets |
 | `ls6t references show / clear correction [LASER@GRATING] / clear background NAME / clear spot` | Everything ls6t remembers between sessions |
 | `ls6t connect [APP... --sim --remove]` | Which LLM apps are on the PC and which run ls6t; add or remove the MCP server in the Claude desktop app (`claude`), the ChatGPT desktop app / Codex (`codex`), Gemini CLI (`gemini`), or every app found (`auto`) |
+| `ls6t test plan / step ID / record ID RESULT / report` | TESTING.md's tests: progress, one test, recording a result and answers, the filled-in results table (`LS6T_HOME\testing`) |
 | `ls6t sim [--seconds S]` | Run the simulator by hand |
 | `ls6t-typelib [--path F] [--format text/markdown/json] [--out F] [--list]` | (a separate program, any OS) Read LabSpec's ActiveX type library straight from the file and list every method and property of the installed version; `NEW` marks those not in the 2018 manual, and words of interest are flagged. Read-only: nothing starts or moves |
 | `ls6t run-request FOLDER` | What the detached runner runs (internal) |
@@ -245,5 +247,5 @@ profile. The shutter mode is restored on every path.
   - `si_calibration`, `graphene_map`, `extended_range`, `saturation`, `series`;
   - `guided_focus`, `focus_scan`, `spot_raman`, `spot_video`;
   - `depth_profile`, `calibration_zero`, `white_light`, `native_map`, `operator_stop`.
-- **Test suite** (`pytest`, 88 tests), which also checks the LabSpec scripts' structure.
+- **Test suite** (`pytest`, 91 tests), which also checks the LabSpec scripts' structure.
 - **Instrument tests** with the maintainer: [TESTING.md](TESTING.md).

@@ -1,5 +1,5 @@
 """cli.py — the command line. Every command prints JSON; '-' reads the studies from stdin.
-Version: 2026.11.20.4
+Version: 2026.11.20.5
 
   ls6t status [REQUEST] [--wait S]   versions, the bridge, the profile; or a request's studies
   ls6t format                        the study format
@@ -30,7 +30,11 @@ Version: 2026.11.20.4
   ls6t connect APP... [--sim] [--remove]
                                      add (or remove) the MCP server in: claude (Claude desktop app), codex (ChatGPT
                                      desktop app, Codex CLI and IDE extension), gemini (Gemini CLI), or auto (every
-                                     app found); --sim also adds 'ls6t-sim' (the simulator)
+                                     app found); --sim also adds 'ls6t-sim' (the simulator); --test turns test
+                                     mode on for those entries (the hardware_test tool), --no-test off
+  ls6t test plan | step ID | report  TESTING.md's tests: the plan with results so far, one test, the report
+  ls6t test record ID RESULT [--notes T] [--values JSON] [--answers JSON] [--who NAME]
+                                     record a test (pass, fail, partial, skipped, blocked) in LS6T_HOME/testing
   ls6t sim [--seconds S]             run the simulator in the foreground (LS6T_MODE=sim tests by hand)
   ls6t run-request FOLDER            what the detached runner runs
 """
@@ -113,6 +117,16 @@ def main(argv=None) -> int:
     s.add_argument("apps", nargs="*", help="claude, codex, gemini, or auto (every app found)")
     s.add_argument("--sim", action="store_true", help="also add 'ls6t-sim' (the simulator)")
     s.add_argument("--remove", action="store_true", help="remove this install's entries instead")
+    s.add_argument("--test", dest="test", action="store_true", default=None, help="test mode on (hardware_test)")
+    s.add_argument("--no-test", dest="test", action="store_false", help="test mode off")
+    s = sub.add_parser("test")
+    s.add_argument("action", choices=["plan", "step", "record", "report"])
+    s.add_argument("id", nargs="?", help="step / record: the test's ID, e.g. T3.4")
+    s.add_argument("result", nargs="?", help="record: pass, fail, partial, skipped or blocked")
+    s.add_argument("--notes", default="")
+    s.add_argument("--values", default="{}", help='record: JSON, e.g. \'{"si_cm1": 520.6}\'')
+    s.add_argument("--answers", default="{}", help='record: JSON, e.g. \'{"Q5": "motorised"}\'')
+    s.add_argument("--who", default="")
     s = sub.add_parser("sim")
     s.add_argument("--seconds", type=float, default=0, help="0: until Ctrl-C")
     s = sub.add_parser("run-request")
@@ -225,11 +239,23 @@ def main(argv=None) -> int:
         if bad:
             ap.error(f"connect: unknown app {', '.join(bad)} (claude, codex, gemini, auto)")
         reps = (C.disconnect(apps, sys.executable) if a.remove
-                else C.connect(apps, sys.executable, sim=a.sim))
+                else C.connect(apps, sys.executable, sim=a.sim, test=a.test))
         ok = all(r.get("ok") for r in reps)
         _print({"ok": ok, "python": sys.executable, "files": reps,
                 "next": "quit and restart each app changed: the ls6t tools appear in a new chat or session"})
         return 0 if ok else 1
+    elif a.cmd == "test":
+        from . import testmode as T
+        if a.action == "plan":
+            _print(T.plan_summary())
+        elif a.action == "report":
+            _print(T.report())
+        elif a.action == "step":
+            r = T.step_info(a.id or "")
+            r.pop("commands_in_chat", None)
+            _print(r)
+        else:
+            _print(T.record(a.id or "", a.result or "", a.notes, json.loads(a.values), json.loads(a.answers), a.who))
     elif a.cmd == "sim":
         from . import sim as S
         bdir = config.sim_bridge_dir()

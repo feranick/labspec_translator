@@ -1074,3 +1074,91 @@ def test_installer_files(tmp_path):
     for f, mod in (("ls6t.cmd", "cli"), ("ls6t-mcp.cmd", "mcp_server"), ("ls6t-typelib.cmd", "typelib")):
         raw = (ROOT / "installer" / "bin" / f).read_bytes()
         assert f"-m labspec_translator.{mod} %*".encode() in raw and b"\r\n" in raw
+
+
+# --------------------------------------------------------------------------------------------- test mode
+
+def test_testing_plan_covers_the_results_table():
+    from labspec_translator import testmode as T
+    text = (ROOT / "TESTING.md").read_text(encoding="utf-8")
+    plan = T.parse(text)
+    table = text[text.index("## Results table"):]
+    wanted = set()
+    for full, base, first, last in re.findall(r"^\| ((T\d+[a-z]?)(?:\.(\d+))?(?:–T\d+[a-z]?\.(\d+))?)", table,
+                                              flags=re.M):
+        if not first:
+            wanted.add(base)
+        else:
+            wanted |= {f"{base}.{i}" for i in range(int(first), int(last or first) + 1)}
+    assert wanted and wanted <= set(plan["steps"]), wanted - set(plan["steps"])
+    assert len(plan["questions"]) >= 40 and plan["steps"]["T9.1"]["questions"] == ["Q12"]
+    assert plan["steps"]["T5b.3"]["laser"] and not plan["steps"]["T5b.1"]["laser"] and plan["steps"]["T5"]["laser"]
+
+
+def test_hardware_test_tool(tmp_path, monkeypatch):
+    from labspec_translator import testmode as T
+    monkeypatch.delenv("LS6T_TEST_MODE", raising=False)
+    assert "test mode is off" in T.hardware_test("plan")["error"]
+    monkeypatch.setenv("LS6T_TEST_MODE", "1")
+    S.ensure(config.active_bridge_dir())
+    plan = T.hardware_test("plan")
+    assert plan["next"] == "T0.1" and len(plan["steps"]) > 60
+    st = T.hardware_test("step", step="T3.4")
+    assert "Laser" in st["text"] and st["commands_in_chat"]
+    with pytest.raises(ValueError):
+        T.hardware_test("step", step="T99")
+    assert "quit" in T.hardware_test("call", verb="quit")["error"]
+    assert not T.hardware_test("call", verb="rm")["ok"]
+    r = T.hardware_test("call", step="T3.3", verb="move", params={"motor": "Grating", "mode": "value", "value": 600})
+    assert r["ok"] and float(r["value"]) == 600
+    r = T.hardware_test("call", step="T3.6", verb="move_xy", params={"x_um": 1234.5 + 6000, "y_um": -567.8})
+    assert not r["ok"] and "max_xy_um" in r["error"]
+    assert T.hardware_test("call", verb="move", params={"motor": "Filter", "mode": "label", "value": "10%"})["ok"]
+    P.save(dict(P.load(), limits=dict(P.load()["limits"], max_filter_pct=5)))
+    r = T.hardware_test("call", step="T3.1", verb="move", params={"motor": "Filter", "mode": "label", "value": "25%"})
+    assert not r["ok"] and "cap" in r["error"]
+    assert "current filter" in T.hardware_test("call", verb="acquire", params={"exposure_s": 1})["error"]  # 10% now
+    T.hardware_test("call", verb="move", params={"motor": "Filter", "mode": "label", "value": "1%"})
+    (config.active_bridge_dir() / "sim_confirm_no").write_text("1")
+    assert "declined" in T.hardware_test("call", step="T4.1", verb="acquire", params={"exposure_s": 1})["error"]
+    (config.active_bridge_dir() / "sim_confirm_no").unlink()
+    r = T.hardware_test("call", step="T4.1", verb="acquire",
+                        params={"exposure_s": 1, "out": "C:/Windows/evil", "from_nm": 540, "to_nm": 560})
+    assert r["ok"] and r["summary"]["max_counts"] > 0 and str(T.folder()) in r["summary"]["file"]
+    with pytest.raises(ValueError):
+        T.hardware_test("record", step="T4.1", result="great")
+    with pytest.raises(ValueError):
+        T.hardware_test("record", step="T4.1", result="pass", answers={"Q999": "x"})
+    r = T.hardware_test("record", step="T4.1", result="pass", notes="Si line seen", values={"max": 1234},
+                        answers={"Q6": "x axis in nm"}, who="NF")
+    rep = Path(r["report"]).read_text()
+    assert "| T4.1 |" in rep and "| pass | Si line seen; max = 1234; Q6: x axis in nm |" in rep and "| Q6 |" in rep
+    assert T.hardware_test("plan")["steps"][[s["id"] for s in plan["steps"]].index("T4.1")]["result"] == "pass"
+    calls = [e for e in T.entries() if e["kind"] == "call"]
+    assert any(e.get("declined") for e in calls) and any(e["step"] == "T4.1" and e.get("ok") for e in calls)
+    assert T.hardware_test("report")["recorded"] == 1
+
+
+def test_mcp_test_mode_and_connect_flag(tmp_path, monkeypatch):
+    pytest.importorskip("mcp")
+    import importlib
+    from labspec_translator import clients as C
+    from labspec_translator import mcp_server
+    assert not hasattr(mcp_server, "hardware_test")
+    monkeypatch.setenv("LS6T_TEST_MODE", "1")
+    m = importlib.reload(mcp_server)
+    try:
+        assert hasattr(m, "hardware_test") and "TEST MODE" in m.INSTRUCTIONS
+        assert len(m.INSTRUCTIONS.splitlines()) <= 30
+    finally:
+        monkeypatch.delenv("LS6T_TEST_MODE")
+        importlib.reload(mcp_server)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    monkeypatch.setattr(C.Path, "home", classmethod(lambda cls: tmp_path / "u"))
+    C.connect(["claude"], "py", sim=True, test=True)
+    env = C.read_json(C.claude_files()[0])["mcpServers"]
+    assert env["ls6t"]["env"]["LS6T_TEST_MODE"] == "1" and env["ls6t-sim"]["env"]["LS6T_TEST_MODE"] == "1"
+    C.connect(["claude"], "py")
+    assert C.read_json(C.claude_files()[0])["mcpServers"]["ls6t"]["env"]["LS6T_TEST_MODE"] == "1"   # kept
+    C.connect(["claude"], "py", test=False)
+    assert C.read_json(C.claude_files()[0])["mcpServers"]["ls6t"]["env"]["LS6T_TEST_MODE"] == "0"

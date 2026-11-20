@@ -1,5 +1,5 @@
 """clients.py — connecting ls6t's MCP server to the LLM apps on this computer (`ls6t connect`, and the installer).
-Version: 2026.11.20.4
+Version: 2026.11.20.5
 
 Each app keeps its MCP servers in its own file. ls6t knows three that start local (stdio) servers:
 
@@ -308,11 +308,14 @@ def existing_env() -> dict:
     return {}
 
 
-def connect(clients: list, python: str, sim: bool = False, main: bool = True) -> list[dict]:
-    """Adds "ls6t" (main) and "ls6t-sim" (sim) to each client's file. Returns one report per file:
+def connect(clients: list, python: str, sim: bool = False, main: bool = True, test: bool | None = None) -> list[dict]:
+    """Adds "ls6t" (main) and "ls6t-sim" (sim) to each client's file. test True / False turns test mode (the
+    hardware_test tool) on / off in those entries; None leaves it as it is. Returns one report per file:
     {client, file, ok, notes | error, backup}."""
     reports = []
     shared = existing_env()
+    shared.pop("LS6T_TEST_MODE", None)
+    tm = {} if test is None else {"LS6T_TEST_MODE": "1" if test else "0"}
     for client in clients:
         for path in files(client, create=True):
             rep = {"client": client, "app": LABELS[client], "file": str(path)}
@@ -321,22 +324,23 @@ def connect(clients: list, python: str, sim: bool = False, main: bool = True) ->
                     text = path.read_text(encoding="utf-8") if path.exists() else ""
                     notes = []
                     if main:
-                        text, n = toml_merge(text, ENTRY, python, {**default_env(), **shared})
+                        text, n = toml_merge(text, ENTRY, python, {**default_env(), **shared}, forced=tm)
                         notes.append(n)
                     if sim:
                         text, n = toml_merge(text, SIM_ENTRY, python, {**default_env(True), **_home_only(shared)},
-                                             forced={"LS6T_MODE": "sim"})
+                                             forced={"LS6T_MODE": "sim", **tm})
                         notes.append(n)
                     rep["backup"] = _str(_backup_and_write(path, text))
                 else:
                     cfg = read_json(path)
                     notes = []
                     if main:
-                        cfg, n = merge_server(cfg, ENTRY, python, {**default_env(), **shared}, client=client)
+                        cfg, n = merge_server(cfg, ENTRY, python, {**default_env(), **shared}, forced=tm,
+                                              client=client)
                         notes.append(n)
                     if sim:
                         cfg, n = merge_server(cfg, SIM_ENTRY, python, {**default_env(True), **_home_only(shared)},
-                                              forced={"LS6T_MODE": "sim"}, client=client)
+                                              forced={"LS6T_MODE": "sim", **tm}, client=client)
                         notes.append(n)
                     rep["backup"] = _str(write_json(path, cfg))
                 rep.update(ok=True, notes=notes)

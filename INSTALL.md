@@ -245,6 +245,7 @@ ls6t connect                 # which apps are here, and which already run ls6t
 ls6t connect auto            # add "ls6t" to every app found (or name them: ls6t connect codex gemini)
 ls6t connect auto --sim      # also "ls6t-sim": the same tools on the simulator, to practise
 ls6t connect codex --remove  # take this install's entries out again
+ls6t connect claude --test   # test mode: the instrument tests of TESTING.md from the chat (--no-test: off)
 ```
 
 Each file is backed up first (`<file>.ls6t-backup-<date>`); other servers and settings in an existing ls6t entry are

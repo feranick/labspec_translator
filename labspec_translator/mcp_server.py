@@ -1,5 +1,5 @@
 """mcp_server.py — MCP server: lets LLM-based tools run Raman measurements on a HORIBA instrument through LabSpec 6.
-Version: 2026.11.20.4
+Version: 2026.11.20.5
 
 Tools (all JSON):
   study_format      the study format, the profile's choices and limits, the bridge's state. Read it first.
@@ -17,6 +17,7 @@ Tools (all JSON):
   run_benchmarks    the benchmarks on the simulator (known answers)
   get_file          a written file as base64
   get_image         a PNG of a study (spectra with fits, map images), as an image
+  hardware_test     only in test mode (LS6T_TEST_MODE=1, `ls6t connect APP --test`): TESTING.md with the maintainer
 
 Run:  ls6t-mcp            (stdio, what the Claude app starts)
       ls6t-mcp --http 8771 [--host 127.0.0.1]
@@ -27,7 +28,7 @@ from __future__ import annotations
 import argparse
 import functools
 
-from . import api
+from . import api, testmode
 
 try:  # MCP Python SDK 2.x
     from mcp.server.mcpserver import Image
@@ -66,6 +67,11 @@ Polling costs tokens: when a run needs more than about 5 minutes, tell the user 
 collect it later with study_status.
 Pictures: "images": true writes PNGs (images.<name>.path); get_image shows them; the snapshot tool shows the
 sample with the beam marked. Units: Raman shift cm-1, positions µm, time s, intensities counts."""
+
+if testmode.enabled():
+    INSTRUCTIONS += """
+TEST MODE (TESTING.md, the maintainer at the instrument): hardware_test plan, then per test step: tell the maintainer
+what to do in LabSpec, check with the tools, call single bridge commands, record the result and the answers."""
 
 server = _Server("labspec-translator", instructions=INSTRUCTIONS)
 
@@ -190,6 +196,29 @@ def get_inputs(study: dict, name: str = "study") -> dict:
     """The bridge commands one study would send (setup moves, the first points), its range in nm and its time
     estimate, without running anything."""
     return api.inputs(study, name)
+
+
+if testmode.enabled():
+    @server.tool()
+    def hardware_test(action: str, step: str | None = None, verb: str | None = None, params: dict | None = None,
+                      result: str | None = None, notes: str = "", values: dict | None = None,
+                      answers: dict | None = None, who: str = "", timeout_s: float = 120) -> dict:
+        """The instrument tests of TESTING.md, run with the maintainer (test mode only). Actions:
+        plan: every test with its last result and the next one to do. step (step="T3.4"): its instructions, pass
+        criteria, the open questions it answers, and how its commands map to these tools. call (verb, params,
+        step): one bridge command (ping, status, discover, move {motor, mode: value|label|index, value}, move_xy
+        {x_um, y_um}, autofocus, acquire {exposure_s, accumulations, from_nm, to_nm, mode, laser_off}, view, save,
+        remove, confirm {text}, message {text}, safe, video {laser_s, during_acq_s, extended}, map_native, guide,
+        notice, resume, last_error): moves within the limits, the filter by label within the caps; anything that
+        can fire the laser asks the operator in LabSpec first; acquire returns a summary of the spectrum. record
+        (step, result: pass|fail|partial|skipped|blocked, notes, values {name: value}, answers {"Q5": "..."}, who):
+        appends to the test log and rewrites the report (TESTING.md's results table filled in). report: the
+        report's path and counts. status: versions, settings, the bridge. last_error: LabSpec's last error.
+        config (params {action: list|save|load, name}): LabSpec's configuration files.
+        Go in order; tell the maintainer what to do and wait for them; ask what only a person can see (the video
+        window, sounds, the stage moving); never record a pass you did not check. Profile changes, alignment
+        baselines, clearing references and installing the scripts stay with a person: give the exact command."""
+        return testmode.hardware_test(action, step, verb, params, result, notes, values, answers, who, timeout_s)
 
 
 @server.tool()

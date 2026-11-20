@@ -16,7 +16,7 @@ it runs **locally**: on the instrument PC, next to the Claude desktop app. It ha
 machines. Unlike the other translators, the backend has no Python API: LabSpec is automated with VBScript
 (*LabSpec 5/6 Automation*, HORIBA, 2018). That is why the bridge script exists.
 
-First instrument: **XploRA** (LabSpec 6, Windows 11). Version 2026.11.20.4.
+First instrument: **XploRA** (LabSpec 6, Windows 11). Version 2026.11.20.5.
 
 **Scope of version 1**
 
@@ -562,6 +562,7 @@ Claude app ──MCP──> ls6t-mcp ──> request folder + runner process (ls
 | `sim.py` | A simulated LabSpec + XploRA speaking the same protocol (`LS6T_MODE=sim`, tests, benchmarks) |
 | `bench.py` | The benchmarks |
 | `api.py`, `cli.py`, `mcp_server.py` | The functions, the command line, the MCP server |
+| `testmode.py` | Test mode: TESTING.md read as a plan, single bridge commands with guards and the operator's Yes for the laser, the test log and report (`hardware_test`, `ls6t test`) |
 | `clients.py` | `ls6t connect`: finds the LLM apps (Claude desktop app, ChatGPT desktop app / Codex, Gemini CLI) and adds or removes the MCP server in their files (JSON or TOML), backed up, other settings kept |
 | `winsetup.py` | What the Windows installer does beyond copying files: checks, precompiling, the LabSpec scripts, PATH, the LLM apps (and undoing them) |
 | `installer/` | The Windows installer: `ls6t.nsi` (NSIS), `build_installer.py`, the launchers (`bin/`) |
@@ -630,6 +631,8 @@ install the scripts again with the same settings.
 
 ## Testing
 
+- **From the chat**: in test mode (`ls6t connect APP --test`) the LLM walks the maintainer through TESTING.md with a
+  `hardware_test` tool and records the results ([TESTING.md, test mode](TESTING.md#running-the-tests-from-the-chat-test-mode)).
 - **Without the instrument**: `pytest` (format, plan, protocol, analysis, full runs on the simulator, operator stop
   and decline, cancel, saturation, the LabSpec scripts' structure, the MCP server) and `ls6t bench`.
 - **With the instrument**: [TESTING.md](TESTING.md), a staged plan to carry out with the instrument's maintainer, from
@@ -659,6 +662,7 @@ frames, LabSpec's image files, `snapshot.json`); a study's frames go to its `vid
 
 | Version | Changes |
 |---|---|
+| 2026.11.20.5 | Test mode: TESTING.md from the chat. `ls6t connect APP --test` adds the `hardware_test` tool (plan, step, call, record, report, status, last_error, config): the LLM reads each test, guides the maintainer, runs single bridge commands with guards (limits, filter caps, the operator's Yes in LabSpec for anything that can fire the laser, files confined, no `quit`, nothing during a request) and records results and answers in `LS6T_HOME\testing` (log and the results table filled in). `ls6t test plan / step / record / report` from the command line. Off by default. |
 | 2026.11.20.4 | Not only Claude: `ls6t connect` and the installer find the LLM apps on the PC (Claude desktop app; ChatGPT desktop app, Codex CLI and IDE extension, which share `~/.codex/config.toml`; Gemini CLI, `~/.gemini/settings.json`) and add the MCP server to those chosen, sharing one `LS6T_HOME`; TOML edited in place (the rest of the file untouched), backups, other settings kept; uninstalling removes only this install's entries. Installer: one component per app, ticked when found; silent `/CLAUDE /CODEX /GEMINI /NOAPPS /SIM`. The Gemini app and ChatGPT on the web take only internet servers and are not supported. |
 | 2026.11.20.3 | Installer build fixed for makensis on Windows (the staged files' path separator); the GitHub workflow uses Node 24 actions (checkout v5, setup-python v6, upload-artifact v6) and the GitHub CLI for the release. |
 | 2026.11.20.2 | A Windows installer, `ls6t-setup-<version>.exe` (NSIS): per user, no administrator rights, offline (python.org's embeddable Python 3.12 with every package preinstalled); launchers, Start menu, PATH, the LabSpec scripts, and the Claude app's configuration (backed up; an `ls6t-sim` entry optional); updates in place, uninstalls cleanly keeping the data. `installer/build_installer.py` builds it on macOS, Windows or Linux; a GitHub workflow builds, installs, tests and attaches it to each tagged release. |
