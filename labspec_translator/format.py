@@ -1,5 +1,5 @@
 """format.py — the study format and its static checks (no instrument needed).
-Version: 2026.11.19.2
+Version: 2026.11.19.3
 """
 from __future__ import annotations
 
@@ -8,9 +8,13 @@ import math
 from . import config, plan
 from .profile import filter_pct, laser_key
 
-KINDS = ("spectrum", "map", "series", "calibration")
+KINDS = ("spectrum", "map", "series", "calibration", "alignment", "guide")
 TOP_KEYS = {"kind", "sample", "setup", "acquire", "focus", "points", "map", "series", "process", "expect",
-            "images", "save_native", "notes", "video"}
+            "images", "save_native", "notes", "video", "alignment", "guide"}
+ALIGN_KEYS = {"guided", "focus_guide"}
+GUIDE_KEYS = {"instruction", "mode", "target", "line_cm1", "center_cm1", "window_cm1", "exposure_s", "max_s",
+              "stable_n", "drop_frac"}
+GUIDE_MODES = ("reach", "drop", "maximize")
 VIDEO_KEYS = {"before", "after", "with_laser"}
 SETUP_KEYS = {"laser_nm", "grating", "filter", "objective", "hole_um", "slit_um"}
 ACQ_KEYS = {"range_cm1", "center_cm1", "exposure_s", "accumulations", "auto_exposure", "spike", "dark"}
@@ -51,7 +55,14 @@ def study_format(status: dict | None = None) -> dict:
             "map": "a grid of spectra: map.x_um / y_um / z_um = [from, to, step] (offsets, µm)",
             "series": "repeated spectra at one spot: series.count, series.interval_s (time series)",
             "calibration": "a spectrum of a silicon reference: fits the Si line and checks it against "
-                           f"{prof['checks']['si_cm1']} ± {prof['checks']['si_tol_cm1']} cm-1"},
+                           f"{prof['checks']['si_cm1']} ± {prof['checks']['si_tol_cm1']} cm-1",
+            "alignment": "is the system aligned for this laser? The Si reference with the laser's fixed settings, "
+                         "compared with the baseline recorded after the last AutoAlignment; if it fails (guided), "
+                         "the operator runs AutoAlignment in LabSpec and the check repeats; then a video snapshot "
+                         "measures the beam's offset. Needs only setup.laser_nm",
+            "guide": "the operator adjusts something by hand (power at the laser, focus, a mirror) while ls6t "
+                     "measures a line every fraction of a second and shows it in LabSpec; STOP appears when the "
+                     "goal is met (reach / drop a target, or the best position just passed: maximize)"},
         "keys": {
             "sample": "{name, notes, sensitive: true caps the filter at limits.sensitive_max_filter_pct}",
             "setup": "{laser_nm, grating (gr/mm), filter (a label from the profile, e.g. '10%'), objective "
@@ -77,6 +88,10 @@ def study_format(status: dict | None = None) -> dict:
                      "after, images video_before/after: look with get_image); with_laser opens the laser shutter "
                      "for about a second so the beam itself shows",
             "save_native": "true (default): LabSpec also saves its own .l6s files",
+            "alignment": "(kind alignment) {guided: true (default), focus_guide: false}",
+            "guide": "(kind guide) {instruction (shown to the operator), mode: reach | drop | maximize, target "
+                     "(counts/s of the line; reach, drop), line_cm1 (default Si 520.7), window_cm1 (30), "
+                     "exposure_s (0.2: shorter is faster feedback), max_s (120), stable_n (2), drop_frac (0.1)}",
         },
         "conventions": [
             "Raman shift in cm-1 (Stokes, relative to the laser line); stage positions in µm.",
@@ -128,6 +143,10 @@ def validate_study(name: str, study: dict, prof: dict) -> dict:
         errors.append(f"kind {kind!r}: use one of {', '.join(KINDS)}")
         return {"ok": False, "errors": errors, "warnings": warnings}
     lim = prof["limits"]
+    if kind == "alignment":
+        return _validate_alignment(name, study, prof, errors, warnings)
+    if kind == "guide":
+        return _validate_guide(name, study, prof, errors, warnings)
     sample = study.get("sample", {})
     if not isinstance(sample, dict):
         errors.append("sample: an object {name, notes, sensitive}")
@@ -386,6 +405,101 @@ def validate_study(name: str, study: dict, prof: dict) -> dict:
         warnings.append("no machine profile yet: the built-in XploRA defaults are used (run the discovery script)")
     out.update(ok=not errors, errors=errors, warnings=warnings, estimate=est,
                range=rng, laser_nm=laser)
+    return out
+
+
+def _merge(out: dict, inner: dict, errors: list, warnings: list) -> dict:
+    errors += [e for e in inner["errors"] if e not in errors]
+    warnings += [w for w in inner["warnings"] if w not in warnings]
+    res = {"ok": not errors, "errors": errors, "warnings": warnings}
+    for k in ("estimate", "range", "laser_nm"):
+        if k in inner:
+            res[k] = inner[k]
+    res.update(out)
+    return res
+
+
+def _validate_alignment(name, study, prof, errors, warnings) -> dict:
+    a = study.get("alignment", {})
+    if not isinstance(a, dict):
+        errors.append("alignment: {guided, focus_guide} (booleans)")
+        a = {}
+    _unknown(a, ALIGN_KEYS, "alignment", errors)
+    for k in ALIGN_KEYS:
+        if k in a and not isinstance(a[k], bool):
+            errors.append(f"alignment.{k}: true or false")
+    for k in ("points", "map", "series", "guide", "process"):
+        if study.get(k) is not None:
+            errors.append(f"{k}: not with kind 'alignment' (it measures the Si reference at the current spot)")
+    s = study.get("setup", {}) or {}
+    if s.get("laser_nm") is None:
+        errors.append("alignment: give setup.laser_nm (AutoAlignment and its check are per laser)")
+        return {"ok": False, "errors": errors, "warnings": warnings}
+    k = laser_key(prof, s["laser_nm"])
+    fixed = prof.get("alignment", {}).get("settings", {}).get(k or "", {})
+    missing = [x for x in ("grating", "filter", "objective") if x not in fixed and s.get(x) is None]
+    if missing:
+        errors.append(f"alignment: no fixed settings for the {s['laser_nm']} nm laser in the profile "
+                      f"(alignment.settings): give setup.{', setup.'.join(missing)}, or the maintainer records them "
+                      "with `ls6t alignment record` after a successful AutoAlignment")
+    if k and k not in prof.get("alignment", {}).get("baselines", {}):
+        warnings.append(f"no alignment baseline for the {s['laser_nm']} nm laser yet: the check measures but cannot "
+                        "judge; the maintainer records one after AutoAlignment (`ls6t alignment record`)")
+    acq = study.get("acquire", {}) or {}
+    bad = set(acq) - {"exposure_s", "accumulations"}
+    if bad:
+        errors.append(f"acquire: only exposure_s and accumulations with kind 'alignment' (not {', '.join(sorted(bad))})")
+    if errors:
+        return {"ok": False, "errors": errors, "warnings": warnings}
+    inner = validate_study(name, plan.alignment_check_study(study, prof), prof)
+    out = _merge({}, inner, errors, warnings)
+    if out["ok"]:
+        out["estimate"] = plan.estimate(study, prof)
+    return out
+
+
+def _validate_guide(name, study, prof, errors, warnings) -> dict:
+    g = study.get("guide")
+    if not isinstance(g, dict):
+        errors.append("guide: {instruction, mode, target, ...} (kind guide)")
+        return {"ok": False, "errors": errors, "warnings": warnings}
+    _unknown(g, GUIDE_KEYS, "guide", errors)
+    gl = prof.get("guide", {})
+    ins = g.get("instruction")
+    if not isinstance(ins, str) or not ins.strip() or len(ins) > 200:
+        errors.append("guide.instruction: what the operator should do, in at most 200 characters "
+                      "(e.g. 'Raise the laser power at the source slowly')")
+    mode = g.get("mode", "reach")
+    if mode not in GUIDE_MODES:
+        errors.append(f"guide.mode {mode!r}: reach, drop or maximize")
+    if mode in ("reach", "drop") and (not _num(g.get("target")) or g["target"] <= 0):
+        errors.append(f"guide.target: the line's signal to {mode} (counts/s, > 0)")
+    for k, lo, hi in (("exposure_s", 0.01, float(gl.get("max_exposure_s", 5.0))),
+                      ("max_s", 1.0, float(gl.get("max_s", 300.0))), ("window_cm1", 2.0, 400.0),
+                      ("drop_frac", 0.01, 0.9)):
+        v = g.get(k)
+        if v is not None and (not _num(v) or not lo <= v <= hi):
+            errors.append(f"guide.{k}: between {lo:g} and {hi:g}")
+    if g.get("stable_n") is not None and (not isinstance(g["stable_n"], int) or not 1 <= g["stable_n"] <= 20):
+        errors.append("guide.stable_n: an integer 1..20 (readings in a row that must meet the goal)")
+    for k in ("line_cm1", "center_cm1"):
+        if g.get(k) is not None and not _num(g[k]):
+            errors.append(f"guide.{k}: a number (cm-1)")
+    for k in ("points", "map", "series", "acquire", "alignment", "process", "video"):
+        if study.get(k) is not None:
+            errors.append(f"{k}: not with kind 'guide' (its acquisitions are set by guide.exposure_s)")
+    if (study.get("setup") or {}).get("laser_nm") is None:
+        errors.append("guide: give setup.laser_nm (the line's position in nm depends on it)")
+    if errors:
+        return {"ok": False, "errors": errors, "warnings": warnings}
+    inner = validate_study(name, plan.guide_spectrum_study(study, prof), prof)
+    inner["warnings"] = [w for w in inner["warnings"] if not w.startswith("acquire.spike")]
+    out = _merge({}, inner, errors, warnings)
+    if out["ok"]:
+        out["estimate"] = plan.estimate(study, prof)
+        p = plan.guide_params(study, prof)
+        out["latency_note"] = (f"one reading every ~{p['exposure_s'] + 0.3:.1f} s (exposure + LabSpec overhead): "
+                               "the operator should adjust slowly")
     return out
 
 

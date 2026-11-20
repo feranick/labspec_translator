@@ -1,5 +1,5 @@
 """profile.py — the machine profile: what the instrument has (from the discovery script) and the limits a person sets.
-Version: 2026.11.19.2
+Version: 2026.11.19.3
 
 The profile is a JSON file (LS6T_PROFILE, default ~/ls6t/profile.json). Studies never change it: an LLM can only
 ask for what the profile allows. Without a file, the built-in XploRA defaults below apply and every result says so
@@ -52,6 +52,14 @@ DEFAULT_PROFILE: dict = {
     "video": {"laser_offset_um": [0.0, 0.0], "marker": "stage", "packing": "colorref", "order": "x_fastest",
               "formats": ["png", "jpg", "bmp", "tif"], "settle_s": 1.5, "laser_s": 1.0, "max_laser_s": 5.0,
               "camera": None},
+    # alignment checks (kind 'alignment'): per laser the fixed settings and the baseline the maintainer recorded
+    # right after a successful AutoAlignment (`ls6t alignment record`); a check passes when the Si signal is at least
+    # min_ratio of the baseline and its width at most max_fwhm_ratio of it; studies warn when a laser's last check
+    # failed or is older than max_age_h (only once a baseline exists)
+    "alignment": {"settings": {}, "baselines": {}, "min_ratio": 0.7, "max_fwhm_ratio": 1.3, "max_age_h": 24.0,
+                  "max_retries": 1},
+    # guided adjustments (kind 'guide'): limits, and the operator's panel (dialog, or the status bar)
+    "guide": {"max_s": 300.0, "max_exposure_s": 5.0, "ui": "dialog", "saturation_frac": 0.9},
     "checks": {"min_snr": 10.0, "detect_snr": 5.0, "si_cm1": 520.7, "si_tol_cm1": 1.0, "saturation_frac": 0.98},
 }
 
@@ -271,6 +279,20 @@ def import_discovery(text: str, base: dict | None = None) -> tuple[dict, list[st
     return prof, notes
 
 
+def set_key(prof: dict, dotted: str, value) -> dict:
+    """profile[a][b]... = value (for `ls6t profile set`, a person's edit); the key must exist already."""
+    parts = dotted.split(".")
+    cur = prof
+    for k in parts[:-1]:
+        if not isinstance(cur, dict) or k not in cur:
+            raise KeyError(f"{dotted}: no {k!r} in the profile")
+        cur = cur[k]
+    if not isinstance(cur, dict) or parts[-1] not in cur:
+        raise KeyError(f"{dotted}: no such key in the profile")
+    cur[parts[-1]] = value
+    return prof
+
+
 def summary(prof: dict) -> dict:
     """The compact view study_format shows: what may be asked for."""
     return {"system": prof.get("system"), "measured": prof.get("measured", False), "source": prof.get("source"),
@@ -280,6 +302,8 @@ def summary(prof: dict) -> dict:
             "objectives": list(prof.get("objectives", [])),
             "holes_um": prof.get("holes_um"), "slits_um": prof.get("slits_um"),
             "limits": prof.get("limits"),
+            "alignment_lasers": sorted(prof.get("alignment", {}).get("baselines", {})),
+            "laser_shutter": bool(prof.get("motors", {}).get("laser_shutter")),
             "laser_limits": {k: {"max_filter_pct": v.get("max_filter_pct", 100), "power_mw": v.get("power_mw")}
                              for k, v in prof.get("lasers", {}).items()}}
 

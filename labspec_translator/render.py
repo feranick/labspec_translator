@@ -1,5 +1,5 @@
 """render.py — PNG pictures of a study's results (matplotlib, optional extra 'render').
-Version: 2026.11.19.2
+Version: 2026.11.19.3
 
 spectrum / calibration / series: the spectrum (or the first and last of a series) with its baseline and fitted
 peaks; map: one image per peak quantity and band (position, FWHM, height or area), positions in µm offsets.
@@ -68,6 +68,29 @@ def map_png(path: Path, grid: np.ndarray, xs, ys, title: str, unit: str) -> dict
     fin = g[np.isfinite(g)]
     return {"path": str(path), "what": title, "min": float(fin.min()) if fin.size else None,
             "max": float(fin.max()) if fin.size else None}
+
+
+def guide_png(path: Path, hist: list, guide: dict, name: str) -> dict:
+    """The signal over time during a guided adjustment, with the goal and where STOP was given."""
+    plt = _plt()
+    t = [h[0] for h in hist]
+    v = [h[1] for h in hist]
+    fig, ax = plt.subplots(figsize=(7, 3.8), dpi=110)
+    ax.plot(t, v, marker="o", ms=3, lw=1)
+    if guide.get("target") and guide.get("mode") in ("reach", "drop"):
+        ax.axhline(float(guide["target"]), color="C2", ls="--", lw=1, label="goal")
+    if guide.get("t_max_s") is not None and guide.get("max_value") is not None:
+        ax.plot([guide["t_max_s"]], [guide["max_value"]], "*", color="C3", ms=10, label="best")
+    if t:
+        ax.axvline(t[-1], color="C3", lw=0.8, alpha=0.7, label=f"STOP ({guide.get('reason')})")
+    ax.set_xlabel("time (s)")
+    ax.set_ylabel("line signal (counts/s)")
+    ax.set_title(f"{name}: {guide.get('instruction', '')}"[:110], fontsize=9)
+    ax.legend(fontsize=7)
+    fig.tight_layout()
+    fig.savefig(path)
+    plt.close(fig)
+    return {"path": str(path), "what": "the line's signal during the guided adjustment"}
 
 
 UNITS = {"position_cm1": "cm-1", "fwhm_cm1": "cm-1", "height": "counts", "area": "counts·cm-1",

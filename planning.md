@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.19.2)
+## Architecture (version 2026.11.19.3)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -59,10 +59,21 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   motor in the profile, current filter within caps, operator confirmation, refused while a request runs. Discovery
   looks for shutter motors and records the video state. TESTING T5b and Q13-Q16 added. 48 tests pass; the MCP
   snapshot tool returns [image, text] through the stdio protocol (SDK 2.3).
+- 2026-11-19, 2026.11.19.3: alignment and guided adjustments, from HORIBA's AutoAlignment quick start guide (2013:
+  check Si intensity -> standard / high-precision alignment -> re-check -> laser marker; per laser; calibrate after;
+  no automation command for it). Kind `alignment`: the Si check at the laser's fixed settings vs the baseline the
+  maintainer records (`ls6t alignment record`, CLI only); guided: on failure the bridge's `notice` shows HORIBA's
+  checklist, the operator runs AutoAlignment and presses OK, the check repeats (max_retries 1); then a snapshot
+  re-measures the beam's offset (AutoAlignment moves LabSpec's marker); alignment_log.jsonl; readiness warnings
+  once baselines exist. Kind `guide` (Nicola's idea: the tool proposes a continuous manual action and says STOP):
+  the fast loop runs in the bridge (short acquisitions, line height/s, reach/drop/maximize, saturation guard,
+  LabSpec dynamic Dialog with Done/Abort, or the status bar), so STOP never waits for Python or the LLM; the LLM
+  sets the goal and reads the result. Simulator: misalignment, AutoAlignment, an operator ramping power or passing
+  focus. `ls6t profile set`. 55 tests pass; 7/7 benchmarks (new: guided_focus). TESTING T5c-T5d, Q17-Q20.
 
 ## To do next
 
-1. **At the instrument**: carry out TESTING.md (T0-T9, T5b) with the maintainer; record the answers to Q1-Q16 here and
+1. **At the instrument**: carry out TESTING.md (T0-T9, T5b-T5d) with the maintainer; record the answers to Q1-Q20 here and
    change the code where they differ from the assumptions (README "Assumptions about LabSpec").
 2. Put the measured times in the profile's `timing` (T3, T7.2).
 3. Later: native LabSpec maps (SetMappingParams + ACQ_SPECTRAL_IMAGE) for large fast maps; Linkam temperature
@@ -73,4 +84,7 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
 
 - Per-objective laser offsets (if T5b.4 shows they differ): video.laser_offset_um as {objective: [dx, dy]}.
 - Use the measured offset to correct where maps and points land (today it only places the marker).
+- Read AutoAlignment's state (Maintenance tab, status-bar indicator) with Windows UI automation, read-only, if
+  T5c.1 shows it is exposed; ask HORIBA whether newer LabSpec automation offers AutoAlignment/AutoCalibration.
+- Guided adjustments on other signals: the video spot's brightness or sharpness (focus without a Raman line).
 - Adaptive maps: refine around boundaries found in a coarse map.

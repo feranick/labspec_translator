@@ -1,5 +1,5 @@
 """plan.py — a study as bridge commands: the setup moves, the points, the acquisitions; and the time estimate.
-Version: 2026.11.19.2
+Version: 2026.11.19.3
 
 Everything here is computed from the study and the profile alone: wavelengths from Raman shifts, the number of
 detector windows, the stage positions (always offsets from where the operator left the stage, Z from the
@@ -176,10 +176,62 @@ def acquire_seconds(study: dict, prof: dict, rng: dict) -> float:
         + t["command_s"]
 
 
+GUIDE_DEFAULTS = {"mode": "reach", "window_cm1": 30.0, "exposure_s": 0.2, "max_s": 120.0, "stable_n": 2,
+                  "drop_frac": 0.1}
+
+
+def alignment_check_study(study: dict, prof: dict) -> dict:
+    """The measurement behind an alignment check: a calibration-like Si spectrum with the laser's fixed settings
+    from the profile (alignment.settings.<laser>), which the study's own setup and acquire may complete."""
+    s = dict(study.get("setup", {}))
+    k = laser_key(prof, s.get("laser_nm")) if s.get("laser_nm") is not None else None
+    fixed = dict(prof.get("alignment", {}).get("settings", {}).get(k, {})) if k else {}
+    setup = {key: fixed[key] for key in ("grating", "filter", "objective", "hole_um", "slit_um") if key in fixed}
+    setup.update(s)
+    acq = {"center_cm1": prof["checks"]["si_cm1"], "exposure_s": fixed.get("exposure_s", 1.0),
+           "accumulations": int(fixed.get("accumulations", 2))}
+    acq.update(study.get("acquire", {}))
+    acq["spike"] = acq.get("spike", "double" if int(acq["accumulations"]) >= 2 else "labspec")
+    return {"kind": "calibration", "sample": study.get("sample") or {"name": "Si reference"}, "setup": setup,
+            "acquire": acq, "save_native": study.get("save_native", True),
+            "process": {"peaks": [{"name": "Si", "near_cm1": prof["checks"]["si_cm1"], "window_cm1": 30}]}}
+
+
+def guide_params(study: dict, prof: dict) -> dict:
+    g = dict(GUIDE_DEFAULTS)
+    g.update(study.get("guide", {}))
+    g.setdefault("line_cm1", prof["checks"]["si_cm1"])
+    return g
+
+
+def guide_spectrum_study(study: dict, prof: dict) -> dict:
+    """The acquisitions of a guided adjustment, as a spectrum study (for validation and the range)."""
+    g = guide_params(study, prof)
+    return {"kind": "spectrum", "sample": study.get("sample", {}), "setup": study.get("setup", {}),
+            "acquire": {"center_cm1": g.get("center_cm1", g["line_cm1"]), "exposure_s": g["exposure_s"],
+                        "accumulations": 1, "spike": "none"}}
+
+
 def estimate(study: dict, prof: dict) -> dict:
     """{minutes, points, windows, seconds: {setup, per_point, total}}: an upper-end estimate from the profile's
     timing (measured values replace the defaults once the instrument has run)."""
     t = prof["timing"]
+    if study.get("kind") == "alignment":
+        base = estimate(alignment_check_study(study, prof), prof)
+        a = study.get("alignment", {})
+        n = 1 + (int(prof["alignment"].get("max_retries", 1)) if a.get("guided", True) else 0)
+        total = base["seconds"]["total"] * n + (guide_params({"guide": {}}, prof)["max_s"]
+                                                if a.get("focus_guide") else 0.0) + 15.0
+        return {"minutes": round(total / 60.0, 2), "points": 1, "windows": 1,
+                "seconds": {"setup": base["seconds"]["setup"], "per_acquisition": base["seconds"]["per_acquisition"],
+                            "total": round(total, 1)}, "note": "with one AutoAlignment retry, if needed; the "
+                                                               "operator's time for AutoAlignment is not included"}
+    if study.get("kind") == "guide":
+        base = estimate(guide_spectrum_study(study, prof), prof)
+        total = base["seconds"]["setup"] + float(guide_params(study, prof)["max_s"])
+        return {"minutes": round(total / 60.0, 2), "points": 1, "windows": 1,
+                "seconds": {"setup": base["seconds"]["setup"], "per_acquisition": base["seconds"]["per_acquisition"],
+                            "total": round(total, 1)}, "note": "at most; it ends as soon as the goal is met"}
     laser = laser_nm(study, prof)
     rng = acq_range(study, prof, laser)
     pts = positions(study)
@@ -219,6 +271,31 @@ def estimate(study: dict, prof: dict) -> dict:
 
 def inputs(study: dict, prof: dict, max_steps: int = 40) -> dict:
     """The bridge commands of one study, without running: setup, then the first points' commands."""
+    if study.get("kind") == "alignment":
+        chk = alignment_check_study(study, prof)
+        inner = inputs(chk, prof, max_steps)
+        a = study.get("alignment", {})
+        inner["steps"].append({"verb": "notice", "why": "only if the check fails and guided: the operator runs "
+                                                        "AutoAlignment in LabSpec (checklist), then the check repeats"})
+        inner["steps"].append({"verb": "video", "why": "a snapshot (with the laser if the profile names the "
+                                                       "shutter): the beam's offset after alignment"})
+        if a.get("focus_guide"):
+            inner["steps"].insert(1, {"verb": "guide", "mode": "maximize", "why": "the operator focuses on the Si "
+                                                                                  "until ls6t says STOP"})
+        inner["check_study"] = chk
+        inner["estimate"] = estimate(study, prof)
+        return inner
+    if study.get("kind") == "guide":
+        g = guide_params(study, prof)
+        laser = laser_nm(study, prof)
+        rng = acq_range(guide_spectrum_study(study, prof), prof, laser)
+        steps = [{"verb": "status"}] + setup_steps(study, prof) + [
+            {"verb": "status"}, {"verb": "confirm"},
+            {"verb": "guide", "text": g.get("instruction"), "mode": g["mode"], "target": g.get("target"),
+             "line_cm1": g["line_cm1"], "exposure_s": g["exposure_s"], "max_s": g["max_s"],
+             "why": "short acquisitions in LabSpec; the panel shows the signal and STOP when the goal is met"}]
+        return {"laser_nm": laser, "range": rng, "points": 1, "steps": steps, "steps_shown": len(steps),
+                "estimate": estimate(study, prof)}
     laser = laser_nm(study, prof)
     rng = acq_range(study, prof, laser)
     steps = [{"verb": "status", "why": "record the instrument state before"}]

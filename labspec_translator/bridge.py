@@ -1,5 +1,5 @@
 """bridge.py — the Python side of the LabSpec bridge: commands as files in a folder the bridge script watches.
-Version: 2026.11.19.2
+Version: 2026.11.19.3
 
 Protocol 1 (the same for ls6t_bridge.vbs inside LabSpec and for sim.py):
 
@@ -87,7 +87,7 @@ class Bridge:
         hb = self.heartbeat()
         if not hb or hb.get("state") == "stopped":
             return False
-        if hb.get("state") == "busy" and hb.get("verb") in ("confirm", "resume"):
+        if hb.get("state") == "busy" and hb.get("verb") in ("confirm", "resume", "notice", "guide"):
             return True             # a modal question in LabSpec: the bridge waits for the operator
         return hb["age_s"] <= config.heartbeat_s()
 

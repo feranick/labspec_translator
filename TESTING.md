@@ -12,7 +12,7 @@ stops and cancel on the simulator, and `ls6t bench` gives known answers. What re
 LabSpec and hardware. The plan goes from no laser and no motion to Claude driving a full map, in stages. Each stage
 starts only when the previous one passed.
 
-Version under test: 2026.11.19.2 (bridge protocol 1).
+Version under test: 2026.11.19.3 (bridge protocol 1).
 
 ---
 
@@ -49,7 +49,7 @@ Version under test: 2026.11.19.2 (bridge protocol 1).
   - a transparent film on silicon for a depth profile (optional).
 - The maintainer's usual settings for these samples (laser, grating, filter, objective, exposure). They are the
   reference for what ls6t should reproduce.
-- About **3.5 hours** for stages T0–T6 (including T5b), and 1 hour for T7–T9 (they can be another day).
+- About **4.5 hours** for stages T0–T6 (including T5b–T5d; T5c needs the maintainer to run AutoAlignment), and 1 hour for T7–T9 (they can be another day).
 
 ## Open questions this plan answers
 
@@ -73,6 +73,10 @@ The vendor manual (2018) leaves these open. Each is answered by the test listed.
 | Q14 | Video pixels: which axis varies fastest, how are colours packed (COLORREF 0x00BBGGRR or RGB), and are the axes stage coordinates in µm? | T5b.2 |
 | Q15 | Which motor is the laser shutter, and do `PutValue(0, "ShutterMode", 1)` plus moving it to 1 / 0 open and close it? | T1.2, T5b.3 |
 | Q16 | How far is the beam from LabSpec's laser position, per objective (`video.laser_offset_um`)? | T5b.4 |
+| Q17 | Does this XploRA have HORIBA's AutoAlignment module (Maintenance tab)? Can its *Current status* be read from outside (Windows UI automation, read-only)? | T5c.1 |
+| Q18 | Does `Message(text, 1)` (OK/Cancel) return 0 for OK and wait while the operator runs AutoAlignment in the same LabSpec? | T5c.2 |
+| Q19 | Does LabSpec's dynamic `Dialog` stay open, update and answer Done/Abort while short acquisitions run? How long is one reading (`period_s`) at 0.2 s exposure? | T5d.1 |
+| Q20 | Is the guided loop fast enough for a person turning a knob (focus, power): does STOP come before the operator has gone too far? | T5d.2–T5d.3 |
 
 ---
 
@@ -294,6 +298,65 @@ cross now sits on the spot.
 **T5b.5 In a calibration study.** Run the calibration study with `"video": {"after": true}`. Pass: `video.before`
 and `video.after` are in the result and the images, and the Si result is as in T4.2.
 
+## T5c. Alignment (LASER)
+
+**T5c.1 The module (Q17).** With the maintainer, find *Maintenance > AutoAlignment* in LabSpec. Record whether it
+exists, its *Last run on* and *Current status*, and the status-bar indicator's colour. Optional: check with
+Windows' *Accessibility Insights* or *Inspect* whether the *Current status* text is visible to UI automation
+(read-only).
+
+**T5c.2 Baseline after AutoAlignment (Q18).** For each laser in use:
+
+1. The maintainer runs AutoAlignment as HORIBA's quick start guide says (reference Si, x100, full power at the
+   source, focus), until it passes.
+2. Run an `alignment` study for that laser with the maintainer's grating, filter and objective, e.g.
+   `{"a532": {"kind": "alignment", "sample": {"name": "HORIBA Si reference"}, "setup": {"laser_nm": 532,
+   "grating": 1800, "filter": "10%", "objective": "x100"}}}`.
+   Pass: `alignment.passed` is null (no baseline yet) and the check is reliable.
+3. `ls6t alignment record <request>`. Pass: `ls6t alignment status` shows the laser's settings and baseline.
+4. Run the study again with only `setup.laser_nm`. Pass: `passed: true`, `ratio` between about 0.9 and 1.1
+   (record it: it shows how repeatable the check is).
+
+**T5c.3 A failing check.** Defocus by about 5 µm, or use a filter one step stronger in a hand-written setup, and run
+the alignment study. Pass:
+- `passed: false` with the ratio;
+- LabSpec shows the checklist message (**Q18**). Answer **Cancel**: the study ends with the recommendation, and
+  nothing else runs.
+
+Run it again, refocus, answer **OK** without running AutoAlignment. Pass: the second check passes; `attempts` lists
+both.
+
+**T5c.4 Readiness.** With a baseline recorded, run a spectrum study on a laser without a check today. Pass: the
+warning about its alignment check.
+
+## T5d. Guided adjustments (LASER, Q19–Q20)
+
+**T5d.1 The panel (Q19).** Silicon, in focus, a low filter. Run
+`{"g": {"kind": "guide", "sample": {"name": "Si"}, "setup": {"laser_nm": 532, "grating": 1800, "filter": "1%",
+"objective": "x100"}, "guide": {"instruction": "Do nothing: this tests the panel", "mode": "maximize",
+"max_s": 20}}}`.
+Pass:
+- LabSpec shows the ls6t guide panel with the instruction;
+- the signal updates after every reading while the spectra appear;
+- after 20 s, *Time is up* appears;
+- *Done* closes it.
+
+Record `guide.period_s`. If the panel did not appear, the result has a `ui_fallback` warning: set
+`ls6t profile set guide.ui statusbar` and repeat. Pass: the status bar shows the readings, and a message box
+shows the final message.
+
+**T5d.2 Focus by hand (Q20).** The maintainer defocuses by about 10 µm. Run a `maximize` guide with the instruction
+*"Turn the focus slowly towards the sample"*. The maintainer turns the focus slowly. Pass: STOP (*you just passed the
+best*) appears within about one turn past the best focus; going back slightly gives the best signal. Record
+`max_value`, the signal after going back, and how far past the best the maintainer had gone.
+
+**T5d.3 Power to a level.** If the laser has an adjustable power at the source: a `reach` guide with a target
+about twice the current signal (`ls6t validate` shows the estimate). The maintainer raises the power slowly. Pass:
+STOP when the target is reached; never above the saturation guard. Repeat with `drop`.
+
+**T5d.4 Abort.** During a guide, the maintainer presses *Abort*, then in another run closes the bridge's window.
+Pass: `operator_abort`, then `stopped` with the bridge halted (resume).
+
 ## T6. Maps (LASER)
 
 **T6.1 A small map (Q9, Q10).** On the contrast sample: a map study, 5 × 5 points, 1 µm steps, a short exposure, the
@@ -379,6 +442,14 @@ With the Claude desktop app connected (README step 8):
 | T5b.3 | | | | Q15: | |
 | T5b.4 | | | | Q16 offsets x10 / x50 / x100: | |
 | T5b.5 | | | | | |
+| T5c.1 | | | | Q17: | |
+| T5c.2 | | | | Q18: ratio repeat: | |
+| T5c.3 | | | | | |
+| T5c.4 | | | | | |
+| T5d.1 | | | | Q19 period_s: | |
+| T5d.2 | | | | Q20: | |
+| T5d.3 | | | | | |
+| T5d.4 | | | | | |
 | T6.1 | | | | Q10: | |
 | T6.2 | | | | | |
 | T6.3 | | | | | |

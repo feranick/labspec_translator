@@ -1,5 +1,5 @@
 """mcp_server.py — MCP server: lets LLM-based tools run Raman measurements on a HORIBA instrument through LabSpec 6.
-Version: 2026.11.19.2
+Version: 2026.11.19.3
 
 Tools (all JSON):
   study_format      the study format, the profile's choices and limits, the bridge's state. Read it first.
@@ -10,6 +10,7 @@ Tools (all JSON):
   jobs              recent requests and which one holds the instrument
   instrument        the bridge and the instrument now (status), the discovery dump (discover), resume after a halt
   snapshot          a video frame now, with the laser position marked (optionally with the beam showing)
+  alignment_status  per laser: the alignment baseline, the last check, its age
   get_inputs        the bridge commands of one study, without running
   run_benchmarks    the benchmarks on the simulator (known answers)
   get_file          a written file as base64
@@ -54,6 +55,10 @@ filter (laser power) is capped per laser and lower for samples marked sensitive.
 or running long maps. If the bridge is not running, ask the user to start ls6t_bridge.vbs in LabSpec.
 Polling costs tokens: run_studies returns 'pending' with an estimate for long runs; when a run needs more than
 about 5 minutes, tell the user when it should finish and stop; collect it later with study_status.
+Alignment: before using a laser, check alignment_status; if stale or failed, run an 'alignment' study (it
+guides the operator through AutoAlignment), then 'calibration'. Manual adjustments (laser power at the source,
+focus, a knob): a 'guide' study; ls6t watches the signal several times a second and tells the operator STOP in
+LabSpec when the goal is met; report its result afterwards.
 Pictures: "images": true in a study writes PNGs (results images.<name>.path); get_image shows each. Video: the
 snapshot tool shows the sample with the laser position marked; a study's "video" key takes frames during the run
 (on by default for calibration): look at them to check the beam is on the intended spot.
@@ -150,6 +155,14 @@ def snapshot(with_laser: bool = False):
     if not r.get("ok") or not r.get("path"):
         return r
     return [Image(path=r["path"]), json.dumps({k: v for k, v in r.items() if k != "what"}, default=str)]
+
+
+@server.tool()
+def alignment_status() -> dict:
+    """Per laser: the fixed alignment settings and the baseline recorded after the last AutoAlignment, the last
+    alignment check (time, passed, ratio to baseline) and its age. Read-only: baselines are recorded by the
+    maintainer on the command line."""
+    return api.alignment_status()
 
 
 @server.tool()

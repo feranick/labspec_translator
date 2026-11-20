@@ -16,7 +16,7 @@ it runs **locally**: on the instrument PC, next to the Claude desktop app. It ha
 machines. Unlike the other translators, the backend has no Python API: LabSpec is automated with VBScript
 (*LabSpec 5/6 Automation*, HORIBA, 2018). That is why the bridge script exists.
 
-First instrument: **XploRA** (LabSpec 6, Windows 11). Version 2026.11.19.2.
+First instrument: **XploRA** (LabSpec 6, Windows 11). Version 2026.11.19.3.
 
 **Scope of version 1**
 
@@ -26,6 +26,8 @@ First instrument: **XploRA** (LabSpec 6, Windows 11). Version 2026.11.19.2.
 | `map` | A grid of spectra: XY maps, line scans, depth (Z) profiles, or XYZ |
 | `series` | Repeated spectra at one spot: a time series |
 | `calibration` | A spectrum of a silicon reference; fits the Si line and checks it against 520.7 ± 1 cm⁻¹ |
+| `alignment` | Is the system aligned for this laser? The Si reference at the laser's fixed settings, compared with the baseline recorded after the last AutoAlignment. If it fails, the operator is guided through LabSpec's AutoAlignment and the check repeats; then the beam's offset is measured again |
+| `guide` | A manual adjustment with live feedback: the operator turns something (laser power at the source, focus, a mirror) while ls6t measures a line several times a second; LabSpec shows the signal and **STOP** when the goal is reached or the best position has just been passed |
 
 **Video snapshots**: a frame of LabSpec's camera with the laser position marked, on demand (`snapshot`) or during a
 study (`video`, on by default for calibration). Optionally the laser shutter opens for about a second: the beam
@@ -43,6 +45,7 @@ detectors. See `planning.md`.
 - [Results](#results)
 - [Safety and the operator](#safety-and-the-operator)
 - [Video snapshots: where the beam is](#video-snapshots-where-the-beam-is)
+- [Alignment and guided adjustments](#alignment-and-guided-adjustments)
 - [The checker](#the-checker)
 - [How it works](#how-it-works)
 - [For LLM tools: the MCP server](#for-llm-tools-the-mcp-server)
@@ -184,6 +187,11 @@ limits a person sets. Until one exists, ls6t uses built-in XploRA defaults and s
      The import proposes one if it finds a shutter motor; confirm it with the maintainer.
    - `video.laser_offset_um`: where the beam really is relative to LabSpec's laser position. It is measured with a
      snapshot with the laser on (TESTING T5b).
+   - `alignment`: the alignment baselines and settings per laser are recorded later, with
+     `ls6t alignment record` (see [Alignment and guided adjustments](#alignment-and-guided-adjustments)).
+     `min_ratio`, `max_fwhm_ratio` and `max_age_h` set when a check fails or is stale.
+   - `guide`: `max_s` and `max_exposure_s` limit guided adjustments; `ui` is `dialog` (LabSpec's panel) or
+     `statusbar`.
 
    Only a person edits this file. Studies cannot change it, and the MCP tools can only *propose* a profile
    (`instrument(action="discover")` writes `profile.proposed.json`).
@@ -310,6 +318,9 @@ ls6t instrument status | discover | resume
 ls6t instrument snapshot [--laser]           # a video frame with the laser position marked (PNG)
 ls6t bridge call <verb> key=value ...        # one bridge command, for the maintainer (TESTING.md)
 ls6t profile show | default | import <dump>
+ls6t profile set <key> <JSON value>          # one profile value, e.g. video.laser_offset_um "[1.4, -0.6]"
+ls6t alignment status                        # per laser: baseline, last check, age
+ls6t alignment record <request> [--study NAME] [--attempt N]   # after AutoAlignment: the check becomes the baseline
 ls6t bench                                   # the benchmarks on the simulator
 ```
 
@@ -349,6 +360,8 @@ Studies are given as `{name: study}`; names use letters, digits, `_` and `-`. An
 | `expect` | `[{quantity: "dotted.result.path", value, tol}]`, checked after the run |
 | `images` | `true`: PNGs (spectra with fits; one map image per peak quantity and band) |
 | `save_native` | `true` (default): LabSpec also saves `.l6s` files |
+| `alignment` | (kind `alignment`) `{guided: true (default), focus_guide: false}`; only `setup.laser_nm` is needed once the maintainer has recorded the laser's settings |
+| `guide` | (kind `guide`) `{instruction, mode: reach, drop or maximize, target (counts/s; reach and drop), line_cm1 (default Si 520.7), window_cm1 (30), exposure_s (0.2), max_s (120), stable_n (2), drop_frac (0.1)}` |
 | `video` | `{before, after, with_laser}`: video frames with the laser position marked, before the first and/or after the last acquisition. `before` is on by default for `calibration`. `with_laser` opens the laser shutter for `video.laser_s` (profile) so the beam shows; it needs `setup.filter` and a laser shutter motor in the profile. |
 
 Validation refuses anything outside the profile: a laser, grating, filter or objective the instrument does not have,
@@ -372,6 +385,8 @@ a filter above the caps, exposures, accumulations or points above the limits, mo
 | `map` | `nx, ny, nz`, axes, `summary.<peak or band>.<quantity>: {n, mean, std, min, max}`, files: `<name>_map.json` (grids), `<name>_map.npz` (all spectra on one axis), the LabSpec `.l6s` |
 | `series` | `t_s` and each quantity over time, with a summary |
 | `calibration` | `reference_cm1`, `measured_cm1`, `offset_cm1`, `fwhm_cm1`, `pass` |
+| `alignment` | `passed` (true, false, or null without a baseline), `attempts` (per check: `counts_per_s`, `ratio` to the baseline, `fwhm_cm1`, `fwhm_ratio`, `position_cm1`, why it failed), `recommendation`, and the snapshot after it with `measured_offset_um` |
+| `guide` | `reason` (`target`, `past_max`, `saturation`, `timeout`, `operator_done`, `operator_abort`, `stopped`), the STOP `message`, `value`, `max_value` and when (`t_max_s`), `iterations`, `period_s` (seconds per reading), the history file and its plot |
 | `expect` | Each expected value: `got`, `pass` |
 | `video` | `before` / `after`: the PNG (`path`), the raw frame, LabSpec's own image files, the stage position, `marker_um`, the field of view; with the laser: `spot_um` and `measured_offset_um` |
 | `images`, `files`, `seconds`, `execution` | Pictures (including `video_before` / `video_after`), paths, timing, mode and bridge version |
@@ -424,6 +439,53 @@ it is refused while a request holds the instrument. In a study, the frame is tak
 Use it before a calibration or a measurement to check that the beam is on the intended spot. From the Claude app, the
 `snapshot` tool returns the image itself, so Claude sees where the beam is.
 
+## Alignment and guided adjustments
+
+**Alignment.** HORIBA's AutoAlignment (LabSpec, *Maintenance* tab) checks the Si reference's Raman intensity and,
+below its thresholds, adjusts the internal optics. It is needed for each laser before it is used, and calibration
+follows it. The automation interface has no command for it, and it needs a person: the laser at full power at the
+source, focus on the HORIBA Si reference with the x100. ls6t therefore does what can be done from outside:
+
+1. **The baseline.** Right after a successful AutoAlignment, run an `alignment` study for that laser (give the
+   grating, filter and objective the first time). The maintainer records it:
+   `ls6t alignment record <request>`. This stores the laser's fixed check settings and its Si signal
+   (counts/s), width and position. Only the command line records baselines; an LLM cannot.
+2. **The check.** An `alignment` study with only `setup.laser_nm` repeats the measurement at those settings.
+   - It passes when the Si signal is at least `alignment.min_ratio` (0.7) of the baseline, and its width at most
+     `max_fwhm_ratio` (1.3) times the baseline's.
+   - A different filter is scaled by its transmission.
+   - Every check goes into `alignment_log.jsonl`, so drift over weeks shows.
+3. **Guided AutoAlignment.** If the check fails (and `guided`, the default), LabSpec shows the operator the failure
+   and HORIBA's checklist, and asks them to run AutoAlignment and press OK. The check then repeats once
+   (`alignment.max_retries`). If it still fails, the recommendation is HORIBA's: contact service.
+4. **The beam's offset.** A video snapshot follows (with the laser if the profile names the shutter). AutoAlignment
+   moves LabSpec's laser marker, so a warning says when `video.laser_offset_um` needs updating
+   (`ls6t profile set video.laser_offset_um "[x, y]"`).
+5. **Readiness.** Once baselines exist, every other study warns when its laser's last check failed, is missing, or
+   is older than `alignment.max_age_h` (24 h). `alignment_status` (tool) / `ls6t alignment status` shows the state
+   per laser.
+
+**Guided adjustments (`guide`).** Some adjustments only a person can make: the laser power at the source, focus by
+hand, a mirror or a polariser. A `guide` study turns them into a closed loop with the operator:
+
+- LabSpec shows a small panel with the instruction (written by the LLM, e.g. *"Raise the laser power at the source
+  slowly"*), the line's signal after every reading, and the goal.
+- The loop runs **inside the bridge**: a short acquisition (`exposure_s`, default 0.2 s), the line's height above
+  its window's edges per second, the decision, the display. No round trip through Python or the LLM, so a reading
+  takes the exposure plus LabSpec's overhead (`period_s` in the result, measured).
+- The goals:
+  - `reach`: the signal ≥ `target` for `stable_n` readings in a row;
+  - `drop`: ≤ `target`;
+  - `maximize`: the signal rose, then fell `drop_frac` below its best twice in a row. The best position has just
+    been passed, and the message says *"STOP – you just passed the best: go back slightly"*.
+- Near saturation (90 % of full scale) it stops at once and says to reduce the power.
+- The operator can end it with *Done* or *Abort*. Without LabSpec's dialog, the status bar and a final message box
+  carry the same information.
+- The LLM sets up the goal and reads the result afterwards (`reason`, `value`, the history and its plot). The STOP
+  itself never waits for the LLM.
+
+`alignment` with `focus_guide: true` starts with such a loop: focus on the Si until STOP.
+
 ## The checker
 
 **Every run checks itself.** A result is *unreliable* when:
@@ -455,6 +517,7 @@ covered, a missing profile, and expected values out of tolerance.
 | `extended_range` | Si, G, 2D in one stitched 300–2900 cm⁻¹ spectrum; range covered | 520.74; 1585.04; 2680.13 |
 | `saturation` | a 30 s exposure at 100 % is flagged unreliable | flagged |
 | `series` | 3 spectra, Si 520.7 ± 0.3 | 520.65 |
+| `guided_focus` | the simulated operator passes the best focus at the 8th reading: STOP (`past_max`) comes right after | 12 readings |
 | `operator_stop` | the operator stops after 4 of 10 map points: partial, unreliable, `stopped_by: operator` | as expected |
 
 On the instrument, the standing check is the `calibration` study on a silicon wafer, at the start of each session.
@@ -471,6 +534,8 @@ On the instrument, the standing check is the `calibration` study on a silicon wa
 | `GetValue(id, "XYData")` gives x in the spectrum axis unit (`AxisUnits` for `AxisType` "Spectr") | Si line at 520.7 cm⁻¹ |
 | `Acq(4, …)` returns the detector temperature | `checks.detector_temp_c` |
 | Map/Profile build live views from single spectra | TESTING T6 (visual) |
+| A dynamic `Dialog` (LabSpec 6) stays open and updates (`DIALOG_UPDATE_VAR`) while acquisitions run | TESTING T5d |
+| `Message(text, 1)` (OK/Cancel) returns 0 for OK | TESTING T5c |
 | `Video(2)` gives the live frame's id; `Exec(id, 3)` clones it; `GetValue(clone, "Data")` gives the pixels, X varying fastest, colours packed as COLORREF (`video.order`, `video.packing`) | TESTING T5b: orientation and colours |
 | Video axes are stage coordinates in µm ("mkm"), so the stage position marks the laser | TESTING T5b: the marker against the beam |
 | `PutValue(0, "ShutterMode", 1)` and moving the shutter motor to 1 / 0 open and close the laser shutter | TESTING T5b, with the maintainer |
@@ -513,7 +578,9 @@ Verbs: `ping`, `status`, `discover`, `move` (`motor`, `mode`: value, label or in
 `autofocus`, `acquire`, `view` (live map or profile in LabSpec: create, add, save), `save`, `remove`, `confirm`,
 `message` (status bar), `safe`, `resume`, `quit`, `video` (a frame: `out`, `settle_s`, `laser_s`,
 `m_laser_shutter`, `formats`, `camera`; written as `<out>.video.txt`, with `<out>.nolaser.video.txt` when the
-laser was on).
+laser was on), `guide` (the fast loop: `text`, `mode`, `target`, `from_nm`/`to_nm`, the line's window
+`lo_nm`/`hi_nm` and `lo_cm1`/`hi_cm1`, `exposure_s`, `max_s`, `stable_n`, `drop_frac`, `sat`, `out`, `ui`),
+`notice` (a message the operator acknowledges: OK or Cancel).
 
 ## For LLM tools: the MCP server
 
@@ -528,6 +595,7 @@ measured).
 | `study_status` | Results, or progress with `eta_min` |
 | `cancel`, `jobs` | Stop a request; recent requests |
 | `instrument` | `status`, `discover` (proposes a profile), `resume` (after an operator halt) |
+| `alignment_status` | Per laser: the baseline, the last check, its age (read-only) |
 | `snapshot` | A video frame now, with the laser position marked; `with_laser` shows the beam and measures its offset. Returns the image. |
 | `get_inputs` | The commands of one study, without running |
 | `run_benchmarks` | The benchmarks on the simulator |
@@ -566,7 +634,7 @@ install the scripts again with the same settings.
 ```
 labspec_translator/
   README.md  TESTING.md  planning.md  pyproject.toml
-  examples/studies.json          six studies covering the scope
+  examples/studies.json          eight studies covering the scope
   labspec_translator/            the package (config, profile, format, plan, bridge, runner, spectra, render,
                                  video, sim, bench, api, cli, mcp_server; vbs/ the LabSpec script parts)
   tests/test_ls6t.py
@@ -582,6 +650,7 @@ frames, LabSpec's image files, `snapshot.json`); a study's frames go to its `vid
 
 | Version | Changes |
 |---|---|
+| 2026.11.19.3 | Alignment and guided adjustments: kind `alignment` (Si check at the laser's fixed settings against the baseline recorded after AutoAlignment; guided AutoAlignment with HORIBA's checklist and a repeat check; the beam's offset measured again; log and readiness warnings), kind `guide` (a fast loop in the bridge with LabSpec's dynamic dialog: reach, drop or maximize a line's signal; STOP shown to the operator; saturation guard), bridge verbs `guide` and `notice`, `ls6t alignment status/record`, `ls6t profile set`, tool `alignment_status`, benchmark `guided_focus`. |
 | 2026.11.19.2 | Video snapshots: `video` bridge verb (frame cloned from the live video; optional timed laser shutter with a frame without and with the beam), `snapshot` tool and `ls6t instrument snapshot`, study key `video` (on by default for calibration), the laser position marked, the spot found and its offset measured; profile `video` settings and `motors.laser_shutter` (from discovery). |
 | 2026.11.19.1 | First version: study format and validation, VBS bridge (protocol 1) and discovery script, runner with operator confirmation and stops, analysis and checks, simulator and benchmarks, CLI and MCP server. Not yet tested on the instrument (TESTING.md). |
 

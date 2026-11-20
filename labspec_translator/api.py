@@ -1,5 +1,5 @@
 """api.py — the functions behind the command line and the MCP server (JSON in, JSON out).
-Version: 2026.11.19.2
+Version: 2026.11.19.3
 """
 from __future__ import annotations
 
@@ -376,6 +376,88 @@ def snapshot(with_laser: bool = False) -> dict:
         out["warnings"].append("the laser shutter could not be confirmed closed: check LabSpec")
     runner.write_json(folder / "snapshot.json", out)
     return out
+
+
+def alignment_status() -> dict:
+    """Per laser: the recorded settings and baseline, the last check (time, passed, ratio) and its age."""
+    prof = P.load()
+    a = prof.get("alignment", {})
+    out = {}
+    for k, v in prof.get("lasers", {}).items():
+        hist = runner.alignment_history(k)
+        last = hist[-1] if hist else None
+        age = None
+        if last and last.get("time"):
+            try:
+                age = round((time.time() - time.mktime(time.strptime(last["time"], "%Y-%m-%dT%H:%M:%S"))) / 3600, 1)
+            except ValueError:
+                pass
+        out[k] = {"laser_nm": v["nm"], "settings": a.get("settings", {}).get(k), "baseline": a.get("baselines", {}).get(k),
+                  "last_check": {kk: last.get(kk) for kk in ("time", "passed", "ratio", "counts_per_s", "fwhm_cm1",
+                                                              "position_cm1", "request")} if last else None,
+                  "age_h": age, "checks_on_record": len(hist),
+                  "stale": bool(age is not None and age > float(a.get("max_age_h", 24)))}
+    return {"lasers": out, "min_ratio": a.get("min_ratio"), "max_fwhm_ratio": a.get("max_fwhm_ratio"),
+            "max_age_h": a.get("max_age_h"), "log": str(config.alignment_log())}
+
+
+def alignment_record(request: str, study: str | None = None, attempt: int | None = None) -> dict:
+    """The maintainer's step after a successful AutoAlignment: an 'alignment' (or 'calibration') study's Si check
+    becomes the laser's baseline, and its settings the laser's fixed alignment settings. Command line only."""
+    folder = _resolve(request)
+    studies = runner.read_json(folder / "studies.json", {})
+    names = [n for n, s in studies.items() if s.get("kind") in ("alignment", "calibration")]
+    if study:
+        names = [study] if study in studies else []
+    if len(names) != 1:
+        raise ValueError(f"name the study (--study): alignment or calibration studies here: {names}")
+    name = names[0]
+    st = studies[name]
+    if st.get("kind") == "alignment":
+        res = runner.read_json(folder / name / f"{name}.json", {})
+        atts = (res.get("alignment") or {}).get("attempts") or []
+        if not atts:
+            raise ValueError(f"{name}: no check was measured")
+        k = attempt or atts[-1]["attempt"]
+        chk = runner.read_json(folder / name / f"check{k}" / f"check{k}.json", {})
+    else:
+        chk = runner.read_json(folder / name / f"{name}.json", {})
+    if not chk.get("reliable"):
+        raise ValueError(f"{name}: the check is not reliable ({chk.get('unreliable_because')}): measure again")
+    prof = P.load()
+    laser = (chk.get("instrument") or {}).get("laser_nm")
+    m = runner.alignment_metrics(chk, prof, laser)
+    if not m.get("counts_per_s"):
+        raise ValueError(f"{name}: no Si line was fitted")
+    lk = m["laser_key"]
+    if not lk:
+        raise ValueError(f"laser {laser} nm is not in the profile")
+    req = chk.get("setup", {}).get("requested", {}) or {}
+    inst = chk.get("instrument") or {}
+    settings = {"grating": req.get("grating", inst.get("grating")), "filter": req.get("filter", inst.get("filter")),
+                "objective": req.get("objective", inst.get("objective")), "exposure_s": m["exposure_s"],
+                "accumulations": int((chk.get("spectra") or [{}])[0].get("accumulations") or 2)}
+    for key in ("hole_um", "slit_um"):
+        if req.get(key) is not None:
+            settings[key] = req[key]
+    base = {"counts_per_s": m["counts_per_s"], "fwhm_cm1": m["fwhm_cm1"], "position_cm1": m["position_cm1"],
+            "filter": m["filter"], "time": m["time"], "request": str(folder), "study": name}
+    prof.setdefault("alignment", {}).setdefault("settings", {})[lk] = settings
+    prof["alignment"].setdefault("baselines", {})[lk] = base
+    path = P.save(prof)
+    return {"ok": True, "laser": lk, "settings": settings, "baseline": base, "profile": str(path)}
+
+
+def profile_set(key: str, value_json: str) -> dict:
+    """A person's edit of one profile value: `ls6t profile set video.laser_offset_um "[1.4, -0.6]"`."""
+    try:
+        value = json.loads(value_json)
+    except ValueError:
+        value = value_json
+    prof = P.load()
+    old = runner.lookup(prof, key)
+    P.set_key(prof, key, value)
+    return {"ok": True, "key": key, "old": old, "new": value, "profile": str(P.save(prof))}
 
 
 def install_bridge(dest: Path | None = None) -> dict:

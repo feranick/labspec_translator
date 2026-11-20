@@ -1,55 +1,262 @@
 {
  "si_check": {
   "kind": "calibration",
-  "sample": {"name": "Si wafer (reference)"},
-  "setup": {"laser_nm": 532, "grating": 1800, "filter": "10%", "objective": "x100"},
-  "acquire": {"exposure_s": 1, "accumulations": 2, "spike": "double"},
-  "expect": [{"quantity": "calibration.measured_cm1", "value": 520.7, "tol": 1.0}]
+  "sample": {
+   "name": "Si wafer (reference)"
+  },
+  "setup": {
+   "laser_nm": 532,
+   "grating": 1800,
+   "filter": "10%",
+   "objective": "x100"
+  },
+  "acquire": {
+   "exposure_s": 1,
+   "accumulations": 2,
+   "spike": "double"
+  },
+  "expect": [
+   {
+    "quantity": "calibration.measured_cm1",
+    "value": 520.7,
+    "tol": 1.0
+   }
+  ]
  },
  "polymer_spectrum": {
   "kind": "spectrum",
-  "sample": {"name": "polystyrene bead"},
-  "setup": {"laser_nm": 785, "grating": 1200, "filter": "25%", "objective": "x50"},
-  "acquire": {"range_cm1": [200, 3200], "exposure_s": "auto",
-              "auto_exposure": {"target_counts": 30000, "min_s": 0.5, "max_s": 20}, "accumulations": 3,
-              "spike": "double"},
-  "focus": {"autofocus": "video"},
-  "process": {"auto_peaks": 6},
+  "sample": {
+   "name": "polystyrene bead"
+  },
+  "setup": {
+   "laser_nm": 785,
+   "grating": 1200,
+   "filter": "25%",
+   "objective": "x50"
+  },
+  "acquire": {
+   "range_cm1": [
+    200,
+    3200
+   ],
+   "exposure_s": "auto",
+   "auto_exposure": {
+    "target_counts": 30000,
+    "min_s": 0.5,
+    "max_s": 20
+   },
+   "accumulations": 3,
+   "spike": "double"
+  },
+  "focus": {
+   "autofocus": "video"
+  },
+  "process": {
+   "auto_peaks": 6
+  },
   "images": true
  },
  "three_points": {
   "kind": "spectrum",
-  "sample": {"name": "coating cross-section"},
-  "setup": {"laser_nm": 532, "grating": 600, "filter": "10%", "objective": "x100"},
-  "acquire": {"range_cm1": [100, 1800], "exposure_s": 2, "accumulations": 2, "spike": "double"},
-  "points": [{"x_um": 0, "y_um": 0}, {"x_um": 5, "y_um": 0}, {"x_um": 10, "y_um": 0}],
-  "process": {"bands": [{"name": "D", "from_cm1": 1300, "to_cm1": 1400}, {"name": "G", "from_cm1": 1550, "to_cm1": 1620}]}
+  "sample": {
+   "name": "coating cross-section"
+  },
+  "setup": {
+   "laser_nm": 532,
+   "grating": 600,
+   "filter": "10%",
+   "objective": "x100"
+  },
+  "acquire": {
+   "range_cm1": [
+    100,
+    1800
+   ],
+   "exposure_s": 2,
+   "accumulations": 2,
+   "spike": "double"
+  },
+  "points": [
+   {
+    "x_um": 0,
+    "y_um": 0
+   },
+   {
+    "x_um": 5,
+    "y_um": 0
+   },
+   {
+    "x_um": 10,
+    "y_um": 0
+   }
+  ],
+  "process": {
+   "bands": [
+    {
+     "name": "D",
+     "from_cm1": 1300,
+     "to_cm1": 1400
+    },
+    {
+     "name": "G",
+     "from_cm1": 1550,
+     "to_cm1": 1620
+    }
+   ]
+  }
  },
  "graphene_map": {
   "kind": "map",
-  "sample": {"name": "CVD graphene on SiO2/Si", "sensitive": true},
-  "setup": {"laser_nm": 532, "grating": 600, "filter": "10%", "objective": "x100"},
-  "acquire": {"range_cm1": [1200, 2900], "exposure_s": 2, "accumulations": 2, "spike": "double"},
-  "map": {"x_um": [-10, 10, 1], "y_um": [-10, 10, 1]},
-  "focus": {"autofocus": "laser", "every": 50},
-  "process": {"peaks": [{"name": "G", "near_cm1": 1585}, {"name": "2D", "near_cm1": 2680, "window_cm1": 60}],
-              "bands": [{"name": "D", "from_cm1": 1300, "to_cm1": 1400}]},
+  "sample": {
+   "name": "CVD graphene on SiO2/Si",
+   "sensitive": true
+  },
+  "setup": {
+   "laser_nm": 532,
+   "grating": 600,
+   "filter": "10%",
+   "objective": "x100"
+  },
+  "acquire": {
+   "range_cm1": [
+    1200,
+    2900
+   ],
+   "exposure_s": 2,
+   "accumulations": 2,
+   "spike": "double"
+  },
+  "map": {
+   "x_um": [
+    -10,
+    10,
+    1
+   ],
+   "y_um": [
+    -10,
+    10,
+    1
+   ]
+  },
+  "focus": {
+   "autofocus": "laser",
+   "every": 50
+  },
+  "process": {
+   "peaks": [
+    {
+     "name": "G",
+     "near_cm1": 1585
+    },
+    {
+     "name": "2D",
+     "near_cm1": 2680,
+     "window_cm1": 60
+    }
+   ],
+   "bands": [
+    {
+     "name": "D",
+     "from_cm1": 1300,
+     "to_cm1": 1400
+    }
+   ]
+  },
   "images": true
  },
  "depth_profile": {
   "kind": "map",
-  "sample": {"name": "polymer film on glass"},
-  "setup": {"laser_nm": 532, "grating": 1800, "filter": "25%", "objective": "x100", "hole_um": 100},
-  "acquire": {"center_cm1": 1000, "exposure_s": 1, "accumulations": 2, "spike": "double"},
-  "map": {"z_um": [-20, 20, 2]},
-  "process": {"peaks": [{"name": "ring", "near_cm1": 1001, "window_cm1": 20}]}
+  "sample": {
+   "name": "polymer film on glass"
+  },
+  "setup": {
+   "laser_nm": 532,
+   "grating": 1800,
+   "filter": "25%",
+   "objective": "x100",
+   "hole_um": 100
+  },
+  "acquire": {
+   "center_cm1": 1000,
+   "exposure_s": 1,
+   "accumulations": 2,
+   "spike": "double"
+  },
+  "map": {
+   "z_um": [
+    -20,
+    20,
+    2
+   ]
+  },
+  "process": {
+   "peaks": [
+    {
+     "name": "ring",
+     "near_cm1": 1001,
+     "window_cm1": 20
+    }
+   ]
+  }
  },
  "laser_heating": {
   "kind": "series",
-  "sample": {"name": "Si under the beam"},
-  "setup": {"laser_nm": 532, "grating": 1800, "filter": "10%", "objective": "x100"},
-  "acquire": {"center_cm1": 520, "exposure_s": 1, "accumulations": 1},
-  "series": {"count": 10, "interval_s": 30},
-  "process": {"peaks": [{"name": "Si", "near_cm1": 520.7, "window_cm1": 30}]}
+  "sample": {
+   "name": "Si under the beam"
+  },
+  "setup": {
+   "laser_nm": 532,
+   "grating": 1800,
+   "filter": "10%",
+   "objective": "x100"
+  },
+  "acquire": {
+   "center_cm1": 520,
+   "exposure_s": 1,
+   "accumulations": 1
+  },
+  "series": {
+   "count": 10,
+   "interval_s": 30
+  },
+  "process": {
+   "peaks": [
+    {
+     "name": "Si",
+     "near_cm1": 520.7,
+     "window_cm1": 30
+    }
+   ]
+  }
+ },
+ "align_532": {
+  "kind": "alignment",
+  "sample": {
+   "name": "HORIBA Si reference"
+  },
+  "setup": {
+   "laser_nm": 532,
+   "grating": 1800,
+   "filter": "10%",
+   "objective": "x100"
+  }
+ },
+ "focus_by_hand": {
+  "kind": "guide",
+  "sample": {
+   "name": "Si"
+  },
+  "setup": {
+   "laser_nm": 532,
+   "grating": 1800,
+   "filter": "1%",
+   "objective": "x100"
+  },
+  "guide": {
+   "instruction": "Turn the focus slowly towards the sample",
+   "mode": "maximize",
+   "exposure_s": 0.2,
+   "max_s": 120
+  }
  }
 }

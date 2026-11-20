@@ -48,6 +48,14 @@ Const LS_SET_ACTIVE_CAMERA = 10
 Const LS_REMOVE_DATA = 2
 Const LS_CLONE_DATA = 3
 Const LS_SHUTTER_MANUAL = 1
+Const LS_DIALOG_ADD_ITEM = 0
+Const LS_DIALOG_SHOW = 1
+Const LS_DIALOG_GET_STATUS = 3
+Const LS_DIALOG_UPDATE_VAR = 4
+Const LS_MB_OKCANCEL = 1
+Const LS_MB_ICONINFORMATION = 20
+Const LS_ACQ_AUTO_SHOW = 10
+Const LS_ACQ_NO_SPIKE_REMOVING = 100
 
 Dim fso, gSep, gLastError
 Set fso = CreateObject("Scripting.FileSystemObject")

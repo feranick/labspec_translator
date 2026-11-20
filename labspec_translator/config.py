@@ -1,5 +1,5 @@
 """config.py — settings (environment variables only) and the folders ls6t writes to.
-Version: 2026.11.19.2
+Version: 2026.11.19.3
 
 | Variable | Meaning | Default |
 |---|---|---|
@@ -78,6 +78,11 @@ def sim_bridge_dir() -> Path:
 
 def active_bridge_dir() -> Path:
     return sim_bridge_dir() if mode() == "sim" else bridge_dir()
+
+
+def alignment_log() -> Path:
+    """Every alignment check, one JSON line each (the simulator keeps its own)."""
+    return (out_dir() / "sim_alignment_log.jsonl") if mode() == "sim" else (home() / "alignment_log.jsonl")
 
 
 def settings() -> dict:

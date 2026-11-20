@@ -467,3 +467,88 @@ def test_mcp_snapshot_returns_an_image(tmp_path):
     S.ensure(config.active_bridge_dir())
     out = mcp_server.snapshot()
     assert isinstance(out, list) and out[0].__class__.__name__ == "Image" and "marker_um" in out[1]
+
+
+# --------------------------------------------------------------------------------------------- guide and alignment
+
+def test_guide_reach_and_maximize(tmp_path):
+    st = run_inline({"g": {"kind": "guide", "sample": {"name": "Si"}, "setup": SETUP,
+                           "guide": {"instruction": "Raise the laser power at the source slowly", "mode": "reach",
+                                     "target": 30000}}})
+    g = st["studies"]["g"]["guide"]
+    assert st["studies"]["g"]["reliable"] and g["reason"] == "target" and g["value"] >= 30000
+    assert g["message"].startswith("STOP") and Path(g["history"]).exists()
+    st = run_inline({"f": {"kind": "guide", "sample": {"name": "Si"}, "setup": SETUP,
+                           "guide": {"instruction": "Focus slowly", "mode": "maximize"}}})
+    g = st["studies"]["f"]["guide"]
+    assert g["reason"] == "past_max" and g["value"] < g["max_value"] and "go back" in g["message"]
+
+
+def test_guide_saturation_and_abort():
+    st = run_inline({"s": {"kind": "guide", "sample": {"name": "Si"}, "setup": SETUP,
+                           "guide": {"instruction": "Raise power", "mode": "reach", "target": 10000000,
+                                     "exposure_s": 1}}})
+    r = st["studies"]["s"]
+    assert r["guide"]["reason"] == "saturation" and not r["reliable"]
+    (config.active_bridge_dir() / "sim_guide_abort").write_text("1")
+    st = run_inline({"a": {"kind": "guide", "sample": {"name": "Si"}, "setup": SETUP,
+                           "guide": {"instruction": "Focus slowly", "mode": "maximize"}}})
+    assert st["studies"]["a"]["guide"]["reason"] == "operator_abort" and not st["studies"]["a"]["reliable"]
+
+
+def test_guide_validation():
+    bad = F.validate({"g": {"kind": "guide", "setup": SETUP, "guide": {"instruction": "x", "mode": "reach"}}})["g"]
+    assert not bad["ok"] and any("guide.target" in e for e in bad["errors"])
+    bad = F.validate({"g": {"kind": "guide", "setup": SETUP, "guide": {"instruction": "x", "mode": "maximize",
+                                                                        "max_s": 10000}}})["g"]
+    assert any("guide.max_s" in e for e in bad["errors"])
+    bad = F.validate({"g": {"kind": "guide", "setup": dict(SETUP, filter="100%"), "sample": {"sensitive": True},
+                            "guide": {"instruction": "x", "mode": "maximize"}}})["g"]
+    assert any("sensitive_max_filter_pct" in e for e in bad["errors"])
+
+
+def test_alignment_baseline_then_guided_autoalignment(tmp_path):
+    _profile_with_shutter(tmp_path)
+    st = run_inline({"a": {"kind": "alignment", "sample": {"name": "Si ref"}, "setup": SETUP}})
+    r = st["studies"]["a"]
+    assert r["alignment"]["passed"] is None and "record" in r["alignment"]["recommendation"]
+    rec = api.alignment_record(st["request"])
+    assert rec["ok"] and rec["baseline"]["counts_per_s"] > 0 and rec["settings"]["filter"] == "10%"
+    # now misaligned: the check fails, the operator runs AutoAlignment (OK), the check passes
+    (config.active_bridge_dir() / "sim_misaligned").write_text("0.4")
+    st = run_inline({"b": {"kind": "alignment", "sample": {"name": "Si ref"}, "setup": {"laser_nm": 532}}})
+    r = st["studies"]["b"]
+    att = r["alignment"]["attempts"]
+    assert [m["passed"] for m in att] == [False, True] and att[0]["ratio"] < 0.7 and r["reliable"]
+    assert r["video"]["after"]["measured_offset_um"] == [pytest.approx(0.4, abs=0.1), pytest.approx(0.3, abs=0.1)]
+    status = api.alignment_status()["lasers"]["532"]
+    assert status["last_check"]["passed"] is True and status["checks_on_record"] >= 3
+
+
+def test_alignment_fails_when_autoalignment_does_not_help(tmp_path):
+    _profile_with_shutter(tmp_path)
+    st = run_inline({"a": {"kind": "alignment", "sample": {"name": "Si ref"}, "setup": SETUP}})
+    api.alignment_record(st["request"])
+    for f in ("sim_misaligned", "sim_autoalign_fails"):
+        (config.active_bridge_dir() / f).write_text("0.4" if f == "sim_misaligned" else "1")
+    st = run_inline({"b": {"kind": "alignment", "sample": {"name": "Si ref"}, "setup": {"laser_nm": 532}}})
+    r = st["studies"]["b"]
+    assert r["alignment"]["passed"] is False and not r["reliable"] and "HORIBA" in r["alignment"]["recommendation"]
+    # a later spectrum on that laser warns
+    st = run_inline({"s": {"kind": "spectrum", "sample": {"name": "x"}, "setup": SETUP,
+                           "acquire": {"center_cm1": 520}}})
+    assert any("alignment check" in w and "failed" in w for w in st["studies"]["s"]["warnings"])
+
+
+def test_alignment_validation():
+    r = F.validate({"a": {"kind": "alignment", "setup": {"laser_nm": 532}}})["a"]
+    assert not r["ok"] and any("alignment.settings" in e for e in r["errors"])
+    r = F.validate({"a": {"kind": "alignment", "setup": SETUP, "map": {"x_um": [0, 1, 1]}}})["a"]
+    assert not r["ok"]
+
+
+def test_profile_set(tmp_path):
+    r = api.profile_set("video.laser_offset_um", "[1.4, -0.6]")
+    assert r["ok"] and P.load()["video"]["laser_offset_um"] == [1.4, -0.6]
+    with pytest.raises(KeyError):
+        api.profile_set("video.nonsense", "1")

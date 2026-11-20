@@ -1,5 +1,5 @@
 """bench.py — benchmarks with known answers, run on the simulator (the instrument is never touched).
-Version: 2026.11.19.2
+Version: 2026.11.19.3
 
 They check the chain end to end: the commands, wavelength <-> Raman shift, the extended range, fits, map assembly,
 the saturation check and an operator stop. On the instrument itself, the 'calibration' study on a silicon wafer is
@@ -53,6 +53,12 @@ CASES = {
                           "process": {"peaks": [{"name": "Si", "near_cm1": 520.7, "window_cm1": 30}]}}},
         "checks": [("t", "series.summary.Si.position_cm1.n", 3, 0),
                    ("t", "series.summary.Si.position_cm1.mean", 520.7, 0.3)]},
+    "guided_focus": {
+        "studies": {"f": {"kind": "guide", "sample": {"name": "Si"}, "setup": SETUP,
+                          "guide": {"instruction": "Focus slowly through the best position", "mode": "maximize"}}},
+        # the simulated operator passes the best focus at the 8th reading: STOP comes right after, not before
+        "checks": [("f", "guide.reason", "past_max", None), ("f", "guide.iterations", 11, 2),
+                   ("f", "reliable", True, None)]},
     "operator_stop": {
         "studies": {"o": {"kind": "map", "sample": {"name": "Si"}, "setup": SETUP,
                           "acquire": {"center_cm1": 520, "exposure_s": 1, "accumulations": 1},

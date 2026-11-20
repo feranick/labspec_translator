@@ -792,6 +792,307 @@ Sub VVideo(cmd, res)
     res("objective") = MotorLabel(GetP(cmd, "m_objective", "Objective"))
 End Sub
 
+' ---------------------------------------------------------------- guided adjustment
+' The signal of a line in spectrum `id`: (highest point in the window - the window's edge level) / exposure.
+' The window is given in nm and in 1/cm; the one matching the spectrum's x unit is used. ymax: the spectrum's top.
+Function GuideMetric(id, loNm, hiNm, loCm, hiCm, ex, ByRef ymax)
+    Dim xy, at, au, i, n, xu, lo, hi, peak, edge, ne, xs(), ys(), m, k, w, e
+    GuideMetric = -1
+    ymax = 0
+    On Error Resume Next
+    LabSpec.GetValue id, "XYData", xy
+    If Err.Number <> 0 Or Not IsArray(xy) Then
+        Err.Clear
+        Exit Function
+    End If
+    xu = "nm"
+    LabSpec.GetValue id, "AxisType", at
+    LabSpec.GetValue id, "AxisUnits", au
+    If IsArray(at) And IsArray(au) Then
+        For i = 0 To UBound(at)
+            If CStr(at(i)) = "Spectr" Then xu = LCase(CStr(au(i)))
+        Next
+    End If
+    Err.Clear
+    On Error GoTo 0
+    lo = loNm
+    hi = hiNm
+    If InStr(xu, "cm") > 0 Then
+        lo = loCm
+        hi = hiCm
+    End If
+    n = UBound(xy, 2)
+    ReDim xs(n)
+    ReDim ys(n)
+    m = -1
+    For i = 0 To n
+        If xy(1, i) > ymax Then ymax = xy(1, i)
+        If xy(0, i) >= lo And xy(0, i) <= hi Then
+            m = m + 1
+            xs(m) = xy(0, i)
+            ys(m) = xy(1, i)
+        End If
+    Next
+    If m < 4 Then Exit Function
+    peak = ys(0)
+    For i = 0 To m
+        If ys(i) > peak Then peak = ys(i)
+    Next
+    ' the edge level: the mean of the outer sixth of the window on each side
+    w = Int((m + 1) / 6)
+    If w < 1 Then w = 1
+    edge = 0
+    ne = 0
+    For k = 0 To w - 1
+        edge = edge + ys(k) + ys(m - k)
+        ne = ne + 2
+    Next
+    edge = edge / ne
+    e = ex
+    If e <= 0 Then e = 1
+    GuideMetric = (peak - edge) / e
+End Function
+
+Function NumText(v)
+    If Abs(v) >= 100 Then
+        NumText = Fmt(Round(v, 0))
+    Else
+        NumText = Fmt(Round(v, 2))
+    End If
+End Function
+
+' A fast closed loop for a manual adjustment: short acquisitions, the line's signal after each, shown live to the
+' operator (a LabSpec dialog, or the status bar), until the goal is met; then STOP is shown. Modes: reach (signal
+' >= target), drop (signal <= target), maximize (the signal rose and has just fallen drop_frac below its best:
+' the best position was passed). A spectrum near saturation stops at once. The operator ends it with Done or
+' Abort; ls6t with stop.flag; max_s limits it.
+Sub VGuide(cmd, res)
+    Dim txt, mode, target, f, t, loNm, hiNm, loCm, hiCm, ex, maxS, stableN, dropF, sat, outPath, ui, unitL
+    Dim useDlg, st, t0, n, nOk, nDrop, maxv, tmax, reason, id, prev, v, ymax, ts, tmp, tt, who, tA, show
+    Dim stopMsg, tgtText, dlgClosed, p, t1, rose
+    txt = GetP(cmd, "text", "Adjust slowly")
+    mode = GetP(cmd, "mode", "reach")
+    target = ParseNum(GetP(cmd, "target", "0"))
+    f = ParseNum(GetP(cmd, "from_nm", "0"))
+    t = ParseNum(GetP(cmd, "to_nm", "0"))
+    loNm = ParseNum(GetP(cmd, "lo_nm", "0"))
+    hiNm = ParseNum(GetP(cmd, "hi_nm", "0"))
+    loCm = ParseNum(GetP(cmd, "lo_cm1", "0"))
+    hiCm = ParseNum(GetP(cmd, "hi_cm1", "0"))
+    ex = ParseNum(GetP(cmd, "exposure_s", "0.2"))
+    maxS = ParseNum(GetP(cmd, "max_s", "120"))
+    stableN = CLng(ParseNum(GetP(cmd, "stable_n", "2")))
+    dropF = ParseNum(GetP(cmd, "drop_frac", "0.1"))
+    sat = ParseNum(GetP(cmd, "sat", "60000"))
+    outPath = GetP(cmd, "out", "")
+    ui = GetP(cmd, "ui", "dialog")
+    unitL = GetP(cmd, "unit", "counts/s")
+    If outPath = "" Then
+        Fail res, "guide needs 'out'"
+        Exit Sub
+    End If
+    If mode = "maximize" Then
+        tgtText = "the best (ls6t says STOP just after it)"
+    ElseIf mode = "drop" Then
+        tgtText = "<= " & NumText(target) & " " & unitL
+    Else
+        tgtText = ">= " & NumText(target) & " " & unitL
+    End If
+    ' the operator's panel
+    useDlg = (ui = "dialog")
+    dlgClosed = False
+    If useDlg Then
+        On Error Resume Next
+        LabSpec.Dialog LS_DIALOG_ADD_ITEM, "Dialog", "ls6t guide", "", "Width:60"
+        LabSpec.Dialog LS_DIALOG_ADD_ITEM, "Label", "instr", "ls6t: " & txt, ""
+        LabSpec.Dialog LS_DIALOG_ADD_ITEM, "BeginTable", "", "", "Cols:2"
+        LabSpec.Dialog LS_DIALOG_ADD_ITEM, "Label", "l1", "Signal now:", ""
+        LabSpec.Dialog LS_DIALOG_ADD_ITEM, "Edit", "value", "-", "Disable:1;Width:40"
+        LabSpec.Dialog LS_DIALOG_ADD_ITEM, "Label", "l2", "Goal:", ""
+        LabSpec.Dialog LS_DIALOG_ADD_ITEM, "Edit", "goal", tgtText, "Disable:1;Width:40"
+        LabSpec.Dialog LS_DIALOG_ADD_ITEM, "Label", "l3", "Status:", ""
+        LabSpec.Dialog LS_DIALOG_ADD_ITEM, "Edit", "state", "measuring - keep adjusting slowly", "Disable:1;Width:40"
+        LabSpec.Dialog LS_DIALOG_ADD_ITEM, "EndTable", "", "", ""
+        LabSpec.Dialog LS_DIALOG_ADD_ITEM, "Button", "Done", "Done", "CloseDialog:Yes;ReturnValue:1"
+        LabSpec.Dialog LS_DIALOG_ADD_ITEM, "Button", "Abort", "Abort", "CloseDialog:Yes;ReturnValue:2"
+        st = LabSpec.Dialog(LS_DIALOG_SHOW, "", "", "", "Dynamic:Yes")
+        If Err.Number <> 0 Then
+            useDlg = False
+            res("ui_fallback") = ErrText("Dialog")
+            Err.Clear
+        End If
+        On Error GoTo 0
+    End If
+    If Not useDlg Then LabSpec.Message "ls6t: " & txt & " | goal " & tgtText, LS_MB_STATUS_BAR
+    tmp = outPath & ".tmp"
+    Set ts = fso.CreateTextFile(tmp, True, True)
+    ts.WriteLine "# t_s,value,ymax"
+    t0 = Timer
+    n = 0
+    nOk = 0
+    nDrop = 0
+    maxv = -1E+300
+    tmax = 0
+    rose = False
+    reason = ""
+    prev = 0
+    On Error Resume Next
+    Do
+        who = StopRequested()
+        If who <> "" Then
+            gStoppedBy = who
+            reason = "stopped"
+            Exit Do
+        End If
+        If useDlg Then
+            st = LabSpec.Dialog(LS_DIALOG_GET_STATUS, "", "", "", "")
+            If Err.Number = 0 And st >= 0 Then
+                dlgClosed = True
+                If st = 1 Then
+                    reason = "operator_done"
+                Else
+                    reason = "operator_abort"
+                End If
+                Exit Do
+            End If
+            Err.Clear
+        End If
+        If Elapsed(t0) > maxS Then
+            reason = "timeout"
+            Exit Do
+        End If
+        ' one short acquisition (no spike removal: speed)
+        id = LabSpec.GetAcqID()
+        LabSpec.Acq LS_ACQ_SPECTRUM + LS_ACQ_AUTO_SHOW + LS_ACQ_NO_SPIKE_REMOVING, ex, 1, f, t
+        If Err.Number <> 0 Then
+            Fail res, ErrText("Acq")
+            Err.Clear
+            reason = "error"
+            Exit Do
+        End If
+        tA = Timer
+        Do
+            id = LabSpec.GetAcqID()
+            If id > 0 Then Exit Do
+            who = StopRequested()
+            If who <> "" Or Elapsed(tA) > ex + 30 Then
+                LabSpec.Acq LS_ACQ_CANCEL, 0, 0, 0, 0
+                If who <> "" Then gStoppedBy = who
+                id = -9
+                Exit Do
+            End If
+            BeatNow
+            LabSpec.Pause 20
+        Loop
+        If id <= 0 Then
+            If gStoppedBy <> "" Then
+                reason = "stopped"
+            Else
+                reason = "error"
+                Fail res, "an acquisition gave no data"
+            End If
+            Exit Do
+        End If
+        v = GuideMetric(id, loNm, hiNm, loCm, hiCm, ex, ymax)
+        If prev > 0 Then LabSpec.Exec prev, LS_REMOVE_DATA, p
+        prev = id
+        Err.Clear
+        n = n + 1
+        tt = Elapsed(t0)
+        ts.WriteLine Fmt(Round(tt, 3)) & "," & Fmt(v) & "," & Fmt(ymax)
+        If v > maxv Then
+            maxv = v
+            tmax = tt
+        End If
+        ' the decision
+        If ymax >= sat Then
+            reason = "saturation"
+        ElseIf mode = "maximize" Then
+            If n >= 3 And v > 0.5 * maxv Then rose = True
+            If rose And maxv > 0 And v < (1 - dropF) * maxv Then
+                nDrop = nDrop + 1
+            Else
+                nDrop = 0
+            End If
+            If nDrop >= 2 Then reason = "past_max"
+        Else
+            If (mode = "drop" And v <= target) Or (mode <> "drop" And v >= target) Then
+                nOk = nOk + 1
+            Else
+                nOk = 0
+            End If
+            If nOk >= stableN Then reason = "target"
+        End If
+        show = NumText(v) & " " & unitL & "   (best " & NumText(maxv) & ")"
+        If useDlg Then
+            LabSpec.Dialog LS_DIALOG_UPDATE_VAR, "", "value", show, ""
+        Else
+            LabSpec.Message "ls6t: " & show & " | goal " & tgtText, LS_MB_STATUS_BAR
+        End If
+        Err.Clear
+        If reason <> "" Then Exit Do
+        BeatNow
+    Loop
+    ts.Close
+    If fso.FileExists(outPath) Then fso.DeleteFile outPath, True
+    fso.MoveFile tmp, outPath
+    Err.Clear
+    ' STOP
+    stopMsg = ""
+    If reason = "target" Then stopMsg = "STOP - goal reached (" & NumText(v) & " " & unitL & ")"
+    If reason = "past_max" Then stopMsg = "STOP - you just passed the best (" & NumText(maxv) & "): go back slightly"
+    If reason = "saturation" Then stopMsg = "STOP - the detector is near saturation: reduce the power"
+    If reason = "timeout" Then stopMsg = "Time is up - stop adjusting"
+    If stopMsg <> "" Then
+        LabSpec.Message stopMsg, LS_MB_STATUS_BAR
+        If useDlg And Not dlgClosed Then
+            LabSpec.Dialog LS_DIALOG_UPDATE_VAR, "", "state", stopMsg, ""
+            ' wait (at most 2 minutes) for the operator to close the panel
+            t1 = Timer
+            Do
+                st = LabSpec.Dialog(LS_DIALOG_GET_STATUS, "", "", "", "")
+                If Err.Number <> 0 Or st >= 0 Then Exit Do
+                If Elapsed(t1) > 120 Then Exit Do
+                BeatNow
+                LabSpec.Pause 100
+            Loop
+            Err.Clear
+        Else
+            LabSpec.Message stopMsg, LS_MB_OK + LS_MB_ICONWARNING
+        End If
+    End If
+    Err.Clear
+    On Error GoTo 0
+    res("reason") = reason
+    res("value") = v
+    If n > 0 Then
+        res("max_value") = maxv
+        res("t_max_s") = tmax
+    End If
+    res("iterations") = n
+    If n > 0 Then res("period_s") = Elapsed(t0) / n
+    res("out") = outPath
+    res("message") = stopMsg
+End Sub
+
+' A message the operator acknowledges (OK or Cancel), e.g. a checklist before a step only they can do
+Sub VNotice(cmd, res)
+    Dim b
+    On Error Resume Next
+    b = LabSpec.Message(GetP(cmd, "text", ""), LS_MB_OKCANCEL + LS_MB_ICONINFORMATION)
+    If Err.Number <> 0 Then
+        Fail res, ErrText("Message")
+        Err.Clear
+        Exit Sub
+    End If
+    On Error GoTo 0
+    If b = 0 Then
+        res("answer") = "ok"
+    Else
+        res("answer") = "cancel"
+    End If
+End Sub
+
 Sub VConfirm(cmd, res)
     Dim b
     On Error Resume Next
@@ -922,6 +1223,8 @@ Sub HandleFile(path)
                 On Error GoTo 0
             Case "safe": VSafe cmd, res
             Case "video": VVideo cmd, res
+            Case "guide": VGuide cmd, res
+            Case "notice": VNotice cmd, res
             Case "resume": VResume cmd, res
             Case "quit": gQuit = True
             Case Else: Fail res, "unknown verb " & verb

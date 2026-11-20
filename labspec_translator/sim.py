@@ -1,5 +1,5 @@
 """sim.py — a simulated LabSpec + XploRA behind the same bridge protocol as ls6t_bridge.vbs.
-Version: 2026.11.19.2
+Version: 2026.11.19.3
 
 It answers every verb of the bridge with the same keys, so the runner, the checks and the MCP server are tested
 without the instrument (LS6T_MODE=sim, and the tests). The simulated sample is a silicon wafer with a graphene
@@ -10,7 +10,10 @@ read noise, cosmic rays when spike removal is off, and clipping at the 16-bit fu
 
 Test hooks (files in the bridge folder): sim_operator_stop (the operator closes the bridge popup: the bridge halts),
 sim_operator_stop_after (containing N: the same once N spectra have been acquired), sim_confirm_no (the operator
-answers No), sim_time_scale (seconds per simulated second, default 0.01).
+answers No), sim_time_scale (seconds per simulated second, default 0.01), sim_misaligned (containing a factor, e.g.
+0.4: the signal is that fraction of normal until the operator runs AutoAlignment, i.e. answers OK to a notice about
+it), sim_autoalign_fails (AutoAlignment does not help), sim_notice_cancel (the operator cancels a notice),
+sim_guide_abort (the operator aborts a guided adjustment).
 """
 from __future__ import annotations
 
@@ -332,6 +335,86 @@ class SimLabSpec:
             res["shutter_closed"] = 1
         return res
 
+    def v_notice(self, p):
+        if (self.dir / "sim_notice_cancel").exists():
+            return {"answer": "cancel"}
+        if "autoalignment" in str(p.get("text", "")).lower():      # the operator runs AutoAlignment, then OK
+            if not (self.dir / "sim_autoalign_fails").exists():
+                try:
+                    (self.dir / "sim_misaligned").unlink()
+                except FileNotFoundError:
+                    pass
+                self.laser_offset = (0.4, 0.3)       # AutoAlignment moves LabSpec's laser marker
+        return {"answer": "ok"}
+
+    def v_guide(self, p):
+        """The operator adjusting something by hand while the signal is measured: reach, the signal climbs 25 % of
+        its start per step; drop, it falls 10 % per step; maximize, it passes through a best position at step 8.
+        Same decisions as the bridge."""
+        out = p.get("out")
+        if not out:
+            return {"ok": 0, "error": "guide needs 'out'"}
+        mode = p.get("mode", "reach")
+        target = float(p.get("target", 0) or 0)
+        ex = float(p.get("exposure_s", 0.2))
+        max_s = float(p.get("max_s", 120))
+        stable_n = int(float(p.get("stable_n", 2)))
+        drop = float(p.get("drop_frac", 0.1))
+        sat = float(p.get("sat", 60000))
+        v0 = {"reach": 0.3 * target if target > 0 else 100.0, "drop": 3 * target if target > 0 else 1000.0}.get(
+            mode, 20000.0)
+        hist, n, n_ok, n_drop, maxv, tmax, rose, reason, v = [], 0, 0, 0, -1e300, 0.0, False, "", 0.0
+        t_sim = 0.0
+        while True:
+            if (self.dir / "sim_guide_abort").exists() and n >= 3:
+                (self.dir / "sim_guide_abort").unlink()
+                reason = "operator_abort"
+                break
+            if t_sim > max_s:
+                reason = "timeout"
+                break
+            who = self._wait(ex + 0.2)
+            if who:
+                hist_write(out, hist)
+                return {**self._stopped(who), "reason": "stopped", "iterations": n, "out": out}
+            t_sim += ex + 0.2
+            if mode == "reach":
+                v = v0 * (1 + 0.25 * n)
+            elif mode == "drop":
+                v = v0 * max(0.0, 1 - 0.1 * n)
+            else:
+                v = v0 * math.exp(-((n - 8) / 4.0) ** 2)
+            v *= self._align() * (1 + float(self.rng.normal(0, 0.01)))
+            ymax = v * ex + 300.0
+            n += 1
+            hist.append((round(t_sim, 3), v, ymax))
+            if v > maxv:
+                maxv, tmax = v, t_sim
+            if ymax >= sat:
+                reason = "saturation"
+            elif mode == "maximize":
+                if n >= 3 and v > 0.5 * maxv:
+                    rose = True
+                n_drop = n_drop + 1 if rose and maxv > 0 and v < (1 - drop) * maxv else 0
+                if n_drop >= 2:
+                    reason = "past_max"
+            else:
+                ok = v <= target if mode == "drop" else v >= target
+                n_ok = n_ok + 1 if ok else 0
+                if n_ok >= stable_n:
+                    reason = "target"
+            if reason:
+                break
+        hist_write(out, hist)
+        msg = {"target": f"STOP - goal reached ({v:.0f} counts/s)",
+               "past_max": f"STOP - you just passed the best ({maxv:.0f}): go back slightly",
+               "saturation": "STOP - the detector is near saturation: reduce the power",
+               "timeout": "Time is up - stop adjusting"}.get(reason, "")
+        res = {"reason": reason, "value": v, "iterations": n, "out": out, "message": msg}
+        if n:
+            res.update(max_value=maxv, t_max_s=tmax, period_s=round(t_sim / n, 3))
+        return res
+
     def v_confirm(self, p):
         if (self.dir / "sim_confirm_no").exists():
             return {"answer": "no"}
@@ -406,7 +489,14 @@ class SimLabSpec:
                 w2 = math.hypot(w, res)
                 sig += h * w / w2 / (1 + 4 * ((shift - pos) / w2) ** 2)
         fluo = 0.03 * np.exp(-((shift - 1800.0) / 2500.0) ** 2)
-        return 40000.0 * (fpct / 100.0) * focus * (sig + fluo)
+        return 40000.0 * (fpct / 100.0) * focus * self._align() * (sig + fluo)
+
+    def _align(self) -> float:
+        f = self.dir / "sim_misaligned"
+        try:
+            return float(f.read_text().strip()) if f.exists() else 1.0
+        except ValueError:
+            return 1.0
 
     def v_acquire(self, p):
         exp = float(p.get("exposure_s", 1.0))
@@ -460,6 +550,15 @@ class SimLabSpec:
         return {"id": sid, "out": str(out), "points": int(nm.size), "x_unit": "nm", "y_unit": "cnt",
                 "max_counts": float(y.max()), "exposure_s": exp, "accumulations": acc,
                 "detector_temp_c": self.temp_c, "windows": windows}
+
+
+def hist_write(out: str, hist: list):
+    path = Path(out)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("# t_s,value,ymax\n")
+        for t, v, y in hist:
+            fh.write(f"{t},{v},{y}\n")
 
 
 _running: dict = {}

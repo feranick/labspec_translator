@@ -1,5 +1,5 @@
 """runner.py — runs a request's studies on the instrument, one command at a time, and checks every result.
-Version: 2026.11.19.2
+Version: 2026.11.19.3
 
 A request runs in its own process (`ls6t run-request FOLDER`, started detached by api.start), so it outlives the
 MCP call that started it. One request at a time holds the instrument (a lock file under LS6T_HOME); others wait
@@ -200,7 +200,7 @@ def run_request(folder: Path | str) -> dict:
                             "unreliable_because": [stopped.why], "warnings": []})
                 continue
             try:
-                run_study(name, study, ctx)
+                run_any(name, study, ctx)
             except Stop as exc:
                 res = folder / name / f"{name}.json"
                 if not res.exists():
@@ -263,22 +263,12 @@ def _progress(sd: Path, **kw):
     write_json(sd / "progress.json", cur)
 
 
-def run_study(name: str, study: dict, ctx: Ctx) -> dict:
+def _setup(name: str, study: dict, ctx: Ctx, warnings: list, unreliable: list, checks: dict,
+           n_points: int) -> dict:
+    """The set-up moves with read-back, the detector check, and the operator's go-ahead before the first exposure.
+    Returns {before, after, laser, temp, readback, rng}."""
     prof = ctx.prof
-    sd = ctx.folder / name
-    (sd / "spectra").mkdir(parents=True, exist_ok=True)
-    t_start = time.time()
     kind = study.get("kind", "spectrum")
-    pts = plan.positions(study)
-    _progress(sd, state="running", stage="setup", point=0, points=len(pts), started=t_start,
-              estimate_min=plan.estimate(study, prof)["minutes"])
-    warnings: list[str] = []
-    unreliable: list[str] = []
-    checks: dict = {}
-    if not prof.get("measured"):
-        warnings.append("no machine profile: built-in XploRA defaults (run the discovery script)")
-
-    # ---- setup, with read-back
     before = ctx.call("status", timeout_s=15, **motor_args(prof))
     readback = []
     for step in plan.setup_steps(study, prof):
@@ -304,17 +294,49 @@ def run_study(name: str, study: dict, ctx: Ctx) -> dict:
     rng = plan.acq_range(study, prof, laser)
     if rng.get("from_nm") is None:
         raise Stop("the laser line is unknown: give setup.laser_nm", "study")
+    if kind not in ("alignment", "guide", "calibration"):
+        readiness_warnings(prof, laser, warnings)
 
     # ---- the operator's go-ahead
     policy = config.confirm_policy()
     if policy == "study" or (policy == "request" and not ctx.confirmed):
-        what = (f"ls6t is about to expose '{study.get('sample', {}).get('name', name)}' ({kind}, {len(pts)} "
+        what = (f"ls6t is about to expose '{study.get('sample', {}).get('name', name)}' ({kind}, {n_points} "
                 f"point(s)) with laser {laser:g} nm, filter {after.get('filter')}, objective {after.get('objective')}."
                 f" Continue?")
         r = ctx.call("confirm", timeout_s=3600, text=what)
         if r.get("answer") != "yes":
             raise Stop("the operator declined in LabSpec", "operator")
         ctx.confirmed = True
+    return {"before": before, "after": after, "laser": laser, "temp": temp, "readback": readback, "rng": rng}
+
+
+def run_any(name: str, study: dict, ctx: Ctx) -> dict:
+    kind = study.get("kind", "spectrum")
+    if kind == "guide":
+        return run_guide(name, study, ctx)
+    if kind == "alignment":
+        return run_alignment(name, study, ctx)
+    return run_study(name, study, ctx)
+
+
+def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
+    prof = ctx.prof
+    sd = sd or ctx.folder / name
+    (sd / "spectra").mkdir(parents=True, exist_ok=True)
+    t_start = time.time()
+    kind = study.get("kind", "spectrum")
+    pts = plan.positions(study)
+    _progress(sd, state="running", stage="setup", point=0, points=len(pts), started=t_start,
+              estimate_min=plan.estimate(study, prof)["minutes"])
+    warnings: list[str] = []
+    unreliable: list[str] = []
+    checks: dict = {}
+    if not prof.get("measured"):
+        warnings.append("no machine profile: built-in XploRA defaults (run the discovery script)")
+
+    su = _setup(name, study, ctx, warnings, unreliable, checks, len(pts))
+    before, after, laser, temp, readback, rng = (su[k] for k in ("before", "after", "laser", "temp", "readback",
+                                                                 "rng"))
 
     # ---- points
     acq = plan.acquire_step(study, prof, rng)
@@ -489,6 +511,269 @@ def run_study(name: str, study: dict, ctx: Ctx) -> dict:
     if stop_exc is not None and stop_exc.by in ("cancel", "operator", "bridge", "timeout"):
         raise stop_exc
     return result
+
+
+# --------------------------------------------------------------------------------------------- guided adjustment
+
+def _finish(sd: Path, name: str, result: dict) -> dict:
+    result = clean(result)
+    write_json(sd / f"{name}.json", result)
+    return result
+
+
+def run_guide(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
+    """The operator adjusts something by hand; the bridge measures the line every fraction of a second, shows it in
+    LabSpec and says STOP when the goal is met. The fast loop runs in the bridge: no round trip through Python or an
+    LLM between readings."""
+    from .profile import shift_to_nm
+    prof = ctx.prof
+    sd = sd or ctx.folder / name
+    sd.mkdir(parents=True, exist_ok=True)
+    t_start = time.time()
+    _progress(sd, state="running", stage="setup", point=0, points=1, started=t_start,
+              estimate_min=plan.estimate(study, prof)["minutes"])
+    warnings: list[str] = []
+    unreliable: list[str] = []
+    checks: dict = {}
+    su = _setup(name, study, ctx, warnings, unreliable, checks, 1)
+    laser = su["laser"]
+    g = plan.guide_params(study, prof)
+    line, win = float(g["line_cm1"]), float(g["window_cm1"])
+    center_nm = round(shift_to_nm(float(g.get("center_cm1", line)), laser), 4)
+    sat = float(prof["guide"].get("saturation_frac", 0.9)) * prof["detector"]["full_scale"]
+    _progress(sd, stage="guiding", eta_min=round(float(g["max_s"]) / 60.0, 2))
+    r = ctx.call("guide", timeout_s=float(g["max_s"]) + 300, text=g["instruction"], mode=g["mode"],
+                 target=g.get("target", 0), from_nm=center_nm, to_nm=center_nm,
+                 lo_nm=round(shift_to_nm(line - win / 2, laser), 4), hi_nm=round(shift_to_nm(line + win / 2, laser), 4),
+                 lo_cm1=line - win / 2, hi_cm1=line + win / 2, exposure_s=g["exposure_s"], max_s=g["max_s"],
+                 stable_n=g["stable_n"], drop_frac=g["drop_frac"], sat=round(sat, 1),
+                 out=str(sd / "guide_history.txt"), ui=prof["guide"].get("ui", "dialog"), unit="counts/s")
+    hist = []
+    try:
+        from .profile import read_text
+        for line_ in read_text(sd / "guide_history.txt").splitlines():
+            if line_.startswith("#") or not line_.strip():
+                continue
+            t_, v_, y_ = (float(x) for x in line_.split(",")[:3])
+            hist.append([t_, v_, y_])
+    except (OSError, ValueError):
+        pass
+    reason = r.get("reason", "")
+    good = reason in ("target", "past_max", "operator_done")
+    if reason == "saturation":
+        unreliable.append("the detector came near saturation: reduce the power, or a stronger filter")
+    elif reason == "timeout":
+        unreliable.append(f"the goal was not met within {g['max_s']:g} s")
+    elif reason in ("operator_abort", "stopped"):
+        unreliable.append("the operator or ls6t stopped the adjustment")
+    elif not r["ok"] and not reason:
+        unreliable.append(f"the guided loop failed: {r.get('error')}")
+    if r.get("ui_fallback"):
+        warnings.append(f"LabSpec's dialog was not available ({r['ui_fallback']}): the status bar was used")
+    guide = {"instruction": g["instruction"], "mode": g["mode"], "target": g.get("target"), "line_cm1": line,
+             "reason": reason, "message": r.get("message"), "value": _f(r.get("value")),
+             "max_value": _f(r.get("max_value")), "t_max_s": _f(r.get("t_max_s")),
+             "iterations": int(_f(r.get("iterations")) or 0), "period_s": _f(r.get("period_s")),
+             "unit": "counts/s (line height above its window's edges, per second)",
+             "history": str(sd / "guide_history.txt"), "points": len(hist)}
+    result = {"ok": guide["iterations"] > 0, "complete": good, "reliable": good and not unreliable,
+              "unreliable_because": unreliable, "warnings": warnings, "checks": checks, "kind": "guide",
+              "sample": study.get("sample", {}), "guide": guide,
+              "setup": {"requested": study.get("setup", {}), "before": su["before"], "after": su["after"],
+                        "moves": su["readback"]},
+              "instrument": {"laser_nm": laser, "detector_temp_c": su["temp"], "filter": su["after"].get("filter"),
+                             "objective": su["after"].get("objective")},
+              "seconds": {"total": round(time.time() - t_start, 2)},
+              "execution": {"mode": config.mode(), "bridge": ctx.bridge_version, "translator": __version__,
+                            "protocol": BRIDGE_PROTOCOL}}
+    if hist:
+        try:
+            from . import render
+            result["images"] = {"guide": render.guide_png(sd / "guide.png", hist, guide, name)}
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"guide plot not drawn: {type(exc).__name__}: {exc}")
+    result = _finish(sd, name, result)
+    _progress(sd, state="done", stage="done")
+    if r.get("stopped_by") in ("operator", "request") or reason == "stopped":
+        raise Stop("stopped by the operator in LabSpec" if r.get("stopped_by") == "operator" else "cancelled",
+                   "operator" if r.get("stopped_by") == "operator" else "cancel")
+    return result
+
+
+# --------------------------------------------------------------------------------------------- alignment
+
+CHECKLIST = ("ls6t: the alignment check failed for the {laser:g} nm laser ({ratio}).\n\n"
+             "Please run AutoAlignment now: LabSpec > Maintenance tab > AutoAlignment > Start, and follow its "
+             "messages. Its checklist: the HORIBA reference Si sample; the laser at full power at the source; the "
+             "x100 objective; the laser focused on the Si; no dust or oil on the sample or objective.\n\n"
+             "Press OK here when AutoAlignment has finished (ls6t then checks again), or Cancel to stop.")
+
+
+def alignment_metrics(res: dict, prof: dict, laser: float | None) -> dict:
+    """From a Si check's result: counts/s of the Si line, its width and position, compared with the laser's
+    baseline. pass is None when there is no baseline to compare with."""
+    from .profile import laser_key
+    a = prof.get("alignment", {})
+    lk = laser_key(prof, laser) if laser else None
+    pk = (res.get("peaks_by_name") or {}).get("Si") or {}
+    sp = (res.get("spectra") or [{}])[0]
+    ex = _f(sp.get("exposure_s")) or _f((res.get("setup", {}).get("requested", {}) or {}).get("exposure_s"))
+    m = {"laser_nm": laser, "laser_key": lk, "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
+         "filter": (res.get("instrument") or {}).get("filter"), "position_cm1": pk.get("position_cm1"),
+         "fwhm_cm1": pk.get("fwhm_cm1"), "height": pk.get("height"), "exposure_s": ex,
+         "counts_per_s": round(pk["height"] / ex, 2) if pk.get("ok") and ex else None,
+         "measured": bool(pk.get("ok")), "reliable": bool(res.get("reliable"))}
+    base = a.get("baselines", {}).get(lk or "")
+    m["baseline"] = base
+    if not m["measured"]:
+        m.update(passed=False, why="no Si line: check the sample is the Si reference and in focus")
+        return m
+    if not base:
+        m.update(passed=None, why="no baseline for this laser: the maintainer records one after AutoAlignment "
+                                  "(`ls6t alignment record`)")
+        return m
+    cps = m["counts_per_s"]
+    from .profile import filter_pct
+    f_now, f_base = prof.get("filters", {}).get(m["filter"]), prof.get("filters", {}).get(base.get("filter"))
+    f_now = f_now if f_now is not None else filter_pct(m["filter"] or "")
+    f_base = f_base if f_base is not None else filter_pct(base.get("filter") or "")
+    if f_now and f_base and abs(f_now - f_base) > 1e-9:
+        cps = cps * f_base / f_now
+        m["scaled_to_baseline_filter"] = base.get("filter")
+    ratio = cps / base["counts_per_s"] if base.get("counts_per_s") else None
+    wratio = m["fwhm_cm1"] / base["fwhm_cm1"] if base.get("fwhm_cm1") and m["fwhm_cm1"] else None
+    ok = ratio is not None and ratio >= float(a.get("min_ratio", 0.7)) and \
+        (wratio is None or wratio <= float(a.get("max_fwhm_ratio", 1.3)))
+    m.update(ratio=round(ratio, 3) if ratio is not None else None,
+             fwhm_ratio=round(wratio, 3) if wratio is not None else None, passed=bool(ok),
+             why=None if ok else (f"Si signal at {ratio:.0%} of the baseline (minimum {a.get('min_ratio', 0.7):.0%})"
+                                  if ratio is not None and ratio < float(a.get("min_ratio", 0.7)) else
+                                  f"Si line {wratio:.2f}x wider than the baseline"))
+    return m
+
+
+def log_alignment(entry: dict):
+    p = config.alignment_log()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with open(p, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(clean(entry), default=_jsonable) + "\n")
+
+
+def alignment_history(laser_key_: str | None = None) -> list:
+    out = []
+    try:
+        for line in config.alignment_log().read_text(encoding="utf-8").splitlines():
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            if laser_key_ is None or e.get("laser_key") == laser_key_:
+                out.append(e)
+    except OSError:
+        pass
+    return out
+
+
+def readiness_warnings(prof: dict, laser: float | None, warnings: list):
+    """Once the maintainer has recorded alignment baselines: warn when this laser's last check failed, is missing,
+    or is older than alignment.max_age_h."""
+    from .profile import laser_key
+    a = prof.get("alignment", {})
+    if not a.get("baselines") or not laser:
+        return
+    lk = laser_key(prof, laser)
+    hist = alignment_history(lk)
+    if not hist:
+        warnings.append(f"the {laser:g} nm laser has no alignment check on record: run an 'alignment' study first")
+        return
+    last = hist[-1]
+    try:
+        age_h = (time.time() - time.mktime(time.strptime(last["time"], "%Y-%m-%dT%H:%M:%S"))) / 3600.0
+    except (KeyError, ValueError):
+        age_h = None
+    if last.get("passed") is False:
+        warnings.append(f"the last alignment check of the {laser:g} nm laser failed ({last.get('time')}): "
+                        "results may be weak; run AutoAlignment and an 'alignment' study")
+    elif age_h is not None and age_h > float(a.get("max_age_h", 24)):
+        warnings.append(f"the last alignment check of the {laser:g} nm laser is {age_h:.0f} h old "
+                        f"(more than {a.get('max_age_h', 24):g} h): run an 'alignment' study")
+
+
+def run_alignment(name: str, study: dict, ctx: Ctx) -> dict:
+    """The check (Si reference, the laser's fixed settings) against the baseline; if it fails and guided, the
+    operator runs AutoAlignment in LabSpec (checklist; OK when done) and the check repeats; then a video snapshot
+    (with the laser when the profile names the shutter) measures the beam's offset, which AutoAlignment changes."""
+    prof = ctx.prof
+    sd = ctx.folder / name
+    sd.mkdir(parents=True, exist_ok=True)
+    t_start = time.time()
+    a = study.get("alignment", {})
+    guided = a.get("guided", True)
+    warnings: list[str] = []
+    chk = plan.alignment_check_study(study, prof)
+    attempts, last, res = [], None, None
+    focus = None
+    if a.get("focus_guide"):
+        gst = {"kind": "guide", "sample": chk["sample"], "setup": chk["setup"],
+               "guide": {"instruction": "Focus on the reference Si: turn the focus slowly through the best position",
+                         "mode": "maximize", "exposure_s": 0.2, "max_s": 120}}
+        try:
+            focus = run_guide(f"{name}_focus", gst, ctx, sd / "focus")
+        except Stop:
+            raise
+        if focus.get("guide", {}).get("reason") not in ("past_max", "operator_done", "target"):
+            warnings.append(f"the focus guide ended with '{focus.get('guide', {}).get('reason')}'")
+    n_max = 1 + (int(prof["alignment"].get("max_retries", 1)) if guided else 0)
+    for attempt in range(1, n_max + 1):
+        res = run_study(f"check{attempt}", chk, ctx, sd / f"check{attempt}")
+        m = alignment_metrics(res, prof, (res.get("instrument") or {}).get("laser_nm"))
+        m["attempt"] = attempt
+        attempts.append(m)
+        last = m
+        if m["passed"] is not False or not guided or attempt == n_max:
+            break
+        txt = CHECKLIST.format(laser=m["laser_nm"] or 0, ratio=m.get("why") or "")
+        ans = ctx.call("notice", timeout_s=7200, text=txt)
+        if ans.get("answer") != "ok":
+            warnings.append("the operator cancelled AutoAlignment: the check was not repeated")
+            break
+    for m in attempts:
+        log_alignment({**{k: v for k, v in m.items() if k != "baseline"}, "request": str(ctx.folder), "study": name})
+    # the beam's offset after (Auto)Alignment
+    snap = None
+    if res and res.get("ok"):
+        snap = _snapshot(ctx, name, sd, "after", bool(prof["motors"].get("laser_shutter")), warnings)
+    passed = last["passed"] if last else False
+    rec = None
+    if passed is False:
+        rec = ("run AutoAlignment for this laser (LabSpec > Maintenance > AutoAlignment); if it fails twice, contact "
+               "HORIBA service")
+    elif passed is None:
+        rec = "record a baseline right after a successful AutoAlignment: ls6t alignment record <request>"
+    else:
+        rec = "aligned; calibrate next (a 'calibration' study) if AutoAlignment ran"
+    if snap and snap.get("measured_offset_um"):
+        off = prof.get("video", {}).get("laser_offset_um", [0, 0])
+        mo = snap["measured_offset_um"]
+        if max(abs(mo[0] - off[0]), abs(mo[1] - off[1])) > 0.5:
+            warnings.append(f"the beam is {mo} µm from LabSpec's laser position, the profile says {off}: the "
+                            "maintainer updates it (ls6t profile set video.laser_offset_um \"[x, y]\")")
+    result = dict(res or {})
+    result.update(kind="alignment", ok=bool(res and res.get("ok")),
+                  reliable=bool(res and res.get("reliable")) and passed is not False,
+                  unreliable_because=list((res or {}).get("unreliable_because", [])) +
+                  ([last["why"]] if passed is False and last and last.get("why") else []),
+                  warnings=list((res or {}).get("warnings", [])) + warnings,
+                  alignment={"passed": passed, "attempts": attempts, "recommendation": rec,
+                             "guided": guided, "focus": (focus or {}).get("guide")},
+                  seconds={"total": round(time.time() - t_start, 2)})
+    if snap:
+        result["video"] = {"after": snap}
+        if snap.get("path"):
+            result.setdefault("images", {})["video_after"] = {"path": snap["path"], "what": snap.get("what")}
+    if focus and (focus.get("images") or {}).get("guide"):
+        result.setdefault("images", {})["focus_guide"] = focus["images"]["guide"]
+    return _finish(sd, name, result)
 
 
 def _snapshot(ctx: Ctx, name: str, sd: Path, tag: str, with_laser: bool, warnings: list) -> dict | None:

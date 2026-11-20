@@ -1,5 +1,5 @@
 """cli.py — the command line. Every command prints JSON; '-' reads the studies from stdin.
-Version: 2026.11.19.2
+Version: 2026.11.19.3
 
   ls6t status [REQUEST] [--wait S]   versions, the bridge, the profile; or a request's studies
   ls6t format                        the study format
@@ -15,6 +15,10 @@ Version: 2026.11.19.2
   ls6t bridge call VERB [k=v ...]    one bridge command, for the maintainer's tests (TESTING.md); acquire and
                                      autofocus fire the laser and need --laser
   ls6t profile show|default|import DUMP
+  ls6t profile set KEY VALUE         one value (JSON), e.g. video.laser_offset_um "[1.4, -0.6]"
+  ls6t alignment status              per laser: baseline, last check, age
+  ls6t alignment record REQUEST [--study NAME] [--attempt N]
+                                     after a successful AutoAlignment: the check becomes the laser's baseline
   ls6t sim [--seconds S]             run the simulator in the foreground (LS6T_MODE=sim tests by hand)
   ls6t run-request FOLDER            what the detached runner runs
 """
@@ -73,8 +77,14 @@ def main(argv=None) -> int:
     s.add_argument("--timeout", type=float, default=120)
     s.add_argument("--laser", action="store_true", help="allow acquire and autofocus (the laser fires)")
     s = sub.add_parser("profile")
-    s.add_argument("action", choices=["show", "default", "import"])
-    s.add_argument("dump", nargs="?")
+    s.add_argument("action", choices=["show", "default", "import", "set"])
+    s.add_argument("dump", nargs="?", help="import: the discovery dump; set: the key")
+    s.add_argument("value", nargs="?", help="set: the value (JSON)")
+    s = sub.add_parser("alignment")
+    s.add_argument("action", choices=["status", "record"])
+    s.add_argument("request", nargs="?")
+    s.add_argument("--study")
+    s.add_argument("--attempt", type=int)
     s = sub.add_parser("sim")
     s.add_argument("--seconds", type=float, default=0, help="0: until Ctrl-C")
     s = sub.add_parser("run-request")
@@ -139,11 +149,22 @@ def main(argv=None) -> int:
                 return 1
             _print({"ok": True, "written": str(P.save(P.load(), p)),
                     "next": "edit the limits and the lasers' max_filter_pct, or import a discovery dump"})
+        elif a.action == "set":
+            if not a.dump or a.value is None:
+                ap.error("profile set needs KEY VALUE")
+            _print(api.profile_set(a.dump, a.value))
         else:
             if not a.dump:
                 ap.error("profile import needs the discovery dump file")
             prof, notes = P.import_discovery(P.read_text(a.dump))
             _print({"ok": True, "written": str(P.save(prof)), "notes": notes})
+    elif a.cmd == "alignment":
+        if a.action == "status":
+            _print(api.alignment_status())
+        else:
+            if not a.request:
+                ap.error("alignment record needs the request folder")
+            _print(api.alignment_record(a.request, a.study, a.attempt))
     elif a.cmd == "sim":
         from . import sim as S
         bdir = config.sim_bridge_dir()
