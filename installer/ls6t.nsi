@@ -17,6 +17,12 @@ ManifestDPIAware true
 !ifndef OUTFILE
   !define OUTFILE "ls6t-setup-${VERSION}.exe"
 !endif
+; the staged files, with the separator of the computer that builds (makensis for Windows wants backslashes)
+!ifdef NSIS_WIN32_MAKENSIS
+  !define STAGEFILES "${STAGE}\*"
+!else
+  !define STAGEFILES "${STAGE}/*"
+!endif
 
 !define APP "ls6t"
 !define APPNAME "labspec-translator (ls6t)"
@@ -110,7 +116,7 @@ Section "ls6t (required)" SecCore
   RMDir /r "$INSTDIR\bin"
   RMDir /r "$INSTDIR\docs"
   RMDir /r "$INSTDIR\examples"
-  File /r "${STAGE}/*"
+  File /r "${STAGEFILES}"
   WriteUninstaller "$INSTDIR\uninstall.exe"
   WriteRegStr HKCU "Software\ls6t" "InstallDir" "$INSTDIR"
   WriteRegStr HKCU "Software\ls6t" "Version" "${VERSION}"

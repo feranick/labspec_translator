@@ -16,7 +16,7 @@ it runs **locally**: on the instrument PC, next to the Claude desktop app. It ha
 machines. Unlike the other translators, the backend has no Python API: LabSpec is automated with VBScript
 (*LabSpec 5/6 Automation*, HORIBA, 2018). That is why the bridge script exists.
 
-First instrument: **XploRA** (LabSpec 6, Windows 11). Version 2026.11.20.2.
+First instrument: **XploRA** (LabSpec 6, Windows 11). Version 2026.11.20.3.
 
 **Scope of version 1**
 
@@ -655,6 +655,7 @@ frames, LabSpec's image files, `snapshot.json`); a study's frames go to its `vid
 
 | Version | Changes |
 |---|---|
+| 2026.11.20.3 | Installer build fixed for makensis on Windows (the staged files' path separator); the GitHub workflow uses Node 24 actions (checkout v5, setup-python v6, upload-artifact v6) and the GitHub CLI for the release. |
 | 2026.11.20.2 | A Windows installer, `ls6t-setup-<version>.exe` (NSIS): per user, no administrator rights, offline (python.org's embeddable Python 3.12 with every package preinstalled); launchers, Start menu, PATH, the LabSpec scripts, and the Claude app's configuration (backed up; an `ls6t-sim` entry optional); updates in place, uninstalls cleanly keeping the data. `installer/build_installer.py` builds it on macOS, Windows or Linux; a GitHub workflow builds, installs, tests and attaches it to each tagged release. |
 | 2026.11.20.1 | Methods from the installed LabSpec's type library. `SaveConfig`/`LoadConfig`: `ls6t instrument config save/load/list` and the profile's `session.restore_config` (LabSpec restored after each request). `GetValueSimplePart`: native maps written out in chunks (`mapping.export_chunk`). `GetValueEx` (manual only) as a fallback after `GetValue`, and for motor position names. `GetLastErrorInfo`: `ls6t instrument last-error` and in `status`. Extended video (`Video(3)`; `SetExtendedVideo` is missing from the build): `snapshot --extended`, off by default (`video.allow_extended`). Discovery probes `GetValueEx`, `GetValueSimplePart` and `GetConfigParam` (its parameters listed). `ls6t_script_motor.vbs`: a virtual script-controlled motor that logs `GetMotorAction`/`SetMotorInfo`, to learn the protocol. `SetConfigParam` and `SetScriptPath` are deliberately not called. TESTING Q35–Q40, T1.4, T5b.6. |
 | 2026.11.19.9 | `ls6t-typelib` reads the type library straight from the `.ocx` (its TYPELIB resource, MSFT format) in pure Python, on Windows, macOS or Linux; identical libraries are listed once. Read on the instrument's `NFActiveX.ocx` (32- and 64-bit builds, 2021): 60 methods, 15 not in the 2018 manual (see planning.md). The bridge adds LabSpec's own last error (`GetLastErrorInfo`) to its error messages; discovery tests it. |

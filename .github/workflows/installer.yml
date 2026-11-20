@@ -16,9 +16,9 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -35,9 +35,9 @@ jobs:
         run: |
           $exe = Get-ChildItem dist\ls6t-setup-*.exe | Select-Object -First 1
           $p = Start-Process $exe.FullName -ArgumentList "/S" -Wait -PassThru
-          if ($p.ExitCode -ne 0) { throw "installer exit code $($p.ExitCode)" }
           $dir = "$env:LOCALAPPDATA\Programs\ls6t"
-          Get-Content "$dir\install.log"
+          if (Test-Path "$dir\install.log") { Get-Content "$dir\install.log" }
+          if ($p.ExitCode -ne 0) { throw "installer exit code $($p.ExitCode)" }
           & "$dir\bin\ls6t.cmd" --version
           & "$dir\python\python.exe" -m labspec_translator.winsetup check
           if ($LASTEXITCODE -ne 0) { throw "winsetup check failed" }
@@ -50,15 +50,20 @@ jobs:
           Start-Sleep -Seconds 20
           if (Test-Path "$dir\python") { throw "the uninstaller left the program files" }
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: ls6t-setup
           path: dist/ls6t-setup-*
 
       - name: Attach to the release
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            dist/ls6t-setup-*.exe
-            dist/ls6t-setup-*.exe.sha256
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --title $tag --notes "Windows installer: ls6t-setup-$tag.exe (INSTALL.md, 'The installer')."
+          }
+          gh release upload $tag (Get-ChildItem dist\ls6t-setup-*).FullName --clobber

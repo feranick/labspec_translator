@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.20.2)
+## Architecture (version 2026.11.20.3)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -158,6 +158,9 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   Retry/Cancel. .github/workflows/installer.yml builds on windows-latest per tag, installs /S, runs winsetup check
   and three sim benchmarks, uninstalls, attaches to the release. Staging tested here (Linux, fake embeddable zip);
   the NSIS script itself is not compiled yet: first compile on the user's Mac (brew makensis) or in CI. 86 tests.
+- 2026-11-20, 2026.11.20.3: first CI build failed: Windows makensis found no files for `File /r "<stage>/*"`
+  (mixed separators); the script now picks the separator (NSIS_WIN32_MAKENSIS). Workflow actions moved to Node 24
+  (checkout v5, setup-python v6, upload-artifact v6); release upload via `gh` instead of softprops/action-gh-release.
 
 ## To do next
 
