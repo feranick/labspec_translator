@@ -1,5 +1,5 @@
 """runner.py — runs a request's studies on the instrument, one command at a time, and checks every result.
-Version: 2026.11.20.8
+Version: 2026.11.20.9
 
 A request runs in its own process (`ls6t run-request FOLDER`, started detached by api.start), so it outlives the
 MCP call that started it. One request at a time holds the instrument (a lock file under LS6T_HOME); others wait

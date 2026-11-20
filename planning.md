@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.20.8)
+## Architecture (version 2026.11.20.9)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -203,6 +203,11 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   order (running --user-data-dir via Get-CimInstance, env, packages -> Claude-Data or LocalCache, Claude-3p,
   APPDATA); connect removes ours from stale files and warns when Claude runs; the NSIS detection adds the new
   folders. `ls6t connect check`: an MCP stdio handshake with each app's entry (initialize + tools/list). 95 tests.
+- 2026-11-20, 2026.11.20.9: the entry is in Claude-Data (the folder the running app reads) and Claude still does not
+  show ls6t. Nicola tests on another PC: tools/ls6t_diagnose.ps1 (PowerShell 5.1, ASCII, CRLF, read-only) collects
+  processes and --user-data-dir, packages, every candidate config (validity, BOM, .user-data-left markers, server
+  names, the ls6t entries), the ls6t python and install.log, the MCP handshake with the entry's env, and Claude's
+  logs (mcp.log, mcp-server-ls6t.log, lines about ls6t/policies). Not run here (no PowerShell in the sandbox).
 
 ## To do next
 

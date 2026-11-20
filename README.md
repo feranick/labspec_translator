@@ -16,7 +16,7 @@ it runs **locally**: on the instrument PC, next to the Claude desktop app. It ha
 machines. Unlike the other translators, the backend has no Python API: LabSpec is automated with VBScript
 (*LabSpec 5/6 Automation*, HORIBA, 2018). That is why the bridge script exists.
 
-First instrument: **XploRA** (LabSpec 6, Windows 11). Version 2026.11.20.8.
+First instrument: **XploRA** (LabSpec 6, Windows 11). Version 2026.11.20.9.
 
 **Scope of version 1**
 
@@ -662,6 +662,7 @@ frames, LabSpec's image files, `snapshot.json`); a study's frames go to its `vid
 
 | Version | Changes |
 |---|---|
+| 2026.11.20.9 | `tools/ls6t_diagnose.ps1`: a read-only PowerShell report for an app that does not show ls6t's tools (which Claude configuration file is read, the ls6t entry, JSON validity and BOM, the server's MCP handshake with the entry's settings, the install log, Claude's MCP logs); other servers' settings are left out of the report. |
 | 2026.11.20.8 | The Claude desktop app from the Microsoft Store now reads its configuration from `%LOCALAPPDATA%\Claude-Data\claude_<id>\` (not the package's `LocalCache`), so the installer's entry was not seen. `ls6t connect` and the installer now find the folder the app reads (the running app's `--user-data-dir`, `CLAUDE_USER_DATA_DIR`, `Claude-Data` once the app moved there, older Store builds' `LocalCache`, `Claude-3p`, `%APPDATA%\Claude`), take ls6t's entries out of folders it no longer reads, and warn when Claude is running (it rewrites the file on quit). `ls6t connect check`: starts each app's ls6t entry as the app would and lists its tools, or shows why it fails. |
 | 2026.11.20.7 | After a session where the LLM ran its own commands against LabSpec's ActiveX (it opened *About NFActiveX Control* and the bridge stopped): the instructions now say that only ls6t's tools reach the instrument (no scripts, shell, COM or bridge files; say so when no tool fits); INSTALL.md says how to make Codex, Gemini CLI and Claude ask before every command. Cameras by name: profile `video.cameras` (e.g. `{"top": 0}`), `instrument camera_on camera="top"`, status reports the active camera, study_format lists the names. A stalled bridge's error says a LabSpec dialog may be open. |
 | 2026.11.20.6 | Less searching by the LLM: direct requests are mapped in the server's instructions and in `hardware_test`'s description (camera, one motor by its role, the stage, a spectrum, the state), so it acts at once instead of looking things up. New bridge verb `camera` (LabSpec's live view on/off) and `instrument camera_on` / `camera_off`; `status` reports `live_video`; `hardware_test call move` takes roles (`filter`, `grating`, `z`...). |
