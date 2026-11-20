@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.20.16)
+## Architecture (version 2026.11.20.17)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -256,6 +256,14 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   (video.cameras when unset, objectives_info, labspec_config); `ls6t profile ini`; discovery's name list adds those
   motors. Test fixture: a reduced made-up ini (the real file, with camera serial numbers, is not in the public
   repo). Ideas: setup keys for the polarisers; the e-Cal neon lamp for the spectral zero. 101 tests.
+- 2026-11-20, 2026.11.20.17: locations confirmed: <LabSpec>\Parameters\ACQUISITION\OLConfig.ini and
+  <LabSpec>\Parameters\COMMON\OLSetup.ini (software set-up: users and roles, licences and owner names - not
+  copied anywhere; external programs; OneClick presets per configuration: -355149504 Blue (off), Green = laser 2
+  (532), Red = 1 (638), Near-IR = 0 (785), IR (off), all grating 0 (600), centre 1001.38, range 100-3500; -355149503
+  RAW/AUTO; and the AutoCalibration script C:\HORIBA\LabSpec_6_1_174\AutoCalibration\UniversalAutoCalibrationv3.vbs
+  (an older install's path). HORIBA's own calibration is a VBS script: reading it may show how to adjust LabSpec's
+  zero/coefficient from a script (Q42, ask Nicola for it). labspec_ini.find knows both paths;
+  setup_summary(presets, autocalibration_script) goes into profile.labspec_config.
 
 ## To do next
 

@@ -16,7 +16,7 @@ it runs **locally**: on the instrument PC, next to the Claude desktop app. It ha
 machines. Unlike the other translators, the backend has no Python API: LabSpec is automated with VBScript
 (*LabSpec 5/6 Automation*, HORIBA, 2018). That is why the bridge script exists.
 
-First instrument: **XploRA** (LabSpec 6, Windows 11). Version 2026.11.20.16.
+First instrument: **XploRA** (LabSpec 6, Windows 11). Version 2026.11.20.17.
 
 **Scope of version 1**
 
@@ -663,6 +663,7 @@ frames, LabSpec's image files, `snapshot.json`); a study's frames go to its `vid
 
 | Version | Changes |
 |---|---|
+| 2026.11.20.17 | LabSpec's files found where they are: `Parameters\ACQUISITION\OLConfig.ini` and `Parameters\COMMON\OLSetup.ini` in LabSpec's folder. From `OLSetup.ini`, ls6t records LabSpec's OneClick presets (per laser: grating, range) and the AutoCalibration script LabSpec runs (`UniversalAutoCalibrationv3.vbs`), leaving users and licences out. TESTING Q42. |
 | 2026.11.20.16 | LabSpec's own hardware configuration (`OLConfig.ini`, in its folder) completes the profile: camera names and numbers (`video.cameras`, e.g. top 0, internal 1, with their models), each objective's NA and field of view, and LabSpec's other motors (polarisers, a second filter wheel, filter type, light path...). Read only, found from discovery's LabSpec folder or `LS6T_LABSPEC_INI`; `ls6t profile ini [FILE]` shows it. Discovery also reads those motors. TESTING Q41. |
 | 2026.11.20.15 | The installer's last page and INSTALL.md: start the bridge in LabSpec and the profile is built from its inventory (running the discovery script separately is optional). |
 | 2026.11.20.14 | The laser on for viewing: `instrument laser_on` (seconds, at most `limits.max_laser_on_s`, default 60) / `laser_off`, `ls6t instrument laser-on/laser-off`: the laser shutter open so the beam shows on the camera, only with the shutter motor confirmed in the profile, the filter within the caps and the operator's Yes in LabSpec; the bridge closes it when the time is up, at a halt or stop, when it ends, and before any command other than quick reads (`status` shows `laser_open`, `laser_left_s`). Cameras: `instrument camera_on` takes a number as well as a name (a number was rejected). |

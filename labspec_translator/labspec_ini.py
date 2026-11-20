@@ -1,7 +1,8 @@
 """labspec_ini.py — what LabSpec's own hardware configuration file (OLConfig.ini) says about the instrument.
-Version: 2026.11.20.16
+Version: 2026.11.20.17
 
-LabSpec 6 keeps its hardware set-up in OLConfig.ini (in its installation folder, e.g. C:\\HORIBA\\LabSpec_6_8_1).
+LabSpec 6 keeps its hardware set-up in Parameters\\ACQUISITION\\OLConfig.ini and its software set-up in
+Parameters\\COMMON\\OLSetup.ini, under its installation folder (e.g. C:\\HORIBA\\LabSpec_6_8_1).
 Most keys are numbers (hashes of property names); the readable parts are the motors (their internal and display
 names, and their positions' names and values), the cameras, and per-objective arrays. ls6t only reads it, to
 complete the machine profile with what LabSpec's automation cannot report:
@@ -141,10 +142,18 @@ def summary(secs: dict) -> dict:
     return out
 
 
-def find(labspec_path: str | None = None) -> Path | None:
-    """OLConfig.ini: LS6T_LABSPEC_INI, else in LabSpec's folder (from discovery) or under C:\\HORIBA."""
-    if os.environ.get("LS6T_LABSPEC_INI") and Path(os.environ["LS6T_LABSPEC_INI"]).is_file():
-        return Path(os.environ["LS6T_LABSPEC_INI"])
+WHERE = {"OLConfig.ini": ("Parameters/ACQUISITION", "LS6T_LABSPEC_INI"),
+         "OLSetup.ini": ("Parameters/COMMON", "LS6T_LABSPEC_SETUP_INI")}
+
+
+def find(labspec_path: str | None = None, name: str = "OLConfig.ini") -> Path | None:
+    """LabSpec's OLConfig.ini (or OLSetup.ini): its environment variable (LS6T_LABSPEC_INI, LS6T_LABSPEC_SETUP_INI),
+    else Parameters\\ACQUISITION (COMMON) in LabSpec's folder from discovery, else the newest under C:\\HORIBA."""
+    sub, env = WHERE[name]
+    if os.environ.get(env) and Path(os.environ[env]).is_file():
+        return Path(os.environ[env])
+    if labspec_path and (Path(labspec_path) / sub / name).is_file():
+        return Path(labspec_path) / sub / name
     roots = [Path(labspec_path)] if labspec_path else []
     if os.name == "nt":
         roots.append(Path("C:/HORIBA"))
@@ -152,11 +161,50 @@ def find(labspec_path: str | None = None) -> Path | None:
         if not root.is_dir():
             continue
         hits = []
-        for depth in ("", "*/", "*/*/"):
-            hits += list(root.glob(depth + "OLConfig.ini"))
+        for depth in ("", "*/", "*/*/", "*/*/*/"):
+            hits += list(root.glob(depth + name))
         if hits:
             return max(hits, key=lambda p: p.stat().st_mtime)
     return None
+
+
+def setup_summary(secs: dict, laser_labels: list | None = None, gratings: list | None = None) -> dict:
+    """From OLSetup.ini: LabSpec's OneClick acquisition presets (laser, grating, range) and the AutoCalibration
+    script it runs. Users, licences and other personal settings are left out."""
+    out: dict = {}
+    for sec, d in secs.items():
+        for k, v in d.items():
+            if v.lower().endswith(".vbs") and "autocalibration" in v.lower():
+                out["autocalibration_script"] = v
+    presets = {}
+    for sec, d in secs.items():
+        m = re.fullmatch(r"(.+_1312052919_2087965145)_(-?\d+)", sec)
+        if not m:
+            continue
+        for k, name in d.items():
+            km = re.fullmatch(r"(\d+)\[1835884910\]", k)
+            if not km or not name or name.startswith("DO NOT USE"):
+                continue
+            i = km.group(1)
+            p: dict = {"enabled": d.get(f"{i}[140866421]") == "1"}
+            for key, what, labels in (("Laser", "laser", laser_labels), ("Grating", "grating", gratings)):
+                idx = d.get(f"{i}[{key}]")
+                if idx is not None:
+                    try:
+                        p[what] = labels[int(idx)] if labels and int(idx) < len(labels) else int(idx)
+                    except ValueError:
+                        pass
+            sub = secs.get(f"{sec}_{i}", {})
+            if sub.get("1809113831[1835216689]"):
+                p["center"] = _num(sub["1809113831[1835216689]"])
+            lo = secs.get(f"{sec}_{i}_1836020445", {}).get("1835216689[0]")
+            hi = secs.get(f"{sec}_{i}_142045044", {}).get("1835216689[0]")
+            if lo is not None and hi is not None:
+                p["range"] = [_num(lo), _num(hi)]
+            presets[name] = p
+    if presets:
+        out["oneclick_presets"] = presets
+    return out
 
 
 def enrich(prof: dict, labspec_path: str | None = None, notes: list | None = None) -> dict:
@@ -173,6 +221,22 @@ def enrich(prof: dict, labspec_path: str | None = None, notes: list | None = Non
         return prof
     prof["labspec_config"] = {"file": str(p), "motors": s.get("motors", {}),
                               "spectrometer_arrays": s.get("spectrometer_arrays", {})}
+    sp = find(labspec_path, "OLSetup.ini")
+    if sp:
+        try:
+            lasers = [str(x) for x in (s.get("motors", {}).get("Laser") or [])]
+            grs = [str(x) for x in (s.get("motors", {}).get("Grating") or [])]
+            su = setup_summary(read(sp), lasers, grs)
+            prof["labspec_config"].update(setup_file=str(sp), **su)
+            if su.get("oneclick_presets"):
+                notes.append("LabSpec's OneClick presets: " + "; ".join(
+                    f"{n} ({v.get('laser')}, {v.get('grating')}"
+                    + (f", {v['range'][0]:g}-{v['range'][1]:g}" if v.get("range") else "") + ")"
+                    for n, v in su["oneclick_presets"].items() if v.get("enabled")))
+            if su.get("autocalibration_script"):
+                notes.append(f"LabSpec's AutoCalibration script: {su['autocalibration_script']}")
+        except (OSError, ValueError) as exc:
+            notes.append(f"LabSpec's {sp} could not be read ({exc})")
     cams = s.get("cameras") or {}
     if cams and not (prof.get("video", {}).get("cameras")):
         prof.setdefault("video", {})["cameras"] = {n.lower(): c["number"] for n, c in cams.items()}

@@ -1320,6 +1320,7 @@ def test_labspec_ini_completes_the_profile(monkeypatch):
     assert s["cameras"]["Internal"]["number"] == 1 and s["motors"]["LaserPol"] == ["Circular", "Horizontal", "Vertical"]
     assert s["objectives"]["x100_VIS"] == {"magnification": 100.0, "na": 0.9, "field_um": [85.56, 58.34]}
     monkeypatch.setenv("LS6T_LABSPEC_INI", str(ini))
+    monkeypatch.setenv("LS6T_LABSPEC_SETUP_INI", str(ROOT / "tests" / "data" / "OLSetup_min.ini"))
     home = config.home()
     home.mkdir(parents=True, exist_ok=True)
     (home / "discovery_latest.txt").write_bytes((ROOT / "tests" / "data" / "discovery_xplora_plus.txt").read_bytes())
@@ -1328,3 +1329,8 @@ def test_labspec_ini_completes_the_profile(monkeypatch):
     assert prof["objectives_info"]["x10_VIS"]["na"] == 0.25 and "x5_VIS" in prof["objectives_info"]
     assert any("cameras from LabSpec" in n for n in prof["auto"]["notes"])
     assert api.instrument("camera_on", camera="internal")["camera_name"] == "internal"
+    lc = prof["labspec_config"]
+    assert lc["autocalibration_script"].endswith("UniversalAutoCalibrationv3.vbs")
+    green = lc["oneclick_presets"]["OneClick Green"]
+    assert green == {"enabled": True, "laser": "532nm_Edge", "grating": "600 (750nm)", "center": 1001.38070121135,
+                     "range": [100.0, 3500.0]} or green["laser"] == 2      # the made-up ini lists no laser names

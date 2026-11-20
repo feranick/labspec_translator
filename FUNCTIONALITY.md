@@ -1,6 +1,6 @@
 # labspec-translator (ls6t): what it can do
 
-This is the complete list of functions in version 2026.11.20.16. It covers:
+This is the complete list of functions in version 2026.11.20.17. It covers:
 
 - what a study can ask for;
 - the tools an LLM sees;
@@ -12,7 +12,7 @@ How it all fits together: [README.md](README.md). Installation: [INSTALL.md](INS
 [TESTING.md](TESTING.md).
 
 Everything below runs on the built-in simulator and is covered by tests and benchmarks. Nothing has run on the
-instrument yet: TESTING.md lists what remains to be confirmed there (Q1–Q41).
+instrument yet: TESTING.md lists what remains to be confirmed there (Q1–Q42).
 
 ---
 

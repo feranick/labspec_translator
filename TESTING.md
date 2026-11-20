@@ -12,7 +12,7 @@ stops and cancel on the simulator, and `ls6t bench` gives known answers. What re
 LabSpec and hardware. The plan goes from no laser and no motion to Claude driving a full map, in stages. Each stage
 starts only when the previous one passed.
 
-Version under test: 2026.11.20.16 (bridge protocol 1).
+Version under test: 2026.11.20.17 (bridge protocol 1).
 
 ---
 
@@ -98,6 +98,7 @@ The vendor manual (2018) leaves these open. Each is answered by the test listed.
 | Q38 | Script-controlled motors: when does LabSpec run the motor script, and what do `GetMotorAction`'s Action and Position hold for a move to a value, to a named position, and a stop? What does `SetMotorInfo`'s State mean? | T1.4 |
 | Q39 | Extended video (`Video(3)`): where is its area set, does the call return only when the image is complete, does it return the image's id, and where is the stage left? (`SetExtendedVideo`, which would set the area, is in the manual but not in this build.) | T5b.6 |
 | Q41 | LabSpec's `OLConfig.ini` (in its folder) keeps the hardware set-up under numeric keys. ls6t reads camera names, objectives' NA and (inferred) field of view from it. Per grating it also holds arrays that look like the spectrometer's calibration (about 198.8 for a focal length in mm, 12.2 for an angle in degrees, about 1.047e-5 for a coefficient, about 7.7–8 for an offset): which are LabSpec's *Zero* and *Koeff*? Copy the file before and after the adjustment in T4.7 and compare (`ls6t profile ini FILE`). Is the field of view right (a snapshot's `field_um`)? | T4.7, T5b.1 |
+| Q42 | LabSpec's `OLSetup.ini` (Parameters\COMMON) names an AutoCalibration script, `...\AutoCalibration\UniversalAutoCalibrationv3.vbs`. Is it in the installed LabSpec's folder? What LabSpec commands does it use to adjust the spectral zero and coefficient (perhaps the undocumented `GUI`/`OperVar`/`PutGUI`)? Send a copy to the ls6t maintainer: if it can be run from the bridge, `calibration` could adjust LabSpec's own zero instead of only guiding the operator (Q27). | T4.7 |
 | Q40 | `GetValueEx` is in the manual but not in this build's type library: confirm (`selftest.get_value_ex=0`). The bridge tries it after `GetValue` and for motor position names past index 9 (`CurrentPositionName:`), so nothing depends on it. | T1.1 |
 | Q25 | How much does the beam drift from LabSpec's marker over a day, between objectives, after AutoAlignment? | T5e.3 |
 | Q21 | Does the focus scan find the same focus as the maintainer (and as LabSpec's autofocus) on Si and on a real sample? Is 1 µm a good step at x100, and what at x50 and x10? | T6.5 |
