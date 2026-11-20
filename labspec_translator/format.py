@@ -1,5 +1,5 @@
 """format.py — the study format and its static checks (no instrument needed).
-Version: 2026.11.19.4
+Version: 2026.11.19.5
 """
 from __future__ import annotations
 
@@ -8,10 +8,13 @@ import math
 from . import config, plan
 from .profile import filter_pct, laser_key
 
-KINDS = ("spectrum", "map", "series", "calibration", "alignment", "guide", "focus", "move")
+KINDS = ("spectrum", "map", "series", "calibration", "alignment", "guide", "focus", "move", "spot")
 TOP_KEYS = {"kind", "sample", "setup", "acquire", "focus", "points", "map", "series", "process", "expect",
-            "images", "save_native", "notes", "video", "alignment", "guide", "move"}
-MOVE_KEYS = {"x_um", "y_um", "dz_um", "stay", "snapshot"}
+            "images", "save_native", "notes", "video", "alignment", "guide", "move", "spot"}
+MOVE_KEYS = {"x_um", "y_um", "to_um", "dz_um", "stay", "snapshot"}
+SPOT_KEYS = {"method", "feature_um", "refine", "range_um", "step_um", "line_cm1", "window_cm1", "exposure_s",
+             "acq_exposure_s", "remember"}
+SPOT_METHODS = ("auto", "shutter", "acquisition", "raman")
 SCAN_KEYS = {"range_um", "step_um", "line_cm1", "window_cm1", "exposure_s"}
 ALIGN_KEYS = {"guided", "focus_guide"}
 GUIDE_KEYS = {"instruction", "mode", "target", "line_cm1", "center_cm1", "window_cm1", "exposure_s", "max_s",
@@ -67,9 +70,14 @@ def study_format(status: dict | None = None) -> dict:
                      "goal is met (reach / drop a target, or the best position just passed: maximize)",
             "focus": "find the focus by the Raman signal: Z steps across focus.scan.range_um around the current "
                      "focus, a short acquisition at each; the best becomes the focus for the rest of the request",
-            "move": "no laser: the stage to move.x_um / y_um (offsets from the home spot) and Z to dz_um from the "
-                    "focus, then a video snapshot; stay: true (default) makes that spot home for later studies and "
-                    "the next request"},
+            "move": "no laser: the stage to move.x_um / y_um (offsets from the home spot), or the beam onto "
+                    "move.to_um (a point picked in a snapshot, using the remembered beam offset), and Z to dz_um "
+                    "from the focus, then a video snapshot; stay: true (default) makes that spot home for later "
+                    "studies and the next request",
+            "spot": "find where the beam really is and remember it (per objective and laser): a video frame with "
+                    "the beam (shutter, or during an acquisition), or the Raman signal while the beam scans over "
+                    "a small feature seen on the video (dust, a particle); snapshots then mark the beam there and "
+                    "move.to_um aims with it"},
         "keys": {
             "sample": "{name, notes, sensitive: true caps the filter at limits.sensitive_max_filter_pct}",
             "setup": "{laser_nm, grating (gr/mm), filter (a label from the profile, e.g. '10%'), objective "
@@ -82,7 +90,12 @@ def study_format(status: dict | None = None) -> dict:
                      "Raman line) (before the first point; map: also every N points with 'every'), dz_um: Z "
                      "offset from the focus (spectrum, series), scan: {range_um (10), step_um (1), line_cm1 (Si), "
                      "window_cm1 (30), exposure_s (0.5)}}",
-            "move": "(kind move) {x_um, y_um, dz_um, stay: true, snapshot: true}; setup may only give the objective",
+            "move": "(kind move) {x_um, y_um | to_um: [x, y] (absolute, from a snapshot), dz_um, stay: true, "
+                    "snapshot: true}; setup may only give the objective",
+            "spot": "(kind spot) {method: auto | shutter | acquisition | raman, feature_um: [x, y] (from a "
+                    "snapshot's 'features' or its axes) | 'auto', refine: true, range_um, step_um (by objective), "
+                    "line_cm1 (Si), exposure_s (0.3), acq_exposure_s (2), remember: true}; setup needs laser_nm and "
+                    "objective",
             "points": "[{x_um, y_um, dz_um}] (spectrum kind): offsets from where the operator left the stage",
             "map": "{x_um, y_um, z_um: [from, to, step] offsets; snake: true (default) for boustrophedon rows}",
             "series": "{count, interval_s: seconds from one start to the next}",
@@ -155,6 +168,8 @@ def validate_study(name: str, study: dict, prof: dict) -> dict:
     lim = prof["limits"]
     if kind == "move":
         return _validate_move(name, study, prof, errors, warnings)
+    if kind == "spot":
+        return _validate_spot(name, study, prof, errors, warnings)
     if kind == "focus":
         for k in ("points", "map", "series", "acquire", "guide", "alignment", "process", "move"):
             if study.get(k) is not None:
@@ -479,6 +494,57 @@ def _validate_scan(sc: dict, prof: dict, errors: list):
         pass
 
 
+def _validate_spot(name, study, prof, errors, warnings) -> dict:
+    sp = study.get("spot", {})
+    if not isinstance(sp, dict):
+        errors.append("spot: {method, feature_um, ...}")
+        return {"ok": False, "errors": errors, "warnings": warnings}
+    _unknown(sp, SPOT_KEYS, "spot", errors)
+    method = sp.get("method", "auto")
+    if method not in SPOT_METHODS:
+        errors.append(f"spot.method {method!r}: {', '.join(SPOT_METHODS)}")
+    f = sp.get("feature_um")
+    if f is not None and f != "auto" and not (isinstance(f, (list, tuple)) and len(f) == 2 and all(_num(v) for v in f)):
+        errors.append("spot.feature_um: [x, y] in µm (from a snapshot) or 'auto'")
+    if method == "shutter" and not prof["motors"].get("laser_shutter"):
+        errors.append("spot.method 'shutter': the profile has no laser shutter motor (motors.laser_shutter); use "
+                      "'acquisition' or 'raman'")
+    s = study.get("setup") or {}
+    for k in ("laser_nm", "objective"):
+        if s.get(k) is None:
+            errors.append(f"spot: give setup.{k} (the beam's offset is remembered per objective and laser)")
+    for k, lo, hi in (("range_um", 0.5, 200.0), ("step_um", 0.05, 50.0), ("exposure_s", 0.01, 10.0),
+                      ("acq_exposure_s", 0.2, 30.0), ("window_cm1", 2.0, 400.0)):
+        v = sp.get(k)
+        if v is not None and (not _num(v) or not lo <= v <= hi):
+            errors.append(f"spot.{k}: between {lo:g} and {hi:g}")
+    for k in ("refine", "remember"):
+        if k in sp and not isinstance(sp[k], bool):
+            errors.append(f"spot.{k}: true or false")
+    for k in ("points", "map", "series", "acquire", "guide", "alignment", "process", "move", "video", "focus"):
+        if study.get(k) is not None:
+            errors.append(f"{k}: not with kind 'spot'")
+    if errors:
+        return {"ok": False, "errors": errors, "warnings": warnings}
+    p = plan.spot_params(study, prof)
+    if method == "raman" or f is not None:
+        n = len(plan.axis_values([-p["range_um"] / 2, p["range_um"] / 2, p["step_um"]]))
+        if n < 5:
+            errors.append(f"spot: {n} steps across; at least 5 (a smaller step_um)")
+        elif n * n > 441:
+            errors.append(f"spot: {n * n} positions; at most 441 (a larger step_um or a smaller range_um)")
+        if p["range_um"] / 2 > prof["limits"]["max_xy_um"]:
+            errors.append("spot.range_um: above 2 x limits.max_xy_um")
+    if method == "raman" and f is None:
+        warnings.append("spot.method 'raman' without feature_um: the feature nearest the centre of the video is used")
+    inner = validate_study(name, plan.spot_spectrum_study(study, prof), prof)
+    inner["warnings"] = [w for w in inner["warnings"] if not w.startswith("acquire.spike")]
+    out = _merge({}, inner, errors, warnings)
+    if out["ok"]:
+        out["estimate"] = plan.estimate(study, prof)
+    return out
+
+
 def _validate_move(name, study, prof, errors, warnings) -> dict:
     m = study.get("move")
     lim = prof["limits"]
@@ -489,6 +555,12 @@ def _validate_move(name, study, prof, errors, warnings) -> dict:
     for k in ("x_um", "y_um", "dz_um"):
         if m.get(k) is not None and not _num(m[k]):
             errors.append(f"move.{k}: a number (µm)")
+    if m.get("to_um") is not None:
+        t = m["to_um"]
+        if not (isinstance(t, (list, tuple)) and len(t) == 2 and all(_num(v) for v in t)):
+            errors.append("move.to_um: [x, y] in µm (stage coordinates, as on a snapshot's axes)")
+        if m.get("x_um") is not None or m.get("y_um") is not None:
+            errors.append("move: give to_um or x_um / y_um, not both")
     for k in ("stay", "snapshot"):
         if k in m and not isinstance(m[k], bool):
             errors.append(f"move.{k}: true or false")

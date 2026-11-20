@@ -701,8 +701,9 @@ End Function
 ' shutter mode restored on every path out (frames are written to disk only after it is closed).
 Sub VVideo(cmd, res)
     Dim outBase, cam, vid, wasOn, clone, clone0, p, shutter, laserS, oldMode, newMode, fmts, i, r, settle
-    Dim opened, ok
+    Dim opened, ok, acqS, aid, tA
     outBase = GetP(cmd, "out", "")
+    acqS = ParseNum(GetP(cmd, "during_acq_s", "0"))
     cam = GetP(cmd, "camera", "")
     settle = ParseNum(GetP(cmd, "settle_s", "1.5"))
     laserS = ParseNum(GetP(cmd, "laser_s", "0"))
@@ -752,7 +753,35 @@ Sub VVideo(cmd, res)
         End If
         If ok Then ok = WaitStoppable(laserS)
     End If
-    If ok Then clone = GrabFrame(res)
+    If ok And acqS > 0 Then
+        ' the beam during a Raman acquisition (LabSpec opens the shutter itself): a frame before, one half-way
+        clone0 = GrabFrame(res)
+        aid = LabSpec.GetAcqID()
+        LabSpec.Acq LS_ACQ_SPECTRUM + LS_ACQ_NO_SPIKE_REMOVING, acqS, 1, ParseNum(GetP(cmd, "acq_from_nm", "0")), _
+                    ParseNum(GetP(cmd, "acq_to_nm", "0"))
+        If Err.Number <> 0 Then
+            Fail res, ErrText("Acq (for the frame during an acquisition)")
+            Err.Clear
+            ok = False
+        End If
+        If ok Then ok = WaitStoppable(acqS / 2)
+        If ok Then clone = GrabFrame(res)
+        tA = Timer
+        Do
+            aid = LabSpec.GetAcqID()
+            If Err.Number <> 0 Or aid > 0 Or aid = -2 Then Exit Do
+            If Not ok Or Elapsed(tA) > acqS + 30 Then
+                LabSpec.Acq LS_ACQ_CANCEL, 0, 0, 0, 0
+                Exit Do
+            End If
+            BeatNow
+            LabSpec.Pause 50
+        Loop
+        If aid > 0 Then LabSpec.Exec aid, LS_REMOVE_DATA, p
+        Err.Clear
+        res("during_acq_s") = acqS
+    End If
+    If ok And clone = 0 Then clone = GrabFrame(res)
     ' the laser off first, whatever happened
     If opened Then
         LabSpec.MoveMotor shutter, 0, "", LS_MOTOR_VALUE

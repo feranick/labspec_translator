@@ -1,5 +1,5 @@
 """mcp_server.py — MCP server: lets LLM-based tools run Raman measurements on a HORIBA instrument through LabSpec 6.
-Version: 2026.11.19.4
+Version: 2026.11.19.5
 
 Tools (all JSON):
   study_format      the study format, the profile's choices and limits, the bridge's state. Read it first.
@@ -11,6 +11,7 @@ Tools (all JSON):
   instrument        the bridge and the instrument now (status), the discovery dump (discover), resume after a halt
   snapshot          a video frame now, with the laser position marked (optionally with the beam showing)
   alignment_status  per laser: the alignment baseline, the last check, its age
+  spot_status       the beam's remembered offsets per objective and laser
   get_inputs        the bridge commands of one study, without running
   run_benchmarks    the benchmarks on the simulator (known answers)
   get_file          a written file as base64
@@ -52,7 +53,9 @@ peak's 'snr'. A saturated spectrum needs a stronger filter or a shorter exposure
 more accumulations.
 Stage and focus: a 'move' study (no laser) goes to an offset and shows a video frame; with stay it becomes the
 new home spot. A 'focus' study (or focus.autofocus 'scan') finds the focus by the Raman line. At the end of a
-request Z returns to the focus, then the stage to the home spot.
+request Z returns to the focus, then the stage to the home spot. The beam drifts from LabSpec's marker: a 'spot'
+study finds it (video with the beam, or the Raman signal over a small feature: snapshots list 'features') and
+remembers it; move.to_um then puts the beam on a point picked in a snapshot.
 Safety: positions are offsets (µm) from where the operator left the stage, Z from the operator's focus; the
 filter (laser power) is capped per laser and lower for samples marked sensitive. Ask the user before raising power
 or running long maps. If the bridge is not running, ask the user to start ls6t_bridge.vbs in LabSpec.
@@ -158,6 +161,13 @@ def snapshot(with_laser: bool = False):
     if not r.get("ok") or not r.get("path"):
         return r
     return [Image(path=r["path"]), json.dumps({k: v for k, v in r.items() if k != "what"}, default=str)]
+
+
+@server.tool()
+def spot_status() -> dict:
+    """Where the beam is relative to LabSpec's laser marker, remembered per objective and laser: the offset (µm),
+    how it was measured, its age and the drift since the first record. Read-only; a 'spot' study measures it."""
+    return api.spot_status()
 
 
 @server.tool()

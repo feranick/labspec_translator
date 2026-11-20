@@ -1,5 +1,5 @@
 """bench.py — benchmarks with known answers, run on the simulator (the instrument is never touched).
-Version: 2026.11.19.4
+Version: 2026.11.19.5
 
 They check the chain end to end: the commands, wavelength <-> Raman shift, the extended range, fits, map assembly,
 the saturation check and an operator stop. On the instrument itself, the 'calibration' study on a silicon wafer is
@@ -63,6 +63,19 @@ CASES = {
         "studies": {"f": {"kind": "focus", "sample": {"name": "Si"}, "setup": SETUP}},
         "sim_files": {"sim_defocus": "2.3"},      # the sample's best focus is 2.3 µm above the operator's
         "checks": [("f", "focus.found", True, None), ("f", "focus.shift_um", 2.3, 0.15), ("f", "reliable", True, None)]},
+    "spot_raman": {
+        "studies": {"s": {"kind": "spot", "sample": {"name": "Si with a dust particle"}, "setup": SETUP,
+                          "spot": {"method": "raman", "feature_um": [1219.5, -557.8]}}},
+        # the beam sits 1.1 / 0.6 µm from LabSpec's marker; the dust particle (dark on the video, no Raman) is at
+        # the given point: the scan finds where the Si signal vanishes
+        "sim_files": {"sim_spot_offset": "1.1,0.6"},
+        "checks": [("s", "spot.found", True, None), ("s", "spot.offset_um.0", 1.1, 0.15),
+                   ("s", "spot.offset_um.1", 0.6, 0.15)]},
+    "spot_video": {
+        "studies": {"v": {"kind": "spot", "sample": {"name": "Si"}, "setup": SETUP,
+                          "spot": {"method": "acquisition"}}},
+        "checks": [("v", "spot.found", True, None), ("v", "spot.offset_um.0", 1.5, 0.1),
+                   ("v", "spot.offset_um.1", -0.8, 0.1)]},
     "operator_stop": {
         "studies": {"o": {"kind": "map", "sample": {"name": "Si"}, "setup": SETUP,
                           "acquire": {"center_cm1": 520, "exposure_s": 1, "accumulations": 1},

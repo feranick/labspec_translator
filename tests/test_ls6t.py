@@ -630,3 +630,59 @@ def test_absolute_z_limit(tmp_path):
                            "acquire": {"center_cm1": 520}, "points": [{"dz_um": 5}]}})
     r = st["studies"]["p"]
     assert not r["ok"] and "stage limits" in r["why"]
+
+
+# --------------------------------------------------------------------------------------------- the laser spot
+
+def test_spot_by_video_during_acquisition_is_remembered():
+    st = run_inline({"v": {"kind": "spot", "sample": {"name": "Si"}, "setup": SETUP,
+                           "spot": {"method": "acquisition"}}})
+    sp = st["studies"]["v"]["spot"]
+    assert sp["found"] and sp["remembered"]
+    assert sp["offset_um"] == [pytest.approx(1.5, abs=0.1), pytest.approx(-0.8, abs=0.1)]
+    rec = api.spot_status()["records"]["x100@532"]
+    assert rec["method"] == "acquisition"
+    # a later snapshot marks the beam with it
+    snap = api.snapshot()
+    assert snap["marker_um"][0] - snap["stage"]["x_um"] == pytest.approx(1.5, abs=0.1)
+    assert snap["offset_source"].startswith("measured")
+
+
+def test_spot_by_raman_on_a_feature_and_drift():
+    bdir = config.active_bridge_dir()
+    S.ensure(bdir)
+    snap = api.snapshot()
+    dust = [f for f in snap["features"] if f["dark"]]
+    assert dust and dust[0]["x_um"] == pytest.approx(1219.5, abs=1.0)
+    run_inline({"v": {"kind": "spot", "sample": {"name": "Si"}, "setup": SETUP, "spot": {"method": "acquisition"}}})
+    (bdir / "sim_spot_offset").write_text("1.1,0.6")          # the beam drifted
+    st = run_inline({"r": {"kind": "spot", "sample": {"name": "Si"}, "setup": SETUP,
+                           "spot": {"method": "raman", "feature_um": [dust[0]["x_um"], dust[0]["y_um"]]}}})
+    r = st["studies"]["r"]
+    assert r["reliable"] and r["spot"]["method"] == "raman"
+    assert r["spot"]["offset_um"] == [pytest.approx(1.1, abs=0.15), pytest.approx(0.6, abs=0.15)]
+    assert r["spot"]["drift_um"] == pytest.approx(1.47, abs=0.2)
+    assert any("the beam moved" in w for w in r["warnings"])
+    assert Path(r["images"]["spot_scan"]["path"]).exists()
+
+
+def test_move_to_puts_the_beam_on_the_point():
+    bdir = config.active_bridge_dir()
+    S.ensure(bdir)
+    (bdir / "sim_spot_offset").write_text("1.1,0.6")
+    run_inline({"v": {"kind": "spot", "sample": {"name": "Si"}, "setup": SETUP, "spot": {"method": "acquisition"}}})
+    st = run_inline({"m": {"kind": "move", "move": {"to_um": [1219.5, -557.8], "stay": False}}})
+    m = st["studies"]["m"]["move"]
+    assert m["stage_um"] == [pytest.approx(1219.5 - 1.1, abs=0.15), pytest.approx(-557.8 - 0.6, abs=0.15)]
+
+
+def test_spot_validation():
+    r = F.validate({"s": {"kind": "spot", "setup": {"laser_nm": 532}}})["s"]
+    assert not r["ok"] and any("objective" in e for e in r["errors"])
+    r = F.validate({"s": {"kind": "spot", "setup": SETUP, "spot": {"method": "shutter"}}})["s"]
+    assert not r["ok"] and any("laser shutter" in e for e in r["errors"])
+    r = F.validate({"s": {"kind": "spot", "setup": SETUP, "spot": {"method": "raman", "feature_um": [0, 0],
+                                                                   "step_um": 0.05}}})["s"]
+    assert not r["ok"] and any("at most 441" in e for e in r["errors"])
+    r = F.validate({"m": {"kind": "move", "move": {"to_um": [1, 2], "x_um": 3}}})["m"]
+    assert not r["ok"]

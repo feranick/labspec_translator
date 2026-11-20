@@ -12,7 +12,7 @@ stops and cancel on the simulator, and `ls6t bench` gives known answers. What re
 LabSpec and hardware. The plan goes from no laser and no motion to Claude driving a full map, in stages. Each stage
 starts only when the previous one passed.
 
-Version under test: 2026.11.19.4 (bridge protocol 1).
+Version under test: 2026.11.19.5 (bridge protocol 1).
 
 ---
 
@@ -76,6 +76,9 @@ The vendor manual (2018) leaves these open. Each is answered by the test listed.
 | Q17 | Does this XploRA have HORIBA's AutoAlignment module (Maintenance tab)? Can its *Current status* be read from outside (Windows UI automation, read-only)? | T5c.1 |
 | Q18 | Does `Message(text, 1)` (OK/Cancel) return 0 for OK and wait while the operator runs AutoAlignment in the same LabSpec? | T5c.2 |
 | Q19 | Does LabSpec's dynamic `Dialog` stay open, update and answer Done/Abort while short acquisitions run? How long is one reading (`period_s`) at 0.2 s exposure? | T5d.1 |
+| Q23 | Does the live video keep updating during a Raman acquisition (so a frame half-way through shows the beam), on this XploRA? | T5e.1 |
+| Q24 | Does the Raman spot scan over a small feature agree with the beam seen on the video (T5b.3 / T5e.1)? Which features work (dust on Si, a gold dot, a pit)? | T5e.2 |
+| Q25 | How much does the beam drift from LabSpec's marker over a day, between objectives, after AutoAlignment? | T5e.3 |
 | Q21 | Does the focus scan find the same focus as the maintainer (and as LabSpec's autofocus) on Si and on a real sample? Is 1 µm a good step at x100, and what at x50 and x10? | T6.5 |
 | Q22 | Does the stage return home and Z to the focus at the end of a request, and does a `move` with `stay` change the next request's start? | T6.6 |
 | Q20 | Is the guided loop fast enough for a person turning a knob (focus, power): does STOP come before the operator has gone too far? | T5d.2–T5d.3 |
@@ -359,6 +362,39 @@ STOP when the target is reached; never above the saturation guard. Repeat with `
 **T5d.4 Abort.** During a guide, the maintainer presses *Abort*, then in another run closes the bridge's window.
 Pass: `operator_abort`, then `stopped` with the bridge halted (resume).
 
+## T5e. The laser spot (LASER, Q23–Q25)
+
+**T5e.1 In a frame during an acquisition (Q23).** Silicon, in focus, a low filter, the live video running. Run
+`{"v": {"kind": "spot", "sample": {"name": "Si"}, "setup": {"laser_nm": 532, "grating": 1800, "filter": "1%",
+"objective": "x100"}, "spot": {"method": "acquisition"}}}`.
+
+Pass:
+- the result's video image shows the spot;
+- `spot.found`, and `offset_um` agrees with T5b.3 (the shutter) within about 0.5 µm;
+- `ls6t spot status` lists it.
+
+If the frame shows no spot (the video freezes or is blanked during acquisitions), record that: then only `shutter`
+and `raman` work on this instrument.
+
+**T5e.2 By the Raman signal (Q24).** Find a small isolated feature (dust or a particle, 1–3 µm) on the Si wafer, in
+focus. Take a snapshot (`ls6t instrument snapshot`) and check that the feature is among `features` (numbered on the
+PNG). Run a spot study with `"method": "raman", "feature_um": [x, y]` from it.
+
+Pass:
+- the scan image shows a clear dip (or peak);
+- `spot.offset_um` agrees with T5e.1 / T5b.3 within about 0.5 µm at x100.
+
+Then aim: `{"m": {"kind": "move", "move": {"to_um": [x, y]}}}` and a 1 s spectrum. Pass: the Si signal is lowest
+there (the beam on the dust). Repeat at x50.
+
+**T5e.3 Drift (Q25).** Repeat T5e.1 (or T5e.2):
+- at the start and end of the session;
+- after changing objective and back;
+- after AutoAlignment (T5c).
+
+Record `drift_um` each time. If it often exceeds 1 µm within a day, plan a spot study at the start of each
+session (or before aiming at small features).
+
 ## T6. Maps (LASER)
 
 **T6.1 A small map (Q9, Q10).** On the contrast sample: a map study, 5 × 5 points, 1 µm steps, a short exposure, the
@@ -471,6 +507,9 @@ With the Claude desktop app connected (README step 8):
 | T5d.2 | | | | Q20: | |
 | T5d.3 | | | | | |
 | T5d.4 | | | | | |
+| T5e.1 | | | | Q23: | |
+| T5e.2 | | | | Q24 (offset raman vs video): | |
+| T5e.3 | | | | Q25 drift: | |
 | T6.1 | | | | Q10: | |
 | T6.2 | | | | | |
 | T6.3 | | | | | |

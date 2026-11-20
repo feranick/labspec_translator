@@ -1,5 +1,5 @@
 """api.py — the functions behind the command line and the MCP server (JSON in, JSON out).
-Version: 2026.11.19.4
+Version: 2026.11.19.5
 """
 from __future__ import annotations
 
@@ -369,7 +369,15 @@ def snapshot(with_laser: bool = False) -> dict:
     if not r["ok"]:
         return {"ok": False, "error": r.get("error"), "stopped_by": r.get("stopped_by")}
     snap = video.snapshot(r, prof, base, f"video {time.strftime('%H:%M:%S')}"
-                          + (f", objective {r.get('objective')}" if r.get("objective") else ""))
+                          + (f", objective {r.get('objective')}" if r.get("objective") else ""), st.get("laser_nm"))
+    snap.pop("_decoded", None)
+    if snap.get("measured_offset_um"):
+        from . import spot as SP
+        rec = SP.record(prof, snap.get("objective"), st.get("laser_nm"), snap["measured_offset_um"], "shutter",
+                        {"contrast_sigma": snap.get("spot_contrast_sigma")}, str(folder))
+        snap["remembered"] = {k: v for k, v in rec.items() if k != "previous"}
+        if rec.get("warning"):
+            snap["warnings"].append(rec["warning"])
     out = {"ok": True, "folder": str(folder), **snap,
            "instrument": {k: st.get(k) for k in ("laser_nm", "filter", "objective", "x_um", "y_um", "z_um")}}
     if with_laser and str(r.get("shutter_closed")) != "1":
@@ -458,6 +466,17 @@ def profile_set(key: str, value_json: str) -> dict:
     old = runner.lookup(prof, key)
     P.set_key(prof, key, value)
     return {"ok": True, "key": key, "old": old, "new": value, "profile": str(P.save(prof))}
+
+
+def spot_status() -> dict:
+    """The beam's remembered offsets per objective and laser: value, method, age, drift since the first record."""
+    from . import spot as SP
+    return SP.status(P.load())
+
+
+def spot_forget(objective: str | None = None, laser_nm: float | None = None) -> dict:
+    from . import spot as SP
+    return SP.forget(objective, laser_nm)
 
 
 def install_bridge(dest: Path | None = None) -> dict:

@@ -1,5 +1,5 @@
 """profile.py — the machine profile: what the instrument has (from the discovery script) and the limits a person sets.
-Version: 2026.11.19.4
+Version: 2026.11.19.5
 
 The profile is a JSON file (LS6T_PROFILE, default ~/ls6t/profile.json). Studies never change it: an LLM can only
 ask for what the profile allows. Without a file, the built-in XploRA defaults below apply and every result says so
@@ -60,6 +60,9 @@ DEFAULT_PROFILE: dict = {
                   "max_retries": 1},
     # guided adjustments (kind 'guide'): limits, and the operator's panel (dialog, or the status bar)
     "guide": {"max_s": 300.0, "max_exposure_s": 5.0, "ui": "dialog", "saturation_frac": 0.9},
+    # the laser spot (kind 'spot'): offsets larger than max_offset_um are not remembered; a change larger than
+    # drift_warn_um from the previous record is reported; records older than max_age_h are flagged stale
+    "spot": {"max_offset_um": 10.0, "drift_warn_um": 1.0, "max_age_h": 24.0},
     "checks": {"min_snr": 10.0, "detect_snr": 5.0, "si_cm1": 520.7, "si_tol_cm1": 1.0, "saturation_frac": 0.98},
 }
 

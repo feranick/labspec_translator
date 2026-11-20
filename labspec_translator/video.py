@@ -1,5 +1,5 @@
 """video.py — video snapshots: decoding the bridge's frame file and drawing it with the laser position marked.
-Version: 2026.11.19.4
+Version: 2026.11.19.5
 
 The bridge writes a cloned video frame as '# key=value' header lines (axis types, sizes, units, values) and the
 pixel values in LabSpec's order. LabSpec's video axes are taken to be stage coordinates in µm ('mkm'), so the laser
@@ -105,7 +105,77 @@ def find_spot(dec: dict, dark: dict | None = None) -> dict | None:
     return {"x": x, "y": y, "pixel": [round(ci, 2), round(cj, 2)], "contrast_sigma": round(float(d[j, i] / s), 1)}
 
 
-def render(dec: dict, png: Path, marker: tuple | None, title: str, note: str = "", spot: dict | None = None) -> dict:
+def features(dec: dict, n: int = 5) -> list:
+    """Small isolated features (dust, particles, pits: 0.5-4 µm across) the beam can be aimed at to find it by the
+    Raman signal: extrema of a difference of Gaussians over a few scales, strongest first, away from the frame's
+    edge. Edges respond too but weaker than a blob of the matching size."""
+    from scipy.ndimage import gaussian_filter, maximum_filter
+    if not dec["um"]:
+        return []
+    lum = _lum(dec["img"])
+    h, w = lum.shape
+    xs, ys = dec["xs"], dec["ys"]
+    um_px = abs(xs[-1] - xs[0]) / max(w - 1, 1)
+    best = np.zeros_like(lum)
+    sig_of = np.zeros_like(lum)
+    for r_um in (0.5, 1.0, 2.0, 4.0):
+        sg = max(0.8, r_um / um_px / 1.41)
+        if sg > min(h, w) / 6:
+            continue
+        dog = (gaussian_filter(lum, sg) - gaussian_filter(lum, 1.6 * sg)) * sg     # scale-normalised
+        upd = np.abs(dog) > np.abs(best)
+        best = np.where(upd, dog, best)
+        sig_of = np.where(upd, sg, sig_of)
+    mag = np.abs(best)
+    noise = 1.4826 * np.median(np.abs(mag - np.median(mag))) or 1e-9
+    peaks = (mag == maximum_filter(mag, size=7)) & (mag > 8 * noise)
+    m = max(3, int(min(h, w) * 0.05))
+    peaks[:m, :] = peaks[-m:, :] = False
+    peaks[:, :m] = peaks[:, -m:] = False
+    jj, ii = np.nonzero(peaks)
+    order = np.argsort(mag[jj, ii])[::-1][:n]
+    out = []
+    for k in order:
+        j, i = int(jj[k]), int(ii[k])
+        out.append({"x_um": round(float(np.interp(i, np.arange(w), xs)), 3),
+                    "y_um": round(float(np.interp(j, np.arange(h), ys)), 3),
+                    "size_um": round(float(2 * 1.41 * sig_of[j, i] * um_px), 2), "dark": bool(best[j, i] < 0),
+                    "strength": round(float(mag[j, i] / noise), 1)})
+    for k, f in enumerate(out, 1):
+        f["n"] = k
+    return out
+
+
+def refine_feature(dec: dict, x: float, y: float, r_um: float = 3.0) -> dict | None:
+    """The centre of the feature near (x, y): the weighted centroid of its contrast (dark or bright) against the
+    surroundings, within r_um. None when nothing stands out there."""
+    from scipy.ndimage import median_filter
+    if not dec["um"]:
+        return None
+    lum = _lum(dec["img"])
+    h, w = lum.shape
+    xs, ys = dec["xs"], dec["ys"]
+    um_px = abs(xs[-1] - xs[0]) / max(w - 1, 1)
+    X, Y = np.meshgrid(xs, ys)
+    near = np.hypot(X - x, Y - y) <= r_um
+    if near.sum() < 9:
+        return None
+    bg = median_filter(lum, size=max(5, int(3 * r_um / um_px) | 1))
+    d = lum - bg
+    sel = d[near]
+    dark = abs(sel.min()) > abs(sel.max())
+    c = np.clip(-d if dark else d, 0, None) * near
+    s = 1.4826 * np.median(np.abs(d - np.median(d))) or 1e-9
+    if c.max() < 6 * s:
+        return None
+    c = np.clip(c - 0.3 * c.max(), 0, None)
+    tot = c.sum()
+    return {"x_um": round(float((c * X).sum() / tot), 3), "y_um": round(float((c * Y).sum() / tot), 3),
+            "dark": bool(dark), "contrast_sigma": round(float(c.max() / s), 1)}
+
+
+def render(dec: dict, png: Path, marker: tuple | None, title: str, note: str = "", spot: dict | None = None,
+           feats: list | None = None) -> dict:
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -131,6 +201,12 @@ def render(dec: dict, png: Path, marker: tuple | None, title: str, note: str = "
         ax.plot([mx, mx], [my - 2 * span, my - 0.6 * span], color="#ff2d2d", lw=1.4)
         ax.plot([mx, mx], [my + 0.6 * span, my + 2 * span], color="#ff2d2d", lw=1.4)
         ax.add_patch(plt.Circle((mx, my), 0.6 * span, fill=False, color="#ff2d2d", lw=1.2))
+    for f in feats or []:
+        span = abs(xs[-1] - xs[0]) * 0.025
+        ax.add_patch(plt.Circle((f["x_um"], f["y_um"]), max(span, f["size_um"] / 2 + 0.5), fill=False, color="#ffd400",
+                                lw=1.0))
+        ax.annotate(str(f["n"]), (f["x_um"], f["y_um"]), xytext=(4, 4), textcoords="offset points",
+                    color="#ffd400", fontsize=8, weight="bold")
     if spot is not None:
         span = (abs(xs[-1] - xs[0]) if dec["um"] else w) * 0.04
         ax.add_patch(plt.Circle((spot["x"], spot["y"]), 1.1 * span, fill=False, color="#00d5ff", lw=1.2, ls="--"))
@@ -142,9 +218,12 @@ def render(dec: dict, png: Path, marker: tuple | None, title: str, note: str = "
     return {"path": str(png)}
 
 
-def snapshot(res: dict, prof: dict, base: Path, title: str) -> dict:
-    """The snapshot record from the bridge's answer: the PNG with the laser position marked, the raw frame, the
-    files LabSpec saved, the stage position and the marker, with warnings."""
+def snapshot(res: dict, prof: dict, base: Path, title: str, laser_nm=None) -> dict:
+    """The snapshot record from the bridge's answer: the PNG with the laser position marked (LabSpec's position
+    plus the beam's remembered offset for this objective and laser), the raw frame, the files LabSpec saved, the
+    stage position, the marker, small features to aim at (numbered on the PNG), and with the laser on: the spot
+    found and the offset measured."""
+    from . import spot as SP
     v = prof.get("video", {})
     out: dict = {"raw": res.get("out"), "native": {}, "warnings": [], "laser_s": _f(res.get("laser_s")),
                  "objective": res.get("objective")}
@@ -162,7 +241,8 @@ def snapshot(res: dict, prof: dict, base: Path, title: str) -> dict:
     except (ValueError, OSError) as exc:
         out["warnings"].append(f"the frame could not be decoded: {exc}")
         return out
-    off = v.get("laser_offset_um", [0.0, 0.0]) or [0.0, 0.0]
+    off, src = SP.offset_for(prof, res.get("objective"), laser_nm)
+    out["offset_used_um"], out["offset_source"] = off, src
     marker, note = None, ""
     if dec["um"] and v.get("marker", "stage") == "stage" and x is not None and y is not None:
         marker = (x + float(off[0]), y + float(off[1]))
@@ -171,7 +251,7 @@ def snapshot(res: dict, prof: dict, base: Path, title: str) -> dict:
             out["warnings"].append("the laser position falls outside the frame: the video axes may not be stage "
                                    "coordinates (profile video.marker 'center' marks the image centre instead)")
             marker = None
-        note = "marker: LabSpec's laser position" + (" + measured offset" if any(off) else
+        note = "marker: LabSpec's laser position" + (f" + offset ({src})" if any(off) else
                                                      " (offset not measured yet)")
     else:
         if dec["um"]:
@@ -182,8 +262,10 @@ def snapshot(res: dict, prof: dict, base: Path, title: str) -> dict:
         if not dec["um"]:
             out["warnings"].append("the video axes are not in µm: positions cannot be marked on the frame")
     spot = None
-    if res.get("laser_s") and float(res["laser_s"]) > 0:
-        note += f"; laser on {float(res['laser_s']):g} s"
+    lit = float(res.get("laser_s") or 0) > 0 or float(res.get("during_acq_s") or 0) > 0
+    if lit:
+        note += (f"; frame during a {float(res['during_acq_s']):g} s acquisition" if float(res.get("during_acq_s") or 0)
+                 > 0 else f"; laser on {float(res['laser_s']):g} s")
         dark = None
         if res.get("out_nolaser"):
             try:
@@ -202,14 +284,24 @@ def snapshot(res: dict, prof: dict, base: Path, title: str) -> dict:
             if dec["um"] and x is not None and y is not None:
                 # what to put in the profile's video.laser_offset_um so the marker sits on the beam
                 out["measured_offset_um"] = [round(spot["x"] - x, 3), round(spot["y"] - y, 3)]
+    feats = []
+    if dec["um"]:
+        try:
+            feats = features(dec)
+        except Exception as exc:  # noqa: BLE001
+            out["warnings"].append(f"feature detection failed: {exc}")
+    out["features"] = feats
+    out["_decoded"] = dec
+    if feats:
+        note += "; yellow: features to aim at"
     try:
-        out.update(render(dec, Path(f"{base}.png"), marker, title, note, spot))
+        out.update(render(dec, Path(f"{base}.png"), marker, title, note, spot, feats))
     except ImportError:
         out["warnings"].append("matplotlib is missing (pip install labspec-translator[render]): no PNG")
     out.update(marker_um=list(marker) if marker and dec["um"] else None, um_axes=dec["um"],
                field_um=[float(abs(dec["xs"][-1] - dec["xs"][0])), float(abs(dec["ys"][-1] - dec["ys"][0]))]
                if dec["um"] else None, pixels=[dec["width"], dec["height"]],
-               what="video frame; red cross: the laser position")
+               what="video frame; red cross: the laser position; yellow numbered circles: small features")
     return out
 
 

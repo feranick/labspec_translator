@@ -284,5 +284,31 @@
     "step_um": 1
    }
   }
+ },
+ "find_beam": {
+  "kind": "spot",
+  "sample": {
+   "name": "Si with some dust"
+  },
+  "setup": {
+   "laser_nm": 532,
+   "grating": 1800,
+   "filter": "10%",
+   "objective": "x100"
+  },
+  "spot": {
+   "method": "auto",
+   "feature_um": "auto"
+  }
+ },
+ "beam_on_particle": {
+  "kind": "move",
+  "move": {
+   "to_um": [
+    1219.5,
+    -557.8
+   ],
+   "stay": true
+  }
  }
 }

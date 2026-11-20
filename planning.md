@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.19.4)
+## Architecture (version 2026.11.19.5)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -78,10 +78,21 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   Z off focus and the next request took it as the focus: fixed). stage.z_um absolute limit. The guided loop's
   metric now uses a 3-point median (cosmic rays: the loop runs without spike removal). Simulator: depth of focus
   by objective, sim_defocus. 61 tests; 8/8 benchmarks (new focus_scan: 2.293 for 2.3). TESTING T6.5-T6.6, Q21-Q22.
+- 2026-11-19, 2026.11.19.5: the laser spot (Nicola: the beam drifts from the screen centre; find it by trial and
+  error with focus/signal, and remember it). spot.py keeps the offset (beam - LabSpec marker) per objective@laser
+  with history and drift (LS6T_HOME/spot.json; plausibility spot.max_offset_um; drift warning spot.drift_warn_um).
+  Kind `spot`: methods shutter (frames without/with the beam), acquisition (bridge `video` during_acq_s: a frame
+  half-way through a Raman acquisition, no shutter motor needed), raman (snapshot -> feature (given, or 'auto':
+  the DoG blob nearest the centre) refined on the video -> grid scan of the stage around feature - prior offset,
+  line height each -> dip or peak -> weighted centroid -> offset = feature - stage). Snapshots now list
+  'features' (numbered on the PNG) and draw the marker with the remembered offset; lit snapshots in any study
+  update the record. move.to_um aims the beam (stage = point - offset). Simulator: Raman follows the real beam
+  (stage + offset), a dust particle 15 µm -X / 10 µm +Y of the start, sim_spot_offset. 65 tests; 10/10
+  benchmarks (spot_raman 1.073/0.584 for 1.1/0.6; spot_video 1.52/-0.80 for 1.5/-0.8). TESTING T5e, Q23-Q25.
 
 ## To do next
 
-1. **At the instrument**: carry out TESTING.md (T0-T9, T5b-T5d) with the maintainer; record the answers to Q1-Q22 here and
+1. **At the instrument**: carry out TESTING.md (T0-T9, T5b-T5d) with the maintainer; record the answers to Q1-Q25 here and
    change the code where they differ from the assumptions (README "Assumptions about LabSpec").
 2. Put the measured times in the profile's `timing` (T3, T7.2).
 3. Later: native LabSpec maps (SetMappingParams + ACQ_SPECTRAL_IMAGE) for large fast maps; Linkam temperature

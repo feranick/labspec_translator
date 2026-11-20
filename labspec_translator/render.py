@@ -1,5 +1,5 @@
 """render.py — PNG pictures of a study's results (matplotlib, optional extra 'render').
-Version: 2026.11.19.4
+Version: 2026.11.19.5
 
 spectrum / calibration / series: the spectrum (or the first and last of a series) with its baseline and fitted
 peaks; map: one image per peak quantity and band (position, FWHM, height or area), positions in µm offsets.
@@ -68,6 +68,33 @@ def map_png(path: Path, grid: np.ndarray, xs, ys, title: str, unit: str) -> dict
     fin = g[np.isfinite(g)]
     return {"path": str(path), "what": title, "min": float(fin.min()) if fin.size else None,
             "max": float(fin.max()) if fin.size else None}
+
+
+def spot_png(path: Path, rs: dict, feature, prior) -> dict:
+    """A Raman spot scan: the line's signal against the stage position relative to where the beam was expected to
+    hit the feature; the cross is where it did."""
+    plt = _plt()
+    g = rs["grid_um"]
+    V = np.array(rs["signal"], float)
+    fig, ax = plt.subplots(figsize=(5.2, 4.4), dpi=110)
+    st = (g[1] - g[0]) if len(g) > 1 else 1.0
+    im = ax.imshow(V, origin="lower", extent=[g[0] - st / 2, g[-1] + st / 2, g[0] - st / 2, g[-1] + st / 2],
+                   cmap="viridis", aspect="equal")
+    fig.colorbar(im, ax=ax, label=f"{rs['line_cm1']:g} cm$^{{-1}}$ signal (counts/s)")
+    ax.plot([0], [0], "w+", ms=10, label="expected (prior offset)")
+    if rs.get("stage_at_hit_um"):
+        hx = rs["stage_at_hit_um"][0] - (feature[0] - prior[0])
+        hy = rs["stage_at_hit_um"][1] - (feature[1] - prior[1])
+        ax.plot([hx], [hy], "rx", ms=10, mew=2, label="beam on the feature")
+    ax.set_xlabel("stage X relative (µm)")
+    ax.set_ylabel("stage Y relative (µm)")
+    ax.set_title(("found: offset " + str(rs.get("offset_um"))) if rs.get("found") else
+                 f"not found: {rs.get('why', '')}"[:80], fontsize=9)
+    ax.legend(fontsize=7, loc="upper right")
+    fig.tight_layout()
+    fig.savefig(path)
+    plt.close(fig)
+    return {"path": str(path), "what": "the Raman spot scan: signal against the stage position"}
 
 
 def focus_png(path: Path, fs: dict) -> dict:

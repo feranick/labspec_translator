@@ -1,5 +1,5 @@
 """sim.py — a simulated LabSpec + XploRA behind the same bridge protocol as ls6t_bridge.vbs.
-Version: 2026.11.19.4
+Version: 2026.11.19.5
 
 It answers every verb of the bridge with the same keys, so the runner, the checks and the MCP server are tested
 without the instrument (LS6T_MODE=sim, and the tests). The simulated sample is a silicon wafer with a graphene
@@ -14,7 +14,9 @@ answers No), sim_time_scale (seconds per simulated second, default 0.01), sim_mi
 0.4: the signal is that fraction of normal until the operator runs AutoAlignment, i.e. answers OK to a notice about
 it), sim_autoalign_fails (AutoAlignment does not help), sim_notice_cancel (the operator cancels a notice),
 sim_guide_abort (the operator aborts a guided adjustment), sim_defocus (containing N: the sample's best focus is
-N µm from where the operator left Z).
+N µm from where the operator left Z), sim_spot_offset ('dx,dy': where the beam really is relative to LabSpec's
+laser position; default 1.5,-0.8). A dust particle (radius 1.5 µm) sits 15 µm to -X and 10 µm to +Y of the start:
+dark on the video, and it blocks the Raman signal where the beam hits it.
 """
 from __future__ import annotations
 
@@ -66,6 +68,7 @@ class SimLabSpec:
         self.exposure, self.accumulations = 1.0, 1
         self.temp_c = -60.0
         self.laser_offset = (1.5, -0.8)     # where the beam really is, relative to LabSpec's laser position (µm)
+        self.particle = (self.x0 - 15.0, self.y0 + 10.0, 1.5)   # a dust particle on the Si: dark, blocks Raman
         self.moves = 0
         self.acquisitions = 0
 
@@ -289,11 +292,12 @@ class SimLabSpec:
         if not out:
             return {"ok": 0, "error": "video needs 'out'"}
         laser_s = float(p.get("laser_s", 0) or 0)
+        acq_s = float(p.get("during_acq_s", 0) or 0)
         if laser_s > 0:
             name = p.get("m_laser_shutter", "")
             if name not in self.m:
                 return {"ok": 0, "error": "video with the laser needs the laser shutter's motor name"}
-        who = self._wait(float(p.get("settle_s", 1.5)) + laser_s)
+        who = self._wait(float(p.get("settle_s", 1.5)) + laser_s + acq_s)
         if who:
             return self._stopped(who)
         mag = self.m["Objective"]["values"][self.m["Objective"]["i"]]
@@ -309,6 +313,10 @@ class SimLabSpec:
         r = np.where(flake, base - 35, base)
         g = np.where(flake, base - 25, base)
         b = np.where(flake, base - 10, base + 8)
+        px, py, pr = self.particle
+        dust = np.hypot(X - px, Y - py) <= pr
+        r, g, b = np.where(dust, r - 90, r), np.where(dust, g - 90, g), np.where(dust, b - 80, b)
+
         def write(path, r, g, b):
             r, g, b = (np.clip(c, 0, 255).astype(int) for c in (r, g, b))
             packed = (r | (g << 8) | (b << 16)).ravel()          # Windows COLORREF: 0x00BBGGRR
@@ -323,19 +331,20 @@ class SimLabSpec:
             return int(packed.size)
 
         extra = {}
-        if laser_s > 0:
+        if laser_s > 0 or acq_s > 0:
             write(Path(out + ".nolaser.video.txt"), r, g, b)
             extra["out_nolaser"] = out + ".nolaser.video.txt"
             fpct = self.m["Filter"]["values"][self.m["Filter"]["i"]] or 0.0
             las = self.m["Laser"]["values"][self.m["Laser"]["i"]]
-            sx, sy = x + self.laser_offset[0], y + self.laser_offset[1]
+            ox, oy = self._offset()
+            sx, sy = x + ox, y + oy
             spot = np.exp(-((X - sx) ** 2 + (Y - sy) ** 2) / (2 * (0.6 + 0.02 * w_um) ** 2))
             amp = 255.0 * min(1.0, 0.2 + fpct / 10.0)
             col = {532.0: (0.3, 1.0, 0.3), 638.0: (1.0, 0.25, 0.2)}.get(las, (0.5, 0.5, 0.5))
             r, g, b = r + amp * col[0] * spot, g + amp * col[1] * spot, b + amp * col[2] * spot
         path = Path(out + ".video.txt")
         npix = write(path, r, g, b)
-        res = {"id": 900, "out": str(path), "pixels": npix, "laser_s": laser_s, **extra,
+        res = {"id": 900, "out": str(path), "pixels": npix, "laser_s": laser_s or acq_s, **extra,
                "x_um": x, "y_um": y, "objective": self.m["Objective"]["labels"][self.m["Objective"]["i"]]}
         for f in str(p.get("formats", "")).split(","):
             if f:
@@ -482,8 +491,12 @@ class SimLabSpec:
     def _signal_per_s(self, nm: np.ndarray) -> np.ndarray:
         las, _ = self._cur("Laser")
         shift = 1e7 / las - 1e7 / nm
-        dx = self.m["X"]["value"] - self.x0
-        flake = dx >= 0
+        ox, oy = self._offset()
+        bx, by = self.m["X"]["value"] + ox, self.m["Y"]["value"] + oy      # where the beam really is
+        flake = bx - self.x0 >= 0
+        px, py, pr = self.particle
+        d = math.hypot(bx - px, by - py)
+        cover = 1.0 / (1.0 + math.exp(min(50.0, (d - pr) / 0.15)))     # 1 on the dust, 0 away from it
         fpct = self.m["Filter"]["values"][self.m["Filter"]["i"]] or 0.0
         dz = self.m["Z"]["value"] - self._zf_true()
         mag = self.m["Objective"]["values"][self.m["Objective"]["i"]]
@@ -499,7 +512,18 @@ class SimLabSpec:
                 w2 = math.hypot(w, res)
                 sig += h * w / w2 / (1 + 4 * ((shift - pos) / w2) ** 2)
         fluo = 0.03 * np.exp(-((shift - 1800.0) / 2500.0) ** 2)
-        return 40000.0 * (fpct / 100.0) * focus * self._align() * (sig + fluo)
+        return 40000.0 * (fpct / 100.0) * focus * self._align() * (1.0 - cover) * (sig + fluo)
+
+    def _offset(self) -> tuple:
+        """Where the beam is relative to LabSpec's laser position: laser_offset, or sim_spot_offset ('dx,dy')."""
+        f = self.dir / "sim_spot_offset"
+        try:
+            if f.exists():
+                a, b = f.read_text().strip().split(",")
+                return float(a), float(b)
+        except ValueError:
+            pass
+        return self.laser_offset
 
     def _align(self) -> float:
         f = self.dir / "sim_misaligned"

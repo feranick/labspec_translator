@@ -1,5 +1,5 @@
 """runner.py — runs a request's studies on the instrument, one command at a time, and checks every result.
-Version: 2026.11.19.4
+Version: 2026.11.19.5
 
 A request runs in its own process (`ls6t run-request FOLDER`, started detached by api.start), so it outlives the
 MCP call that started it. One request at a time holds the instrument (a lock file under LS6T_HOME); others wait
@@ -18,6 +18,7 @@ from pathlib import Path
 import numpy as np
 
 from . import __version__, BRIDGE_PROTOCOL, config, plan, spectra, video
+from . import spot as SP
 from . import profile as P
 from .bridge import Bridge, BridgeError, BridgeGone, BridgeTimeout
 
@@ -322,6 +323,8 @@ def run_any(name: str, study: dict, ctx: Ctx) -> dict:
         return run_move(name, study, ctx)
     if kind == "focus":
         return run_focus(name, study, ctx)
+    if kind == "spot":
+        return run_spot(name, study, ctx)
     if kind == "guide":
         return run_guide(name, study, ctx)
     if kind == "alignment":
@@ -427,7 +430,7 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
                 if zcur is None or abs(target - zcur) > 1e-6:
                     zcur = move_z(ctx, target, f"point {k}")
             if k == 0 and want_before:
-                snaps["before"] = _snapshot(ctx, name, sd, "before", bool(vd.get("with_laser")), warnings)
+                snaps["before"] = _snapshot(ctx, name, sd, "before", bool(vd.get("with_laser")), warnings, laser)
             out = sd / "spectra" / f"p{k:05d}.txt"
             params = dict(acq)
             params.pop("verb", None)
@@ -474,7 +477,7 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
             break
     if vd.get("after") and per_point and stop_exc is None:
         try:
-            snaps["after"] = _snapshot(ctx, name, sd, "after", bool(vd.get("with_laser")), warnings)
+            snaps["after"] = _snapshot(ctx, name, sd, "after", bool(vd.get("with_laser")), warnings, laser)
         except Stop as exc:
             stop_exc = exc
     if view and native:
@@ -688,7 +691,21 @@ def run_move(name: str, study: dict, ctx: Ctx) -> dict:
     hx, hy = ctx.home_xy
     if None in (hx, hy):
         raise Stop("the stage position could not be read: moves are refused", "study")
-    tx, ty = hx + float(m.get("x_um", 0) or 0), hy + float(m.get("y_um", 0) or 0)
+    beam = None
+    if m.get("to_um") is not None:
+        # put the beam (not LabSpec's marker) on a point picked in a snapshot: stage = point - the beam's offset
+        objective = obj if obj is not None else before.get("objective")
+        off, src = SP.offset_for(prof, objective, _f(before.get("laser_nm")))
+        beam = {"to_um": [float(v) for v in m["to_um"]], "offset_um": off, "offset_source": src}
+        tx, ty = beam["to_um"][0] - off[0], beam["to_um"][1] - off[1]
+        if math.hypot(tx - hx, ty - hy) > prof["limits"]["max_xy_um"]:
+            raise Stop(f"{name}: {math.hypot(tx - hx, ty - hy):.0f} µm from the home spot, above "
+                       f"limits.max_xy_um = {prof['limits']['max_xy_um']:g} µm", "study")
+        if src == "none measured":
+            warnings.append("no beam offset measured for this objective and laser: the beam lands where LabSpec's "
+                            "marker is (run a 'spot' study to find it)")
+    else:
+        tx, ty = hx + float(m.get("x_um", 0) or 0), hy + float(m.get("y_um", 0) or 0)
     _check_abs(prof, "x", tx, name)
     _check_abs(prof, "y", ty, name)
     r = ctx.call("move_xy", timeout_s=300, x_um=round(tx, 3), y_um=round(ty, 3), **motor_args(prof))
@@ -703,11 +720,11 @@ def run_move(name: str, study: dict, ctx: Ctx) -> dict:
         ctx.home_xy = (xy[0] if xy[0] is not None else tx, xy[1] if xy[1] is not None else ty)
     snap = None
     if m.get("snapshot", True):
-        snap = _snapshot(ctx, name, sd, "here", False, warnings)
+        snap = _snapshot(ctx, name, sd, "here", False, warnings, _f(before.get("laser_nm")))
     result = {"ok": True, "complete": True, "reliable": True, "unreliable_because": [], "warnings": warnings,
               "kind": "move", "move": {"offset_um": [float(m.get("x_um", 0) or 0), float(m.get("y_um", 0) or 0)],
                                        "dz_um": dz, "stage_um": xy, "z_um": z, "stay": m.get("stay", True),
-                                       "home_um": list(ctx.home_xy), "objective": obj},
+                                       "home_um": list(ctx.home_xy), "objective": obj, "beam": beam},
               "setup": {"before": before}, "seconds": {"total": round(time.time() - t_start, 2)}}
     if snap:
         result["video"] = {"here": snap}
@@ -715,6 +732,189 @@ def run_move(name: str, study: dict, ctx: Ctx) -> dict:
             result["images"] = {"video_here": {"path": snap["path"], "what": snap.get("what")}}
     if m.get("stay", True):
         warnings.append("the stage stays here: later offsets (in this request and the next) start from this spot")
+    _progress(sd, state="done", stage="done")
+    return _finish(sd, name, result)
+
+
+# --------------------------------------------------------------------------------------------- the laser spot
+
+def raman_spot(ctx: Ctx, study: dict, sp: dict, laser: float, objective, sd: Path, warnings: list) -> dict:
+    """Find the beam by the Raman signal on a small feature seen on the video: the stage scans a small grid so the
+    beam passes over the feature; where the line's signal changes most (dip for dust on Si, peak for a particle with
+    the line) the beam sat on the feature. offset = feature - stage there."""
+    from .profile import shift_to_nm
+    prof = ctx.prof
+    sd.mkdir(parents=True, exist_ok=True)
+    st = ctx.call("status", timeout_s=15, **motor_args(prof))
+    s0 = (_f(st.get("x_um")), _f(st.get("y_um")))
+    if None in s0:
+        raise Stop("the stage position could not be read", "study")
+    snap = _snapshot(ctx, "spot", sd, "feature", False, warnings, laser, remember=False)
+    dec = (snap or {}).pop("_decoded", None)
+    out: dict = {"method": "raman", "found": False, "snapshot": snap}
+    if dec is None or not dec.get("um"):
+        out["why"] = "no usable video frame (axes in µm needed) to locate the feature"
+        return out
+    feat = sp.get("feature_um")
+    if feat in (None, "auto"):
+        cx, cy = float(np.mean(dec["xs"])), float(np.mean(dec["ys"]))
+        cands = [f for f in (snap.get("features") or []) if f["size_um"] <= 6 and f["strength"] >= 10]
+        if not cands:
+            out["why"] = "no small feature found on the video: give spot.feature_um (a point picked in a snapshot)"
+            return out
+        f0 = min(cands, key=lambda f: math.hypot(f["x_um"] - cx, f["y_um"] - cy))
+        F = (f0["x_um"], f0["y_um"])
+        out["feature_auto"] = f0
+    else:
+        F = (float(feat[0]), float(feat[1]))
+    if sp.get("refine", True):
+        rf = video.refine_feature(dec, F[0], F[1], max(2.0, float(sp["range_um"]) / 2))
+        if rf:
+            out["feature_refined"] = rf
+            F = (rf["x_um"], rf["y_um"])
+        else:
+            warnings.append("the feature could not be refined on the video: its given position is used")
+    out["feature_um"] = [round(F[0], 3), round(F[1], 3)]
+    o0, src = SP.offset_for(prof, objective, laser)
+    out["prior_offset_um"], out["prior_source"] = o0, src
+    g = plan.axis_values([-float(sp["range_um"]) / 2, float(sp["range_um"]) / 2, float(sp["step_um"])])
+    nm = round(shift_to_nm(float(sp["line_cm1"]), laser), 4)
+    hx, hy = ctx.home_xy
+    V = np.full((len(g), len(g)), np.nan)
+    grid_pos = []
+    for iy, gy in enumerate(g):
+        row = list(enumerate(g)) if iy % 2 == 0 else list(enumerate(g))[::-1]
+        for ix, gx in row:
+            sx, sy = F[0] - o0[0] + gx, F[1] - o0[1] + gy
+            if math.hypot(sx - hx, sy - hy) > prof["limits"]["max_xy_um"]:
+                raise Stop(f"the spot scan would go {math.hypot(sx - hx, sy - hy):.0f} µm from the home spot "
+                           f"(limits.max_xy_um = {prof['limits']['max_xy_um']:g})", "study")
+            _check_abs(prof, "x", sx, "spot scan")
+            _check_abs(prof, "y", sy, "spot scan")
+            r = ctx.call("move_xy", timeout_s=120, x_um=round(sx, 3), y_um=round(sy, 3), **motor_args(prof))
+            if not r["ok"]:
+                raise Stop(f"spot scan: XY move failed: {r.get('error')}", "study")
+            f = sd / f"g{iy:02d}_{ix:02d}.txt"
+            r = ctx.call("acquire", timeout_s=60 + 3 * float(sp["exposure_s"]), mode=110,
+                         exposure_s=float(sp["exposure_s"]), accumulations=1, from_nm=nm, to_nm=nm, out=str(f),
+                         sample="spot scan")
+            if not r["ok"]:
+                raise Stop(f"spot scan: acquisition failed: {r.get('error')}", "study")
+            spc = spectra.read(f)
+            x, _ = spectra.to_shift(spc["x"], spc["meta"].get("x_unit", "nm"), laser)
+            x, y = spectra.sort_xy(x, spc["y"])
+            V[iy, ix] = spectra.line_signal(x, y, float(sp["line_cm1"]), float(sp["window_cm1"])) / float(sp["exposure_s"])
+            grid_pos.append([round(sx, 3), round(sy, 3)])
+    ctx.call("move_xy", timeout_s=120, x_um=round(s0[0], 3), y_um=round(s0[1], 3), **motor_args(prof))
+    border = np.concatenate([V[0, :], V[-1, :], V[1:-1, 0], V[1:-1, -1]])
+    b = float(np.median(border))
+    noise = float(1.4826 * np.median(np.abs(border - b))) or max(abs(b) * 0.02, 1e-9)
+    dev = V - b
+    dark = abs(np.nanmin(dev)) > abs(np.nanmax(dev))
+    c = -dev if dark else dev
+    contrast = float(np.nanmax(c) / noise)
+    GX, GY = np.meshgrid(g, g)
+    w = np.clip(c - 0.5 * np.nanmax(c), 0, None)
+    out.update(grid_um=g, signal=V.round(3).tolist(), dark=bool(dark), contrast_sigma=round(contrast, 1),
+               line_cm1=float(sp["line_cm1"]))
+    if contrast < 6 or not np.isfinite(contrast) or w.sum() <= 0:
+        out["why"] = (f"the feature hardly changes the signal ({contrast:.1f} sigma): another feature, a longer "
+                      "exposure, or the line it has (spot.line_cm1)")
+    else:
+        gx_hit, gy_hit = float((w * GX).sum() / w.sum()), float((w * GY).sum() / w.sum())
+        edge = max(abs(gx_hit), abs(gy_hit)) > g[-1] - float(sp["step_um"])
+        sx_hit, sy_hit = F[0] - o0[0] + gx_hit, F[1] - o0[1] + gy_hit
+        off = [round(F[0] - sx_hit, 3), round(F[1] - sy_hit, 3)]
+        out.update(stage_at_hit_um=[round(sx_hit, 3), round(sy_hit, 3)], offset_um=off)
+        if edge:
+            out["why"] = "the beam hit the feature at the edge of the scan: a larger spot.range_um"
+        else:
+            out["found"] = True
+    try:
+        from . import render
+        out["image"] = render.spot_png(sd / "spot_scan.png", out, F, o0)
+    except Exception as exc:  # noqa: BLE001
+        warnings.append(f"spot scan plot not drawn: {type(exc).__name__}: {exc}")
+    return out
+
+
+def run_spot(name: str, study: dict, ctx: Ctx) -> dict:
+    """Kind 'spot': find where the beam really is, and remember it. With the laser shutter (a frame with the beam
+    on), during a Raman acquisition (a frame half-way through it), or by the Raman signal on a small feature
+    seen on the video; 'auto' tries the video first and falls back to the Raman scan when a feature is given (or
+    found)."""
+    from .profile import shift_to_nm
+    prof = ctx.prof
+    sd = ctx.folder / name
+    sd.mkdir(parents=True, exist_ok=True)
+    t_start = time.time()
+    warnings: list[str] = []
+    unreliable: list[str] = []
+    checks: dict = {}
+    _progress(sd, state="running", stage="setup", started=t_start,
+              estimate_min=plan.estimate(study, prof)["minutes"])
+    su = _setup(name, study, ctx, warnings, unreliable, checks, 1)
+    laser = su["laser"]
+    objective = su["after"].get("objective")
+    sp = plan.spot_params(study, prof, objective)
+    method = sp["method"]
+    attempts: list = []
+    found = None
+    _progress(sd, stage="finding the beam")
+    if method in ("auto", "shutter", "acquisition"):
+        use = method if method != "auto" else ("shutter" if prof["motors"].get("laser_shutter") else "acquisition")
+        snap = _snapshot(ctx, name, sd, use, use == "shutter", warnings, laser,
+                         during_acq_s=float(sp["acq_exposure_s"]) if use == "acquisition" else 0.0,
+                         acq_nm=round(shift_to_nm(float(sp["line_cm1"]), laser), 4), remember=False)
+        if snap:
+            snap.pop("_decoded", None)
+        att = {"method": use, "found": bool(snap and snap.get("measured_offset_um")),
+               "contrast_sigma": (snap or {}).get("spot_contrast_sigma"), "snapshot": snap}
+        attempts.append(att)
+        if att["found"]:
+            found = {"method": use, "offset_um": snap["measured_offset_um"],
+                     "quality": {"contrast_sigma": snap.get("spot_contrast_sigma")}}
+    if found is None and (method == "raman" or (method == "auto" and sp.get("feature_um") is not None)):
+        rs = raman_spot(ctx, study, sp, laser, objective, sd / "raman", warnings)
+        attempts.append({k: v for k, v in rs.items() if k != "snapshot"})
+        if rs.get("found"):
+            found = {"method": "raman", "offset_um": rs["offset_um"],
+                     "quality": {"contrast_sigma": rs.get("contrast_sigma"), "dark": rs.get("dark"),
+                                 "step_um": sp["step_um"]}}
+    rec = None
+    if found:
+        if sp.get("remember", True):
+            rec = SP.record(prof, objective, laser, found["offset_um"], found["method"], found["quality"],
+                            str(ctx.folder))
+            if rec.get("warning"):
+                warnings.append(rec["warning"])
+            if not rec.get("stored"):
+                warnings.append(rec.get("why", "not remembered"))
+    else:
+        unreliable.append("the beam was not found: " + "; ".join(
+            a.get("why") or ("no spot on the video" if not a.get("found") else "") for a in attempts if a))
+    images = {}
+    for a in attempts:
+        if a.get("snapshot") and a["snapshot"].get("path"):
+            images[f"video_{a['method'].replace(' ', '_')}"] = {"path": a["snapshot"]["path"],
+                                                                  "what": a["snapshot"].get("what")}
+        if a.get("image"):
+            images["spot_scan"] = a["image"]
+        if a.get("snapshot") is None and a.get("method") == "raman":
+            pass
+    result = {"ok": True, "complete": True, "reliable": found is not None and not unreliable,
+              "unreliable_because": unreliable, "warnings": warnings, "checks": checks, "kind": "spot",
+              "sample": study.get("sample", {}),
+              "spot": {"found": found is not None, "objective": objective, "laser_nm": laser,
+                       "offset_um": (found or {}).get("offset_um"), "method": (found or {}).get("method"),
+                       "remembered": bool(rec and rec.get("stored")), "drift_um": (rec or {}).get("drift_um"),
+                       "previous": (rec or {}).get("previous"), "attempts": attempts},
+              "instrument": {"laser_nm": laser, "objective": objective, "filter": su["after"].get("filter")},
+              "seconds": {"total": round(time.time() - t_start, 2)},
+              "execution": {"mode": config.mode(), "bridge": ctx.bridge_version, "translator": __version__,
+                            "protocol": BRIDGE_PROTOCOL}}
+    if images:
+        result["images"] = images
     _progress(sd, state="done", stage="done")
     return _finish(sd, name, result)
 
@@ -948,7 +1148,8 @@ def run_alignment(name: str, study: dict, ctx: Ctx) -> dict:
     # the beam's offset after (Auto)Alignment
     snap = None
     if res and res.get("ok"):
-        snap = _snapshot(ctx, name, sd, "after", bool(prof["motors"].get("laser_shutter")), warnings)
+        snap = _snapshot(ctx, name, sd, "after", bool(prof["motors"].get("laser_shutter")), warnings,
+                         (res.get("instrument") or {}).get("laser_nm"))
     passed = last["passed"] if last else False
     rec = None
     if passed is False:
@@ -982,20 +1183,31 @@ def run_alignment(name: str, study: dict, ctx: Ctx) -> dict:
     return _finish(sd, name, result)
 
 
-def _snapshot(ctx: Ctx, name: str, sd: Path, tag: str, with_laser: bool, warnings: list) -> dict | None:
-    """A video frame now (LabSpec's live video; with_laser: the shutter opens for video.laser_s), drawn with the
-    laser position marked. A failure is a warning, never a reason to stop the study."""
+def _snapshot(ctx: Ctx, name: str, sd: Path, tag: str, with_laser: bool, warnings: list, laser_nm=None,
+              during_acq_s: float = 0.0, acq_nm: float | None = None, remember: bool = True) -> dict | None:
+    """A video frame now (LabSpec's live video; with_laser: the shutter opens for video.laser_s; during_acq_s: the
+    frame is taken half-way through a Raman acquisition of that length, which opens the shutter itself), drawn with
+    the laser position marked. When the beam shows and is found, its offset is remembered (spot.py). A failure is a
+    warning, never a reason to stop the study."""
     v = ctx.prof.get("video", {})
     base = sd / "video" / tag
     base.parent.mkdir(parents=True, exist_ok=True)
     laser_s = float(v.get("laser_s", 1.0)) if with_laser else 0.0
     settle = float(v.get("settle_s", 1.5))
-    r = ctx.call("video", timeout_s=60 + settle + laser_s, out=str(base), settle_s=settle, laser_s=laser_s,
+    r = ctx.call("video", timeout_s=90 + settle + laser_s + 2 * during_acq_s, out=str(base), settle_s=settle,
+                 laser_s=laser_s, during_acq_s=during_acq_s or None, acq_from_nm=acq_nm, acq_to_nm=acq_nm,
                  formats=",".join(v.get("formats", [])), camera=v.get("camera"), **motor_args(ctx.prof))
     if not r["ok"]:
         warnings.append(f"video snapshot ({tag}) failed: {r.get('error')}")
         return None
-    snap = video.snapshot(r, ctx.prof, base, f"{name}: {tag}")
+    snap = video.snapshot(r, ctx.prof, base, f"{name}: {tag}", laser_nm)
+    if remember and snap.get("measured_offset_um"):
+        rec = SP.record(ctx.prof, snap.get("objective"), laser_nm, snap["measured_offset_um"],
+                        "shutter" if laser_s else "during acquisition",
+                        {"contrast_sigma": snap.get("spot_contrast_sigma")}, str(ctx.folder))
+        snap["remembered"] = {k: v for k, v in rec.items() if k != "previous"}
+        if rec.get("warning"):
+            warnings.append(rec["warning"])
     if with_laser and str(r.get("shutter_closed")) != "1":
         warnings.append("after the snapshot the laser shutter could not be confirmed closed: check LabSpec")
     for w in snap.get("warnings", []):

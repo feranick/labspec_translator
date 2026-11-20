@@ -1,5 +1,5 @@
 """plan.py — a study as bridge commands: the setup moves, the points, the acquisitions; and the time estimate.
-Version: 2026.11.19.4
+Version: 2026.11.19.5
 
 Everything here is computed from the study and the profile alone: wavelengths from Raman shifts, the number of
 detector windows, the stage positions (always offsets from where the operator left the stage, Z from the
@@ -199,6 +199,32 @@ def scan_seconds(study: dict, prof: dict) -> float:
     return len(scan_offsets(sc)) * (t["move_s"] + float(sc["exposure_s"]) + t["readout_s"] + 2 * t["command_s"])
 
 
+def magnification(objective) -> float:
+    """100 for 'x100' or '100x LWD'; 100 when unknown."""
+    import re
+    m = re.search(r"(\d+(?:\.\d+)?)", str(objective or ""))
+    return float(m.group(1)) if m else 100.0
+
+
+def spot_params(study: dict, prof: dict, objective=None) -> dict:
+    """A spot study's settings; the Raman scan's range and step scale with the objective (x100: 4 µm in 0.5 µm
+    steps; x10: 40 µm in 5 µm steps)."""
+    obj = objective if objective is not None else (study.get("setup") or {}).get("objective")
+    k = 100.0 / magnification(obj)
+    sp = {"method": "auto", "feature_um": None, "refine": True, "range_um": round(4.0 * k, 3),
+          "step_um": round(0.5 * k, 3), "line_cm1": prof["checks"]["si_cm1"], "window_cm1": 30.0,
+          "exposure_s": 0.3, "acq_exposure_s": 2.0, "remember": True}
+    sp.update(study.get("spot") or {})
+    return sp
+
+
+def spot_spectrum_study(study: dict, prof: dict) -> dict:
+    sp = spot_params(study, prof)
+    return {"kind": "spectrum", "sample": study.get("sample", {}), "setup": study.get("setup", {}),
+            "acquire": {"center_cm1": sp["line_cm1"], "exposure_s": max(sp["exposure_s"], sp["acq_exposure_s"]),
+                        "accumulations": 1, "spike": "none"}}
+
+
 GUIDE_DEFAULTS = {"mode": "reach", "window_cm1": 30.0, "exposure_s": 0.2, "max_s": 120.0, "stable_n": 2,
                   "drop_frac": 0.1}
 
@@ -255,6 +281,17 @@ def estimate(study: dict, prof: dict) -> dict:
             (float(prof.get("video", {}).get("settle_s", 1.5)) + 5 if m.get("snapshot", True) else 0)
         return {"minutes": round(total / 60.0, 2), "points": 0, "windows": 0,
                 "seconds": {"setup": 0.0, "per_acquisition": 0.0, "total": round(total, 1)}}
+    if study.get("kind") == "spot":
+        sp = spot_params(study, prof)
+        base = estimate(spot_spectrum_study(study, prof), prof)
+        total = base["seconds"]["setup"] + 15.0 + float(sp["acq_exposure_s"])
+        n = 0
+        if sp["method"] == "raman" or sp.get("feature_um") is not None:
+            n = len(axis_values([-sp["range_um"] / 2, sp["range_um"] / 2, sp["step_um"]])) ** 2
+            total += n * (t["command_s"] * 2 + t["xy_settle_s"] + float(sp["exposure_s"]) + t["readout_s"]) + 10
+        return {"minutes": round(total / 60.0, 2), "points": n, "windows": 1,
+                "seconds": {"setup": base["seconds"]["setup"], "per_acquisition": base["seconds"]["per_acquisition"],
+                            "total": round(total, 1)}}
     if study.get("kind") == "focus":
         base = estimate(focus_spectrum_study(study, prof), prof)
         total = base["seconds"]["setup"] + scan_seconds(study, prof)
