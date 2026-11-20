@@ -1,5 +1,5 @@
 """runner.py — runs a request's studies on the instrument, one command at a time, and checks every result.
-Version: 2026.11.20.19
+Version: 2026.11.20.20
 
 A request runs in its own process (`ls6t run-request FOLDER`, started detached by api.start), so it outlives the
 MCP call that started it. One request at a time holds the instrument (a lock file under LS6T_HOME); others wait
@@ -351,6 +351,10 @@ def run_any(name: str, study: dict, ctx: Ctx) -> dict:
         return run_calibration(name, study, ctx)
     if kind == "background":
         return run_background(name, study, ctx)
+    if kind == "filters":
+        return run_filters(name, study, ctx)
+    if kind == "cutoff":
+        return run_cutoff(name, study, ctx)
     if kind == "depth":
         derived = plan.depth_as_map(study, ctx.prof)
         derived["_kind"] = "depth"
@@ -569,6 +573,8 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
                    "protocol": BRIDGE_PROTOCOL})
     if not per_point:
         result["why"] = stop_exc.why if stop_exc else "no spectrum was measured"
+    if kind == "calibration" and (result.get("calibration") or {}).get("fwhm_cm1"):
+        _record_resolution(result, after, prof, warnings, str(ctx.folder))
     result["expect"] = evaluate_expect(study.get("expect", []), result)
     if any(e.get("pass") is False for e in result["expect"]):
         warnings.append("an expected value is out of tolerance (see 'expect')")
@@ -671,10 +677,12 @@ def focus_scan(ctx: Ctx, study: dict, laser: float, z0: float | None, sd: Path, 
         # three-point parabola around the best when too few points qualify
         sel = v > 0.3 * v.max()
         zb = None
+        fwhm = None
         if sel.sum() >= 4:
             c2, c1, _ = np.polyfit(zs_a[sel], np.log(v[sel]), 2, w=np.sqrt(v[sel]))
             if c2 < 0:
                 zb = float(-c1 / (2 * c2))
+                fwhm = float(2.0 * math.sqrt(math.log(2.0) / -c2))   # of the Gaussian exp(c2 z^2 + ...)
         if zb is None or not zs_a.min() <= zb <= zs_a.max():
             y1, y2, y3 = v[i - 1], v[i], v[i + 1]
             den = (y1 - 2 * y2 + y3)
@@ -683,6 +691,8 @@ def focus_scan(ctx: Ctx, study: dict, laser: float, z0: float | None, sd: Path, 
             zb = float(zs_a[i] + max(-0.5, min(0.5, frac)) * step)
         res.update(found=True, z_um=round(move_z(ctx, zb, "focus scan: to the best"), 3),
                    best_signal=round(float(v.max()), 3), shift_um=round(zb - z0, 3), contrast=round(contrast, 3))
+        if fwhm is not None and fwhm < 0.9 * (zs_a.max() - zs_a.min()):
+            res["axial_fwhm_um"] = round(fwhm, 3)       # the depth resolution on this sample (stage µm)
         res["z_now"] = res["z_um"]
     try:
         from . import render
@@ -710,6 +720,13 @@ def run_focus(name: str, study: dict, ctx: Ctx) -> dict:
     fs = focus_scan(ctx, study, su["laser"], ctx.z_focus if ctx.z_focus is not None else z0, sd / "focus", warnings)
     if fs.get("found"):
         ctx.z_focus = fs["z_um"]
+        if fs.get("axial_fwhm_um"):
+            from . import perf
+            k = perf.key(su["after"].get("objective") or "?", su["laser"], _f(su["after"].get("hole_um")))
+            rec = perf.record("axial", k, {"fwhm_um": fs["axial_fwhm_um"], "line_cm1": fs.get("line_cm1"),
+                                           "sample": (study.get("sample") or {}).get("name")}, str(ctx.folder))
+            fs["axial_resolution"] = {"key": k, "fwhm_um": fs["axial_fwhm_um"],
+                                      "baseline_um": rec["baseline"].get("fwhm_um"), "measurements": rec["n"]}
     else:
         unreliable.append(f"no clear focus: {fs.get('why')}")
     result = {"ok": True, "complete": True, "reliable": fs.get("found", False) and not unreliable,
@@ -1075,6 +1092,218 @@ def _labspec_params(ctx: Ctx) -> dict | None:
             except (TypeError, ValueError):
                 out[k[len(f"g{i}."):]] = v
     return out or None
+
+
+def _record_resolution(result: dict, after: dict, prof: dict, warnings: list, request: str):
+    """The reference line's width after a calibration: the spectral resolution for this laser, grating and slit,
+    compared with its first measurement and with the profile's performance.resolution_cm1, if set."""
+    from . import perf
+    cal = result["calibration"]
+    laser = (result.get("instrument") or {}).get("laser_nm")
+    grating = _f(after.get("grating"))
+    slit = _f(after.get("slit_um"))
+    k = perf.key(laser, grating, slit)
+    fw = float(cal["fwhm_cm1"])
+    rec = perf.record("resolution", k, {"fwhm_cm1": round(fw, 3), "line_cm1": cal.get("reference_cm1"),
+                                        "reference": cal.get("reference")}, request)
+    base = float(rec["baseline"]["fwhm_cm1"])
+    pf = prof.get("performance", {})
+    out = {"key": k, "fwhm_cm1": round(fw, 3), "baseline_cm1": base, "measurements": rec["n"]}
+    if fw > float(pf.get("resolution_tol", 1.25)) * base:
+        out["worse_than_baseline"] = True
+        warnings.append(f"the {cal.get('reference')} line is {fw:.2f} cm-1 wide, {fw / base:.2f} x its first "
+                        f"measurement ({base:.2f}) for {k}: alignment, focus or slit?")
+    spec = (pf.get("resolution_cm1") or {}).get(f"{grating:g}" if grating else "")
+    if spec is not None:
+        out["specification_cm1"] = float(spec)
+        if fw > float(spec):
+            warnings.append(f"the line width {fw:.2f} cm-1 is above the profile's resolution for {grating:g} gr/mm "
+                            f"({float(spec):g} cm-1)")
+    cal["resolution"] = out
+
+
+def run_filters(name: str, study: dict, ctx: Ctx) -> dict:
+    """Kind 'filters': the real transmission of each filter, from one Raman line (Si 520.7 by default) measured
+    through each, strongest transmission first (the reference) with the exposure scaled so the counts stay
+    alike; transmission = reference % x (signal per second / the reference's). Only filters within the caps."""
+    from . import perf
+    from .profile import shift_to_nm
+    prof = ctx.prof
+    sd = ctx.folder / name
+    (sd / "spectra").mkdir(parents=True, exist_ok=True)
+    t_start = time.time()
+    warnings: list[str] = []
+    unreliable: list[str] = []
+    checks: dict = {}
+    fp = plan.filters_params(study, prof)
+    _progress(sd, state="running", stage="setup", started=t_start, estimate_min=plan.estimate(study, prof)["minutes"])
+    su = _setup(name, study, ctx, warnings, unreliable, checks, 1)
+    laser = su["laser"]
+    steps = [s for s in plan.filters_steps(study, prof, laser) if s.get("exposure_s")]
+    before_filter = su["before"].get("filter")
+    nm = round(shift_to_nm(fp["line_cm1"], laser), 4)
+    rows = []
+    try:
+        for i, s in enumerate(steps):
+            _progress(sd, stage=f"filter {s['label']}", point=i, points=len(steps))
+            r = ctx.call("move", timeout_s=120, motor=prof["motors"]["filter"], mode="label", value=s["label"])
+            if not r["ok"] or str(r.get("label")) != s["label"]:
+                raise Stop(f"filter {s['label']}: LabSpec did not move there ({r.get('error') or r.get('label')})",
+                           "study")
+            out = sd / "spectra" / f"filter_{i:02d}.txt"
+            r = ctx.call("acquire", timeout_s=120 + 3 * s["exposure_s"], mode=110, exposure_s=s["exposure_s"],
+                         accumulations=1, from_nm=nm, to_nm=nm, out=str(out), sample=f"filter {s['label']}")
+            if not r["ok"]:
+                raise Stop(f"filter {s['label']}: acquisition failed: {r.get('error')}", "study")
+            sp = spectra.read(out)
+            x, _ = spectra.to_shift(sp["x"], sp["meta"].get("x_unit", "nm"), laser)
+            x, y = spectra.sort_xy(x, sp["y"])
+            sat = spectra.saturation(y, prof["detector"]["full_scale"], prof["checks"]["saturation_frac"])
+            sig = spectra.line_signal(x, y, fp["line_cm1"], fp["window_cm1"]) / s["exposure_s"]
+            noise = spectra.noise_sigma(y) / s["exposure_s"]
+            rows.append({**s, "signal_cps": round(float(sig), 3), "snr": round(float(sig / max(noise, 1e-9)), 1),
+                         "saturated": sat["saturated"], "file": str(out)})
+    finally:
+        if before_filter:
+            try:
+                ctx.call("move", timeout_s=120, motor=prof["motors"]["filter"], mode="label", value=before_filter)
+            except Stop:
+                pass
+    tol = float(prof.get("performance", {}).get("filters_tol", 0.3))
+    ref = rows[0] if rows else None
+    if ref and ref["saturated"]:
+        unreliable.append(f"the reference filter {ref['label']} is saturated: a shorter filters.exposure_s")
+    if ref and ref["signal_cps"] <= 0:
+        unreliable.append("no line through the reference filter: check the sample and its focus")
+    flagged = []
+    for r_ in rows:
+        if ref and ref["signal_cps"] > 0:
+            r_["measured_pct"] = round(ref["nominal_pct"] * r_["signal_cps"] / ref["signal_cps"], 5)
+            r_["ratio"] = round(r_["measured_pct"] / r_["nominal_pct"], 3)
+            if r_ is not ref and abs(r_["ratio"] - 1.0) > tol:
+                flagged.append(f"{r_['label']}: measured {r_['measured_pct']:.4g} % ({r_['ratio']:.2f} x nominal)")
+            if r_ is not ref and r_["snr"] < prof["checks"].get("detect_snr", 5.0):
+                warnings.append(f"filter {r_['label']}: weak line (SNR {r_['snr']}): its value is uncertain")
+    if flagged:
+        warnings.append("filters off their nominal transmission by more than performance.filters_tol: "
+                        + "; ".join(flagged) + " (relative to " + (ref["label"] if ref else "?") + ")")
+    measured = {r_["label"]: r_.get("measured_pct") for r_ in rows if r_.get("measured_pct") is not None}
+    rec = None
+    if measured and not unreliable:
+        rec = perf.record("filters", perf.key(laser), {"reference": ref["label"], "measured_pct": measured,
+                                                        "line_cm1": fp["line_cm1"]}, str(ctx.folder))
+    proposal = None
+    if measured and not unreliable:
+        new = dict(prof.get("filters", {}))
+        new.update({k: round(v, 4) for k, v in measured.items()})
+        proposal = ("ls6t profile set filters '" + json.dumps(new) + "'")
+    result = {"ok": bool(rows), "complete": len(rows) == len(steps), "reliable": bool(rows) and not unreliable,
+              "unreliable_because": unreliable, "warnings": warnings, "checks": checks, "kind": "filters",
+              "sample": study.get("sample", {}),
+              "filters": {"reference": ref["label"] if ref else None, "line_cm1": fp["line_cm1"], "steps": rows,
+                          "flagged": flagged, "measurements": rec["n"] if rec else 0,
+                          "profile_command": proposal,
+                          "note": "relative to the reference filter (the strongest allowed); the profile's caps "
+                                  "use the filters' values: a person decides whether to set the measured ones "
+                                  "(profile_command)"},
+              "instrument": {"laser_nm": laser, "objective": su["after"].get("objective"),
+                             "grating": _f(su["after"].get("grating"))},
+              "seconds": {"total": round(time.time() - t_start, 2)}}
+    _progress(sd, state="done", stage="done")
+    return _finish(sd, name, result)
+
+
+def run_cutoff(name: str, study: dict, ctx: Ctx) -> dict:
+    """Kind 'cutoff': where the edge filter lets light through, from a spectrum across the laser line: with the
+    white light (laser off: the shutter, or the operator blocks it) or the sample's own background with the laser.
+    Transmission = (signal - dark) / (plateau - dark), the plateau taken over cutoff.plateau_cm1; reports the shifts
+    at 10, 50 and 90 % (usable_from_cm1), remembered per laser and grating (later ranges below it are warned)."""
+    from . import perf
+    prof = ctx.prof
+    sd = ctx.folder / name
+    (sd / "spectra").mkdir(parents=True, exist_ok=True)
+    t_start = time.time()
+    warnings: list[str] = []
+    unreliable: list[str] = []
+    checks: dict = {}
+    cp = plan.cutoff_params(study, prof)
+    white = cp["light"] == "white"
+    _progress(sd, state="running", stage="setup", started=t_start)
+    su = _setup(name, study, ctx, warnings, unreliable, checks, 1, confirm=not white)
+    laser, rng = su["laser"], su["rng"]
+    if white:
+        txt = ("ls6t: the edge filter's cut-off, with the white light.\n\nTurn the white light on"
+               + (", and block the laser (LabSpec: Laser Off, or close its shutter by hand)"
+                  if cp["laser_off"] == "operator" else " (ls6t keeps the laser shutter closed)")
+               + ".\n\nPress OK when ready, or Cancel.")
+        if ctx.call("notice", timeout_s=3600, text=txt).get("answer") != "ok":
+            raise Stop("the operator cancelled", "study")
+    acq = plan.acquire_step(study, prof, rng)
+    acq.pop("verb", None)
+    out = sd / "spectra" / "cutoff.txt"
+    params = dict(acq, out=str(out), sample="edge filter cut-off")
+    if white and cp["laser_off"] == "shutter":
+        params.update(laser_off=1, m_laser_shutter=prof["motors"]["laser_shutter"])
+    r = ctx.call("acquire", timeout_s=_acq_timeout(study, prof, rng), **params)
+    if white and cp["laser_off"] == "operator":
+        ctx.call("notice", timeout_s=3600, text="ls6t: done. Unblock the laser when you want to measure again. OK.")
+    if not r["ok"]:
+        raise Stop(f"cut-off acquisition failed: {r.get('error')}", "study")
+    sp = spectra.read(out)
+    x, _ = spectra.to_shift(sp["x"], sp["meta"].get("x_unit", "nm"), laser)
+    x, y = spectra.sort_xy(x, sp["y"])
+    k = max(3, int(len(y) // 200) | 1)
+    ys = np.convolve(np.pad(y, k // 2, mode="edge"), np.ones(k) / k, mode="valid")[:len(y)]
+    lo, hi = cp["plateau_cm1"]
+    sel = (x >= lo) & (x <= hi)
+    if not white:
+        sel &= np.abs(x - 520.7) > 30
+    res: dict = {"light": cp["light"], "range_cm1": [float(x.min()), float(x.max())]}
+    if sel.sum() < 5:
+        unreliable.append(f"the plateau {lo:g}-{hi:g} cm-1 is not inside the range: widen cutoff.to_cm1")
+    else:
+        plateau = float(np.median(ys[sel]))
+        dark = float(np.percentile(ys[x < lo], 5)) if (x < lo).any() else float(ys.min())
+        res.update(plateau=round(plateau, 2), dark=round(dark, 2))
+        if plateau - dark < 10 * max(spectra.noise_sigma(y), 1.0):
+            unreliable.append("no clear step: too little light above the cut-off (more white light, a longer "
+                              "exposure, or light 'white')")
+        else:
+            tr = (ys - dark) / (plateau - dark)
+            idx = np.where(x < lo)[0]
+
+            def crossing(level):
+                # from the plateau down towards the laser: the first point under the level
+                for j in sorted(idx, key=lambda j: -x[j]):
+                    if tr[j] < level:
+                        j2 = j + 1 if j + 1 < len(x) else j
+                        if tr[j2] != tr[j]:
+                            return float(x[j] + (level - tr[j]) * (x[j2] - x[j]) / (tr[j2] - tr[j]))
+                        return float(x[j])
+                return None
+            for lvl, key_ in ((0.1, "edge_10_cm1"), (0.5, "edge_50_cm1"), (0.9, "usable_from_cm1")):
+                v = crossing(lvl)
+                res[key_] = round(v, 1) if v is not None else None
+            if res.get("usable_from_cm1") is None:
+                unreliable.append("the transmission never drops below 90 % in the range: start lower (cutoff.from_cm1)")
+    if res.get("usable_from_cm1") is not None and not unreliable:
+        grating = _f(su["after"].get("grating"))
+        rec = perf.record("cutoff", perf.key(laser, grating), {k_: res.get(k_) for k_ in
+                                                                ("edge_10_cm1", "edge_50_cm1", "usable_from_cm1")}
+                          | {"light": cp["light"]}, str(ctx.folder))
+        res["measurements"] = rec["n"]
+        res["baseline_usable_from_cm1"] = rec["baseline"].get("usable_from_cm1")
+    result = {"ok": True, "complete": True, "reliable": not unreliable, "unreliable_because": unreliable,
+              "warnings": warnings, "checks": checks, "kind": "cutoff", "sample": study.get("sample", {}),
+              "cutoff": res, "spectra": [{"file": str(out)}],
+              "instrument": {"laser_nm": laser, "grating": _f(su["after"].get("grating"))},
+              "seconds": {"total": round(time.time() - t_start, 2)}}
+    try:
+        from . import render
+        result["images"] = {"cutoff": render.cutoff_png(sd / "cutoff.png", x, y, res)}
+    except Exception as exc:  # noqa: BLE001
+        warnings.append(f"cut-off plot not drawn: {type(exc).__name__}: {exc}")
+    return _finish(sd, name, result)
 
 
 def run_background(name: str, study: dict, ctx: Ctx) -> dict:

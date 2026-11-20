@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.20.19)
+## Architecture (version 2026.11.20.20)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -294,6 +294,18 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   CI (.18) failed in the installed copy's benchmarks on Windows (native_map passed; which failed is not in the
   pasted tail; they pass on Linux): the workflow now prints the failing case, its checks, state.json and runner.log,
   and keeps bench.json. 102 tests.
+- 2026-11-20, 2026.11.20.20: Nicola: build all five checks inspired by HORIBA's service scripts (own code, no
+  HORIBA code or spec tables copied). perf.py (performance.json: filters per laser, axial per objective@laser@hole,
+  resolution per laser@grating@slit, cutoff per laser@grating; history, first = baseline). Kind filters
+  (plan.filters_steps: within the caps, strongest first = reference, exposure x ref%/%, skipped above
+  max_exposure_s; line_signal per s; measured = ref% x ratio; flagged beyond performance.filters_tol; restores the
+  operator's filter; profile_command for a person). Kind cutoff (white light + laser off via shutter or operator,
+  or the laser; smoothed; transmission (y-dark)/(plateau-dark), plateau 200-380 cm-1; crossings at 10/50/90 %
+  walking down from the plateau; format warns ranges below perf.cutoff_for). Focus scan: FWHM of the log-Gaussian
+  (2 sqrt(ln2/-c2)) -> axial_fwhm_um, recorded. Calibration: fwhm of the first line -> resolution, vs baseline x
+  resolution_tol and performance.resolution_cm1 {grating}. Polarisers: profile motors.laser_pol/raman_pol and
+  polarizers{} from discovery (LaserPol/RamanPol), setup keys (match_label), plan.setup_steps, instrument set, status.
+  Sim: edge filter (45 cm-1, sim_edge_cm1), sim_filter_actual, LaserPol/RamanPol motors. 106 tests, 14/14 bench.
 
 ## To do next
 

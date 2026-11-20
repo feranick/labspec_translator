@@ -238,6 +238,8 @@ Sub VStatus(cmd, res)
     res("accumulations") = LSValue(0, "LabSpecAccumulation")
     res("shutter_mode") = LSValue(0, "ShutterMode")
     res("last_error") = LabSpecError()
+    If GetP(cmd, "m_laser_pol", "") <> "" Then res("laser_pol") = MotorLabel(GetP(cmd, "m_laser_pol", ""))
+    If GetP(cmd, "m_raman_pol", "") <> "" Then res("raman_pol") = MotorLabel(GetP(cmd, "m_raman_pol", ""))
     res("laser_open") = Bit(gLaserOpen)
     If gLaserOpen Then res("laser_left_s") = Fmt(gLaserS - Elapsed(gLaserT0))
     On Error Resume Next

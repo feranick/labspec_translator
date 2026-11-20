@@ -12,7 +12,7 @@ stops and cancel on the simulator, and `ls6t bench` gives known answers. What re
 LabSpec and hardware. The plan goes from no laser and no motion to Claude driving a full map, in stages. Each stage
 starts only when the previous one passed.
 
-Version under test: 2026.11.20.19 (bridge protocol 1).
+Version under test: 2026.11.20.20 (bridge protocol 1).
 
 ---
 
@@ -376,6 +376,22 @@ AutoCalibration should correct it.
 4. A `calibration` study with `"adjust": "auto"` on the Si wafer, after shifting the zero slightly by hand in
    LabSpec. Pass: the check fails, AutoCalibration runs (after Yes), the second check passes.
 
+**T4.10 The filters' real transmission (LASER).** On the Si wafer, focused, x100: a `filters` study
+(`{"kind": "filters", "sample": {"name": "Si"}, "setup": {"laser_nm": 532, "grating": 1800, "objective": "x100"}}`),
+with the per-laser caps the maintainer agreed. Pass: every filter within the caps measured, the reference not
+saturated; note filters flagged off nominal. With the maintainer, decide whether to apply `profile_command` (the caps
+then act on the real values). Repeat per laser (filters can differ with wavelength).
+
+**T4.11 The edge filter's cut-off.** White light on, a matt white sample or the Si wafer: a `cutoff` study per
+laser (`{"kind": "cutoff", "sample": {"name": "white light"}, "setup": {"laser_nm": 532, "grating": 1800}}`).
+Pass: the plot shows the step; `usable_from_cm1` is plausible for the edge filter (about 50-100 cm-1). Then a
+spectrum study with `range_cm1` starting below it is warned at validation.
+
+Also recorded from now on, nothing to do: the **spectral resolution** (the reference line's width) with each
+calibration (`calibration.resolution`, compared with its first measurement), and the **depth resolution** with each
+focus scan (`focus.axial_fwhm_um`, per objective, laser and hole). Compare with the instrument's specification if
+the maintainer has it (`ls6t profile set performance.resolution_cm1 '{"1800": 6}'`, say).
+
 **T4.8 White-light background (Q28).** With the maintainer: the white light on as for routine measurements.
 
 1. Run `{"bg": {"kind": "background", "sample": {"name": "lamp"}, "setup": {... grating 600 ...}, "acquire":
@@ -681,6 +697,8 @@ With the Claude desktop app connected ([INSTALL.md](INSTALL.md) step 8):
 | T4.7 | | | | Q27 (names in LabSpec, offset before/after): | |
 | T4.8 | | | | Q28: | |
 | T4.9 | | | | Q42 (script found, runs inside the bridge?, asks?, values changed): | |
+| T4.10 | | | | filters measured / flagged, per laser: | |
+| T4.11 | | | | usable_from_cm1 per laser: | |
 | T5 | | | | Q8: | |
 | T5b.1 | | | | Q13 (formats saved): | |
 | T5b.2 | | | | Q14 (order, packing, axes): | |

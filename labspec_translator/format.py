@@ -1,5 +1,5 @@
 """format.py — the study format and its static checks (no instrument needed).
-Version: 2026.11.20.19
+Version: 2026.11.20.20
 """
 from __future__ import annotations
 
@@ -9,10 +9,12 @@ from . import config, plan
 from .profile import filter_pct, laser_key, match_label
 
 KINDS = ("spectrum", "map", "series", "calibration", "alignment", "guide", "focus", "move", "spot", "depth",
-         "background")
+         "background", "filters", "cutoff")
 TOP_KEYS = {"kind", "sample", "setup", "acquire", "focus", "points", "map", "series", "process", "expect",
             "images", "save_native", "notes", "video", "alignment", "guide", "move", "spot", "depth",
-            "calibration", "background"}
+            "calibration", "background", "filters", "cutoff"}
+FILTERS_KEYS = {"line_cm1", "window_cm1", "labels", "exposure_s", "max_exposure_s"}
+CUTOFF_KEYS = {"from_cm1", "to_cm1", "light", "laser_off", "plateau_cm1"}
 CAL_KEYS = {"reference", "lines_cm1", "tol_cm1", "adjust"}
 BG_KEYS = {"name", "laser_off"}
 DEPTH_KEYS = {"from_um", "to_um", "step_um", "refractive_index", "engine", "swift"}
@@ -26,7 +28,7 @@ GUIDE_KEYS = {"instruction", "mode", "target", "line_cm1", "center_cm1", "window
               "stable_n", "drop_frac"}
 GUIDE_MODES = ("reach", "drop", "maximize")
 VIDEO_KEYS = {"before", "after", "with_laser"}
-SETUP_KEYS = {"laser_nm", "grating", "filter", "objective", "hole_um", "slit_um"}
+SETUP_KEYS = {"laser_nm", "grating", "filter", "objective", "hole_um", "slit_um", "laser_pol", "raman_pol"}
 ACQ_KEYS = {"range_cm1", "center_cm1", "exposure_s", "accumulations", "auto_exposure", "spike", "dark",
             "subtract_background"}
 AE_KEYS = {"target_counts", "min_s", "max_s", "test_s"}
@@ -72,6 +74,10 @@ def study_format(status: dict | None = None) -> dict:
                            "and applies it to later spectra",
             "background": "a white-light background: a spectrum with the white light on and the laser off, stored "
                           "by name and subtracted from later spectra (acquire.subtract_background)",
+            "filters": "each filter's real transmission, from one line (Si) measured through every filter within "
+                       "the caps, strongest first; proposes the profile change (a person applies it)",
+            "cutoff": "where the edge filter lets light through (cm-1 at 10/50/90 %), with the white light (laser "
+                      "off) or the sample's background; later ranges below it are warned",
             "alignment": "is the system aligned for this laser? The Si reference with the laser's fixed settings, "
                          "compared with the baseline recorded after the last AutoAlignment; if it fails (guided), "
                          "the operator runs AutoAlignment in LabSpec and the check repeats; then a video snapshot "
@@ -95,7 +101,8 @@ def study_format(status: dict | None = None) -> dict:
         "keys": {
             "sample": "{name, notes, sensitive: true caps the filter at limits.sensitive_max_filter_pct}",
             "setup": "{laser_nm, grating (gr/mm), filter (a label from the profile, e.g. '10%'), objective "
-                     "(label), hole_um, slit_um}; a key left out keeps what LabSpec has (recorded in the result)",
+                     "(label), hole_um, slit_um, laser_pol, raman_pol (polariser positions, when the profile has "
+                     "them)}; a key left out keeps what LabSpec has (recorded in the result)",
             "acquire": "{range_cm1: [from, to] (extended range: LabSpec stitches windows) | center_cm1 (one "
                        "window), exposure_s (s per accumulation, or 'auto' with auto_exposure: {target_counts, "
                        "min_s, max_s, test_s}), accumulations, spike: labspec | none | single | double | "
@@ -112,6 +119,10 @@ def study_format(status: dict | None = None) -> dict:
                            "(LabSpec's AutoCalibration when enabled in the profile, else guided like labspec)}",
             "background": "(kind background) {name, laser_off: shutter | operator}; acquire as for the spectra "
                           "it will correct (same grating and range)",
+            "filters": "(kind filters) {line_cm1 (520.7), window_cm1 (30), labels (all within the caps), "
+                       "exposure_s (1: through the reference), max_exposure_s (30)}; no setup.filter",
+            "cutoff": "(kind cutoff) {from_cm1 (-100), to_cm1 (400), light: white | laser, laser_off: shutter | "
+                      "operator, plateau_cm1 ([200, 380])}",
             "depth": "(kind depth) {from_um (-5: above the focus), to_um (20), step_um (1): nominal depth, the "
                      "stage displacement into the sample from the focus; refractive_index (optional: depth = n x "
                      "displacement, paraxial)}; with setup, acquire, process, focus, images as for a spectrum",
@@ -215,6 +226,44 @@ def validate_study(name: str, study: dict, prof: dict) -> dict:
             errors.append("calibration.adjust: none, labspec, ls6t or auto")
         if cal.get("tol_cm1") is not None and (not _num(cal["tol_cm1"]) or cal["tol_cm1"] <= 0):
             errors.append("calibration.tol_cm1: > 0")
+    for k in ("filters", "cutoff"):
+        if study.get(k) is not None and kind != k:
+            errors.append(f"{k}: only with kind '{k}'")
+    if kind == "filters":
+        fp = study.get("filters") or {}
+        if not isinstance(fp, dict):
+            errors.append("filters: {line_cm1, window_cm1, labels, exposure_s, max_exposure_s}")
+            fp = {}
+        _unknown(fp, FILTERS_KEYS, "filters", errors)
+        if (study.get("setup") or {}).get("filter") is not None:
+            errors.append("setup.filter: not with kind 'filters' (it steps through the filters itself)")
+        if fp.get("labels") is not None:
+            bad = [lab for lab in fp["labels"] if str(lab) not in prof.get("filters", {})] \
+                if isinstance(fp["labels"], list) else ["?"]
+            if bad:
+                errors.append(f"filters.labels: from the profile's filters ({', '.join(prof.get('filters', {}))})")
+        for k in ("exposure_s", "max_exposure_s"):
+            if fp.get(k) is not None and (not _num(fp[k]) or not 0 < fp[k] <= lim["max_exposure_s"]):
+                errors.append(f"filters.{k}: 0 < s <= limits.max_exposure_s ({lim['max_exposure_s']:g})")
+        steps = plan.filters_steps(study, prof, plan.laser_nm(study, prof))
+        if len([s_ for s_ in steps if s_.get("exposure_s")]) < 2:
+            errors.append("filters: fewer than two filters can be measured within the caps and exposure limits")
+        skipped = [s_["label"] for s_ in steps if not s_.get("exposure_s")]
+        if skipped:
+            warnings.append(f"filters {', '.join(skipped)}: would need more than filters.max_exposure_s: not measured")
+    if kind == "cutoff":
+        cp = study.get("cutoff") or {}
+        if not isinstance(cp, dict):
+            errors.append("cutoff: {from_cm1, to_cm1, light: white | laser, laser_off, plateau_cm1}")
+            cp = {}
+        _unknown(cp, CUTOFF_KEYS, "cutoff", errors)
+        if cp.get("light", "white") not in ("white", "laser"):
+            errors.append("cutoff.light: white (the white light, laser off) or laser (the sample's own background)")
+        lo = cp.get("laser_off", "shutter" if prof["motors"].get("laser_shutter") else "operator")
+        if cp.get("light", "white") == "white" and lo == "shutter" and not prof["motors"].get("laser_shutter"):
+            errors.append("cutoff.laser_off 'shutter': no laser shutter motor in the profile; use 'operator'")
+        if lo not in ("shutter", "operator"):
+            errors.append("cutoff.laser_off: shutter or operator")
     if kind == "background":
         bgk = study.get("background")
         if not isinstance(bgk, dict):
@@ -343,6 +392,14 @@ def validate_study(name: str, study: dict, prof: dict) -> dict:
                               "choose a stronger attenuation")
     if s.get("objective") is not None and match_label(s["objective"], prof["objectives"])[0] is None:
         errors.append(f"setup.objective {s['objective']!r}: use one of {', '.join(map(str, prof['objectives']))}")
+    for key in ("laser_pol", "raman_pol"):
+        if s.get(key) is None:
+            continue
+        if not prof["motors"].get(key):
+            errors.append(f"setup.{key}: this instrument has no such polariser in the profile")
+        elif match_label(s[key], (prof.get("polarizers") or {}).get(key, []))[0] is None:
+            errors.append(f"setup.{key} {s[key]!r}: use one of "
+                          f"{', '.join((prof.get('polarizers') or {}).get(key, [])) or '(none known)'}")
     for key, allowed in (("hole_um", prof.get("holes_um")), ("slit_um", prof.get("slits_um"))):
         v = s.get(key)
         if v is None:
@@ -366,7 +423,7 @@ def validate_study(name: str, study: dict, prof: dict) -> dict:
             errors.append("acquire.range_cm1: [from, to] in cm-1, e.g. [100, 1800]")
     elif a.get("center_cm1") is not None and not _num(a["center_cm1"]):
         errors.append("acquire.center_cm1: a number (cm-1)")
-    elif a.get("range_cm1") is None and a.get("center_cm1") is None and kind != "calibration":
+    elif a.get("range_cm1") is None and a.get("center_cm1") is None and kind not in ("calibration", "filters", "cutoff"):
         warnings.append("acquire: neither range_cm1 nor center_cm1: one window centred at 1000 cm-1")
     exp = a.get("exposure_s", 1.0)
     if exp == "auto":
@@ -530,9 +587,15 @@ def validate_study(name: str, study: dict, prof: dict) -> dict:
     laser = plan.laser_nm(study, prof)
     rng = plan.acq_range(study, prof, laser)
     if laser and rng.get("from_nm") is not None:
-        if rng.get("from_cm1") is not None and rng["from_cm1"] < 0:
+        if rng.get("from_cm1") is not None and rng["from_cm1"] < 0 and kind != "cutoff":
             warnings.append("acquire range starts below 0 cm-1 (anti-Stokes or the laser line): check the edge "
                             "filter allows it")
+        if rng.get("from_cm1") is not None and kind != "cutoff":
+            from . import perf
+            cut = perf.cutoff_for(laser, (study.get("setup") or {}).get("grating"))
+            if cut is not None and rng["from_cm1"] < cut:
+                warnings.append(f"the range starts at {rng['from_cm1']:g} cm-1, below the measured cut-off "
+                                f"({cut:g} cm-1 for this laser and grating): the edge filter blocks part of it")
         if rng.get("windows") and rng["windows"] > 12:
             warnings.append(f"the range needs about {rng['windows']} detector windows: a coarser grating "
                             "covers it in fewer")

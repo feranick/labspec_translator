@@ -568,6 +568,9 @@ def test_focus_scan_finds_the_focus():
     assert r["reliable"] and r["focus"]["found"]
     assert r["focus"]["z_um"] - start_z == pytest.approx(2.3, abs=0.15)
     assert Path(r["images"]["focus_scan"]["path"]).exists()
+    # the depth resolution: the simulator's axial response at x100 has a FWHM of 2 x 3 x sqrt(ln 2) = 5.0 µm
+    assert r["focus"]["axial_fwhm_um"] == pytest.approx(5.0, abs=0.8)
+    assert r["focus"]["axial_resolution"]["key"].startswith("x100@532")
     # the request ends at the focus found
     assert st["state"] == "done"
     assert float(api.instrument("status")["status"]["z_um"]) == pytest.approx(r["focus"]["z_um"], abs=0.01)
@@ -1366,3 +1369,66 @@ def test_autocalibration_flow(tmp_path, monkeypatch):
     r = api.instrument("autocal_run")
     assert r["ok"] and r["changed"]["1800"]["BF"]                      # the zero moved back
     assert api.instrument("autocal_info")["enabled"]
+
+
+
+# --------------------------------------------------------------------------------------------- instrument checks
+
+def test_filter_transmission_check():
+    bdir = config.active_bridge_dir()
+    S.ensure(bdir)
+    (bdir / "sim_filter_actual").write_text('{"25%": 0.6}')
+    st = run_inline({"f": {"kind": "filters", "sample": {"name": "Si"},
+                           "setup": {"laser_nm": 532, "grating": 1800, "objective": "x100"},
+                           "filters": {"exposure_s": 0.2, "max_exposure_s": 5}}})
+    r = st["studies"]["f"]
+    assert r["reliable"], r["unreliable_because"]
+    steps = {s_["label"]: s_ for s_ in r["filters"]["steps"]}
+    assert r["filters"]["reference"] == "100%" and set(steps) == {"100%", "50%", "25%", "10%"}   # 1%: 20 s > 5
+    assert steps["50%"]["measured_pct"] == pytest.approx(50, rel=0.08)
+    assert steps["25%"]["measured_pct"] == pytest.approx(15, rel=0.1) and any("25%" in f for f in r["filters"]["flagged"])
+    assert "ls6t profile set filters" in r["filters"]["profile_command"]
+    assert api.instrument("status")["status"]["filter"] == "1%"           # back to the operator's filter
+    assert "532" in api.references()["performance"]["filters"]
+    bad = F.validate({"f": {"kind": "filters", "setup": dict(SETUP)}})["f"]
+    assert not bad["ok"] and any("setup.filter" in e for e in bad["errors"])
+
+
+def test_spectral_resolution_is_remembered():
+    for _ in range(2):
+        st = run_inline({"si": {"kind": "calibration", "sample": {"name": "Si"}, "setup": SETUP,
+                                "acquire": {"exposure_s": 1}}})
+    res = st["studies"]["si"]["calibration"]["resolution"]
+    assert res["key"].startswith("532@1800") and res["measurements"] == 2 and res["fwhm_cm1"] > 0
+    assert res["fwhm_cm1"] == pytest.approx(res["baseline_cm1"], rel=0.2)
+
+
+def test_edge_filter_cutoff(tmp_path):
+    _profile_with_shutter(tmp_path)
+    bdir = config.active_bridge_dir()
+    (bdir / "sim_lamp").write_text("1")
+    st = run_inline({"c": {"kind": "cutoff", "sample": {"name": "white light"},
+                           "setup": {"laser_nm": 532, "grating": 1800},
+                           "acquire": {"exposure_s": 1, "accumulations": 2}}})
+    r = st["studies"]["c"]
+    assert r["reliable"], r["unreliable_because"]
+    c = r["cutoff"]
+    assert c["edge_50_cm1"] == pytest.approx(45, abs=4) and c["edge_10_cm1"] < c["edge_50_cm1"] < c["usable_from_cm1"]
+    assert Path(r["images"]["cutoff"]["path"]).exists()
+    v = F.validate({"s": {"kind": "spectrum", "sample": {"name": "x"}, "setup": SETUP,
+                          "acquire": {"range_cm1": [30, 600]}}})["s"]
+    assert any("cut-off" in w for w in v["warnings"])
+
+
+def test_polarisers_in_the_setup(tmp_path):
+    prof = _profile_with_shutter(tmp_path)
+    assert prof["motors"]["laser_pol"] == "LaserPol" and "Vertical" in prof["polarizers"]["laser_pol"]
+    r = api.instrument("set", setup={"laser_pol": "vertical", "raman_pol": "horizontal"})
+    assert r["ok"] and r["after"]["laser_pol"] == "Vertical" and r["after"]["raman_pol"] == "Horizontal"
+    v = F.validate({"s": {"kind": "spectrum", "sample": {"name": "x"},
+                          "setup": dict(SETUP, laser_pol="Diagonal")}})["s"]
+    assert not v["ok"] and any("laser_pol" in e for e in v["errors"])
+    st = run_inline({"s": {"kind": "spectrum", "sample": {"name": "Si"}, "setup": dict(SETUP, raman_pol="None"),
+                           "acquire": {"center_cm1": 520, "exposure_s": 0.5}}})
+    moves = st["studies"]["s"]["setup"]["moves"]
+    assert any(m["motor"] == "RamanPol" and m["ok"] for m in moves)

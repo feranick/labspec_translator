@@ -1,5 +1,5 @@
 """mcp_server.py — MCP server: lets LLM-based tools run Raman measurements on a HORIBA instrument through LabSpec 6.
-Version: 2026.11.20.19
+Version: 2026.11.20.20
 
 Tools (all JSON):
   study_format      the study format, the profile's choices and limits, the bridge's state. Read it first.
@@ -49,7 +49,7 @@ files: they bypass the operator's checks and can freeze LabSpec. If no tool does
 Workflow: study_format once (this instrument's lasers, gratings, filters, objectives, limits; is the bridge
 running); write {name: study}; validate_studies and fix every error; run_studies, then study_status until done.
 Kinds: spectrum (points), map (XY/Z grids), depth (spectra down through the sample, interfaces, refractive-index
-correction), series, calibration, alignment, spot, focus, move (no laser), guide, background.
+correction), series, calibration, alignment, spot, focus, move (no laser), guide, background, filters, cutoff.
 Start of a session: alignment_status / an 'alignment' study per laser (guides the operator through AutoAlignment);
 a 'calibration' on Si or polystyrene (offset and scale of the spectral zero; adjust 'labspec' guides the operator,
 'ls6t' remembers a correction applied to later spectra); a 'spot' study if the beam must hit small features;

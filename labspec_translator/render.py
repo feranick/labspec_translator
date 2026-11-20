@@ -1,5 +1,5 @@
 """render.py — PNG pictures of a study's results (matplotlib, optional extra 'render').
-Version: 2026.11.20.19
+Version: 2026.11.20.20
 
 spectrum / calibration / series: the spectrum (or the first and last of a series) with its baseline and fitted
 peaks; map: one image per peak quantity and band (position, FWHM, height or area), positions in µm offsets.
@@ -141,6 +141,26 @@ def focus_png(path: Path, fs: dict) -> dict:
     fig.savefig(path)
     plt.close(fig)
     return {"path": str(path), "what": "the line's signal against Z; the focus chosen"}
+
+
+def cutoff_png(path: Path, x, y, res: dict) -> dict:
+    """The spectrum across the laser line with the edge filter's 10, 50 and 90 % points."""
+    plt = _plt()
+    fig, ax = plt.subplots(figsize=(6.5, 3.6), dpi=110)
+    ax.plot(x, y, lw=1)
+    for k, lab, c in (("edge_10_cm1", "10 %", "C1"), ("edge_50_cm1", "50 %", "C2"),
+                      ("usable_from_cm1", "90 %: usable from", "C3")):
+        if res.get(k) is not None:
+            ax.axvline(res[k], color=c, lw=1, ls="--", label=f"{lab} {res[k]:g} cm$^{{-1}}$")
+    ax.set_xlabel("Raman shift (cm$^{-1}$)")
+    ax.set_ylabel("counts")
+    ax.set_title(f"edge filter cut-off ({res.get('light')} light)", fontsize=9)
+    if ax.get_legend_handles_labels()[0]:
+        ax.legend(fontsize=8)
+    fig.tight_layout()
+    fig.savefig(path)
+    plt.close(fig)
+    return {"path": str(path), "what": "the spectrum across the laser line; the edge filter's transmission points"}
 
 
 def guide_png(path: Path, hist: list, guide: dict, name: str) -> dict:

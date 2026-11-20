@@ -1,5 +1,5 @@
 """profile.py — the machine profile: what the instrument has (from the discovery script) and the limits a person sets.
-Version: 2026.11.20.19
+Version: 2026.11.20.20
 
 The profile is a JSON file (LS6T_PROFILE, default ~/ls6t/profile.json). Studies never change it: an LLM can only
 ask for what the profile allows. Without a file, the built-in XploRA defaults below apply and every result says so
@@ -25,7 +25,10 @@ DEFAULT_PROFILE: dict = {
     # LabSpec motor names, from the discovery script. Filter and objective names vary by configuration.
     "motors": {"laser": "Laser", "grating": "Grating", "filter": "Filter", "objective": "Objective",
                "hole": "Hole", "slit": "Slit", "x": "X", "y": "Y", "z": "Z",
-               "laser_shutter": None},    # needed only for video snapshots with the laser on (from discovery)
+               "laser_shutter": None,     # needed only for video snapshots with the laser on (from discovery)
+               "laser_pol": None, "raman_pol": None},   # the polarisers, when the instrument has them (discovery)
+    # the polarisers' positions by motor role (from discovery), e.g. {"laser_pol": ["Circular", "Horizontal", ...]}
+    "polarizers": {},
     "lasers": {"532": {"nm": 532.0, "label": "532", "power_mw": None, "max_filter_pct": 100},
                "638": {"nm": 638.0, "label": "638", "power_mw": None, "max_filter_pct": 100},
                "785": {"nm": 785.0, "label": "785", "power_mw": None, "max_filter_pct": 100}},
@@ -69,6 +72,10 @@ DEFAULT_PROFILE: dict = {
     "spot": {"max_offset_um": 10.0, "drift_warn_um": 1.0, "max_age_h": 24.0},
     # spectral calibration: corrections older than max_age_h are flagged; guided LabSpec adjustments repeat at most
     # max_retries times
+    # instrument checks: the filters' measured transmission may differ from nominal by filters_tol (fraction); a
+    # spectral resolution (FWHM) worse than resolution_tol x its baseline is reported; resolution_cm1 {grating: max
+    # FWHM} (optional, e.g. from the instrument's specification) is checked too
+    "performance": {"filters_tol": 0.3, "resolution_tol": 1.25, "resolution_cm1": {}},
     "calibration": {"max_age_h": 24.0, "max_retries": 2,
                     # LabSpec's own AutoCalibration, run by the bridge (calibration.adjust 'auto'): off until it was
                     # tried with the maintainer (TESTING T4.9); script: its .vbs; sample: what it needs under the
@@ -358,6 +365,15 @@ def import_discovery(text: str, base: dict | None = None) -> tuple[dict, list[st
             notes.append(f"laser shutter motor: {name!r} (check with the maintainer that it is the laser shutter "
                          "before using video snapshots with the laser)")
             break
+    for role, cands in (("laser_pol", ("LaserPol", "Laser Polarizer", "Laser pol")),
+                        ("raman_pol", ("RamanPol", "Raman Polarizer", "Raman pol"))):
+        for name in cands:
+            m = _motor(d, name) if name in names else None
+            if m and m["size"] > 0:
+                prof["motors"][role] = name
+                prof.setdefault("polarizers", {})[role] = [lab for lab in m["labels"] if lab]
+                notes.append(f"{role.replace('_', ' ')}arizer ({name}): " + ", ".join(prof["polarizers"][role]))
+                break
     for role, key in (("hole", "holes_um"), ("slit", "slits_um")):
         m = _motor(d, prof["motors"][role])
         if m and m["size"] > 0:
@@ -436,6 +452,7 @@ def summary(prof: dict) -> dict:
             "alignment_lasers": sorted(prof.get("alignment", {}).get("baselines", {})),
             "laser_shutter": bool(prof.get("motors", {}).get("laser_shutter")),
             "cameras": prof.get("video", {}).get("cameras") or {},
+            "polarizers": prof.get("polarizers") or {},
             "objectives_info": prof.get("objectives_info") or {},
             "laser_limits": {k: {"max_filter_pct": v.get("max_filter_pct", 100), "power_mw": v.get("power_mw")}
                              for k, v in prof.get("lasers", {}).items()}}

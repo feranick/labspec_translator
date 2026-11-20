@@ -1,5 +1,5 @@
 """plan.py — a study as bridge commands: the setup moves, the points, the acquisitions; and the time estimate.
-Version: 2026.11.20.19
+Version: 2026.11.20.20
 
 Everything here is computed from the study and the profile alone: wavelengths from Raman shifts, the number of
 detector windows, the stage positions (always offsets from where the operator left the stage, Z from the
@@ -82,6 +82,11 @@ def acq_range(study: dict, prof: dict, laser: float | None) -> dict:
     if grating is not None:
         g = prof.get("gratings", {}).get(f"{float(grating):g}")
         win_nm = float(g["window_nm"]) if g and g.get("window_nm") else None
+    if study.get("kind") == "filters" and not acq.get("range_cm1") and acq.get("center_cm1") is None:
+        acq = dict(acq, center_cm1=filters_params(study, prof)["line_cm1"])
+    if study.get("kind") == "cutoff" and not acq.get("range_cm1") and acq.get("center_cm1") is None:
+        cp = cutoff_params(study, prof)
+        acq = dict(acq, range_cm1=[cp["from_cm1"], cp["to_cm1"]])
     if study.get("kind") == "calibration" and not acq.get("range_cm1") and acq.get("center_cm1") is None:
         lines = calibration_lines(study, prof, None)
         if len(lines) > 1:
@@ -143,6 +148,11 @@ def setup_steps(study: dict, prof: dict) -> list[dict]:
         steps.append({"verb": "move", "motor": mot["objective"], "mode": "label", "value": obj,
                       "why": "objective" + (" (manual turret: LabSpec asks the operator)"
                                             if prof.get("manual_objective") else "")})
+    for role in ("laser_pol", "raman_pol"):
+        if s.get(role) is not None and mot.get(role):
+            lab = match_label(s[role], (prof.get("polarizers") or {}).get(role, []))[0] or str(s[role])
+            steps.append({"verb": "move", "motor": mot[role], "mode": "label", "value": lab,
+                          "why": role.replace("_", " ") + "ariser"})
     if s.get("hole_um") is not None:
         steps.append({"verb": "move", "motor": mot["hole"], "mode": "value", "value": float(s["hole_um"]),
                       "why": "confocal hole"})
@@ -330,6 +340,53 @@ def guide_spectrum_study(study: dict, prof: dict) -> dict:
                         "accumulations": 1, "spike": "none"}}
 
 
+def filters_params(study: dict, prof: dict) -> dict:
+    fp = study.get("filters") or {}
+    return {"line_cm1": float(fp.get("line_cm1", prof["checks"].get("si_cm1", 520.7))),
+            "window_cm1": float(fp.get("window_cm1", 30.0)),
+            "exposure_s": float(fp.get("exposure_s", 1.0)),
+            "max_exposure_s": float(fp.get("max_exposure_s", min(30.0, prof["limits"]["max_exposure_s"]))),
+            "labels": fp.get("labels")}
+
+
+def filters_steps(study: dict, prof: dict, laser) -> list[dict]:
+    """The filters a 'filters' study measures, strongest transmission first (the reference): those within the
+    caps for the laser; each with the exposure that gives about the reference's counts (exposure x ref% / %),
+    or none when that is above filters.max_exposure_s."""
+    from .profile import filter_pct
+    fp = filters_params(study, prof)
+    caps = [float(prof["limits"].get("max_filter_pct", 100))]
+    lk = laser_key(prof, laser) if laser else None
+    if lk:
+        caps.append(float(prof["lasers"][lk].get("max_filter_pct", 100)))
+    if (study.get("sample") or {}).get("sensitive"):
+        caps.append(float(prof["limits"].get("sensitive_max_filter_pct", 10)))
+    cap = min(caps)
+    labels = fp["labels"] or list(prof.get("filters", {}))
+    rows = []
+    for lab in labels:
+        pct = prof.get("filters", {}).get(str(lab))
+        pct = pct if pct is not None else filter_pct(lab)
+        if pct is None or pct <= 0 or pct > cap + 1e-9:
+            continue
+        rows.append({"label": str(lab), "nominal_pct": float(pct)})
+    rows.sort(key=lambda r: -r["nominal_pct"])
+    if rows:
+        ref = rows[0]["nominal_pct"]
+        for r in rows:
+            e = fp["exposure_s"] * ref / r["nominal_pct"]
+            r["exposure_s"] = round(e, 3) if e <= fp["max_exposure_s"] else None
+    return rows
+
+
+def cutoff_params(study: dict, prof: dict) -> dict:
+    cp = study.get("cutoff") or {}
+    return {"from_cm1": float(cp.get("from_cm1", -100.0)), "to_cm1": float(cp.get("to_cm1", 400.0)),
+            "light": cp.get("light", "white"),
+            "laser_off": cp.get("laser_off", "shutter" if prof["motors"].get("laser_shutter") else "operator"),
+            "plateau_cm1": list(cp.get("plateau_cm1", [200.0, 380.0]))}
+
+
 def estimate(study: dict, prof: dict) -> dict:
     """{minutes, points, windows, seconds: {setup, per_point, total}}: an upper-end estimate from the profile's
     timing (measured values replace the defaults once the instrument has run)."""
@@ -344,6 +401,13 @@ def estimate(study: dict, prof: dict) -> dict:
                 "seconds": {"setup": 0.0, "per_acquisition": 0.0, "total": round(total, 1)}}
     if study.get("kind") == "depth":
         return estimate(depth_as_map(study, prof), prof)
+    if study.get("kind") == "filters":
+        base = estimate(dict(study, kind="spectrum", filters=None), prof)
+        steps = [s for s in filters_steps(study, prof, laser_nm(study, prof)) if s.get("exposure_s")]
+        total = base["seconds"]["setup"] + sum(s["exposure_s"] + t["move_s"] + t["readout_s"] + 2 * t["command_s"]
+                                               for s in steps)
+        return {"minutes": round(total / 60.0, 2), "points": len(steps), "windows": 1,
+                "seconds": {"setup": base["seconds"]["setup"], "per_acquisition": 0.0, "total": round(total, 1)}}
     if study.get("kind") == "spot":
         sp = spot_params(study, prof)
         base = estimate(spot_spectrum_study(study, prof), prof)

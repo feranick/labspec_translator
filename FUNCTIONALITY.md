@@ -1,6 +1,6 @@
 # labspec-translator (ls6t): what it can do
 
-This is the complete list of functions in version 2026.11.20.19. It covers:
+This is the complete list of functions in version 2026.11.20.20. It covers:
 
 - what a study can ask for;
 - the tools an LLM sees;
@@ -33,6 +33,8 @@ A request is `{name: study}`; each study has a `kind`.
 | `move` | The stage to an offset, or the beam onto a point picked in a snapshot (`to_um`); Z to an offset from the focus; a video snapshot; `stay` makes it the new home spot | `move.x_um, y_um / to_um, dz_um, stay, snapshot` | no |
 | `guide` | A manual adjustment with live feedback: the operator turns something (power at the source, focus by hand) while the bridge measures several times a second; LabSpec shows the signal and **STOP** when the goal is met (`reach`, `drop`, or `maximize`: just past the best) | `guide.instruction, mode, target, line_cm1, exposure_s, max_s` | yes |
 | `background` | A white-light background: white light on, laser off (shutter closed by the bridge, or blocked by the operator); stored by name | `background.name, laser_off`; `acquire` as for the spectra to correct | no (blocked) |
+| `filters` | Each filter's real transmission: one line (Si) through every filter within the caps, strongest first, exposure scaled; flags filters off nominal (`performance.filters_tol`); proposes the profile change (a person applies it); remembered per laser | `filters.line_cm1, window_cm1, labels, exposure_s, max_exposure_s` (no `setup.filter`) | yes |
+| `cutoff` | Where the edge filter lets light through: 10/50/90 % points (`usable_from_cm1`) from a spectrum across the laser line, with the white light (laser off) or the sample's background; remembered per laser and grating; later ranges below it are warned | `cutoff.from_cm1, to_cm1, light, laser_off, plateau_cm1` | white: no; laser: yes |
 
 ### Options any measuring study can use
 
@@ -255,5 +257,5 @@ profile. The shutter mode is restored on every path.
   - `si_calibration`, `graphene_map`, `extended_range`, `saturation`, `series`;
   - `guided_focus`, `focus_scan`, `spot_raman`, `spot_video`;
   - `depth_profile`, `calibration_zero`, `white_light`, `native_map`, `operator_stop`.
-- **Test suite** (`pytest`, 102 tests), which also checks the LabSpec scripts' structure.
+- **Test suite** (`pytest`, 106 tests), which also checks the LabSpec scripts' structure.
 - **Instrument tests** with the maintainer: [TESTING.md](TESTING.md).

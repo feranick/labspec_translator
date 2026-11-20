@@ -1,5 +1,5 @@
 """sim.py — a simulated LabSpec + XploRA behind the same bridge protocol as ls6t_bridge.vbs.
-Version: 2026.11.20.19
+Version: 2026.11.20.20
 
 It answers every verb of the bridge with the same keys, so the runner, the checks and the MCP server are tested
 without the instrument (LS6T_MODE=sim, and the tests). The simulated sample is a silicon wafer with a graphene
@@ -23,6 +23,7 @@ T µm thick with refractive index n covers the Si; +Z focuses deeper (depth prof
 """
 from __future__ import annotations
 
+import json
 import math
 import os
 import threading
@@ -72,6 +73,8 @@ class SimLabSpec:
                   "Objective": {"values": [10.0, 50.0, 100.0], "labels": ["x10", "x50", "x100"], "i": 2},
                   "Hole": {"value": 300.0}, "Slit": {"value": 100.0}, "Spectro": {"value": 550.0},
                   "Shutter": {"values": [0.0, 1.0], "labels": ["closed", "open"], "i": 0},
+                  "LaserPol": {"values": [0.0, 1.0, 2.0], "labels": ["Circular", "Horizontal", "Vertical"], "i": 1},
+                  "RamanPol": {"values": [0.0, 1.0, 2.0], "labels": ["Horizontal", "Vertical", "None"], "i": 2},
                   "X": {"value": self.x0}, "Y": {"value": self.y0}, "Z": {"value": self.zf}}
         self.exposure, self.accumulations = 1.0, 1
         self.temp_c = -60.0
@@ -227,7 +230,9 @@ class SimLabSpec:
                 "slit_um": self.m["Slit"]["value"], "x_um": self.m["X"]["value"], "y_um": self.m["Y"]["value"],
                 "z_um": self.m["Z"]["value"], "exposure_s": self.exposure, "accumulations": self.accumulations,
                 "shutter_mode": 0, "halted": int(self.halted), "last_error": self.last_error,
-                "live_video": int(self.live), "camera": self.camera, "laser_open": int(time.time() < self.laser_until)}
+                "live_video": int(self.live), "camera": self.camera,
+                **({"laser_pol": self._cur("LaserPol")[1]} if p.get("m_laser_pol") else {}),
+                **({"raman_pol": self._cur("RamanPol")[1]} if p.get("m_raman_pol") else {}), "laser_open": int(time.time() < self.laser_until)}
 
     def v_laser(self, p):
         state = p.get("state")
@@ -689,7 +694,8 @@ class SimLabSpec:
         px, py, pr = self.particle
         d = math.hypot(bx - px, by - py)
         cover = 1.0 / (1.0 + math.exp(min(50.0, (d - pr) / 0.15)))     # 1 on the dust, 0 away from it
-        fpct = self.m["Filter"]["values"][self.m["Filter"]["i"]] or 0.0
+        fpct = (self.m["Filter"]["values"][self.m["Filter"]["i"]] or 0.0) * \
+            self._filter_actual(self.m["Filter"]["labels"][self.m["Filter"]["i"]])
         dz = self.m["Z"]["value"] - self._zf_true()
         mag = self.m["Objective"]["values"][self.m["Objective"]["i"]]
         focus = math.exp(-(dz / (300.0 / mag)) ** 2)        # depth of focus: ~3 µm at x100, 30 µm at x10
@@ -760,6 +766,24 @@ class SimLabSpec:
             return 0.0
         return 900.0 * np.exp(-((nm - 600.0) / 140.0) ** 2) + 150.0 * np.exp(-((nm - 545.0) / 8.0) ** 2)
 
+    def _edge(self, nm):
+        """The edge filter: no light below about 45 cm-1 (sim_edge_cm1 sets it), full transmission above ~60."""
+        las, _ = self._cur("Laser")
+        shift = 1e7 / las - 1e7 / np.asarray(nm, float)
+        try:
+            e = float((self.dir / "sim_edge_cm1").read_text()) if (self.dir / "sim_edge_cm1").exists() else 45.0
+        except ValueError:
+            e = 45.0
+        return 1.0 / (1.0 + np.exp(-np.clip((shift - e) / 3.0, -50, 50)))
+
+    def _filter_actual(self, label: str) -> float:
+        """sim_filter_actual {label: factor}: a filter that transmits factor x its nominal value."""
+        f = self.dir / "sim_filter_actual"
+        try:
+            return float(json.loads(f.read_text()).get(label, 1.0)) if f.exists() else 1.0
+        except (ValueError, OSError):
+            return 1.0
+
     def _align(self) -> float:
         f = self.dir / "sim_misaligned"
         try:
@@ -790,7 +814,7 @@ class SimLabSpec:
         else:
             nm_true = nm
         rate = np.zeros_like(nm) if laser_off or self.laser_blocked else self._signal_per_s(nm_true)
-        rate = rate + self._lamp(nm_true)
+        rate = (rate + self._lamp(nm_true)) * self._edge(nm_true)
         if exp <= 0:   # auto exposure: reach the target at the peak, within [min, max]
             target = float(p.get("ae_target", 30000))
             peak = float(rate.max()) or 1.0

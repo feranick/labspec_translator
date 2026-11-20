@@ -1,5 +1,5 @@
 """api.py — the functions behind the command line and the MCP server (JSON in, JSON out).
-Version: 2026.11.20.19
+Version: 2026.11.20.20
 """
 from __future__ import annotations
 
@@ -307,7 +307,7 @@ def instrument(action: str = "status", camera=None, setup: dict | None = None, s
                      "autocal_info, autocal_run, discover, resume or last_error")
 
 
-SET_KEYS = ("filter", "laser_nm", "grating", "objective", "hole_um", "slit_um")
+SET_KEYS = ("filter", "laser_nm", "grating", "objective", "hole_um", "slit_um", "laser_pol", "raman_pol")
 
 
 def autocal_info() -> dict:
@@ -508,6 +508,15 @@ def set_instrument(setup: dict) -> dict:
                     if r.get("answer") != "yes":
                         return {"ok": False, "error": "the operator declined in LabSpec"}
                 moves.append(("objective", mot["objective"], "label", lab))
+        for role in ("laser_pol", "raman_pol"):
+            if role in s:
+                if not mot.get(role):
+                    return {"ok": False, "error": f"{role}: this instrument has no such polariser in the profile"}
+                labs, _ = _labels(b, mot[role])
+                lab, err = match_label(s[role], labs or (prof.get("polarizers") or {}).get(role, []))
+                if err:
+                    return {"ok": False, "error": f"{role} {err}"}
+                moves.append((role, mot[role], "label", lab))
         for key, role in (("hole_um", "hole"), ("slit_um", "slit")):
             if key in s:
                 moves.append((key, mot[role], "value", float(s[key])))
@@ -525,8 +534,8 @@ def set_instrument(setup: dict) -> dict:
                 break
         after = b.call("status", timeout_s=15, **runner.motor_args(prof))
         out = {"ok": all(d["ok"] for d in done) and len(done) == len(moves), "moves": done,
-               "before": {k: before.get(k) for k in ("laser_nm", "grating", "filter", "objective", "hole_um", "slit_um")},
-               "after": {k: after.get(k) for k in ("laser_nm", "grating", "filter", "objective", "hole_um", "slit_um")}}
+               "before": {k: before.get(k) for k in SET_KEYS if before.get(k) is not None},
+               "after": {k: after.get(k) for k in SET_KEYS if after.get(k) is not None}}
         if not moves:
             out.update(ok=True, note="already set")
         return out
@@ -822,7 +831,8 @@ def references() -> dict:
     from . import spot as SP
     from . import xcal
     corr = {k: {**v, "age_h": xcal.age_h(v)} for k, v in xcal.load().items()}
-    return {"spectral_corrections": corr, "backgrounds": BG.index(),
+    from . import perf
+    return {"spectral_corrections": corr, "backgrounds": BG.index(), "performance": perf.status(),
             "beam_offsets": SP.status(P.load())["records"], "labspec_configs": _configs(),
             "alignment": {k: v.get("last_check") for k, v in alignment_status()["lasers"].items()}}
 
