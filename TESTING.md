@@ -12,7 +12,7 @@ stops and cancel on the simulator, and `ls6t bench` gives known answers. What re
 LabSpec and hardware. The plan goes from no laser and no motion to Claude driving a full map, in stages. Each stage
 starts only when the previous one passed.
 
-Version under test: 2026.11.19.3 (bridge protocol 1).
+Version under test: 2026.11.19.4 (bridge protocol 1).
 
 ---
 
@@ -76,6 +76,8 @@ The vendor manual (2018) leaves these open. Each is answered by the test listed.
 | Q17 | Does this XploRA have HORIBA's AutoAlignment module (Maintenance tab)? Can its *Current status* be read from outside (Windows UI automation, read-only)? | T5c.1 |
 | Q18 | Does `Message(text, 1)` (OK/Cancel) return 0 for OK and wait while the operator runs AutoAlignment in the same LabSpec? | T5c.2 |
 | Q19 | Does LabSpec's dynamic `Dialog` stay open, update and answer Done/Abort while short acquisitions run? How long is one reading (`period_s`) at 0.2 s exposure? | T5d.1 |
+| Q21 | Does the focus scan find the same focus as the maintainer (and as LabSpec's autofocus) on Si and on a real sample? Is 1 µm a good step at x100, and what at x50 and x10? | T6.5 |
+| Q22 | Does the stage return home and Z to the focus at the end of a request, and does a `move` with `stay` change the next request's start? | T6.6 |
 | Q20 | Is the guided loop fast enough for a person turning a knob (focus, power): does STOP come before the operator has gone too far? | T5d.2–T5d.3 |
 
 ---
@@ -379,6 +381,25 @@ is `cancelled`. Resume afterwards.
 clearance at -10 first). Pass: the Si signal peaks near dz = 0; Z returns within 1 µm of the start at the end of the
 next study.
 
+**T6.5 Focus scan (Q21).** On silicon, the maintainer focuses by hand and notes Z. Then:
+
+- Defocus by +3 µm (`ls6t bridge call move motor=Z mode=value value=<Z+3>`) and run a `focus` study:
+  `{"f": {"kind": "focus", "sample": {"name": "Si"}, "setup": {"laser_nm": 532, "grating": 1800, "filter": "10%",
+  "objective": "x100"}}}`. Pass: `focus.found`, the final Z within 0.5 µm of the maintainer's, a smooth curve in the
+  plot (`images.focus_scan`).
+- Repeat from -3 µm.
+- Compare with LabSpec's autofocus (`"focus": {"autofocus": "laser"}` in a calibration study).
+- On the contrast sample, try a different line (`focus.scan.line_cm1`). Record the step that gives a clean curve at
+  x50 and x10 (`step_um` 2–5).
+
+**T6.6 Moves and home (Q22).**
+- Run `{"m": {"kind": "move", "move": {"x_um": -20, "y_um": 0}}}`. Pass: the stage moves 20 µm in −X (check on the
+  video); the snapshot shows the new spot; `ls6t instrument status` shows the new X afterwards.
+- Run a 3-point spectrum study. Pass: its points start from the new spot.
+- Run a small map with `z_um` [-2, 2, 2]. Pass: at the end, Z is back at the focus and the stage at the spot
+  (`state.json` → `returned`).
+- Run a `move` with `"stay": false`. Pass: the request ends back at the previous spot.
+
 **T6.4 A larger map (Q11).** 50 × 50 points at the shortest useful exposure (about 0.1–0.5 s), after the maintainer
 agrees on the time estimate (`ls6t validate`). Watch LabSpec's memory in Task Manager. Pass: it completes, and
 LabSpec stays responsive. Record the time per point (`seconds.total / points_measured`) and peak memory.
@@ -454,6 +475,8 @@ With the Claude desktop app connected (README step 8):
 | T6.2 | | | | | |
 | T6.3 | | | | | |
 | T6.4 | | | | Q11: s/point, memory | |
+| T6.5 | | | | Q21: Z found vs maintainer, step at x50/x10: | |
+| T6.6 | | | | Q22: | |
 | T7.1 | | | | | |
 | T7.2 | | | | timing updated: | |
 | T8.1–T8.5 | | | | | |

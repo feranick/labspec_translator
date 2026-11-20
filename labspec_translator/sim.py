@@ -1,5 +1,5 @@
 """sim.py — a simulated LabSpec + XploRA behind the same bridge protocol as ls6t_bridge.vbs.
-Version: 2026.11.19.3
+Version: 2026.11.19.4
 
 It answers every verb of the bridge with the same keys, so the runner, the checks and the MCP server are tested
 without the instrument (LS6T_MODE=sim, and the tests). The simulated sample is a silicon wafer with a graphene
@@ -13,7 +13,8 @@ sim_operator_stop_after (containing N: the same once N spectra have been acquire
 answers No), sim_time_scale (seconds per simulated second, default 0.01), sim_misaligned (containing a factor, e.g.
 0.4: the signal is that fraction of normal until the operator runs AutoAlignment, i.e. answers OK to a notice about
 it), sim_autoalign_fails (AutoAlignment does not help), sim_notice_cancel (the operator cancels a notice),
-sim_guide_abort (the operator aborts a guided adjustment).
+sim_guide_abort (the operator aborts a guided adjustment), sim_defocus (containing N: the sample's best focus is
+N µm from where the operator left Z).
 """
 from __future__ import annotations
 
@@ -270,8 +271,16 @@ class SimLabSpec:
         who = self._wait(8.0)
         if who:
             return self._stopped(who)
-        self.m["Z"]["value"] = self.zf + float(self.rng.normal(0, 0.2))
+        self.m["Z"]["value"] = self._zf_true() + float(self.rng.normal(0, 0.2))
         return {"z_um": self.m["Z"]["value"], "how": p.get("how", "laser")}
+
+    def _zf_true(self) -> float:
+        """The sample's real focus: the operator's (zf), unless sim_defocus says the operator missed it by N µm."""
+        f = self.dir / "sim_defocus"
+        try:
+            return self.zf + (float(f.read_text().strip()) if f.exists() else 0.0)
+        except ValueError:
+            return self.zf
 
     def v_video(self, p):
         """A white-light frame around the stage position (160 x 120 px, field 6400/magnification µm wide): silicon,
@@ -476,8 +485,9 @@ class SimLabSpec:
         dx = self.m["X"]["value"] - self.x0
         flake = dx >= 0
         fpct = self.m["Filter"]["values"][self.m["Filter"]["i"]] or 0.0
-        dz = self.m["Z"]["value"] - self.zf
-        focus = math.exp(-(dz / 20.0) ** 2)
+        dz = self.m["Z"]["value"] - self._zf_true()
+        mag = self.m["Objective"]["values"][self.m["Objective"]["i"]]
+        focus = math.exp(-(dz / (300.0 / mag)) ** 2)        # depth of focus: ~3 µm at x100, 30 µm at x10
         gr, _ = self._cur("Grating")
         res = 1.0 + 1800.0 / gr      # coarser gratings: broader lines
         sig = np.zeros_like(nm)

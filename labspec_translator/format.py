@@ -1,5 +1,5 @@
 """format.py — the study format and its static checks (no instrument needed).
-Version: 2026.11.19.3
+Version: 2026.11.19.4
 """
 from __future__ import annotations
 
@@ -8,9 +8,11 @@ import math
 from . import config, plan
 from .profile import filter_pct, laser_key
 
-KINDS = ("spectrum", "map", "series", "calibration", "alignment", "guide")
+KINDS = ("spectrum", "map", "series", "calibration", "alignment", "guide", "focus", "move")
 TOP_KEYS = {"kind", "sample", "setup", "acquire", "focus", "points", "map", "series", "process", "expect",
-            "images", "save_native", "notes", "video", "alignment", "guide"}
+            "images", "save_native", "notes", "video", "alignment", "guide", "move"}
+MOVE_KEYS = {"x_um", "y_um", "dz_um", "stay", "snapshot"}
+SCAN_KEYS = {"range_um", "step_um", "line_cm1", "window_cm1", "exposure_s"}
 ALIGN_KEYS = {"guided", "focus_guide"}
 GUIDE_KEYS = {"instruction", "mode", "target", "line_cm1", "center_cm1", "window_cm1", "exposure_s", "max_s",
               "stable_n", "drop_frac"}
@@ -19,7 +21,7 @@ VIDEO_KEYS = {"before", "after", "with_laser"}
 SETUP_KEYS = {"laser_nm", "grating", "filter", "objective", "hole_um", "slit_um"}
 ACQ_KEYS = {"range_cm1", "center_cm1", "exposure_s", "accumulations", "auto_exposure", "spike", "dark"}
 AE_KEYS = {"target_counts", "min_s", "max_s", "test_s"}
-FOCUS_KEYS = {"autofocus", "every", "dz_um"}
+FOCUS_KEYS = {"autofocus", "every", "dz_um", "scan"}
 MAP_KEYS = {"x_um", "y_um", "z_um", "snake"}
 SERIES_KEYS = {"count", "interval_s"}
 PROCESS_KEYS = {"baseline", "peaks", "auto_peaks", "bands"}
@@ -62,7 +64,12 @@ def study_format(status: dict | None = None) -> dict:
                          "measures the beam's offset. Needs only setup.laser_nm",
             "guide": "the operator adjusts something by hand (power at the laser, focus, a mirror) while ls6t "
                      "measures a line every fraction of a second and shows it in LabSpec; STOP appears when the "
-                     "goal is met (reach / drop a target, or the best position just passed: maximize)"},
+                     "goal is met (reach / drop a target, or the best position just passed: maximize)",
+            "focus": "find the focus by the Raman signal: Z steps across focus.scan.range_um around the current "
+                     "focus, a short acquisition at each; the best becomes the focus for the rest of the request",
+            "move": "no laser: the stage to move.x_um / y_um (offsets from the home spot) and Z to dz_um from the "
+                    "focus, then a video snapshot; stay: true (default) makes that spot home for later studies and "
+                    "the next request"},
         "keys": {
             "sample": "{name, notes, sensitive: true caps the filter at limits.sensitive_max_filter_pct}",
             "setup": "{laser_nm, grating (gr/mm), filter (a label from the profile, e.g. '10%'), objective "
@@ -71,8 +78,11 @@ def study_format(status: dict | None = None) -> dict:
                        "window), exposure_s (s per accumulation, or 'auto' with auto_exposure: {target_counts, "
                        "min_s, max_s, test_s}), accumulations, spike: labspec | none | single | double | "
                        "double_auto, dark: labspec | true | false}",
-            "focus": "{autofocus: laser | raman | video (before the first point; map: also every N points with "
-                     "'every'), dz_um: Z offset from the operator's focus (spectrum, series)}",
+            "focus": "{autofocus: laser | raman | video (LabSpec's routines) | scan (ls6t's focus scan on the "
+                     "Raman line) (before the first point; map: also every N points with 'every'), dz_um: Z "
+                     "offset from the focus (spectrum, series), scan: {range_um (10), step_um (1), line_cm1 (Si), "
+                     "window_cm1 (30), exposure_s (0.5)}}",
+            "move": "(kind move) {x_um, y_um, dz_um, stay: true, snapshot: true}; setup may only give the objective",
             "points": "[{x_um, y_um, dz_um}] (spectrum kind): offsets from where the operator left the stage",
             "map": "{x_um, y_um, z_um: [from, to, step] offsets; snake: true (default) for boustrophedon rows}",
             "series": "{count, interval_s: seconds from one start to the next}",
@@ -143,6 +153,28 @@ def validate_study(name: str, study: dict, prof: dict) -> dict:
         errors.append(f"kind {kind!r}: use one of {', '.join(KINDS)}")
         return {"ok": False, "errors": errors, "warnings": warnings}
     lim = prof["limits"]
+    if kind == "move":
+        return _validate_move(name, study, prof, errors, warnings)
+    if kind == "focus":
+        for k in ("points", "map", "series", "acquire", "guide", "alignment", "process", "move"):
+            if study.get(k) is not None:
+                errors.append(f"{k}: not with kind 'focus' (it scans Z at the current spot; focus.scan sets it)")
+        if (study.get("setup") or {}).get("laser_nm") is None:
+            errors.append("focus: give setup.laser_nm")
+        fo = study.get("focus") or {}
+        if not isinstance(fo, dict):
+            errors.append("focus: {scan: {...}}")
+            fo = {}
+        _unknown(fo, {"scan"}, "focus (kind focus)", errors)
+        _validate_scan(fo.get("scan") or {}, prof, errors)
+        if errors:
+            return {"ok": False, "errors": errors, "warnings": warnings}
+        inner = validate_study(name, plan.focus_spectrum_study(study, prof), prof)
+        inner["warnings"] = [w for w in inner["warnings"] if not w.startswith("acquire.spike")]
+        out = _merge({}, inner, errors, warnings)
+        if out["ok"]:
+            out["estimate"] = plan.estimate(study, prof)
+        return out
     if kind == "alignment":
         return _validate_alignment(name, study, prof, errors, warnings)
     if kind == "guide":
@@ -262,7 +294,10 @@ def validate_study(name: str, study: dict, prof: dict) -> dict:
         f = {}
     _unknown(f, FOCUS_KEYS, "focus", errors)
     if f.get("autofocus") is not None and f["autofocus"] not in plan.AUTOFOCUS:
-        errors.append(f"focus.autofocus {f['autofocus']!r}: use laser, raman or video")
+        errors.append(f"focus.autofocus {f['autofocus']!r}: use laser, raman, video or scan")
+    sc = f.get("scan")
+    if sc is not None or f.get("autofocus") == "scan" or kind == "focus":
+        _validate_scan(sc or {}, prof, errors)
     if f.get("every") is not None and (not isinstance(f["every"], int) or f["every"] < 1):
         errors.append("focus.every: an integer >= 1 (points between autofocus runs)")
     if f.get("dz_um") is not None and (not _num(f["dz_um"]) or abs(f["dz_um"]) > lim["max_dz_um"]):
@@ -417,6 +452,66 @@ def _merge(out: dict, inner: dict, errors: list, warnings: list) -> dict:
             res[k] = inner[k]
     res.update(out)
     return res
+
+
+def _validate_scan(sc: dict, prof: dict, errors: list):
+    if not isinstance(sc, dict):
+        errors.append("focus.scan: {range_um, step_um, line_cm1, window_cm1, exposure_s}")
+        return
+    _unknown(sc, SCAN_KEYS, "focus.scan", errors)
+    p = dict(plan.SCAN_DEFAULTS, **sc)
+    lim = prof["limits"]
+    for k, lo, hi in (("range_um", 0.5, 2 * float(lim["max_dz_um"])), ("step_um", 0.05, 50.0),
+                      ("window_cm1", 2.0, 400.0), ("exposure_s", 0.01, float(lim["max_exposure_s"]))):
+        v = sc.get(k)
+        if v is not None and (not _num(v) or not lo <= v <= hi):
+            errors.append(f"focus.scan.{k}: between {lo:g} and {hi:g}"
+                          + (" (2 x limits.max_dz_um)" if k == "range_um" else ""))
+    if sc.get("line_cm1") is not None and not _num(sc["line_cm1"]):
+        errors.append("focus.scan.line_cm1: a number (cm-1)")
+    try:
+        n = len(plan.scan_offsets(p))
+        if n < 5:
+            errors.append(f"focus.scan: {n} Z steps; give at least 5 (a smaller step_um or a larger range_um)")
+        elif n > 81:
+            errors.append(f"focus.scan: {n} Z steps; at most 81")
+    except (TypeError, ValueError, ZeroDivisionError):
+        pass
+
+
+def _validate_move(name, study, prof, errors, warnings) -> dict:
+    m = study.get("move")
+    lim = prof["limits"]
+    if not isinstance(m, dict):
+        errors.append("move: {x_um, y_um, dz_um, stay, snapshot} (kind move)")
+        return {"ok": False, "errors": errors, "warnings": warnings}
+    _unknown(m, MOVE_KEYS, "move", errors)
+    for k in ("x_um", "y_um", "dz_um"):
+        if m.get(k) is not None and not _num(m[k]):
+            errors.append(f"move.{k}: a number (µm)")
+    for k in ("stay", "snapshot"):
+        if k in m and not isinstance(m[k], bool):
+            errors.append(f"move.{k}: true or false")
+    if not errors:
+        d = math.hypot(m.get("x_um", 0) or 0, m.get("y_um", 0) or 0)
+        if d > lim["max_xy_um"]:
+            errors.append(f"move: {d:g} µm from the home spot, above limits.max_xy_um = {lim['max_xy_um']:g} µm")
+        if abs(m.get("dz_um", 0) or 0) > lim["max_dz_um"]:
+            errors.append(f"move.dz_um: |dz| <= limits.max_dz_um = {lim['max_dz_um']:g} µm")
+    s = study.get("setup") or {}
+    if set(s) - {"objective"}:
+        errors.append("setup: only the objective with kind 'move' (no laser is used)")
+    elif s.get("objective") is not None and str(s["objective"]) not in [str(o) for o in prof["objectives"]]:
+        errors.append(f"setup.objective {s['objective']!r}: use one of {', '.join(map(str, prof['objectives']))}")
+    for k in ("points", "map", "series", "acquire", "guide", "alignment", "process", "focus", "video", "expect"):
+        if study.get(k) is not None:
+            errors.append(f"{k}: not with kind 'move'")
+    out = {"ok": not errors, "errors": errors, "warnings": warnings}
+    if not errors:
+        out["estimate"] = plan.estimate(study, prof)
+        if m.get("stay", True):
+            warnings.append("stay: the new spot becomes home for later studies and the next request")
+    return out
 
 
 def _validate_alignment(name, study, prof, errors, warnings) -> dict:

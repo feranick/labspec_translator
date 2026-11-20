@@ -793,10 +793,11 @@ Sub VVideo(cmd, res)
 End Sub
 
 ' ---------------------------------------------------------------- guided adjustment
-' The signal of a line in spectrum `id`: (highest point in the window - the window's edge level) / exposure.
+' The signal of a line in spectrum `id`: (highest point in the window - the window's edge level) / exposure, after a
+' 3-point median so a cosmic ray (one or two pixels; the loop runs without spike removal) does not count.
 ' The window is given in nm and in 1/cm; the one matching the spectrum's x unit is used. ymax: the spectrum's top.
 Function GuideMetric(id, loNm, hiNm, loCm, hiCm, ex, ByRef ymax)
-    Dim xy, at, au, i, n, xu, lo, hi, peak, edge, ne, xs(), ys(), m, k, w, e
+    Dim xy, at, au, i, n, xu, lo, hi, peak, edge, ne, xs(), ys(), md(), m, k, w, e, a, b, c
     GuideMetric = -1
     ymax = 0
     On Error Resume Next
@@ -834,9 +835,25 @@ Function GuideMetric(id, loNm, hiNm, loCm, hiCm, ex, ByRef ymax)
         End If
     Next
     If m < 4 Then Exit Function
-    peak = ys(0)
+    ReDim md(m)
     For i = 0 To m
-        If ys(i) > peak Then peak = ys(i)
+        a = ys(i)
+        b = ys(i)
+        c = ys(i)
+        If i > 0 Then a = ys(i - 1)
+        If i < m Then c = ys(i + 1)
+        ' the median of three
+        If (a - b) * (c - a) >= 0 Then
+            md(i) = a
+        ElseIf (b - a) * (c - b) >= 0 Then
+            md(i) = b
+        Else
+            md(i) = c
+        End If
+    Next
+    peak = md(0)
+    For i = 0 To m
+        If md(i) > peak Then peak = md(i)
     Next
     ' the edge level: the mean of the outer sixth of the window on each side
     w = Int((m + 1) / 6)
@@ -844,7 +861,7 @@ Function GuideMetric(id, loNm, hiNm, loCm, hiCm, ex, ByRef ymax)
     edge = 0
     ne = 0
     For k = 0 To w - 1
-        edge = edge + ys(k) + ys(m - k)
+        edge = edge + md(k) + md(m - k)
         ne = ne + 2
     Next
     edge = edge / ne

@@ -1,5 +1,5 @@
 """bench.py — benchmarks with known answers, run on the simulator (the instrument is never touched).
-Version: 2026.11.19.3
+Version: 2026.11.19.4
 
 They check the chain end to end: the commands, wavelength <-> Raman shift, the extended range, fits, map assembly,
 the saturation check and an operator stop. On the instrument itself, the 'calibration' study on a silicon wafer is
@@ -59,6 +59,10 @@ CASES = {
         # the simulated operator passes the best focus at the 8th reading: STOP comes right after, not before
         "checks": [("f", "guide.reason", "past_max", None), ("f", "guide.iterations", 11, 2),
                    ("f", "reliable", True, None)]},
+    "focus_scan": {
+        "studies": {"f": {"kind": "focus", "sample": {"name": "Si"}, "setup": SETUP}},
+        "sim_files": {"sim_defocus": "2.3"},      # the sample's best focus is 2.3 µm above the operator's
+        "checks": [("f", "focus.found", True, None), ("f", "focus.shift_um", 2.3, 0.15), ("f", "reliable", True, None)]},
     "operator_stop": {
         "studies": {"o": {"kind": "map", "sample": {"name": "Si"}, "setup": SETUP,
                           "acquire": {"center_cm1": 520, "exposure_s": 1, "accumulations": 1},
@@ -109,6 +113,8 @@ def run(names: list | None = None, wait_s: float = 600) -> dict:
         with _sim_env(out):
             bdir = config.active_bridge_dir()
             sim = S.ensure(bdir)
+            for fname, content in case.get("sim_files", {}).items():
+                (bdir / fname).write_text(content)
             if case.get("operator_stop_after"):
                 (bdir / "sim_operator_stop_after").write_text(str(case["operator_stop_after"]))
             s = api.start(case["studies"], inline=True)

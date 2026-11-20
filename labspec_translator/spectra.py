@@ -1,5 +1,5 @@
 """spectra.py — reading the bridge's spectrum files, and the analysis done here rather than in LabSpec.
-Version: 2026.11.19.3
+Version: 2026.11.19.4
 
 Raman shift from wavelength with the laser line read back from the instrument; an iterative polynomial baseline;
 noise from second differences; spikes; peak fits (pseudo-Voigt, Lorentz, Gauss with a local linear background);
@@ -254,6 +254,22 @@ def find_peaks(x, y, n: int = 3, sigma: float | None = None, min_snr: float = 5.
         return []
     order = np.argsort(props["prominences"])[::-1][:n]
     return sorted(float(np.asarray(x)[idx[i]]) for i in order)
+
+
+def line_signal(x, y, line: float, window: float) -> float:
+    """A line's height above its window's edges (the mean of the outer sixth on each side), after a 3-point median
+    so a cosmic ray (one or two pixels) does not count: the same measure the bridge's guided loop uses. x in cm-1,
+    ascending."""
+    x = np.asarray(x, float)
+    y = np.asarray(y, float)
+    sel = (x >= line - window / 2) & (x <= line + window / 2)
+    ys = y[sel]
+    if ys.size < 5:
+        return 0.0
+    med = np.median(np.lib.stride_tricks.sliding_window_view(np.pad(ys, 1, mode="edge"), 3), axis=1)
+    w = max(1, ys.size // 6)
+    edge = float(np.mean(np.concatenate([med[:w], med[-w:]])))
+    return float(med.max() - edge)
 
 
 def band(x, y, lo: float, hi: float) -> float | None:

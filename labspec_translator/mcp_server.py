@@ -1,5 +1,5 @@
 """mcp_server.py — MCP server: lets LLM-based tools run Raman measurements on a HORIBA instrument through LabSpec 6.
-Version: 2026.11.19.3
+Version: 2026.11.19.4
 
 Tools (all JSON):
   study_format      the study format, the profile's choices and limits, the bridge's state. Read it first.
@@ -50,6 +50,9 @@ Before trusting numbers check 'reliable' (false: say why from 'unreliable_becaus
 as results), 'warnings', 'checks' (saturation, detector temperature, setup read-back, range, calibration) and each
 peak's 'snr'. A saturated spectrum needs a stronger filter or a shorter exposure; a weak one longer exposure or
 more accumulations.
+Stage and focus: a 'move' study (no laser) goes to an offset and shows a video frame; with stay it becomes the
+new home spot. A 'focus' study (or focus.autofocus 'scan') finds the focus by the Raman line. At the end of a
+request Z returns to the focus, then the stage to the home spot.
 Safety: positions are offsets (µm) from where the operator left the stage, Z from the operator's focus; the
 filter (laser power) is capped per laser and lower for samples marked sensitive. Ask the user before raising power
 or running long maps. If the bridge is not running, ask the user to start ls6t_bridge.vbs in LabSpec.

@@ -1,5 +1,5 @@
 """plan.py — a study as bridge commands: the setup moves, the points, the acquisitions; and the time estimate.
-Version: 2026.11.19.3
+Version: 2026.11.19.4
 
 Everything here is computed from the study and the profile alone: wavelengths from Raman shifts, the number of
 detector windows, the stage positions (always offsets from where the operator left the stage, Z from the
@@ -12,7 +12,6 @@ import math
 from .profile import laser_key, shift_to_nm
 
 SPIKE_MODES = {"labspec": 0, "none": 100, "single": 200, "double": 300, "double_auto": 400}
-AUTOFOCUS = ("laser", "raman", "video")
 
 
 def axis_values(spec) -> list[float]:
@@ -176,6 +175,30 @@ def acquire_seconds(study: dict, prof: dict, rng: dict) -> float:
         + t["command_s"]
 
 
+SCAN_DEFAULTS = {"range_um": 10.0, "step_um": 1.0, "window_cm1": 30.0, "exposure_s": 0.5}
+AUTOFOCUS = ("laser", "raman", "video", "scan")
+
+
+def scan_params(study: dict, prof: dict) -> dict:
+    sc = dict(SCAN_DEFAULTS)
+    sc.update((study.get("focus") or {}).get("scan") or {})
+    sc.setdefault("line_cm1", prof["checks"]["si_cm1"])
+    return sc
+
+
+def scan_offsets(sc: dict) -> list[float]:
+    """Z offsets of a focus scan: -range/2 .. +range/2 in steps, 0 included."""
+    half, step = float(sc["range_um"]) / 2, float(sc["step_um"])
+    n = int(math.floor(half / step + 1e-9))
+    return [round(i * step, 6) for i in range(-n, n + 1)]
+
+
+def scan_seconds(study: dict, prof: dict) -> float:
+    sc = scan_params(study, prof)
+    t = prof["timing"]
+    return len(scan_offsets(sc)) * (t["move_s"] + float(sc["exposure_s"]) + t["readout_s"] + 2 * t["command_s"])
+
+
 GUIDE_DEFAULTS = {"mode": "reach", "window_cm1": 30.0, "exposure_s": 0.2, "max_s": 120.0, "stable_n": 2,
                   "drop_frac": 0.1}
 
@@ -197,6 +220,14 @@ def alignment_check_study(study: dict, prof: dict) -> dict:
             "process": {"peaks": [{"name": "Si", "near_cm1": prof["checks"]["si_cm1"], "window_cm1": 30}]}}
 
 
+def focus_spectrum_study(study: dict, prof: dict) -> dict:
+    """The acquisitions of a focus scan, as a spectrum study (for validation and the range)."""
+    sc = scan_params(study, prof)
+    return {"kind": "spectrum", "sample": study.get("sample", {}), "setup": study.get("setup", {}),
+            "acquire": {"center_cm1": sc["line_cm1"], "exposure_s": sc["exposure_s"], "accumulations": 1,
+                        "spike": "none"}}
+
+
 def guide_params(study: dict, prof: dict) -> dict:
     g = dict(GUIDE_DEFAULTS)
     g.update(study.get("guide", {}))
@@ -216,6 +247,21 @@ def estimate(study: dict, prof: dict) -> dict:
     """{minutes, points, windows, seconds: {setup, per_point, total}}: an upper-end estimate from the profile's
     timing (measured values replace the defaults once the instrument has run)."""
     t = prof["timing"]
+    if study.get("kind") == "move":
+        m = study.get("move", {})
+        d = math.hypot(float(m.get("x_um", 0) or 0), float(m.get("y_um", 0) or 0))
+        total = 3 * t["command_s"] + t["xy_settle_s"] + d / t["xy_um_per_s"] + t["move_s"] + \
+            (t["objective_s"] if (study.get("setup") or {}).get("objective") else 0) + \
+            (float(prof.get("video", {}).get("settle_s", 1.5)) + 5 if m.get("snapshot", True) else 0)
+        return {"minutes": round(total / 60.0, 2), "points": 0, "windows": 0,
+                "seconds": {"setup": 0.0, "per_acquisition": 0.0, "total": round(total, 1)}}
+    if study.get("kind") == "focus":
+        base = estimate(focus_spectrum_study(study, prof), prof)
+        total = base["seconds"]["setup"] + scan_seconds(study, prof)
+        return {"minutes": round(total / 60.0, 2), "points": len(scan_offsets(scan_params(study, prof))),
+                "windows": 1, "seconds": {"setup": base["seconds"]["setup"],
+                                          "per_acquisition": base["seconds"]["per_acquisition"],
+                                          "total": round(total, 1)}}
     if study.get("kind") == "alignment":
         base = estimate(alignment_check_study(study, prof), prof)
         a = study.get("alignment", {})
@@ -255,7 +301,7 @@ def estimate(study: dict, prof: dict) -> dict:
         if p["dz_um"]:
             total += t["move_s"]
         if af and (k == 0 or (every and k % every == 0)):
-            total += t["autofocus_s"]
+            total += scan_seconds(study, prof) if af == "scan" else t["autofocus_s"]
         total += acq_s
     vd = study.get("video") or {}
     v = prof.get("video", {})
@@ -271,6 +317,30 @@ def estimate(study: dict, prof: dict) -> dict:
 
 def inputs(study: dict, prof: dict, max_steps: int = 40) -> dict:
     """The bridge commands of one study, without running: setup, then the first points' commands."""
+    if study.get("kind") == "move":
+        m = study.get("move", {})
+        steps = [{"verb": "status"}]
+        if (study.get("setup") or {}).get("objective"):
+            steps.append({"verb": "move", "motor": prof["motors"]["objective"], "mode": "label",
+                          "value": study["setup"]["objective"]})
+        steps += [{"verb": "move_xy", "x_um": m.get("x_um", 0), "y_um": m.get("y_um", 0), "relative_to": "home"},
+                  {"verb": "move", "motor": prof["motors"]["z"], "value": f"focus{float(m.get('dz_um', 0) or 0):+g}",
+                   "why": "Z relative to the focus"}]
+        if m.get("snapshot", True):
+            steps.append({"verb": "video", "laser_s": 0})
+        return {"laser_nm": None, "range": None, "points": 0, "steps": steps, "steps_shown": len(steps),
+                "estimate": estimate(study, prof), "note": "no laser"}
+    if study.get("kind") == "focus":
+        sc = scan_params(study, prof)
+        laser = laser_nm(study, prof)
+        steps = [{"verb": "status"}] + setup_steps(study, prof) + [{"verb": "status"}, {"verb": "confirm"}]
+        for dz in scan_offsets(sc)[:max_steps]:
+            steps += [{"verb": "move", "motor": prof["motors"]["z"], "value": f"focus{dz:+g}"},
+                      {"verb": "acquire", "exposure_s": sc["exposure_s"], "center_cm1": sc["line_cm1"]}]
+        steps.append({"verb": "move", "motor": prof["motors"]["z"], "value": "the best Z (parabola through the top)"})
+        return {"laser_nm": laser, "range": acq_range(focus_spectrum_study(study, prof), prof, laser),
+                "points": len(scan_offsets(sc)), "steps": steps, "steps_shown": len(steps),
+                "estimate": estimate(study, prof)}
     if study.get("kind") == "alignment":
         chk = alignment_check_study(study, prof)
         inner = inputs(chk, prof, max_steps)

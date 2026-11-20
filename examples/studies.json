@@ -258,5 +258,31 @@
    "exposure_s": 0.2,
    "max_s": 120
   }
+ },
+ "look_left": {
+  "kind": "move",
+  "move": {
+   "x_um": -50,
+   "y_um": 0,
+   "stay": false
+  }
+ },
+ "focus_on_si": {
+  "kind": "focus",
+  "sample": {
+   "name": "Si"
+  },
+  "setup": {
+   "laser_nm": 532,
+   "grating": 1800,
+   "filter": "10%",
+   "objective": "x100"
+  },
+  "focus": {
+   "scan": {
+    "range_um": 10,
+    "step_um": 1
+   }
+  }
  }
 }

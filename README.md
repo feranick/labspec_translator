@@ -16,7 +16,7 @@ it runs **locally**: on the instrument PC, next to the Claude desktop app. It ha
 machines. Unlike the other translators, the backend has no Python API: LabSpec is automated with VBScript
 (*LabSpec 5/6 Automation*, HORIBA, 2018). That is why the bridge script exists.
 
-First instrument: **XploRA** (LabSpec 6, Windows 11). Version 2026.11.19.3.
+First instrument: **XploRA** (LabSpec 6, Windows 11). Version 2026.11.19.4.
 
 **Scope of version 1**
 
@@ -27,6 +27,8 @@ First instrument: **XploRA** (LabSpec 6, Windows 11). Version 2026.11.19.3.
 | `series` | Repeated spectra at one spot: a time series |
 | `calibration` | A spectrum of a silicon reference; fits the Si line and checks it against 520.7 ± 1 cm⁻¹ |
 | `alignment` | Is the system aligned for this laser? The Si reference at the laser's fixed settings, compared with the baseline recorded after the last AutoAlignment. If it fails, the operator is guided through LabSpec's AutoAlignment and the check repeats; then the beam's offset is measured again |
+| `focus` | Find the focus by the Raman signal: Z steps across a range around the current focus, a short acquisition at each, a Gaussian through the best points; the focus found serves the rest of the request |
+| `move` | No laser: the stage to an offset (and Z to an offset from the focus), then a video snapshot. With `stay` (default) that spot becomes home for later studies and the next request |
 | `guide` | A manual adjustment with live feedback: the operator turns something (laser power at the source, focus, a mirror) while ls6t measures a line several times a second; LabSpec shows the signal and **STOP** when the goal is reached or the best position has just been passed |
 
 **Video snapshots**: a frame of LabSpec's camera with the laser position marked, on demand (`snapshot`) or during a
@@ -45,6 +47,7 @@ detectors. See `planning.md`.
 - [Results](#results)
 - [Safety and the operator](#safety-and-the-operator)
 - [Video snapshots: where the beam is](#video-snapshots-where-the-beam-is)
+- [Stage and focus](#stage-and-focus)
 - [Alignment and guided adjustments](#alignment-and-guided-adjustments)
 - [The checker](#the-checker)
 - [How it works](#how-it-works)
@@ -352,7 +355,8 @@ Studies are given as `{name: study}`; names use letters, digits, `_` and `-`. An
 | `sample` | `{name, notes, sensitive}`; `sensitive: true` caps the filter at `limits.sensitive_max_filter_pct`. The name goes into the LabSpec file. |
 | `setup` | `{laser_nm, grating (gr/mm), filter (a profile label, e.g. "10%"), objective (label), hole_um, slit_um}`. A key left out keeps what LabSpec has; the result records what it was. |
 | `acquire` | `range_cm1: [from, to]` (extended range: LabSpec stitches windows) or `center_cm1` (one window); `exposure_s` (per accumulation) or `"auto"` with `auto_exposure: {target_counts, min_s, max_s, test_s}`; `accumulations`; `spike`: `labspec`, `none`, `single`, `double`, `double_auto`; `dark`: `labspec`, `true`, `false` |
-| `focus` | `{autofocus: laser, raman or video (before the first point, and every N points with every), dz_um}` |
+| `focus` | `{autofocus: laser, raman or video (LabSpec's routines), or scan (ls6t's focus scan on the Raman line), before the first point and every N points with every; dz_um; scan: {range_um (10), step_um (1), line_cm1 (Si), window_cm1 (30), exposure_s (0.5)}}` |
+| `move` | (kind `move`) `{x_um, y_um, dz_um, stay: true, snapshot: true}`; `setup` may only give the objective |
 | `points` | (spectrum) `[{x_um, y_um, dz_um}]`: offsets from where the operator left the stage |
 | `map` | `{x_um, y_um, z_um: [from, to, step]}` offsets in µm; `snake: true` (default): alternate rows reversed |
 | `series` | `{count, interval_s}`: seconds from one start to the next |
@@ -386,6 +390,8 @@ a filter above the caps, exposures, accumulations or points above the limits, mo
 | `series` | `t_s` and each quantity over time, with a summary |
 | `calibration` | `reference_cm1`, `measured_cm1`, `offset_cm1`, `fwhm_cm1`, `pass` |
 | `alignment` | `passed` (true, false, or null without a baseline), `attempts` (per check: `counts_per_s`, `ratio` to the baseline, `fwhm_cm1`, `fwhm_ratio`, `position_cm1`, why it failed), `recommendation`, and the snapshot after it with `measured_offset_um` |
+| `focus` | (kind `focus`) `found`, `z_um`, `shift_um` from the starting focus, `best_signal`, `contrast`, the Z steps and the signal at each, the plot; why when no clear best (Z then goes back). Other kinds with `autofocus: scan`: `focus_scans` |
+| `move` | `stage_um`, `z_um`, `home_um`, `stay`, the snapshot (`video.here`) |
 | `guide` | `reason` (`target`, `past_max`, `saturation`, `timeout`, `operator_done`, `operator_abort`, `stopped`), the STOP `message`, `value`, `max_value` and when (`t_max_s`), `iterations`, `period_s` (seconds per reading), the history file and its plot |
 | `expect` | Each expected value: `got`, `pass` |
 | `video` | `before` / `after`: the PNG (`path`), the raw frame, LabSpec's own image files, the stage position, `marker_um`, the field of view; with the laser: `spot_um` and `measured_offset_um` |
@@ -407,8 +413,13 @@ acquisition info as `acq.*`, then wavelength and counts). The Raman-shift versio
   - Cancelling an acquisition in LabSpec counts as the same operator stop.
   - LabSpec's script stop button ends the bridge.
   - `ls6t cancel` (or the `cancel` tool) stops a request from the PC.
-- **Positions**: XY moves are offsets from where the operator left the stage when the request started. Z is relative
-  to the operator's focus (or the last autofocus). Absolute positions are never taken from a study.
+- **Positions**: XY moves are offsets from the *home spot*: where the operator left the stage when the request
+  started, or where a `move` study chose to stay. Z is relative to the *focus*: the operator's, or the last autofocus
+  or focus scan. Absolute positions are never taken from a study. The profile's `stage.x_um`, `y_um` and `z_um`
+  (absolute limits) are checked before every move.
+- **Back home**: at the end of a request that finished normally, Z returns to the focus first (the safe height),
+  then the stage to the home spot. After a stop (operator, cancel) nothing moves, and the next request starts from
+  where the stage was left.
 - **Power**: the filter is capped per laser, for samples marked sensitive, and globally. The laser shutter opens only
   during acquisitions (LabSpec's automatic shutter mode).
 - **One request at a time** holds the instrument (a lock file). Others wait as `queued`.
@@ -438,6 +449,26 @@ it is refused while a request holds the instrument. In a study, the frame is tak
 
 Use it before a calibration or a measurement to check that the beam is on the intended spot. From the Claude app, the
 `snapshot` tool returns the image itself, so Claude sees where the beam is.
+
+## Stage and focus
+
+Both are motorised on the XploRA and driven through LabSpec: `MoveXY` for the stage, the `Z` motor for focus.
+
+- **In measurements**: `points` (offsets), `map` (`x_um`, `y_um`, `z_um` grids, snake order), `focus.dz_um` (an
+  offset from the focus).
+- **Focus**: LabSpec's own autofocus (`focus.autofocus`: `laser`, `raman`, `video`), or ls6t's **focus scan**
+  (`autofocus: "scan"`, or a `focus` study).
+  - The scan steps Z across `range_um` (default ±5 µm, 1 µm steps) around the current focus, with a short
+    acquisition at each.
+  - It measures the line's height (Si 520.7 cm⁻¹ by default) after a 3-point median, so cosmic rays do not count.
+  - It fits a Gaussian through the points above 30 % of the best, moves Z there, and draws the curve.
+  - With no clear maximum inside the range, Z goes back to where it was and the result says why.
+  - On the simulator it finds a focus 2.3 µm off to within 0.01–0.03 µm at the x100.
+- **Looking around**: a `move` study (no laser) goes to an offset and takes a video snapshot, for example *"show me
+  50 µm to the left"*. With `stay: true` (default), that spot becomes home for the following studies and the next
+  request. With `stay: false`, the request ends back at the previous home.
+- **For the maintainer**: `ls6t bridge call move_xy x_um=... y_um=...` and `ls6t bridge call move motor=Z ...`, one
+  command at a time.
 
 ## Alignment and guided adjustments
 
@@ -517,6 +548,7 @@ covered, a missing profile, and expected values out of tolerance.
 | `extended_range` | Si, G, 2D in one stitched 300–2900 cm⁻¹ spectrum; range covered | 520.74; 1585.04; 2680.13 |
 | `saturation` | a 30 s exposure at 100 % is flagged unreliable | flagged |
 | `series` | 3 spectra, Si 520.7 ± 0.3 | 520.65 |
+| `focus_scan` | the sample's best focus is 2.3 µm above the operator's; the scan finds it | 2.293 |
 | `guided_focus` | the simulated operator passes the best focus at the 8th reading: STOP (`past_max`) comes right after | 12 readings |
 | `operator_stop` | the operator stops after 4 of 10 map points: partial, unreliable, `stopped_by: operator` | as expected |
 
@@ -634,7 +666,7 @@ install the scripts again with the same settings.
 ```
 labspec_translator/
   README.md  TESTING.md  planning.md  pyproject.toml
-  examples/studies.json          eight studies covering the scope
+  examples/studies.json          ten studies covering the scope
   labspec_translator/            the package (config, profile, format, plan, bridge, runner, spectra, render,
                                  video, sim, bench, api, cli, mcp_server; vbs/ the LabSpec script parts)
   tests/test_ls6t.py
@@ -650,6 +682,7 @@ frames, LabSpec's image files, `snapshot.json`); a study's frames go to its `vid
 
 | Version | Changes |
 |---|---|
+| 2026.11.19.4 | Stage and focus: kind `move` (no laser; to an offset with a snapshot; `stay` makes it the home spot), kind `focus` and `focus.autofocus: "scan"` (focus by the Raman line: Z steps, Gaussian fit, back to the start without a clear best), the request's home spot and focus (Z then XY back to them at the end of a normal request), absolute Z limit (`stage.z_um`), the guided loop's metric robust to cosmic rays (3-point median), benchmark `focus_scan`. |
 | 2026.11.19.3 | Alignment and guided adjustments: kind `alignment` (Si check at the laser's fixed settings against the baseline recorded after AutoAlignment; guided AutoAlignment with HORIBA's checklist and a repeat check; the beam's offset measured again; log and readiness warnings), kind `guide` (a fast loop in the bridge with LabSpec's dynamic dialog: reach, drop or maximize a line's signal; STOP shown to the operator; saturation guard), bridge verbs `guide` and `notice`, `ls6t alignment status/record`, `ls6t profile set`, tool `alignment_status`, benchmark `guided_focus`. |
 | 2026.11.19.2 | Video snapshots: `video` bridge verb (frame cloned from the live video; optional timed laser shutter with a frame without and with the beam), `snapshot` tool and `ls6t instrument snapshot`, study key `video` (on by default for calibration), the laser position marked, the spot found and its offset measured; profile `video` settings and `motors.laser_shutter` (from discovery). |
 | 2026.11.19.1 | First version: study format and validation, VBS bridge (protocol 1) and discovery script, runner with operator confirmation and stops, analysis and checks, simulator and benchmarks, CLI and MCP server. Not yet tested on the instrument (TESTING.md). |

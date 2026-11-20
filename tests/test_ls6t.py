@@ -552,3 +552,81 @@ def test_profile_set(tmp_path):
     assert r["ok"] and P.load()["video"]["laser_offset_um"] == [1.4, -0.6]
     with pytest.raises(KeyError):
         api.profile_set("video.nonsense", "1")
+
+
+# --------------------------------------------------------------------------------------------- stage and focus
+
+def test_focus_scan_finds_the_focus():
+    bdir = config.active_bridge_dir()
+    S.ensure(bdir)
+    (bdir / "sim_defocus").write_text("2.3")
+    st = run_inline({"f": {"kind": "focus", "sample": {"name": "Si"}, "setup": SETUP}})
+    r = st["studies"]["f"]
+    start_z = float(json.loads((Path(st["request"]) / "start.json").read_text())["status"]["z_um"])
+    assert r["reliable"] and r["focus"]["found"]
+    assert r["focus"]["z_um"] - start_z == pytest.approx(2.3, abs=0.15)
+    assert Path(r["images"]["focus_scan"]["path"]).exists()
+    # the request ends at the focus found
+    assert st["state"] == "done"
+    assert float(api.instrument("status")["status"]["z_um"]) == pytest.approx(r["focus"]["z_um"], abs=0.01)
+
+
+def test_focus_scan_without_a_clear_best_goes_back():
+    bdir = config.active_bridge_dir()
+    S.ensure(bdir)
+    (bdir / "sim_defocus").write_text("30")            # far outside the scan: the signal hardly changes
+    st = run_inline({"f": {"kind": "focus", "sample": {"name": "Si"}, "setup": SETUP,
+                           "focus": {"scan": {"range_um": 6, "step_um": 1}}}})
+    r = st["studies"]["f"]
+    start_z = float(json.loads((Path(st["request"]) / "start.json").read_text())["status"]["z_um"])
+    assert not r["focus"]["found"] and not r["reliable"]
+    assert float(api.instrument("status")["status"]["z_um"]) == pytest.approx(start_z, abs=0.01)
+
+
+def test_move_stays_and_later_offsets_follow():
+    st = run_inline({"m": {"kind": "move", "move": {"x_um": -20, "y_um": 5}},
+                     "s": {"kind": "spectrum", "sample": {"name": "x"}, "setup": SETUP,
+                           "acquire": {"center_cm1": 520, "exposure_s": 0.5}, "points": [{"x_um": 3}]}})
+    start = json.loads((Path(st["request"]) / "start.json").read_text())["status"]
+    x0, y0 = float(start["x_um"]), float(start["y_um"])
+    m = st["studies"]["m"]
+    assert m["move"]["stage_um"] == [pytest.approx(x0 - 20), pytest.approx(y0 + 5)]
+    assert Path(m["images"]["video_here"]["path"]).exists()
+    assert st["studies"]["s"]["spectra"][0]["stage"]["x_um"] == pytest.approx(x0 - 17)
+    now = api.instrument("status")["status"]
+    assert float(now["x_um"]) == pytest.approx(x0 - 20) and float(now["y_um"]) == pytest.approx(y0 + 5)
+
+
+def test_request_returns_home_after_a_map():
+    st = run_inline({"mp": {"kind": "map", "sample": {"name": "x"}, "setup": SETUP,
+                            "acquire": {"center_cm1": 520, "exposure_s": 0.5},
+                            "map": {"x_um": [0, 4, 2], "z_um": [-2, 2, 2]}}})
+    start = json.loads((Path(st["request"]) / "start.json").read_text())["status"]
+    now = api.instrument("status")["status"]
+    for k in ("x_um", "y_um", "z_um"):
+        assert float(now[k]) == pytest.approx(float(start[k]), abs=0.01), k
+    assert "returned" in json.loads((Path(st["request"]) / "state.json").read_text())
+
+
+def test_move_and_focus_validation():
+    r = F.validate({"m": {"kind": "move", "move": {"x_um": 9000}}})["m"]
+    assert not r["ok"] and any("max_xy_um" in e for e in r["errors"])
+    r = F.validate({"m": {"kind": "move", "move": {"x_um": 1}, "setup": {"laser_nm": 532}}})["m"]
+    assert not r["ok"] and any("only the objective" in e for e in r["errors"])
+    r = F.validate({"f": {"kind": "focus", "setup": SETUP, "focus": {"scan": {"range_um": 500}}}})["f"]
+    assert not r["ok"] and any("range_um" in e for e in r["errors"])
+    r = F.validate({"f": {"kind": "focus", "setup": SETUP, "focus": {"scan": {"range_um": 2, "step_um": 1}}}})["f"]
+    assert not r["ok"] and any("at least 5" in e for e in r["errors"])
+    r = F.validate({"m": {"kind": "map", "setup": SETUP, "map": {"x_um": [0, 2, 1]},
+                          "focus": {"autofocus": "scan", "every": 2}}})["m"]
+    assert r["ok"], r["errors"]
+
+
+def test_absolute_z_limit(tmp_path):
+    prof = P.load()
+    prof["stage"]["z_um"] = [0, 251]                  # the simulator's focus is at 250
+    P.save(prof)
+    st = run_inline({"p": {"kind": "spectrum", "sample": {"name": "x"}, "setup": SETUP,
+                           "acquire": {"center_cm1": 520}, "points": [{"dz_um": 5}]}})
+    r = st["studies"]["p"]
+    assert not r["ok"] and "stage limits" in r["why"]

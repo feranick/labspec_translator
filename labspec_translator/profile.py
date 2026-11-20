@@ -1,5 +1,5 @@
 """profile.py — the machine profile: what the instrument has (from the discovery script) and the limits a person sets.
-Version: 2026.11.19.3
+Version: 2026.11.19.4
 
 The profile is a JSON file (LS6T_PROFILE, default ~/ls6t/profile.json). Studies never change it: an LLM can only
 ask for what the profile allows. Without a file, the built-in XploRA defaults below apply and every result says so
@@ -38,7 +38,7 @@ DEFAULT_PROFILE: dict = {
     "holes_um": None,              # null: any value LabSpec accepts
     "slits_um": None,
     "detector": {"full_scale": 65535, "max_temp_c": -50.0, "pixels": 1024},
-    "stage": {"x_um": None, "y_um": None},   # absolute stage limits [min, max]; null: only max_xy_um applies
+    "stage": {"x_um": None, "y_um": None, "z_um": None},   # absolute limits [min, max]; null: only the relative ones
     "limits": {"max_xy_um": 5000.0,          # farthest a study may move from where the operator left the stage
                "max_dz_um": 100.0,           # farthest from the operator's focus (Z is always relative)
                "max_exposure_s": 600.0, "max_accumulations": 500, "max_points": 10000,

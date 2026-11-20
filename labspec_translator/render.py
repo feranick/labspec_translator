@@ -1,5 +1,5 @@
 """render.py — PNG pictures of a study's results (matplotlib, optional extra 'render').
-Version: 2026.11.19.3
+Version: 2026.11.19.4
 
 spectrum / calibration / series: the spectrum (or the first and last of a series) with its baseline and fitted
 peaks; map: one image per peak quantity and band (position, FWHM, height or area), positions in µm offsets.
@@ -68,6 +68,24 @@ def map_png(path: Path, grid: np.ndarray, xs, ys, title: str, unit: str) -> dict
     fin = g[np.isfinite(g)]
     return {"path": str(path), "what": title, "min": float(fin.min()) if fin.size else None,
             "max": float(fin.max()) if fin.size else None}
+
+
+def focus_png(path: Path, fs: dict) -> dict:
+    """A focus scan: the line's signal against Z, with the focus chosen."""
+    plt = _plt()
+    fig, ax = plt.subplots(figsize=(6, 3.6), dpi=110)
+    z = [zz - fs["z0_um"] for zz in fs["z_steps_um"]]
+    ax.plot(z, fs["signal"], marker="o", ms=4)
+    if fs.get("found"):
+        ax.axvline(fs["z_um"] - fs["z0_um"], color="C3", lw=1, label=f"focus: {fs['shift_um']:+.2f} µm")
+        ax.legend(fontsize=8)
+    ax.set_xlabel("Z offset from the starting focus (µm)")
+    ax.set_ylabel(f"{fs['line_cm1']:g} cm$^{{-1}}$ signal (counts/s)")
+    ax.set_title("focus scan" + ("" if fs.get("found") else f": no clear best ({fs.get('why')})")[:90], fontsize=9)
+    fig.tight_layout()
+    fig.savefig(path)
+    plt.close(fig)
+    return {"path": str(path), "what": "the line's signal against Z; the focus chosen"}
 
 
 def guide_png(path: Path, hist: list, guide: dict, name: str) -> dict:
