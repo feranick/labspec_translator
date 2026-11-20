@@ -1,5 +1,5 @@
 """plan.py — a study as bridge commands: the setup moves, the points, the acquisitions; and the time estimate.
-Version: 2026.11.19.6
+Version: 2026.11.19.7
 
 Everything here is computed from the study and the profile alone: wavelengths from Raman shifts, the number of
 detector windows, the stage positions (always offsets from where the operator left the stage, Z from the
@@ -197,6 +197,23 @@ def calibration_lines(study: dict, prof: dict, rng: dict | None) -> list[float]:
     return lines
 
 
+def map_engine(study: dict, prof: dict) -> str:
+    """'native' (LabSpec's mapping engine) or 'points' (ls6t moves and acquires point by point). 'auto' picks native
+    for large maps that need nothing between points."""
+    if study.get("kind") not in ("map", "depth"):
+        return "points"
+    m = study.get("map", {}) if study.get("kind") == "map" else study.get("depth", {})
+    eng = m.get("engine", "auto")
+    if eng in ("points", "native"):
+        return eng
+    if (study.get("focus") or {}).get("every") or (study.get("acquire") or {}).get("exposure_s") == "auto":
+        return "points"
+    if (study.get("acquire") or {}).get("range_cm1"):
+        return "points"
+    n = len(positions(study if study.get("kind") == "map" else depth_as_map(study, prof)))
+    return "native" if n >= int(prof.get("mapping", {}).get("native_min_points", 400)) else "points"
+
+
 def into_sign(prof: dict) -> tuple[int, bool]:
     """+1 when a larger Z focuses deeper into the sample, -1 the other way (profile stage.z_into_sample); the
     second value says whether the profile states it (otherwise +1 is assumed)."""
@@ -216,6 +233,9 @@ def depth_as_map(study: dict, prof: dict) -> dict:
     a, b, st = float(d.get("from_um", -5.0)), float(d.get("to_um", 20.0)), float(d.get("step_um", 1.0))
     derived = {k: v for k, v in study.items() if k not in ("depth", "kind")}
     derived.update(kind="map", map={"z_um": [sgn * a, sgn * b, st], "snake": False})
+    for k in ("engine", "swift"):
+        if k in d:
+            derived["map"][k] = d[k]
     return derived
 
 
@@ -371,6 +391,13 @@ def estimate(study: dict, prof: dict) -> dict:
     every = int(focus.get("every", 0) or 0)
     acq_s = acquire_seconds(study, prof, rng)
     total = setup
+    if map_engine(study, prof) == "native":
+        acc_ = int(study.get("acquire", {}).get("accumulations", 1))
+        ex_ = float(study.get("acquire", {}).get("exposure_s", 1.0))
+        per = ex_ * acc_ + float(prof.get("mapping", {}).get("native_point_s", 0.05))
+        total += len(pts) * per + 0.02 * len(pts) + 20.0       # the map, then writing it out
+        return {"minutes": round(total / 60.0, 2), "points": len(pts), "windows": 1, "engine": "native",
+                "seconds": {"setup": round(setup, 1), "per_acquisition": round(per, 3), "total": round(total, 1)}}
     prev = (0.0, 0.0)
     for k, p in enumerate(pts):
         dist = math.hypot(p["x_um"] - prev[0], p["y_um"] - prev[1])

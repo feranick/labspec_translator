@@ -1,5 +1,5 @@
 """bench.py — benchmarks with known answers, run on the simulator (the instrument is never touched).
-Version: 2026.11.19.6
+Version: 2026.11.19.7
 
 They check the chain end to end: the commands, wavelength <-> Raman shift, the extended range, fits, map assembly,
 the saturation check and an operator stop. On the instrument itself, the 'calibration' study on a silicon wafer is
@@ -102,6 +102,14 @@ CASES = {
         # the white light on; the operator blocks the laser: the background holds the lamp only (no Raman line)
         "sim_files": {"sim_lamp": "on"},
         "checks": [("b", "reliable", True, None), ("b", "warnings", [], None)]},
+    "native_map": {
+        "studies": {"n": {"kind": "map", "sample": {"name": "graphene flake"}, "setup": dict(SETUP, grating=600),
+                          "acquire": {"center_cm1": 2000, "exposure_s": 0.5},
+                          "map": {"x_um": [-4, 4, 2], "y_um": [0, 2, 1], "engine": "native"},
+                          "process": {"peaks": [{"name": "G", "near_cm1": 1585}]}}},
+        # LabSpec's own engine: the same 9 graphene points as the point-by-point map
+        "checks": [("n", "map.summary.G.position_cm1.n", 9, 0), ("n", "map.summary.G.position_cm1.mean", 1585.0, 2.0),
+                   ("n", "points_measured", 15, 0)]},
     "operator_stop": {
         "studies": {"o": {"kind": "map", "sample": {"name": "Si"}, "setup": SETUP,
                           "acquire": {"center_cm1": 520, "exposure_s": 1, "accumulations": 1},

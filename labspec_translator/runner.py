@@ -1,5 +1,5 @@
 """runner.py — runs a request's studies on the instrument, one command at a time, and checks every result.
-Version: 2026.11.19.6
+Version: 2026.11.19.7
 
 A request runs in its own process (`ls6t run-request FOLDER`, started detached by api.start), so it outlives the
 MCP call that started it. One request at a time holds the instrument (a lock file under LS6T_HOME); others wait
@@ -380,7 +380,28 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
     want_before = vd.get("before", kind == "calibration")
     focus_scans: list = []
     snaps: dict = {}
-    for k, p in enumerate(pts):
+    native = plan.map_engine(study, prof) == "native"
+    if native:
+        try:
+            if af:
+                if af == "scan":
+                    fs = focus_scan(ctx, study, laser, zref if zref is not None else zcur, sd / "focus" / "start",
+                                    warnings)
+                    focus_scans.append(fs)
+                    if fs.get("found"):
+                        zref = zcur = ctx.z_focus = fs["z_um"]
+                else:
+                    r = ctx.call("autofocus", timeout_s=240, how=af, **motor_args(prof))
+                    if r["ok"] and _f(r.get("z_um")) is not None:
+                        zref = zcur = ctx.z_focus = _f(r.get("z_um"))
+            if want_before:
+                snaps["before"] = _snapshot(ctx, name, sd, "before", bool(vd.get("with_laser")), warnings, laser)
+            t_a = time.time()
+            per_point = _native_map(ctx, name, study, sd, rng, laser, acq, x0, y0, zref, warnings)
+            t_acq += time.time() - t_a
+        except Stop as exc:
+            stop_exc = exc
+    for k, p in enumerate(pts if not native else []):
         if ctx.cancelled():
             stop_exc = Stop("cancelled", "cancel")
             break
@@ -1414,7 +1435,7 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
     spike_mode = study.get("acquire", {}).get("spike", "labspec")
     axes, ys = [], []
     for rec in per_point:
-        sp = spectra.read(rec["file"])
+        sp = rec.pop("_sp") if "_sp" in rec else spectra.read(rec["file"])
         try:
             shift, unit = spectra.to_shift(sp["x"], sp["meta"].get("x_unit", "nm"), laser)
         except ValueError as exc:
@@ -1554,6 +1575,118 @@ def _calibration_result(study, prof, rec, ref_lines, laser, grating, request, ch
     return res
 
 
+def _native_map(ctx: Ctx, name: str, study: dict, sd: Path, rng: dict, laser: float, acq: dict, x0, y0, zref,
+                warnings: list) -> list:
+    """LabSpec's own mapping engine: the axes as stage positions (or offsets, profile mapping.positions), one
+    detector window at the range's centre, exposure and accumulations in LabSpec's interface, SWIFT if asked;
+    the map comes back as one data object, split here into per-point records (with their grid indices)."""
+    prof = ctx.prof
+    mp = prof.get("mapping", {})
+    m = study.get("map", {})
+    absolute = mp.get("positions", "absolute") == "absolute"
+    params: dict = {}
+    refs = {"x": x0, "y": y0, "z": zref}
+    for ax in ("x", "y", "z"):
+        if not m.get(f"{ax}_um"):
+            continue
+        a, b, st = (float(v) for v in m[f"{ax}_um"])
+        if refs[ax] is None and absolute:
+            raise Stop(f"the {ax.upper()} position could not be read: a native map needs it", "study")
+        base = refs[ax] if absolute else 0.0
+        for v in (a, b):
+            _check_abs(prof, ax, (refs[ax] or 0.0) + v, f"native map {ax}")
+        params.update({f"{ax}_from": round(base + a, 3), f"{ax}_to": round(base + b, 3), f"{ax}_step": st})
+    flags = int(acq.get("mode", 10)) - 10
+    n = len(plan.positions(study))
+    per_s = float(acq.get("exposure_s") or 1.0) * int(acq.get("accumulations", 1)) + \
+        float(mp.get("native_point_s", 0.05))
+    _progress(sd, stage="LabSpec is mapping", point=0, points=n, eta_min=round(n * per_s / 60.0, 2))
+    r = ctx.call("map_native", timeout_s=600 + 3 * n * per_s, out=str(sd / name), center_nm=rng.get("from_nm"),
+                 from_nm=rng.get("from_nm"), to_nm=rng.get("to_nm"), exposure_s=acq.get("exposure_s"),
+                 accumulations=acq.get("accumulations", 1), mode_flags=flags, swift=bool(m.get("swift")),
+                 acq_time=mp.get("acq_time", "interface"), **params, **motor_args(prof))
+    if not r["ok"]:
+        if r.get("stopped_by"):
+            raise Stop("stopped by the operator in LabSpec" if r.get("stopped_by") == "operator" else "cancelled",
+                       "operator" if r.get("stopped_by") == "operator" else "cancel")
+        raise Stop(f"native map failed: {r.get('error')}", "study")
+    if str(r.get("native_ok")) != "1":
+        warnings.append("LabSpec did not save the map's .l6s file")
+    recs = parse_native_map(r["out"], study, prof, x0, y0, zref)
+    if len(recs) != n:
+        warnings.append(f"LabSpec's map has {len(recs)} points, the study {n}: check the axes (TESTING Q29)")
+    for rec in recs:
+        rec.update(file=r["out"], exposure_s=float(acq.get("exposure_s") or 1.0),
+                   accumulations=float(acq.get("accumulations", 1)), id=r.get("id"))
+    return recs
+
+
+def parse_native_map(path, study: dict, prof: dict, x0, y0, zref) -> list:
+    """The bridge's dump of a LabSpec map: axes (types, sizes, units, values) and the values in LabSpec's order
+    (profile mapping.data_order: each spectrum contiguous, or each wavelength's image contiguous; points with the
+    first spatial axis fastest). Each point becomes a record with its spectrum and grid indices (the study's
+    axes)."""
+    from .profile import read_text
+    meta: dict = {}
+    rows: list = []
+    for line in read_text(path).splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("#"):
+            k, _, v = line[1:].strip().partition("=")
+            meta[k.strip()] = v.strip()
+        else:
+            rows.append(line)
+    data = np.array([float(v) for row in rows for v in row.split(",") if v != ""], float)
+    types = [t.strip() for t in meta.get("axis_types", "").split(",")]
+    sizes = [int(float(v)) for v in meta.get("axis_sizes", "").split(",") if v.strip()]
+    units = [u.strip() for u in meta.get("axis_units", "").split(",")]
+    axis = np.array([float(v) for v in meta.get("axis_values", "").split(",") if v.strip()], float)
+    vals, pos_ = {}, 0
+    for t, sz in zip(types, sizes):
+        vals[t] = axis[pos_:pos_ + sz]
+        pos_ += sz
+    spec_t = next((t for t in types if t.lower().startswith("spectr")), None)
+    if spec_t is None:
+        raise Stop("the native map has no spectral axis", "study")
+    xs_spec = vals[spec_t]
+    ns = xs_spec.size
+    ui = types.index(spec_t)
+    x_unit = units[ui] if ui < len(units) and units[ui] else "nm"
+    sp_axes = [t for t in ("X", "Y", "Z") if t in vals and vals[t].size > 0]
+    shape = [vals[t].size for t in sp_axes]
+    npts = int(np.prod(shape)) if shape else 1
+    if data.size != npts * ns:
+        raise Stop(f"the native map holds {data.size} values, not {npts} x {ns}", "study")
+    order = prof.get("mapping", {}).get("data_order", "spectral_fastest")
+    spec = data.reshape(npts, ns) if order == "spectral_fastest" else data.reshape(ns, npts).T
+    m = study.get("map", {})
+    absolute = prof.get("mapping", {}).get("positions", "absolute") == "absolute"
+    refs = {"X": x0, "Y": y0, "Z": zref}
+    grid = {t: plan.axis_values(m[f"{t.lower()}_um"]) for t in ("X", "Y", "Z") if m.get(f"{t.lower()}_um")}
+    recs = []
+    for k in range(npts):
+        rem, idx = k, {}
+        for t, sz in zip(sp_axes, shape):          # the first spatial axis varies fastest
+            idx[t] = rem % sz
+            rem //= sz
+        ixyz = {"ix": 0, "iy": 0, "iz": 0}
+        stage, offs = {}, {}
+        for t in sp_axes:
+            v = float(vals[t][idx[t]])
+            off = v - (refs[t] or 0.0) if absolute else v
+            offs[t] = round(off, 4)
+            stage[f"{t.lower()}_um"] = v if absolute else (refs[t] or 0.0) + v
+            g = grid.get(t)
+            if g:
+                ixyz["i" + t.lower()] = int(np.argmin([abs(off - gv) for gv in g]))
+        recs.append({"point": k, "ixyz": ixyz, "stage": stage,
+                     "offset": {"x_um": offs.get("X", 0.0), "y_um": offs.get("Y", 0.0), "dz_um": offs.get("Z", 0.0)},
+                     "_sp": {"x": xs_spec, "y": spec[k], "meta": {"x_unit": x_unit, "y_unit": "cnt"}}})
+    return recs
+
+
 def _point_summary(r: dict) -> dict:
     keys = ("point", "offset", "stage", "file", "native", "t", "exposure_s", "accumulations", "max_counts",
             "saturated", "noise_sigma", "spikes", "from_cm1", "to_cm1", "peaks", "bands", "x_correction", "background")
@@ -1658,7 +1791,7 @@ def _map_result(name, study, per_point, axes, ys, sd: Path, process) -> dict:
         for f, vals in fields.items():
             g = np.full((nz, ny, nx), np.nan)
             for r, v in zip(per_point, vals):
-                p = pos[r["point"]]
+                p = r.get("ixyz") or pos[r["point"]]
                 if v is not None:
                     g[p["iz"], p["iy"], p["ix"]] = v
             grids[f"{qn}.{f}"] = g
@@ -1672,7 +1805,7 @@ def _map_result(name, study, per_point, axes, ys, sd: Path, process) -> dict:
         spec = np.full((len(per_point), ref.size), np.nan)
         for i, (xa, ya) in enumerate(zip(axes, ys)):
             spec[i] = np.interp(ref, xa, ya, left=np.nan, right=np.nan)
-        idx = np.array([[pos[r["point"]]["ix"], pos[r["point"]]["iy"], pos[r["point"]]["iz"]] for r in per_point])
+        idx = np.array([[(r.get("ixyz") or pos[r["point"]])[k] for k in ("ix", "iy", "iz")] for r in per_point])
         npz = sd / f"{name}_map.npz"
         np.savez_compressed(npz, shift_cm1=ref, spectra=spec, index_xyz=idx, x_um=np.array(xs),
                             y_um=np.array(yv), z_um=np.array(zs),

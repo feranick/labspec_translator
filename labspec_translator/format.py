@@ -1,5 +1,5 @@
 """format.py — the study format and its static checks (no instrument needed).
-Version: 2026.11.19.6
+Version: 2026.11.19.7
 """
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ TOP_KEYS = {"kind", "sample", "setup", "acquire", "focus", "points", "map", "ser
             "calibration", "background"}
 CAL_KEYS = {"reference", "lines_cm1", "tol_cm1", "adjust"}
 BG_KEYS = {"name", "laser_off"}
-DEPTH_KEYS = {"from_um", "to_um", "step_um", "refractive_index"}
+DEPTH_KEYS = {"from_um", "to_um", "step_um", "refractive_index", "engine", "swift"}
 MOVE_KEYS = {"x_um", "y_um", "to_um", "dz_um", "stay", "snapshot"}
 SPOT_KEYS = {"method", "feature_um", "refine", "range_um", "step_um", "line_cm1", "window_cm1", "exposure_s",
              "acq_exposure_s", "remember"}
@@ -31,7 +31,7 @@ ACQ_KEYS = {"range_cm1", "center_cm1", "exposure_s", "accumulations", "auto_expo
             "subtract_background"}
 AE_KEYS = {"target_counts", "min_s", "max_s", "test_s"}
 FOCUS_KEYS = {"autofocus", "every", "dz_um", "scan"}
-MAP_KEYS = {"x_um", "y_um", "z_um", "snake"}
+MAP_KEYS = {"x_um", "y_um", "z_um", "snake", "engine", "swift"}
 SERIES_KEYS = {"count", "interval_s"}
 PROCESS_KEYS = {"baseline", "peaks", "auto_peaks", "bands"}
 PEAK_KEYS = {"near_cm1", "window_cm1", "shape", "name"}
@@ -119,7 +119,9 @@ def study_format(status: dict | None = None) -> dict:
                     "line_cm1 (Si), exposure_s (0.3), acq_exposure_s (2), remember: true}; setup needs laser_nm and "
                     "objective",
             "points": "[{x_um, y_um, dz_um}] (spectrum kind): offsets from where the operator left the stage",
-            "map": "{x_um, y_um, z_um: [from, to, step] offsets; snake: true (default) for boustrophedon rows}",
+            "map": "{x_um, y_um, z_um: [from, to, step] offsets; snake: true (default) for boustrophedon rows; "
+                   "engine: auto | points (ls6t moves and acquires: checks and autofocus between points) | native "
+                   "(LabSpec's mapping engine: faster for large maps; one detector window; swift: true for SWIFT)}",
             "series": "{count, interval_s: seconds from one start to the next}",
             "process": "{baseline: {degree: 3} | false (polynomial, iterative; default degree 3), peaks: "
                        "[{name, near_cm1, window_cm1 (default 40), shape: pseudo_voigt | lorentz | gauss}], "
@@ -433,6 +435,8 @@ def validate_study(name: str, study: dict, prof: dict) -> dict:
                         errors.append(f"map.{ax}: the stage axis {motor!r} was not found by the discovery script")
     elif study.get("map") is not None:
         errors.append("map: only with kind 'map'")
+    if kind == "map" and isinstance(study.get("map"), dict):
+        _validate_engine(study, study["map"], prof, errors, warnings)
     if study.get("points") is not None:
         if kind != "spectrum":
             errors.append("points: only with kind 'spectrum'")
@@ -562,6 +566,30 @@ def _merge(out: dict, inner: dict, errors: list, warnings: list) -> dict:
             res[k] = inner[k]
     res.update(out)
     return res
+
+
+def _validate_engine(study: dict, m: dict, prof: dict, errors: list, warnings: list):
+    eng = m.get("engine", "auto")
+    if eng not in ("auto", "points", "native"):
+        errors.append("map.engine: auto, points or native")
+        return
+    if m.get("swift") is not None and not isinstance(m["swift"], bool):
+        errors.append("map.swift: true or false")
+    if m.get("swift") and eng != "native":
+        errors.append("map.swift: only with engine 'native' (SWIFT is LabSpec's fast mapping)")
+    if eng == "native":
+        a = study.get("acquire") or {}
+        if a.get("range_cm1"):
+            errors.append("map.engine 'native': one detector window only: give acquire.center_cm1, not range_cm1 "
+                          "(or engine 'points' for an extended range)")
+        if a.get("exposure_s") == "auto":
+            errors.append("map.engine 'native': a fixed exposure_s (auto-exposure is per point: engine 'points')")
+        if (study.get("focus") or {}).get("every"):
+            errors.append("map.engine 'native': no autofocus between points (focus.every needs engine 'points')")
+        if (study.get("focus") or {}).get("autofocus"):
+            warnings.append("map.engine 'native': the autofocus runs once, before the map")
+        warnings.append("map.engine 'native': LabSpec runs the map; ls6t checks the spectra when it ends (a stop "
+                        "still cancels it)")
 
 
 def _validate_scan(sc: dict, prof: dict, errors: list):

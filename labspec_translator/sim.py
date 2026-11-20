@@ -1,5 +1,5 @@
 """sim.py — a simulated LabSpec + XploRA behind the same bridge protocol as ls6t_bridge.vbs.
-Version: 2026.11.19.6
+Version: 2026.11.19.7
 
 It answers every verb of the bridge with the same keys, so the runner, the checks and the MCP server are tested
 without the instrument (LS6T_MODE=sim, and the tests). The simulated sample is a silicon wafer with a graphene
@@ -447,6 +447,70 @@ class SimLabSpec:
         if n:
             res.update(max_value=maxv, t_max_s=tmax, period_s=round(t_sim / n, 3))
         return res
+
+    def v_map_native(self, p):
+        """LabSpec's mapping engine: the grid of the axes given (absolute stage positions), X fastest; one window at
+        center_nm; written like the bridge's dump (spectra contiguous), each spectrum measured at its position."""
+        out = p.get("out")
+        if not out:
+            return {"ok": 0, "error": "map_native needs 'out'"}
+        ex = float(p.get("exposure_s", 1.0))
+        acc = max(1, int(float(p.get("accumulations", 1))))
+        axes = []
+        for ax, motor in (("x", "X"), ("y", "Y"), ("z", "Z")):
+            if p.get(f"{ax}_from") not in (None, ""):
+                a, b, st = float(p[f"{ax}_from"]), float(p[f"{ax}_to"]), float(p[f"{ax}_step"])
+                n = int(math.floor(abs(b - a) / st + 1e-9)) + 1
+                sign = 1.0 if b >= a else -1.0
+                axes.append((motor, [a + sign * i * st for i in range(n)]))
+        if not axes:
+            return {"ok": 0, "error": "no mapping axis enabled"}
+        c = float(p.get("center_nm") or 0) or float(p.get("from_nm") or 0)
+        nm = self._axis_nm(c, c)
+        las, _ = self._cur("Laser")
+        shape = [len(v) for _, v in axes]
+        npts = int(np.prod(shape))
+        speed = 0.02 if str(p.get("swift", "0")) == "1" else 0.05
+        rows = []
+        keep = {m: self.m[m]["value"] for m, _ in axes}
+        for k in range(npts):
+            rem = k
+            for motor, vals in axes:
+                self.m[motor]["value"] = vals[rem % len(vals)]
+                rem //= len(vals)
+            who = self._wait(ex * acc + speed)
+            if who:
+                for m_, v_ in keep.items():
+                    self.m[m_]["value"] = v_
+                return {**self._stopped(who), "cancelled": 1}
+            xs_ = self._xshift()
+            if xs_:
+                rep = 1e7 / las - 1e7 / nm
+                nm_true = 1e7 / (1e7 / las - (rep - xs_[0]) / xs_[1])
+            else:
+                nm_true = nm
+            rate = self._signal_per_s(nm_true) + self._lamp(nm_true)
+            fr = np.mean([self.rng.poisson(np.clip(rate * ex, 0, None)).astype(float) + 300.0
+                          + self.rng.normal(0, 4.0, nm.size) for _ in range(acc)], axis=0)
+            rows.append(np.minimum(fr, FULL_SCALE))
+        self.acquisitions += npts
+        data = np.concatenate(rows)
+        types = ["Spectr"] + [m for m, _ in axes] + ["Intens"]
+        sizes = [nm.size] + shape + [0]
+        units = ["nm"] + ["mkm"] * len(axes) + ["cnt"]
+        axis_vals = np.concatenate([nm] + [np.array(v) for _, v in axes])
+        path = Path(out + ".map.txt")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(f"# kind=map\n# id=950\n# axis_types={','.join(types)}\n# axis_sizes={','.join(map(str, sizes))}\n")
+            fh.write(f"# axis_units={','.join(units)}\n")
+            fh.write("# axis_values=" + ",".join(f"{v:.5f}" for v in axis_vals) + "\n")
+            fh.write(f"# data_dims={data.size}\n")
+            for i in range(0, data.size, 256):
+                fh.write(",".join(f"{v:.2f}" for v in data[i:i + 256]) + "\n")
+        return {"id": 950, "out": str(path), "native_ok": 0, "text_ok": 0, "pixels": int(data.size),
+                "axes": " ".join(m for m, _ in axes), "seconds_map": round(npts * (ex * acc + speed), 2),
+                "detector_temp_c": self.temp_c}
 
     def v_confirm(self, p):
         if (self.dir / "sim_confirm_no").exists():

@@ -16,7 +16,7 @@ it runs **locally**: on the instrument PC, next to the Claude desktop app. It ha
 machines. Unlike the other translators, the backend has no Python API: LabSpec is automated with VBScript
 (*LabSpec 5/6 Automation*, HORIBA, 2018). That is why the bridge script exists.
 
-First instrument: **XploRA** (LabSpec 6, Windows 11). Version 2026.11.19.6.
+First instrument: **XploRA** (LabSpec 6, Windows 11). Version 2026.11.19.7.
 
 **Scope of version 1**
 
@@ -51,6 +51,7 @@ detectors. See `planning.md`.
 - [Safety and the operator](#safety-and-the-operator)
 - [Video snapshots: where the beam is](#video-snapshots-where-the-beam-is)
 - [Stage and focus](#stage-and-focus)
+- [Mapping engines](#mapping-engines)
 - [Depth profiles](#depth-profiles)
 - [The spectral zero: calibration](#the-spectral-zero-calibration)
 - [White-light background](#white-light-background)
@@ -146,7 +147,7 @@ Studies are given as `{name: study}`; names use letters, digits, `_` and `-`. An
 | `move` | (kind `move`) `{x_um, y_um` or `to_um: [x, y]` (stage coordinates from a snapshot: the beam lands there), `dz_um, stay: true, snapshot: true}`; `setup` may only give the objective |
 | `spot` | (kind `spot`) `{method: auto, shutter, acquisition or raman; feature_um: [x, y] (from a snapshot) or "auto"; refine: true; range_um, step_um (by objective: x100 4 and 0.5 µm); line_cm1 (Si); exposure_s (0.3); acq_exposure_s (2); remember: true}`; `setup` needs `laser_nm` and `objective` |
 | `points` | (spectrum) `[{x_um, y_um, dz_um}]`: offsets from where the operator left the stage |
-| `map` | `{x_um, y_um, z_um: [from, to, step]}` offsets in µm; `snake: true` (default): alternate rows reversed |
+| `map` | `{x_um, y_um, z_um: [from, to, step]}` offsets in µm; `snake: true` (default): alternate rows reversed; `engine`: `auto`, `points` or `native` (LabSpec's mapping engine), `swift: true` (native only) |
 | `series` | `{count, interval_s}`: seconds from one start to the next |
 | `depth` | (kind `depth`) `{from_um (−5: above the focus), to_um (20), step_um (1), refractive_index}`: nominal depth is the stage displacement into the sample from the focus; with `setup`, `acquire`, `process`, `focus`, `images` as for a spectrum |
 | `calibration` | (kind `calibration`) `{reference: si, polystyrene, cyclohexane, naphthalene or diamond; lines_cm1: [...] (your own); tol_cm1 (1); adjust: none, labspec or ls6t}` |
@@ -265,6 +266,35 @@ Both are motorised on the XploRA and driven through LabSpec: `MoveXY` for the st
   request. With `stay: false`, the request ends back at the previous home.
 - **For the maintainer**: `ls6t bridge call move_xy x_um=... y_um=...` and `ls6t bridge call move motor=Z ...`, one
   command at a time.
+
+## Mapping engines
+
+Maps (and depth profiles) run on one of two engines (`map.engine`, or `depth.engine`):
+
+| | `points` | `native` |
+|---|---|---|
+| Who runs it | ls6t: a stage move and an acquisition per point, through the bridge | LabSpec's own mapping engine (`SetMappingParams` per axis, `Acq` spectral image); SWIFT fast mapping with `swift: true` |
+| Speed | exposure + about 0.5–1 s per point | exposure + LabSpec's overhead (about 0.05 s, measured on the instrument: TESTING T6.7); SWIFT faster still |
+| Spectral range | any (extended range stitched) | one detector window (`acquire.center_cm1`) |
+| Between points | checks, autofocus every N points, auto-exposure, live view through `Map()` | nothing: LabSpec runs the map; the autofocus (if any) runs once before |
+| Stop | immediate, after any point | cancels LabSpec's map (the partial map is not returned) |
+| Checks | every spectrum, as it comes | every spectrum, when the map ends |
+
+`auto` (the default) picks `native` for maps of `mapping.native_min_points` (400) points or more that need nothing
+between points (a single window, a fixed exposure, no autofocus every N points), and `points` otherwise.
+
+**How the native engine works:**
+
+1. ls6t converts the study's offsets into stage positions (`mapping.positions`: `absolute`, or `relative` if
+   LabSpec turns out to take offsets).
+2. It centres the spectrometer, sets the exposure and accumulations in LabSpec's interface, enables the axes, and
+   starts the map. The bridge waits, writing its heartbeat and watching for stops.
+3. The bridge writes the whole map for ls6t (axes and values) and saves it as `.l6s` and as LabSpec's text export.
+4. ls6t splits it into spectra (`mapping.data_order`) and runs the same analysis as for point-by-point maps.
+
+The manual leaves several points open: absolute or relative positions, the order of the values, which exposure
+the engine takes, and how fast a large map can be written out from a script. They are settings in the profile's
+`mapping` block, to confirm in TESTING T6.7 (Q29–Q33).
 
 ## Depth profiles
 
@@ -453,6 +483,7 @@ covered, a missing profile, and expected values out of tolerance.
 | `depth_profile` | a 12 µm polystyrene film (n = 1.59) on Si: Si rises and PS falls at 12 µm (corrected), PS rises at the surface | 12.63; 12.28; 0.31 |
 | `calibration_zero` | the scale reads 1.5 cm⁻¹ high; the operator corrects LabSpec's zero when asked; the second check passes | +1.52, then +0.04 |
 | `white_light` | a background with the white light on and the laser blocked by the operator: no Raman line in it | clean |
+| `native_map` | the graphene map on LabSpec's engine: the same 9 graphene points as point by point | 9; 1585.0 |
 | `operator_stop` | the operator stops after 4 of 10 map points: partial, unreliable, `stopped_by: operator` | as expected |
 
 On the instrument, the standing check is the `calibration` study on a silicon wafer (or polystyrene, for the scale
@@ -516,7 +547,7 @@ names.
 
 Verbs: `ping`, `status`, `discover`, `move` (`motor`, `mode`: value, label or index, `value`), `move_xy`,
 `autofocus`, `acquire`, `view` (live map or profile in LabSpec: create, add, save), `save`, `remove`, `confirm`,
-`message` (status bar), `safe`, `resume`, `quit`, `video` (a frame: `out`, `settle_s`, `laser_s`,
+`message` (status bar), `safe`, `resume`, `quit`, `map_native` (LabSpec's mapping engine), `video` (a frame: `out`, `settle_s`, `laser_s`,
 `m_laser_shutter`, `formats`, `camera`; written as `<out>.video.txt`, with `<out>.nolaser.video.txt` when the
 laser was on), `guide` (the fast loop: `text`, `mode`, `target`, `from_nm`/`to_nm`, the line's window
 `lo_nm`/`hi_nm` and `lo_cm1`/`hi_cm1`, `exposure_s`, `max_s`, `stable_n`, `drop_frac`, `sat`, `out`, `ui`),
@@ -592,6 +623,7 @@ frames, LabSpec's image files, `snapshot.json`); a study's frames go to its `vid
 
 | Version | Changes |
 |---|---|
+| 2026.11.19.7 | Native mapping: `map.engine` (`auto`, `points`, `native`) and `swift`; bridge verb `map_native` (`SetMappingParams` per axis, interface exposure and accumulations, spectrometer centred, SWIFT, `Acq` spectral image, wait and cancel, the map written for ls6t and saved as `.l6s` and text); ls6t splits it into spectra and analyses it like point-by-point maps; profile `mapping` settings for what the manual leaves open; benchmark `native_map`. |
 | 2026.11.19.6 | Depth profiles (kind `depth`: Z steps into the sample, profiles and interfaces, refractive-index correction; profile `stage.z_into_sample`; Z-only maps get the same analysis and a live profile in LabSpec), the spectral zero (kind `calibration` with `reference`, `lines_cm1`, `adjust: labspec` (guided correction of LabSpec's zero, then a new check) or `ls6t` (a remembered correction applied to later spectra), offset and scale fit), white-light backgrounds (kind `background`, `acquire.subtract_background`; bridge `acquire` with `laser_off`), tool and command `references`; INSTALL.md (the installation, out of the README) and FUNCTIONALITY.md; benchmarks `depth_profile`, `calibration_zero`, `white_light`. |
 | 2026.11.19.5 | The laser spot: kind `spot` (with the shutter, in a frame during an acquisition, or by the Raman signal over a small feature: grid scan, dip or peak, offset = feature − stage), remembered per objective and laser with drift (`spot.json`, `ls6t spot status/forget`, tool `spot_status`); snapshots list features to aim at and mark the beam with the remembered offset; `move.to_um` puts the beam on a picked point; bridge `video` takes `during_acq_s`; benchmarks `spot_video`, `spot_raman`. |
 | 2026.11.19.4 | Stage and focus: kind `move` (no laser; to an offset with a snapshot; `stay` makes it the home spot), kind `focus` and `focus.autofocus: "scan"` (focus by the Raman line: Z steps, Gaussian fit, back to the start without a clear best), the request's home spot and focus (Z then XY back to them at the end of a normal request), absolute Z limit (`stage.z_um`), the guided loop's metric robust to cosmic rays (3-point median), benchmark `focus_scan`. |

@@ -1,6 +1,6 @@
 # labspec-translator (ls6t): what it can do
 
-This is the complete list of functions in version 2026.11.19.6. It covers:
+This is the complete list of functions in version 2026.11.19.7. It covers:
 
 - what a study can ask for;
 - the tools an LLM sees;
@@ -12,7 +12,7 @@ How it all fits together: [README.md](README.md). Installation: [INSTALL.md](INS
 [TESTING.md](TESTING.md).
 
 Everything below runs on the built-in simulator and is covered by tests and benchmarks. Nothing has run on the
-instrument yet: TESTING.md lists what remains to be confirmed there (Q1–Q28).
+instrument yet: TESTING.md lists what remains to be confirmed there (Q1–Q33).
 
 ---
 
@@ -23,7 +23,7 @@ A request is `{name: study}`; each study has a `kind`.
 | Kind | What it does | Main keys | Laser |
 |---|---|---|---|
 | `spectrum` | One spectrum at the current spot, or one per entry of `points` (offsets in µm) | `setup`, `acquire`, `points`, `focus`, `process` | yes |
-| `map` | A grid of spectra: XY maps, line scans, Z stacks, XYZ; snake order; a live map in LabSpec | `map.x_um / y_um / z_um = [from, to, step]` | yes |
+| `map` | A grid of spectra: XY maps, line scans, Z stacks, XYZ; on ls6t's point-by-point engine (snake order, checks and autofocus between points, a live map in LabSpec) or LabSpec's own engine (faster for large maps; SWIFT) | `map.x_um / y_um / z_um = [from, to, step]`, `engine`, `swift` | yes |
 | `depth` | A depth profile at the current spot: Z steps into the sample; each peak and band against depth; interfaces; depth corrected for the refractive index; a live profile in LabSpec | `depth.from_um, to_um, step_um, refractive_index` | yes |
 | `series` | Repeated spectra at one spot (time series); a live profile in LabSpec | `series.count, interval_s` | yes |
 | `calibration` | The spectral zero: reference lines (Si, polystyrene, cyclohexane, naphthalene, diamond, or your own) against their true positions; offset, and scale with several lines; `adjust`: `labspec` (the operator corrects LabSpec's zero, ls6t checks again) or `ls6t` (a remembered correction applied to later spectra) | `calibration.reference, lines_cm1, tol_cm1, adjust` | yes |
@@ -115,6 +115,7 @@ read them, not change them.
 | `autofocus` | LabSpec's laser, Raman or video autofocus |
 | `acquire` | A spectrum (range or one window; exposure or auto-exposure; spike removal; dark); written with LabSpec's acquisition info; optionally saved as `.l6s`; `laser_off` keeps the laser shutter closed (white-light backgrounds) |
 | `view` | Live map or profile in LabSpec, growing as points are measured; saved at the end |
+| `map_native` | A map on LabSpec's own engine: axes set with `SetMappingParams`, the interface's exposure and accumulations, the spectrometer centred, SWIFT on or off, the spectral image acquired, waited for (or cancelled), written out for ls6t, saved as `.l6s` and text |
 | `video` | A video frame (cloned from the live video), written for ls6t and saved in LabSpec's image formats; with the laser shutter opened briefly, or half-way through a Raman acquisition, so the beam shows |
 | `guide` | The fast loop of a guided adjustment: short acquisitions, the line's signal, LabSpec's dialog (or the status bar), STOP |
 | `confirm`, `notice` | Yes/No and OK/Cancel questions to the operator |
@@ -221,9 +222,9 @@ profile. The shutter mode is restored on every path.
   - a white light;
   - beam offset, misalignment, defocus, spectral scale error, cosmic rays and saturation;
   - an operator who confirms, stops, aborts, runs AutoAlignment or corrects the zero.
-- **Benchmarks** (`ls6t bench`, 13 cases with known answers):
+- **Benchmarks** (`ls6t bench`, 14 cases with known answers):
   - `si_calibration`, `graphene_map`, `extended_range`, `saturation`, `series`;
   - `guided_focus`, `focus_scan`, `spot_raman`, `spot_video`;
-  - `depth_profile`, `calibration_zero`, `white_light`, `operator_stop`.
-- **Test suite** (`pytest`, 72 tests), which also checks the LabSpec scripts' structure.
+  - `depth_profile`, `calibration_zero`, `white_light`, `native_map`, `operator_stop`.
+- **Test suite** (`pytest`, 75 tests), which also checks the LabSpec scripts' structure.
 - **Instrument tests** with the maintainer: [TESTING.md](TESTING.md).

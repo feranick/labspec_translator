@@ -797,3 +797,45 @@ def test_background_validation():
     assert not r["ok"] and any("no such background" in e for e in r["errors"])
     r = F.validate({"b": {"kind": "background", "setup": SETUP, "background": {"name": "a b"}}})["b"]
     assert not r["ok"] and any("background.name" in e for e in r["errors"])
+
+
+# --------------------------------------------------------------------------------------------- native maps
+
+def _flake_map(engine):
+    return {"m": {"kind": "map", "sample": {"name": "flake"}, "setup": dict(SETUP, grating=600),
+                  "acquire": {"center_cm1": 2000, "exposure_s": 0.5},
+                  "map": {"x_um": [-4, 4, 2], "y_um": [0, 2, 1], "engine": engine},
+                  "process": {"peaks": [{"name": "G", "near_cm1": 1585}]}}}
+
+
+def test_native_map_matches_points():
+    res = {}
+    for eng in ("points", "native"):
+        st = run_inline(_flake_map(eng))
+        res[eng] = st["studies"]["m"]
+        assert res[eng]["reliable"] and res[eng]["points_measured"] == 15
+    g = {e: json.loads(Path(r["map"]["files"]["json"]).read_text())["grids"]["G.position_cm1"][0]
+         for e, r in res.items()}
+    found = {e: [[v is not None for v in row] for row in g[e]] for e in g}
+    assert found["points"] == found["native"]                  # the same points see graphene
+    assert res["native"]["map"]["summary"]["G"]["position_cm1"]["mean"] == pytest.approx(1585, abs=1)
+
+
+def test_native_map_operator_stop():
+    bdir = config.active_bridge_dir()
+    S.ensure(bdir)
+    (bdir / "sim_operator_stop_after").write_text("0")
+    st = run_inline(_flake_map("native"))
+    assert st["stopped_by"] == "operator" and not st["studies"]["m"]["ok"]
+
+
+def test_native_map_validation_and_auto():
+    r = F.validate({"m": {"kind": "map", "setup": SETUP, "acquire": {"range_cm1": [100, 3000]},
+                          "map": {"x_um": [0, 1, 1], "engine": "native"}}})["m"]
+    assert not r["ok"] and any("one detector window" in e for e in r["errors"])
+    r = F.validate({"m": {"kind": "map", "setup": SETUP, "acquire": {"center_cm1": 520},
+                          "map": {"x_um": [0, 1, 1], "swift": True}}})["m"]
+    assert not r["ok"] and any("swift" in e for e in r["errors"])
+    big = {"kind": "map", "acquire": {"center_cm1": 520}, "map": {"x_um": [0, 19, 1], "y_um": [0, 19, 1]}}
+    assert plan.map_engine(big, P.load()) == "native"
+    assert plan.map_engine(dict(big, focus={"autofocus": "laser", "every": 10}), P.load()) == "points"

@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.19.6)
+## Architecture (version 2026.11.19.7)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -101,13 +101,22 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   warn). Tool/command references. INSTALL.md split from the README; FUNCTIONALITY.md. Simulator: sim_film,
   sim_xshift, sim_lamp, laser blocked by the operator. 72 tests; 13/13 benchmarks. TESTING T4.7, T4.8, T6.3,
   Q26-Q28.
+- 2026-11-19, 2026.11.19.7: native mapping. map.engine auto|points|native (+swift); auto -> native from
+  mapping.native_min_points (400) when nothing is needed between points (one window, fixed exposure, no autofocus
+  every N). Bridge map_native: Spectro to the centre, SetMappingParams (all off, then x/y/z by step), PutValue
+  LabSpecExposureTime/Accumulation, SWIFT, Acq(ACQ_SPECTRAL_IMAGE, -1 or exposure), wait/cancel, WriteData (the
+  generic writer the video uses) + Save .l6s and txt. ls6t parse_native_map: axes, data order (profile), first
+  spatial axis fastest -> per-point records with grid indices, analysed like points maps. The open points are
+  profile settings (mapping.positions, data_order, acq_time, native_point_s) for TESTING T6.7 (Q29-Q33).
+  75 tests; 14/14 benchmarks (native_map = the points map).
 
 ## To do next
 
-1. **At the instrument**: carry out TESTING.md (T0-T9, T5b-T5d) with the maintainer; record the answers to Q1-Q28 here and
+1. **At the instrument**: carry out TESTING.md (T0-T9, T5b-T5d) with the maintainer; record the answers to Q1-Q33 here and
    change the code where they differ from the assumptions (README "Assumptions about LabSpec").
 2. Put the measured times in the profile's `timing` (T3, T7.2).
-3. Later: native LabSpec maps (SetMappingParams + ACQ_SPECTRAL_IMAGE, also on Z) for large fast maps; Linkam temperature
+3. Later: trigger scripts during native maps (per-point actions: Send, PutDataInfo); script-controlled motors
+   as map axes (temperature, polariser); Linkam temperature
    series (ManageTemperature has rates only: set points need RS232 through Send); a translators.json entry
    (llmt's bin/ scripts are bash: decide how a Windows install fits llm-translators).
 

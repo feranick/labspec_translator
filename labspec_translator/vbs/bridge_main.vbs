@@ -592,12 +592,18 @@ End Sub
 ' Writes image `id` (a video frame) as '# key=value' header lines (axis types, sizes, units and values), then its
 ' pixel values, comma-separated, 256 per line, in LabSpec's order. Python decodes and draws it.
 Function WriteImage(id, outPath, res)
+    WriteImage = WriteData(id, outPath, res, "video")
+End Function
+
+' Writes data object `id` (a video frame, a map...) as '# key=value' header lines (axis types, sizes, units, values)
+' and its values in LabSpec's order, comma-separated, 256 per line.
+Function WriteData(id, outPath, res, kind)
     Dim data, at, sz, au, ax, ts, tmp, i, j, n, line, d2, n1, n2
-    WriteImage = False
+    WriteData = False
     On Error Resume Next
     LabSpec.GetValue id, "Data", data
     If Err.Number <> 0 Or Not IsArray(data) Then
-        Fail res, ErrText("GetValue Data (video)")
+        Fail res, ErrText("GetValue Data (" & kind & ")")
         Err.Clear
         Exit Function
     End If
@@ -613,7 +619,7 @@ Function WriteImage(id, outPath, res)
         Err.Clear
         Exit Function
     End If
-    ts.WriteLine "# kind=video"
+    ts.WriteLine "# kind=" & kind
     ts.WriteLine "# id=" & id
     If IsArray(at) Then
         line = ""
@@ -691,7 +697,7 @@ Function WriteImage(id, outPath, res)
     End If
     On Error GoTo 0
     res("pixels") = n
-    WriteImage = True
+    WriteData = True
 End Function
 
 ' Waits `seconds`, answering stop requests and writing the heartbeat; False when stopped (gStoppedBy says who)
@@ -1177,6 +1183,138 @@ Sub VNotice(cmd, res)
     End If
 End Sub
 
+' A map run by LabSpec's own engine. Axes: x/y/z (from, to, step in LabSpec's stage units, as ls6t computed them),
+' each on its motor (m_x, m_y, m_z); the spectrometer centred at center_nm (one window); exposure and accumulations
+' set in LabSpec's interface; SWIFT on or off; then ACQ_SPECTRAL_IMAGE and a wait (stop checks, heartbeat). The
+' map is written for ls6t (out & ".map.txt": axes and values) and saved as .l6s (and LabSpec's text export).
+Sub VMapNative(cmd, res)
+    Dim ax, i, mname, f, t, st, n, ex, acc, sw, swOk, id, t0, started, who, tmo, outBase, r, mode, tval, axes
+    outBase = GetP(cmd, "out", "")
+    ex = ParseNum(GetP(cmd, "exposure_s", "1"))
+    acc = CLng(ParseNum(GetP(cmd, "accumulations", "1")))
+    tmo = ParseNum(GetP(cmd, "timeout_s", "36000"))
+    If outBase = "" Then
+        Fail res, "map_native needs 'out'"
+        Exit Sub
+    End If
+    On Error Resume Next
+    ' the spectrometer centre (one window)
+    If GetP(cmd, "center_nm", "") <> "" Then
+        r = LabSpec.MoveMotor("Spectro", ParseNum(GetP(cmd, "center_nm", "0")), "", LS_MOTOR_VALUE + LS_MOTOR_NO_WAIT)
+        If Err.Number <> 0 Then
+            Fail res, ErrText("Spectro")
+            Err.Clear
+            Exit Sub
+        End If
+        If r > 0 Then WaitMotor "Spectro", r, 120, res
+    End If
+    ' the axes: all off, then the ones asked for
+    LabSpec.SetMappingParams "", 0, 0, 0, LS_DISABLE_ALL_MOTORS, 0
+    axes = ""
+    For Each ax In Array("x", "y", "z")
+        If GetP(cmd, ax & "_from", "") <> "" Then
+            mname = GetP(cmd, "m_" & ax, UCase(ax))
+            f = ParseNum(GetP(cmd, ax & "_from", "0"))
+            t = ParseNum(GetP(cmd, ax & "_to", "0"))
+            st = ParseNum(GetP(cmd, ax & "_step", "1"))
+            LabSpec.SetMappingParams mname, f, t, st, LS_INCREMENT_STEP, LS_ENABLE_AXIS
+            axes = axes & mname & " "
+        End If
+    Next
+    If Err.Number <> 0 Then
+        Fail res, ErrText("SetMappingParams")
+        Err.Clear
+        Exit Sub
+    End If
+    res("axes") = Trim(axes)
+    ' exposure and accumulations in the interface; SWIFT
+    LabSpec.PutValue 0, "LabSpecExposureTime", ex
+    LabSpec.PutValue 0, "LabSpecAccumulation", acc
+    sw = GetP(cmd, "swift", "0")
+    LabSpec.GetValue 0, "SWIFT", swOk
+    Err.Clear
+    If sw = "1" Then
+        If CStr(swOk) = "-1" Then
+            Fail res, "SWIFT is not available with this configuration"
+            Exit Sub
+        End If
+        n = 1
+        LabSpec.PutValue 0, "SWIFT", n
+    Else
+        n = 0
+        LabSpec.PutValue 0, "SWIFT", n
+    End If
+    Err.Clear
+    ' start
+    mode = LS_ACQ_SPECTRAL_IMAGE + CLng(ParseNum(GetP(cmd, "mode_flags", "0")))
+    tval = -1
+    If GetP(cmd, "acq_time", "interface") = "exposure" Then tval = ex
+    For i = 1 To 50
+        id = LabSpec.GetAcqID()
+        If Err.Number <> 0 Or id = -1 Then Exit For
+        LabSpec.Pause 20
+    Next
+    Err.Clear
+    LabSpec.Acq mode, tval, acc, ParseNum(GetP(cmd, "from_nm", "0")), ParseNum(GetP(cmd, "to_nm", "0"))
+    If Err.Number <> 0 Then
+        Fail res, ErrText("Acq (spectral image)")
+        Err.Clear
+        Exit Sub
+    End If
+    t0 = Timer
+    started = False
+    Do
+        id = LabSpec.GetAcqID()
+        If Err.Number <> 0 Then
+            Fail res, ErrText("GetAcqID")
+            Err.Clear
+            Exit Sub
+        End If
+        If id > 0 Then Exit Do
+        If id = -2 And (started Or Elapsed(t0) > 1) Then
+            gHalted = True
+            gStoppedBy = "operator"
+            ClosePopup
+            Exit Sub
+        End If
+        If id = 0 Then started = True
+        If id = -1 And Not started And Elapsed(t0) > 30 Then
+            Fail res, "the map did not start (LabSpec reports no acquisition in progress)"
+            Exit Sub
+        End If
+        who = StopRequested()
+        If who <> "" Then
+            LabSpec.Acq LS_ACQ_CANCEL, 0, 0, 0, 0
+            gStoppedBy = who
+            res("cancelled") = 1
+            Exit Sub
+        End If
+        If Elapsed(t0) > tmo Then
+            LabSpec.Acq LS_ACQ_CANCEL, 0, 0, 0, 0
+            Fail res, "the map did not finish in " & tmo & " s (cancelled)"
+            Exit Sub
+        End If
+        BeatNow
+        LabSpec.Pause 200
+    Loop
+    Err.Clear
+    On Error GoTo 0
+    res("id") = id
+    res("seconds_map") = Elapsed(t0)
+    If WriteData(id, outBase & ".map.txt", res, "map") Then res("out") = outBase & ".map.txt"
+    On Error Resume Next
+    r = LabSpec.Save(id, outBase & ".l6s", "")
+    res("native_ok") = Bit(Err.Number = 0 And r = 0)
+    Err.Clear
+    r = LabSpec.Save(id, outBase & ".labspec.txt", "txt")
+    res("text_ok") = Bit(Err.Number = 0 And r = 0)
+    Err.Clear
+    LabSpec.Exec id, LS_SHOW_DATA, r
+    Err.Clear
+    On Error GoTo 0
+    res("detector_temp_c") = DetectorTemp()
+End Sub
+
 Sub VConfirm(cmd, res)
     Dim b
     On Error Resume Next
@@ -1307,6 +1445,7 @@ Sub HandleFile(path)
                 On Error GoTo 0
             Case "safe": VSafe cmd, res
             Case "video": VVideo cmd, res
+            Case "map_native": VMapNative cmd, res
             Case "guide": VGuide cmd, res
             Case "notice": VNotice cmd, res
             Case "resume": VResume cmd, res

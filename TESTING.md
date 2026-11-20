@@ -12,7 +12,7 @@ stops and cancel on the simulator, and `ls6t bench` gives known answers. What re
 LabSpec and hardware. The plan goes from no laser and no motion to Claude driving a full map, in stages. Each stage
 starts only when the previous one passed.
 
-Version under test: 2026.11.19.6 (bridge protocol 1).
+Version under test: 2026.11.19.7 (bridge protocol 1).
 
 ---
 
@@ -81,6 +81,11 @@ The vendor manual (2018) leaves these open. Each is answered by the test listed.
 | Q26 | Which Z direction focuses deeper into the sample (`stage.z_into_sample`)? Does a depth profile through a film of known thickness give it back with the refractive index? | T6.3 |
 | Q27 | What are LabSpec's spectral calibration settings on this system (Zero, Koeff, laser wavelength...) and where are they? Does correcting them as ls6t says bring the line back? | T4.7 |
 | Q28 | Can the white light stay on during acquisitions, and does a background with the laser off (shutter, or *Laser Off*) remove it cleanly? | T4.8 |
+| Q29 | Native maps: does `SetMappingParams` take absolute stage positions or offsets (`mapping.positions`)? Does the map have the asked points? | T6.7 |
+| Q30 | Native maps: does `Acq(ACQ_SPECTRAL_IMAGE, -1, ...)` use the interface's exposure and accumulations set by `PutValue`, or does it need them in `Acq` (`mapping.acq_time`)? Which spectral window does it use? | T6.7 |
+| Q31 | Native maps: does `GetAcqID` return the map when it ends, and does `ACQ_CANCEL` stop it? | T6.7 |
+| Q32 | Native maps: in which order are the values in `GetValue(map, "Data")` (`mapping.data_order`), and how long does writing out a 50 × 50 map take? Does `Save(map, "...txt", "txt")` write LabSpec's text export? | T6.7 |
+| Q33 | Is SWIFT available on this XploRA (`GetValue SWIFT`), and how much faster is it? Time per point native vs point by point (`mapping.native_point_s`) | T6.7 |
 | Q25 | How much does the beam drift from LabSpec's marker over a day, between objectives, after AutoAlignment? | T5e.3 |
 | Q21 | Does the focus scan find the same focus as the maintainer (and as LabSpec's autofocus) on Si and on a real sample? Is 1 µm a good step at x100, and what at x50 and x10? | T6.5 |
 | Q22 | Does the stage return home and Z to the focus at the end of a request, and does a `move` with `stay` change the next request's start? | T6.6 |
@@ -474,6 +479,23 @@ Pass:
   (`state.json` → `returned`).
 - Run a `move` with `"stay": false`. Pass: the request ends back at the previous spot.
 
+**T6.7 Native maps (Q29–Q33).** On the contrast sample (or the Si wafer with dust), x100, a short exposure.
+
+1. A small native map: `{"n": {"kind": "map", "sample": {"name": "..."}, "setup": {...}, "acquire": {"center_cm1":
+   520, "exposure_s": 0.2}, "map": {"x_um": [-4, 4, 1], "y_um": [-2, 2, 1], "engine": "native"}, "images": true}}`.
+   Pass: LabSpec maps the same area as the point-by-point map of the same study with `"engine": "points"`. Compare
+   the two maps' images: same features in the same places, so positions and data order are right (Q29, Q32).
+   - If the map lands elsewhere: `ls6t profile set mapping.positions relative`.
+   - If its image is scrambled: `mapping.data_order wavelength_fastest`.
+   - Repeat until they match.
+2. The exposure (Q30): compare `max_counts` with the points map. If they differ by the exposure ratio, set
+   `mapping.acq_time exposure`.
+3. Stop (Q31): start a 20 × 20 native map and press *Stop* in the bridge's window after a few seconds. Pass: LabSpec
+   stops; the request ends `cancelled`.
+4. Speed (Q32, Q33): a 50 × 50 native map at 0.1 s. Record `seconds.total`, the time LabSpec took (`seconds_map`)
+   and the time to write it out; with SWIFT (`"swift": true`) if available. Put the time per point beyond the
+   exposure in `mapping.native_point_s`.
+
 **T6.4 A larger map (Q11).** 50 × 50 points at the shortest useful exposure (about 0.1–0.5 s), after the maintainer
 agrees on the time estimate (`ls6t validate`). Watch LabSpec's memory in Task Manager. Pass: it completes, and
 LabSpec stays responsive. Record the time per point (`seconds.total / points_measured`) and peak memory.
@@ -554,6 +576,7 @@ With the Claude desktop app connected ([INSTALL.md](INSTALL.md) step 8):
 | T6.2 | | | | | |
 | T6.3 | | | | Q26 (direction, thickness found vs known): | |
 | T6.4 | | | | Q11: s/point, memory | |
+| T6.7 | | | | Q29 positions: Q30 exposure: Q31 stop: Q32 order, write-out time: Q33 SWIFT, s/point: | |
 | T6.5 | | | | Q21: Z found vs maintainer, step at x50/x10: | |
 | T6.6 | | | | Q22: | |
 | T7.1 | | | | | |

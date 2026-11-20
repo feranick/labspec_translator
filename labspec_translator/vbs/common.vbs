@@ -56,6 +56,10 @@ Const LS_MB_OKCANCEL = 1
 Const LS_MB_ICONINFORMATION = 20
 Const LS_ACQ_AUTO_SHOW = 10
 Const LS_ACQ_NO_SPIKE_REMOVING = 100
+Const LS_ACQ_SPECTRAL_IMAGE = 3
+Const LS_INCREMENT_STEP = 1
+Const LS_DISABLE_ALL_MOTORS = 3
+Const LS_ENABLE_AXIS = 1
 
 Dim fso, gSep, gLastError
 Set fso = CreateObject("Scripting.FileSystemObject")
