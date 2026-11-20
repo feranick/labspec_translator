@@ -1,5 +1,5 @@
 """cli.py — the command line. Every command prints JSON; '-' reads the studies from stdin.
-Version: 2026.11.19.9
+Version: 2026.11.20.1
 
   ls6t status [REQUEST] [--wait S]   versions, the bridge, the profile; or a request's studies
   ls6t format                        the study format
@@ -9,8 +9,12 @@ Version: 2026.11.19.9
   ls6t cancel REQUEST                stop a request (the current acquisition or move stops)
   ls6t jobs [--limit N] [--active]   recent requests
   ls6t bench [NAMES...]              the benchmarks (on the simulator)
-  ls6t instrument status|discover|resume
-  ls6t instrument snapshot [--laser] a video frame with the laser position marked (--laser: the beam shows)
+  ls6t instrument status|discover|resume|last-error
+  ls6t instrument snapshot [--laser | --extended]
+                                     a video frame with the laser position marked (--laser: the beam shows;
+                                     --extended: LabSpec's extended video, the stage moves)
+  ls6t instrument config list | save NAME | load NAME [--show]
+                                     LabSpec's whole configuration as LS6T_HOME/configs/NAME.ini (maintainer)
   ls6t bridge install [--dest DIR]   write the LabSpec scripts configured for this machine
   ls6t bridge call VERB [k=v ...]    one bridge command, for the maintainer's tests (TESTING.md); acquire and
                                      autofocus fire the laser and need --laser
@@ -70,8 +74,12 @@ def main(argv=None) -> int:
     s = sub.add_parser("bench")
     s.add_argument("names", nargs="*")
     s = sub.add_parser("instrument")
-    s.add_argument("action", choices=["status", "discover", "resume", "snapshot"])
+    s.add_argument("action", choices=["status", "discover", "resume", "last-error", "snapshot", "config"])
+    s.add_argument("what", nargs="?", help="config: list, save or load")
+    s.add_argument("name", nargs="?", help="config save/load: the configuration's name")
     s.add_argument("--laser", action="store_true", help="snapshot: open the laser shutter briefly (asks in LabSpec)")
+    s.add_argument("--extended", action="store_true", help="snapshot: LabSpec's extended video (the stage moves)")
+    s.add_argument("--show", action="store_true", help="config: open LabSpec's own dialog")
     s = sub.add_parser("bridge")
     s.add_argument("action", choices=["install", "call"])
     s.add_argument("verb", nargs="?")
@@ -131,10 +139,16 @@ def main(argv=None) -> int:
         return 0 if not r["failed"] else 1
     elif a.cmd == "instrument":
         if a.action == "snapshot":
-            r = api.snapshot(with_laser=a.laser)
+            r = api.snapshot(with_laser=a.laser, extended=a.extended)
             _print(r)
             return 0 if r.get("ok") else 1
-        _print(api.instrument(a.action))
+        if a.action == "config":
+            if a.what not in ("list", "save", "load"):
+                ap.error("instrument config list | save NAME | load NAME")
+            r = api.labspec_config(a.what, a.name, show=a.show)
+            _print(r)
+            return 0 if r.get("ok") else 1
+        _print(api.instrument(a.action.replace("-", "_")))
     elif a.cmd == "bridge":
         if a.action == "install":
             _print(api.install_bridge(Path(a.dest) if a.dest else None))

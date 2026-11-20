@@ -1,6 +1,6 @@
 # labspec-translator (ls6t): what it can do
 
-This is the complete list of functions in version 2026.11.19.9. It covers:
+This is the complete list of functions in version 2026.11.20.1. It covers:
 
 - what a study can ask for;
 - the tools an LLM sees;
@@ -12,7 +12,7 @@ How it all fits together: [README.md](README.md). Installation: [INSTALL.md](INS
 [TESTING.md](TESTING.md).
 
 Everything below runs on the built-in simulator and is covered by tests and benchmarks. Nothing has run on the
-instrument yet: TESTING.md lists what remains to be confirmed there (Q1–Q34).
+instrument yet: TESTING.md lists what remains to be confirmed there (Q1–Q40).
 
 ---
 
@@ -60,9 +60,9 @@ A request is `{name: study}`; each study has a `kind`.
 | `study_status` | A request's results, or its progress |
 | `cancel` | Stops a request: the acquisition or move in progress stops |
 | `jobs` | Recent requests, and which one holds the instrument |
-| `instrument` | `status` (bridge and instrument now), `discover` (proposes a machine profile), `resume` (after an operator halt) |
-| `snapshot` | A video frame now, returned as an image: the beam's position marked, small features numbered; `with_laser` shows the beam and measures its offset |
-| `references` | Spectral corrections, white-light backgrounds, beam offsets and alignment state (read-only) |
+| `instrument` | `status` (bridge and instrument now, with LabSpec's last error), `discover` (proposes a machine profile), `resume` (after an operator halt) |
+| `snapshot` | A video frame now, returned as an image: the beam's position marked, small features numbered; `with_laser` shows the beam and measures its offset; `extended` takes LabSpec's extended video (a stitched still over the area set in LabSpec; the stage moves; only when the profile allows it, after the operator's Yes) |
+| `references` | Spectral corrections, white-light backgrounds, beam offsets, alignment state and saved LabSpec configurations (read-only) |
 | `spot_status` | The beam's remembered offsets, their age and drift (read-only) |
 | `alignment_status` | Per laser: the alignment baseline, the last check and its age (read-only) |
 | `get_inputs` | The bridge commands one study would send, its range and time estimate, without running |
@@ -87,9 +87,10 @@ trusting numbers, the safety rules and the polling etiquette.
 | `ls6t cancel REQUEST` | Stop a request |
 | `ls6t jobs [--limit N] [--active]` | Recent requests |
 | `ls6t bench [NAMES]` | The benchmarks on the simulator |
-| `ls6t instrument status / discover / resume` | The instrument now; the discovery; lift a halt |
-| `ls6t instrument snapshot [--laser]` | A video frame with the beam marked |
-| `ls6t bridge install [--dest DIR]` | Write the two LabSpec scripts for this PC |
+| `ls6t instrument status / discover / resume / last-error` | The instrument now; the discovery; lift a halt; LabSpec's last error (`GetLastErrorInfo`) |
+| `ls6t instrument snapshot [--laser / --extended]` | A video frame with the beam marked; `--extended`: LabSpec's extended video |
+| `ls6t instrument config list / save NAME / load NAME [--show]` | LabSpec's whole configuration as `LS6T_HOME\configs\NAME.ini` (`SaveConfig` / `LoadConfig`); loading asks the operator; `--show` opens LabSpec's dialog. Maintainer only |
+| `ls6t bridge install [--dest DIR]` | Write the LabSpec scripts for this PC: the bridge, the discovery, and the optional script-motor logger |
 | `ls6t bridge call VERB key=value ... [--laser]` | One bridge command, for the maintainer's tests |
 | `ls6t profile show / default / import DUMP / set KEY VALUE` | The machine profile: view, create, import the discovery, change one value |
 | `ls6t alignment status` / `record REQUEST [--study] [--attempt]` | Alignment state; record a baseline after AutoAlignment (person only) |
@@ -110,21 +111,34 @@ read them, not change them.
 
 | Verb | What it does |
 |---|---|
-| `ping`, `status` | Version; laser, grating, filter, objective, hole, slit, stage X/Y/Z, detector temperature, exposure, shutter mode |
+| `ping`, `status` | Version; laser, grating, filter, objective, hole, slit, stage X/Y/Z, detector temperature, exposure, shutter mode, LabSpec's last error |
 | `move` | Any motor by value, position label or index, waiting for it with stop checks; read back |
 | `move_xy` | The stage in X and Y together |
 | `autofocus` | LabSpec's laser, Raman or video autofocus |
 | `acquire` | A spectrum (range or one window; exposure or auto-exposure; spike removal; dark); written with LabSpec's acquisition info; optionally saved as `.l6s`; `laser_off` keeps the laser shutter closed (white-light backgrounds) |
 | `view` | Live map or profile in LabSpec, growing as points are measured; saved at the end |
-| `map_native` | A map on LabSpec's own engine: axes set with `SetMappingParams`, the interface's exposure and accumulations, the spectrometer centred, SWIFT on or off, the spectral image acquired, waited for (or cancelled), written out for ls6t, saved as `.l6s` and text |
-| `video` | A video frame (cloned from the live video), written for ls6t and saved in LabSpec's image formats; with the laser shutter opened briefly, or half-way through a Raman acquisition, so the beam shows |
+| `map_native` | A map on LabSpec's own engine: axes set with `SetMappingParams`, the interface's exposure and accumulations, the spectrometer centred, SWIFT on or off, the spectral image acquired, waited for (or cancelled), written out for ls6t in chunks (`GetValueSimplePart`, `mapping.export_chunk`) or whole, saved as `.l6s` and text |
+| `video` | A video frame (cloned from the live video), written for ls6t and saved in LabSpec's image formats; with the laser shutter opened briefly, or half-way through a Raman acquisition, so the beam shows; or LabSpec's extended video (`Video(3)`, no laser) |
+| `config` | Save or load LabSpec's configuration file (`SaveConfig` / `LoadConfig`) |
+| `last_error` | LabSpec's last error (`GetLastErrorInfo`); also added to every error the bridge reports |
 | `guide` | The fast loop of a guided adjustment: short acquisitions, the line's signal, LabSpec's dialog (or the status bar), STOP |
 | `confirm`, `notice` | Yes/No and OK/Cancel questions to the operator |
 | `message` | Status-bar messages |
 | `save`, `remove` | Save or free a LabSpec data object |
 | `safe` | Stop motion and acquisition |
 | `resume`, `quit` | Lift a halt (the operator agrees); end the bridge |
-| `discover` | (and `ls6t_discover.vbs`) list the motors and positions, read the detector, test file access, the stop window, the stop button and the video |
+| `discover` | (and `ls6t_discover.vbs`) list the motors and positions, read the detector, test file access, the stop window, the stop button and the video; probe the methods outside the 2018 manual (`GetLastErrorInfo`, `GetValueEx`, `GetValueSimplePart` on a scratch spectrum, `GetConfigParam` and its parameters) |
+
+**Reading data.** Arrays are read with `GetValue`, falling back to `GetValueEx` (in the manual, missing from the
+installed build) and then `GetValueSimple`; each answer says which worked (`data_via`). A motor position's name past
+index 9 is read with `GetValueEx("CurrentPositionName:<motor>")` when available.
+
+**`ls6t_script_motor.vbs`** (optional, TESTING.md T1.4): a virtual script-controlled motor that drives nothing. It
+logs every `GetMotorAction` call and answers with `SetMotorInfo`, so the maintainer can record how LabSpec talks to
+such a motor before ls6t drives real hardware this way.
+
+**Not used (on purpose):** `SetConfigParam` and `SetScriptPath` change LabSpec's script set-up, whose meaning is not
+documented; `SetExtendedVideo` is not in the installed build (the extended video uses the area set in LabSpec).
 
 **The operator stays in charge:**
 
@@ -211,6 +225,8 @@ profile. The shutter mode is restored on every path.
 | Beam offsets per objective and laser | `spot.json` | `spot` studies, lit snapshots | the marker, `move.to_um` |
 | Spectral corrections per laser and grating | `xcal.json` | `calibration` with `adjust: ls6t` | later spectra's Raman shift |
 | White-light backgrounds | `backgrounds\` | `background` studies | `acquire.subtract_background` |
+| LabSpec configurations | `configs\NAME.ini` | a person (`instrument config save`) | `instrument config load` |
+| LabSpec's configuration before a request | `LS6T_OUT\run_...\labspec_before.ini` | requests, with `session.restore_config` | loaded back when the request ends normally |
 | Every request: studies, spectra, results, images, LabSpec files | `LS6T_OUT\run_...` | every request | results, `get_file`, `get_image` |
 
 ---
@@ -227,5 +243,5 @@ profile. The shutter mode is restored on every path.
   - `si_calibration`, `graphene_map`, `extended_range`, `saturation`, `series`;
   - `guided_focus`, `focus_scan`, `spot_raman`, `spot_video`;
   - `depth_profile`, `calibration_zero`, `white_light`, `native_map`, `operator_stop`.
-- **Test suite** (`pytest`, 78 tests), which also checks the LabSpec scripts' structure.
+- **Test suite** (`pytest`, 84 tests), which also checks the LabSpec scripts' structure.
 - **Instrument tests** with the maintainer: [TESTING.md](TESTING.md).

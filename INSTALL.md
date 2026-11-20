@@ -98,16 +98,17 @@ pytest -q              # optional: the test suite (about 30 s)
 ls6t bridge install
 ```
 
-This writes two scripts, configured with this PC's folders, to `C:\Users\<you>\ls6t\vbs\`:
+This writes three scripts, configured with this PC's folders, to `C:\Users\<you>\ls6t\vbs\`:
 
 | Script | When |
 |---|---|
 | `ls6t_discover.vbs` | Once, and again after the hardware changes: lists the instrument for the profile. It does not use the laser and moves nothing. |
 | `ls6t_bridge.vbs` | Whenever ls6t should drive the instrument. It runs until stopped. |
+| `ls6t_script_motor.vbs` | Optional, only for the maintainer's test T1.4 (TESTING.md): a virtual script-controlled motor that drives nothing and logs how LabSpec calls it. Not needed for normal use. |
 
 It also creates the bridge folder `C:\Users\<you>\ls6t\bridge\` (with `inbox` and `outbox`).
 
-In **LabSpec 6**: *Processing > Scripts*. Add both scripts (the manual's script manager allows adding, configuring and
+In **LabSpec 6**: *Processing > Scripts*. Add the discovery and bridge scripts (the manual's script manager allows adding, configuring and
 starting scripts). Run the scripts again after every `ls6t bridge install`, for example after an update.
 
 **What does this LabSpec offer?** `ls6t-typelib` reads LabSpec's ActiveX type library (`NFActiveX.ocx`). It lists

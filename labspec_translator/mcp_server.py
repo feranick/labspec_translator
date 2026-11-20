@@ -1,5 +1,5 @@
 """mcp_server.py — MCP server: lets LLM-based tools run Raman measurements on a HORIBA instrument through LabSpec 6.
-Version: 2026.11.19.9
+Version: 2026.11.20.1
 
 Tools (all JSON):
   study_format      the study format, the profile's choices and limits, the bridge's state. Read it first.
@@ -148,13 +148,15 @@ def instrument(action: str = "status") -> dict:
 
 
 @server.tool()
-def snapshot(with_laser: bool = False):
+def snapshot(with_laser: bool = False, extended: bool = False):
     """A video frame of the sample now, with the laser position marked (red cross), returned as an image plus its
     details (stage position, field of view, files). with_laser: true opens the laser shutter for about a second so
     the beam itself shows (only with the current filter within the profile's caps, after the operator's Yes in
-    LabSpec). Use it to check where the beam is before a calibration or a measurement."""
+    LabSpec). Use it to check where the beam is before a calibration or a measurement. extended: true takes
+    LabSpec's extended video (a wider still image stitched over the area set in LabSpec; the stage moves; only when
+    the profile allows it and the operator says Yes; no laser)."""
     import json
-    r = api.snapshot(with_laser)
+    r = api.snapshot(with_laser, extended)
     if not r.get("ok") or not r.get("path"):
         return r
     return [Image(path=r["path"]), json.dumps({k: v for k, v in r.items() if k != "what"}, default=str)]
@@ -163,8 +165,8 @@ def snapshot(with_laser: bool = False):
 @server.tool()
 def references() -> dict:
     """What ls6t keeps between sessions: the spectral corrections per laser and grating (from 'calibration' with
-    adjust 'ls6t'), the white-light backgrounds by name (for acquire.subtract_background), the beam offsets, and the
-    last alignment check per laser. Read-only."""
+    adjust 'ls6t'), the white-light backgrounds by name (for acquire.subtract_background), the beam offsets, the
+    last alignment check per laser, and the LabSpec configurations a maintainer saved. Read-only."""
     return api.references()
 
 

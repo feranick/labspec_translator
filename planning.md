@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.19.9)
+## Architecture (version 2026.11.20.1)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -26,8 +26,9 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   protocol; `runner.py` one request at a time (instrument lock), checks, results; `spectra.py` baseline, noise,
   spikes, fits, bands; `render.py` PNGs; `sim.py` simulated LabSpec + XploRA on the same protocol; `bench.py`
   known-answer benchmarks on the simulator; `api.py`, `cli.py`, `mcp_server.py`.
-- `vbs/common.vbs` + `vbs/bridge_main.vbs` / `vbs/discover_main.vbs`: `ls6t bridge install` composes
-  `ls6t_bridge.vbs` and `ls6t_discover.vbs` with this machine's folders (ASCII, CRLF).
+- `vbs/common.vbs` + `vbs/bridge_main.vbs` / `vbs/discover_main.vbs` / `vbs/script_motor_main.vbs`: `ls6t bridge
+  install` composes `ls6t_bridge.vbs`, `ls6t_discover.vbs` and `ls6t_script_motor.vbs` with this machine's folders
+  (ASCII, CRLF).
 - Protocol 1: key=value lines, `%0A` line end, `%25` percent; commands UTF-16 (FSO Unicode mode); stop.flag names
   its seq; heartbeat age (file time) = bridge alive, except during modal confirm/resume.
 - Safety: XY offsets from where the operator left the stage, Z from the operator's focus (never absolute);
@@ -131,10 +132,23 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   HORIBA before trying); OpenCL(...) (GPU processing); GetValueSimplePart(id, name, value, vtype, start, size)
   (chunked data reads: useful for exporting large native maps faster than GetValue); InitNA(root, status).
   No method named for AutoAlignment, AutoCalibration, zero/coefficient, lamp or map progress.
+- 2026-11-20, 2026.11.20.1: the type library's extra methods put to use, each guarded and tested on the simulator:
+  SaveConfig/LoadConfig (bridge verb `config`; `ls6t instrument config save|load|list`, LS6T_HOME/configs/NAME.ini,
+  load asks the operator; profile `session.restore_config` saves at request start, loads at normal end);
+  GetValueSimplePart (map_native writes the values in chunks of `mapping.export_chunk`, falls back to whole reads;
+  results carry `data_via`); GetArr helper: GetValue -> GetValueEx -> GetValueSimple; MotorLabel falls back to
+  GetValueEx "CurrentPositionName:" (past index 9); GetLastErrorInfo: verb `last_error`, `status.last_error`;
+  extended video: `video` with extended=1 calls Video(3) (manual; SetExtendedVideo absent so the area is LabSpec's),
+  clones a returned id > 0, else the active video; profile video.allow_extended false + operator Yes; no laser.
+  Discovery probes GetValueEx, GetValueSimplePart (16-point scratch spectrum, removed) and GetConfigParam (lists
+  config_param.*); profile import notes them and sets mapping.export_chunk 0 when GetValueSimplePart is missing.
+  ls6t_script_motor.vbs: virtual script motor logging GetMotorAction / SetMotorInfo (Q38). Deliberately not called:
+  SetConfigParam, SetScriptPath (change the script set-up, semantics unknown), GUI/OperVar/PutGUI/PutArrGUI.
+  TESTING Q35-Q40, T1.4, T5b.6. 84 tests.
 
 ## To do next
 
-1. **At the instrument**: carry out TESTING.md (T0-T9, T5b-T5d) with the maintainer; record the answers to Q1-Q34 here and
+1. **At the instrument**: carry out TESTING.md (T0-T9, T5b-T5e) with the maintainer; record the answers to Q1-Q40 here and
    change the code where they differ from the assumptions (README "Assumptions about LabSpec").
 2. Put the measured times in the profile's `timing` (T3, T7.2).
 3. Later: trigger scripts during native maps (per-point actions: Send, PutDataInfo); script-controlled motors

@@ -12,7 +12,7 @@ stops and cancel on the simulator, and `ls6t bench` gives known answers. What re
 LabSpec and hardware. The plan goes from no laser and no motion to Claude driving a full map, in stages. Each stage
 starts only when the previous one passed.
 
-Version under test: 2026.11.19.9 (bridge protocol 1).
+Version under test: 2026.11.20.1 (bridge protocol 1).
 
 ---
 
@@ -85,8 +85,14 @@ The vendor manual (2018) leaves these open. Each is answered by the test listed.
 | Q30 | Native maps: does `Acq(ACQ_SPECTRAL_IMAGE, -1, ...)` use the interface's exposure and accumulations set by `PutValue`, or does it need them in `Acq` (`mapping.acq_time`)? Which spectral window does it use? | T6.7 |
 | Q31 | Native maps: does `GetAcqID` return the map when it ends, and does `ACQ_CANCEL` stop it? | T6.7 |
 | Q32 | Native maps: in which order are the values in `GetValue(map, "Data")` (`mapping.data_order`), and how long does writing out a 50 × 50 map take? Does `Save(map, "...txt", "txt")` write LabSpec's text export? | T6.7 |
-| Q34 | Which commands does the installed LabSpec's ActiveX offer beyond the 2018 manual? **Partly answered (2026-11-20)** from the instrument's `NFActiveX.ocx`: 15 methods not in the manual (planning.md), none named for alignment, calibration, lamp or map progress; no events. To ask HORIBA: what `GUI`, `PutGUI`, `PutArrGUI`, `OperVar`, `GetConfigParam`/`SetConfigParam`, `LoadConfig`/`SaveConfig` and `GetLastErrorInfo` do, and whether the VBS `LabSpec` object has the same methods | T1.3 |
+| Q34 | Which commands does the installed LabSpec's ActiveX offer beyond the 2018 manual? **Partly answered (2026-11-20)** from the instrument's `NFActiveX.ocx`: 15 methods not in the manual (planning.md), none named for alignment, calibration, lamp or map progress; no events. To ask HORIBA: what `GUI`, `PutGUI`, `PutArrGUI`, `OperVar`, `GetConfigParam`/`SetConfigParam`, `LoadConfig`/`SaveConfig` and `GetLastErrorInfo` do, and whether the VBS `LabSpec` object has the same methods. ls6t now uses `GetLastErrorInfo`, `SaveConfig`/`LoadConfig` and `GetValueSimplePart`, and probes `GetConfigParam` (Q35–Q38) | T1.3 |
 | Q33 | Is SWIFT available on this XploRA (`GetValue SWIFT`), and how much faster is it? Time per point native vs point by point (`mapping.native_point_s`) | T6.7 |
+| Q35 | `GetValueSimplePart(id, "Data", 0, VT_R4, start, size)` (type library only): does it return the map's values in the same order as `GetValue`, and is writing a map out in chunks faster (`mapping.export_chunk`)? | T1.1, T6.7 |
+| Q36 | `SaveConfig(ini, 0)` / `LoadConfig(ini, 0)` (type library only): what does the file hold (laser, grating, filter, hole, slit, acquisition settings, stage?), does `ShowDialog` 0 run without a dialog, and does loading move motors? Is it safe to restore it after each request (`session.restore_config`)? | T1.4 |
+| Q37 | `GetConfigParam` (type library only): what are the parameters it lists (the script's own configuration in *Processing > Scripts*?) and their types? `SetConfigParam` is not called until this is known. | T1.1 |
+| Q38 | Script-controlled motors: when does LabSpec run the motor script, and what do `GetMotorAction`'s Action and Position hold for a move to a value, to a named position, and a stop? What does `SetMotorInfo`'s State mean? | T1.4 |
+| Q39 | Extended video (`Video(3)`): where is its area set, does the call return only when the image is complete, does it return the image's id, and where is the stage left? (`SetExtendedVideo`, which would set the area, is in the manual but not in this build.) | T5b.6 |
+| Q40 | `GetValueEx` is in the manual but not in this build's type library: confirm (`selftest.get_value_ex=0`). The bridge tries it after `GetValue` and for motor position names past index 9 (`CurrentPositionName:`), so nothing depends on it. | T1.1 |
 | Q25 | How much does the beam drift from LabSpec's marker over a day, between objectives, after AutoAlignment? | T5e.3 |
 | Q21 | Does the focus scan find the same focus as the maintainer (and as LabSpec's autofocus) on Si and on a real sample? Is 1 µm a good step at x100, and what at x50 and x10? | T6.5 |
 | Q22 | Does the stage return home and Z to the focus at the end of a request, and does a `move` with `stay` change the next request's start? | T6.6 |
@@ -116,7 +122,7 @@ to Q1–Q12, and the measured times, and lists anything to change.
 | T0.1 | `ls6t status` | versions listed; `settings.LS6T_MODE` is `labspec`; `bridge.running` false |
 | T0.2 | `ls6t bench` | `"failed": []` (all six benchmarks pass on this PC) |
 | T0.3 | `pytest -q` | all tests pass |
-| T0.4 | `ls6t bridge install` | two scripts written to `%USERPROFILE%\ls6t\vbs`; the bridge folder exists |
+| T0.4 | `ls6t bridge install` | three scripts written to `%USERPROFILE%\ls6t\vbs` (bridge, discovery, the optional script-motor logger); the bridge folder exists |
 
 ## T1. Discovery (no laser, no motion)
 
@@ -128,7 +134,12 @@ Pass:
 - in the dump: `selftest.pause=1`, `selftest.popup_open=-1`, `selftest.popup_closed=0`, `selftest.stop_button=0`,
   `selftest.status_bar=1` (**Q2**);
 - `system=XploRA` (or the actual model), and `detector_temp_c` close to LabSpec's display;
-- `video.id_now` > 0 if the live video was running (start it first to check), and no `video.error` (**Q13**).
+- `video.id_now` > 0 if the live video was running (start it first to check), and no `video.error` (**Q13**);
+- the methods outside the 2018 manual (record each value): `selftest.last_error_info` (expected 1),
+  `selftest.get_value_ex` (expected 0: **Q40**), `selftest.get_value_simple_part` and its `_size` (8 expected:
+  **Q35**; discovery makes a 16-point scratch spectrum for it and removes it at once), `selftest.get_config_param`
+  and the `config_param.*` lines (**Q37**). `ls6t profile import` summarises them in its notes and turns chunked map
+  export off when `GetValueSimplePart` is missing.
 
 If the dump is missing, **stop**: file access is not available to scripts, and the transport must change before
 anything else (see planning.md). Note any error message LabSpec showed.
@@ -161,6 +172,22 @@ Pass: `ls6t format` shows the instrument's lasers, gratings, filters and objecti
 `NFActiveX.ocx` in LabSpec's folder if none is found). Pass: the list opens; its first lines say how many methods are
 not in the 2018 manual and which look useful. Keep the file: methods marked `NEW` with *align*, *calib*, *lamp*,
 *progress* or *map* are candidates for ls6t (planning.md), to try one at a time with the maintainer.
+
+**T1.4 LabSpec configurations and script motors (Q36, Q38; maintainer; no laser).** Start the bridge first (T2.1).
+
+1. `ls6t instrument config save before_tests`. Pass: `ok`, `exists` true; the file is in `LS6T_HOME\configs`. Open it
+   in Notepad and note what it holds (**Q36**). `ls6t instrument last-error` shows LabSpec's last error, if any.
+2. In LabSpec, change the grating and the filter. `ls6t instrument config load before_tests`; LabSpec asks (answer
+   Yes). Pass: grating and filter are back; note whether anything else moved (stage, turret, laser). Try once with
+   `--show` to see LabSpec's own dialog, and once answer No (nothing changes).
+3. Only if steps 1–2 pass and the maintainer agrees: `ls6t profile set session.restore_config true`, run a short
+   spectrum study with another grating, and check LabSpec's settings are back afterwards (`config_restored` true in
+   the request's status).
+4. Script motors (optional, **Q38**). `ls6t bridge install` also wrote `ls6t_script_motor.vbs`: a virtual motor that
+   drives nothing and logs every call. In *Processing > Scripts*, add it as one of the script-controlled motors (the
+   dialog's motor settings), then from LabSpec's interface move that motor to a value, to a named position if
+   offered, and stop it. Send `LS6T_HOME\script_motor_log.txt` to the ls6t maintainer: it shows what LabSpec asks
+   (`GetMotorAction`) and how it takes the answer (`SetMotorInfo`). Remove the motor afterwards.
 
 ## T2. The bridge, idle (no laser, no motion)
 
@@ -342,6 +369,13 @@ cross now sits on the spot.
 **T5b.5 In a calibration study.** Run the calibration study with `"video": {"after": true}`. Pass: `video.before`
 and `video.after` are in the result and the images, and the Si result is as in T4.2.
 
+**T5b.6 Extended video (no laser; THE STAGE MOVES; Q39).** The maintainer sets a small extended-video area in
+LabSpec's interface (a few fields of view), at x10 or x50, and checks the objective's clearance over it. Then
+`ls6t profile set video.allow_extended true` and `ls6t instrument snapshot --extended`. Pass: LabSpec asks (answer
+Yes); the stage scans the area; `frame.png` shows the stitched image with µm axes over the whole area; record
+`extended_returned`, `extended_s`, and where the stage ended. If the image is not found or LabSpec misbehaves, set
+`video.allow_extended` back to false and note what happened.
+
 ## T5c. Alignment (LASER)
 
 **T5c.1 The module (Q17).** With the maintainer, find *Maintenance > AutoAlignment* in LabSpec. Record whether it
@@ -502,6 +536,9 @@ Pass:
 4. Speed (Q32, Q33): a 50 × 50 native map at 0.1 s. Record `seconds.total`, the time LabSpec took (`seconds_map`)
    and the time to write it out; with SWIFT (`"swift": true`) if available. Put the time per point beyond the
    exposure in `mapping.native_point_s`.
+5. Export in chunks (Q35): the result's points carry `data_via` (`GetValueSimplePart` by default). Run the map of
+   step 1 again after `ls6t profile set mapping.export_chunk 0` (one `GetValue`). Pass: both give the same map;
+   record the write-out time of each on the 50 × 50 map and keep the faster.
 
 **T6.4 A larger map (Q11).** 50 × 50 points at the shortest useful exposure (about 0.1–0.5 s), after the maintainer
 agrees on the time estimate (`ls6t validate`). Watch LabSpec's memory in Task Manager. Pass: it completes, and
@@ -549,6 +586,7 @@ With the Claude desktop app connected ([INSTALL.md](INSTALL.md) step 8):
 | T1.1 | | | | Q1: Q2: | |
 | T1.2 | | | | Q5: | |
 | T1.3 | | | | Q34: methods new / of interest: | labspec_commands.md |
+| T1.4 | | | | Q36 (config contents, motors moved?): Q38 (actions logged): | configs\before_tests.ini, script_motor_log.txt |
 | T2.1 | | | | | |
 | T2.2 | | | | Q3: | |
 | T2.3 | | | | | |
@@ -569,6 +607,7 @@ With the Claude desktop app connected ([INSTALL.md](INSTALL.md) step 8):
 | T5b.3 | | | | Q15: | |
 | T5b.4 | | | | Q16 offsets x10 / x50 / x100: | |
 | T5b.5 | | | | | |
+| T5b.6 | | | | Q39 (returned, seconds, stage left at): | |
 | T5c.1 | | | | Q17: | |
 | T5c.2 | | | | Q18: ratio repeat: | |
 | T5c.3 | | | | | |
@@ -584,7 +623,7 @@ With the Claude desktop app connected ([INSTALL.md](INSTALL.md) step 8):
 | T6.2 | | | | | |
 | T6.3 | | | | Q26 (direction, thickness found vs known): | |
 | T6.4 | | | | Q11: s/point, memory | |
-| T6.7 | | | | Q29 positions: Q30 exposure: Q31 stop: Q32 order, write-out time: Q33 SWIFT, s/point: | |
+| T6.7 | | | | Q29 positions: Q30 exposure: Q31 stop: Q32 order, write-out time: Q33 SWIFT, s/point: Q35 chunks vs whole: | |
 | T6.5 | | | | Q21: Z found vs maintainer, step at x50/x10: | |
 | T6.6 | | | | Q22: | |
 | T7.1 | | | | | |

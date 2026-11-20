@@ -1,5 +1,5 @@
 """sim.py — a simulated LabSpec + XploRA behind the same bridge protocol as ls6t_bridge.vbs.
-Version: 2026.11.19.9
+Version: 2026.11.20.1
 
 It answers every verb of the bridge with the same keys, so the runner, the checks and the MCP server are tested
 without the instrument (LS6T_MODE=sim, and the tests). The simulated sample is a silicon wafer with a graphene
@@ -56,6 +56,7 @@ class SimLabSpec:
         self.verb = ""
         self.seq = ""
         self.halted = False
+        self.last_error = ""
         self.next_id = 100
         self.views: dict = {}
         self.data: dict = {}
@@ -202,7 +203,10 @@ class SimLabSpec:
         fn = getattr(self, "v_" + str(verb), None)
         if not fn:
             return {"ok": 0, "error": f"unknown verb {verb!r}"}
-        return fn(p)
+        res = fn(p)
+        if str(res.get("ok", 1)) == "0" and res.get("error"):
+            self.last_error = str(res["error"])
+        return res
 
     def v_ping(self, p):
         return {"protocol": BRIDGE_PROTOCOL, "version": f"sim {__version__}", "system": "XploRA",
@@ -217,7 +221,41 @@ class SimLabSpec:
                 "filter": fil, "objective": obj, "hole_um": self.m["Hole"]["value"],
                 "slit_um": self.m["Slit"]["value"], "x_um": self.m["X"]["value"], "y_um": self.m["Y"]["value"],
                 "z_um": self.m["Z"]["value"], "exposure_s": self.exposure, "accumulations": self.accumulations,
-                "shutter_mode": 0, "halted": int(self.halted)}
+                "shutter_mode": 0, "halted": int(self.halted), "last_error": self.last_error}
+
+    def v_last_error(self, p):
+        return {"info": self.last_error}
+
+    def v_config(self, p):
+        """LabSpec's SaveConfig / LoadConfig: the simulator keeps its motors, exposure and accumulations in an ini."""
+        action, path = p.get("action"), p.get("path")
+        if not path:
+            return {"ok": 0, "error": "config needs 'path'"}
+        f = Path(path)
+        if action == "save":
+            f.parent.mkdir(parents=True, exist_ok=True)
+            lines = ["[ls6t simulated LabSpec configuration]", f"exposure={self.exposure}",
+                     f"accumulations={self.accumulations}"]
+            for name, m in self.m.items():
+                lines.append(f"{name}={m['i'] if 'values' in m else m['value']}")
+            f.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        elif action == "load":
+            if not f.exists():
+                return {"ok": 0, "error": f"LoadConfig: {path} not found"}
+            for line in f.read_text(encoding="utf-8").splitlines():
+                k, _, v = line.partition("=")
+                if k == "exposure":
+                    self.exposure = float(v)
+                elif k == "accumulations":
+                    self.accumulations = int(float(v))
+                elif k in self.m and k not in ("X", "Y", "Z"):      # LabSpec's configuration holds no stage position
+                    if "values" in self.m[k]:
+                        self.m[k]["i"] = int(float(v))
+                    else:
+                        self.m[k]["value"] = float(v)
+        else:
+            return {"ok": 0, "error": "config action: save or load"}
+        return {"returned": 0, "path": str(f), "exists": int(f.exists())}
 
     def v_discover(self, p):
         lines = [f"time={time.strftime('%Y-%m-%dT%H:%M:%S')}", "system=XploRA", "labspec_version=6.6 (simulated)",
@@ -231,6 +269,10 @@ class SimLabSpec:
                 lines += [f"motor.{name}.current={m['i']}", f"motor.{name}.current_label={m['labels'][m['i']]}"]
             else:
                 lines += [f"motor.{name}.size=0", f"motor.{name}.current={m['value']}"]
+        lines += ["selftest.last_error_info=1", "selftest.get_value_ex=0", "selftest.get_value_simple_part=1",
+                  "selftest.get_value_simple_part_size=8", "selftest.get_config_param=1",
+                  "config_param.0.name=Delay", "config_param.0.unit=s", "config_param.0.type=double",
+                  "config_param.0.value=0"]
         out = Path(p["out"])
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -298,6 +340,9 @@ class SimLabSpec:
             return {"ok": 0, "error": "video needs 'out'"}
         laser_s = float(p.get("laser_s", 0) or 0)
         acq_s = float(p.get("during_acq_s", 0) or 0)
+        extended = str(p.get("extended", "0")) == "1"
+        if extended and (laser_s > 0 or acq_s > 0):
+            return {"ok": 0, "error": "extended video takes no laser (laser_s, during_acq_s)"}
         if laser_s > 0:
             name = p.get("m_laser_shutter", "")
             if name not in self.m:
@@ -306,8 +351,8 @@ class SimLabSpec:
         if who:
             return self._stopped(who)
         mag = self.m["Objective"]["values"][self.m["Objective"]["i"]]
-        w_um = 6400.0 / mag
-        W, H = 160, 120
+        w_um = 6400.0 / mag * (3 if extended else 1)      # extended: a 3 x 3 mosaic around the position
+        W, H = (480, 360) if extended else (160, 120)
         x = self.m["X"]["value"]
         y = self.m["Y"]["value"]
         xs = x + (np.arange(W) - (W - 1) / 2) * w_um / W
@@ -356,6 +401,8 @@ class SimLabSpec:
                 res[f"saved_{f}"] = 0           # the simulator writes no LabSpec image files
         if laser_s > 0:
             res["shutter_closed"] = 1
+        if extended:
+            res.update(extended=1, extended_returned=0, extended_s=round(9 * 0.5, 2))
         return res
 
     def v_notice(self, p):
@@ -508,7 +555,8 @@ class SimLabSpec:
             fh.write(f"# data_dims={data.size}\n")
             for i in range(0, data.size, 256):
                 fh.write(",".join(f"{v:.2f}" for v in data[i:i + 256]) + "\n")
-        return {"id": 950, "out": str(path), "native_ok": 0, "text_ok": 0, "pixels": int(data.size),
+        via = "GetValueSimplePart" if int(float(p.get("chunk", 65536) or 0)) > 0 else "GetValue"
+        return {"id": 950, "out": str(path), "native_ok": 0, "text_ok": 0, "pixels": int(data.size), "data_via": via,
                 "axes": " ".join(m for m, _ in axes), "seconds_map": round(npts * (ex * acc + speed), 2),
                 "detector_temp_c": self.temp_c}
 

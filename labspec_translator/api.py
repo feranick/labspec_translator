@@ -1,5 +1,5 @@
 """api.py — the functions behind the command line and the MCP server (JSON in, JSON out).
-Version: 2026.11.19.9
+Version: 2026.11.20.1
 """
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import base64
 import json
 import os
 import platform
+import re
 import secrets
 import subprocess
 import sys
@@ -189,8 +190,8 @@ def status(request: str, wait_s: float = 0) -> dict:
             prog[n] = runner.read_json(folder / n / "progress.json", {})
     out = {"request": str(folder), "translator": __version__, "state": st.get("state"),
            "done": st.get("state") in runner.FINAL, "pending": pending, "studies": res, "progress": prog}
-    for k in ("why", "stopped_by", "reason"):
-        if st.get(k):
+    for k in ("why", "stopped_by", "reason", "config_restored", "config_restore_error"):
+        if st.get(k) is not None:
             out[k] = st[k]
     if pending:
         eta = [p.get("eta_min") or p.get("estimate_min") for p in prog.values()]
@@ -267,9 +268,63 @@ def instrument(action: str = "status") -> dict:
                             f"\"{dump}\""}
         if action == "resume":
             return b.call("resume", timeout_s=600)
+        if action == "last_error":
+            return b.call("last_error", timeout_s=15)
     except BridgeError as exc:
         return {"ok": False, "error": str(exc)}
-    raise ValueError(f"action {action!r}: status, discover or resume")
+    raise ValueError(f"action {action!r}: status, discover, resume or last_error")
+
+
+def configs_dir() -> Path:
+    return (config.out_dir() / "sim_configs") if config.mode() == "sim" else (config.home() / "configs")
+
+
+def _configs() -> dict:
+    d = configs_dir()
+    return {f.stem: {"file": str(f), "bytes": f.stat().st_size,
+                     "time": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(f.stat().st_mtime))}
+            for f in sorted(d.glob("*.ini"))} if d.is_dir() else {}
+
+
+def labspec_config(action: str, name: str | None = None, show: bool = False) -> dict:
+    """LabSpec's whole configuration as an .ini file (SaveConfig / LoadConfig, in LabSpec's type library), kept in
+    LS6T_HOME/configs/<name>.ini: list, save NAME, load NAME. For a maintainer at the instrument: loading changes
+    lasers, gratings, filters and acquisition settings at once, so the operator confirms it in LabSpec. show opens
+    LabSpec's own dialog."""
+    if action == "list":
+        return {"ok": True, "folder": str(configs_dir()), "configs": _configs()}
+    if action not in ("save", "load"):
+        raise ValueError(f"action {action!r}: list, save or load")
+    if not name or not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", name) or name.startswith("."):
+        return {"ok": False, "error": "a configuration name: letters, digits, '_', '-', '.' (at most 64)"}
+    lock = runner.read_json(runner.lock_path(), None)
+    if lock:
+        return {"ok": False, "error": f"the instrument is busy with {lock.get('request')}: wait or cancel it"}
+    path = configs_dir() / f"{name}.ini"
+    if action == "load" and not path.exists():
+        return {"ok": False, "error": f"no configuration {name!r}: saved are {', '.join(_configs()) or 'none'}"}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    b = Bridge()
+    if config.mode() == "sim":
+        from . import sim as S
+        S.ensure(b.dir)
+    try:
+        if action == "load" and config.confirm_policy() != "never":
+            r = b.call("confirm", timeout_s=3600,
+                       text=f"ls6t asks to load LabSpec's configuration '{name}' ({path}). Lasers, gratings, filters "
+                            "and acquisition settings may change. Continue?")
+            if r.get("answer") != "yes":
+                return {"ok": False, "error": "the operator declined in LabSpec"}
+        r = b.call("config", timeout_s=600 if show else 60, action=action, path=str(path), show=int(bool(show)))
+    except BridgeError as exc:
+        return {"ok": False, "error": str(exc)}
+    if not r["ok"]:
+        return {"ok": False, "error": r.get("error")}
+    out = {"ok": True, "action": action, "name": name, "file": str(path), "returned": r.get("returned"),
+           "exists": str(r.get("exists")) == "1"}
+    if action == "save" and not out["exists"]:
+        out["warning"] = "LabSpec answered but wrote no file there: see TESTING.md T1.4"
+    return out
 
 
 LASER_VERBS = ("acquire", "autofocus")
@@ -298,13 +353,15 @@ def bridge_call(verb: str, params: dict, timeout_s: float = 120, allow_laser: bo
 
 
 def compose_vbs(bridge_dir: Path, home_dir: Path) -> dict:
-    """The two LabSpec scripts: a header with this machine's folders, the shared code, then each one's main part."""
+    """The LabSpec scripts: a header with this machine's folders, the shared code, then each one's main part."""
     common = (VBS_DIR / "common.vbs").read_text(encoding="utf-8")
     out = {}
     for name, main, what in (("ls6t_bridge.vbs", "bridge_main.vbs", "the ls6t bridge: start it whenever ls6t "
                                                                      "should drive the instrument"),
                              ("ls6t_discover.vbs", "discover_main.vbs", "run once: lists the instrument for "
-                                                                         "the ls6t profile")):
+                                                                         "the ls6t profile"),
+                             ("ls6t_script_motor.vbs", "script_motor_main.vbs", "a virtual script-controlled "
+                                                                                 "motor that logs LabSpec's calls")):
         for p in (str(bridge_dir), str(home_dir)):
             if '"' in p:
                 raise ValueError(f"{p}: a folder with a double quote cannot be written into a VBScript string")
@@ -319,10 +376,12 @@ def compose_vbs(bridge_dir: Path, home_dir: Path) -> dict:
     return out
 
 
-def snapshot(with_laser: bool = False) -> dict:
+def snapshot(with_laser: bool = False, extended: bool = False) -> dict:
     """A video frame now, with the laser position marked (LabSpec's position plus the profile's measured offset).
     with_laser opens the laser shutter for video.laser_s seconds so the beam shows: only with a laser shutter motor
-    in the profile, the current filter within the profile's caps, and the operator's Yes in LabSpec."""
+    in the profile, the current filter within the profile's caps, and the operator's Yes in LabSpec. extended takes
+    LabSpec's extended video instead (a still image stitched over the area set in LabSpec; the stage moves): only
+    with video.allow_extended in the profile and the operator's Yes; no laser."""
     from . import video
     lock = runner.read_json(runner.lock_path(), None)
     if lock:
@@ -334,8 +393,19 @@ def snapshot(with_laser: bool = False) -> dict:
         from . import sim as S
         S.ensure(b.dir)
     v = prof.get("video", {})
+    if extended and with_laser:
+        return {"ok": False, "error": "an extended video takes no laser"}
+    if extended and not v.get("allow_extended"):
+        return {"ok": False, "error": "extended video is off in the profile (video.allow_extended): a person turns it "
+                                      "on once it was tried at the instrument (TESTING.md T5b.6)"}
     try:
         st = b.call("status", timeout_s=15, **runner.motor_args(prof))
+        if extended and config.confirm_policy() != "never":
+            r = b.call("confirm", timeout_s=3600,
+                       text="ls6t asks for LabSpec's extended video: the stage will move over the area set in LabSpec's "
+                            "extended video settings. Is that area safe for the objective? Continue?")
+            if r.get("answer") != "yes":
+                return {"ok": False, "error": "the operator declined in LabSpec"}
         if with_laser:
             if not prof["motors"].get("laser_shutter"):
                 return {"ok": False, "error": "no laser shutter motor in the profile (motors.laser_shutter): a person "
@@ -362,7 +432,8 @@ def snapshot(with_laser: bool = False) -> dict:
         base = folder / "frame"
         laser_s = float(v.get("laser_s", 1.0)) if with_laser else 0.0
         settle = float(v.get("settle_s", 1.5))
-        r = b.call("video", timeout_s=60 + settle + laser_s, out=str(base), settle_s=settle, laser_s=laser_s,
+        r = b.call("video", timeout_s=60 + settle + laser_s + (float(v.get("extended_max_s", 600)) if extended else 0),
+                   out=str(base), settle_s=settle, laser_s=laser_s, extended=int(extended),
                    formats=",".join(v.get("formats", [])), camera=v.get("camera"), **runner.motor_args(prof))
     except BridgeError as exc:
         return {"ok": False, "error": str(exc)}
@@ -482,7 +553,7 @@ def references() -> dict:
     from . import xcal
     corr = {k: {**v, "age_h": xcal.age_h(v)} for k, v in xcal.load().items()}
     return {"spectral_corrections": corr, "backgrounds": BG.index(),
-            "beam_offsets": SP.status(P.load())["records"],
+            "beam_offsets": SP.status(P.load())["records"], "labspec_configs": _configs(),
             "alignment": {k: v.get("last_check") for k, v in alignment_status()["lasers"].items()}}
 
 
@@ -515,7 +586,8 @@ def spot_forget(objective: str | None = None, laser_nm: float | None = None) -> 
 
 
 def install_bridge(dest: Path | None = None) -> dict:
-    """Writes ls6t_bridge.vbs and ls6t_discover.vbs, configured with this machine's folders, to LS6T_HOME/vbs."""
+    """Writes ls6t_bridge.vbs, ls6t_discover.vbs and ls6t_script_motor.vbs (optional, TESTING.md T1.4), configured
+    with this machine's folders, to LS6T_HOME/vbs."""
     dest = Path(dest) if dest else config.home() / "vbs"
     dest.mkdir(parents=True, exist_ok=True)
     bdir = config.bridge_dir()

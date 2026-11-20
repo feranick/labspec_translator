@@ -1,5 +1,5 @@
 """profile.py — the machine profile: what the instrument has (from the discovery script) and the limits a person sets.
-Version: 2026.11.19.9
+Version: 2026.11.20.1
 
 The profile is a JSON file (LS6T_PROFILE, default ~/ls6t/profile.json). Studies never change it: an LLM can only
 ask for what the profile allows. Without a file, the built-in XploRA defaults below apply and every result says so
@@ -52,7 +52,7 @@ DEFAULT_PROFILE: dict = {
     # the pixel data, the image formats LabSpec is asked to save, the settle time and the laser time (s)
     "video": {"laser_offset_um": [0.0, 0.0], "marker": "stage", "packing": "colorref", "order": "x_fastest",
               "formats": ["png", "jpg", "bmp", "tif"], "settle_s": 1.5, "laser_s": 1.0, "max_laser_s": 5.0,
-              "camera": None},
+              "camera": None, "allow_extended": False, "extended_max_s": 600.0},
     # alignment checks (kind 'alignment'): per laser the fixed settings and the baseline the maintainer recorded
     # right after a successful AutoAlignment (`ls6t alignment record`); a check passes when the Si signal is at least
     # min_ratio of the baseline and its width at most max_fwhm_ratio of it; studies warn when a laser's last check
@@ -69,9 +69,13 @@ DEFAULT_PROFILE: dict = {
     "calibration": {"max_age_h": 24.0, "max_retries": 2},
     # LabSpec's own mapping engine (map.engine 'native'): used by 'auto' from native_min_points points; whether
     # SetMappingParams takes absolute stage positions or offsets; the order of the exported values; whether
-    # Acq(ACQ_SPECTRAL_IMAGE) takes the interface's exposure (-1) or ours; the time per point beyond the exposure
+    # Acq(ACQ_SPECTRAL_IMAGE) takes the interface's exposure (-1) or ours; the time per point beyond the exposure;
+    # export_chunk: values read per GetValueSimplePart call when the map is written out (0: one GetValue)
     "mapping": {"native_min_points": 400, "positions": "absolute", "data_order": "spectral_fastest",
-                "point_order": "x_fastest", "acq_time": "interface", "native_point_s": 0.05},
+                "point_order": "x_fastest", "acq_time": "interface", "native_point_s": 0.05, "export_chunk": 65536},
+    # LabSpec's configuration around each request: with restore_config, the bridge saves it (SaveConfig) when a
+    # request starts and loads it back (LoadConfig) when the request ends normally
+    "session": {"restore_config": False},
     "checks": {"min_snr": 10.0, "detect_snr": 5.0, "si_cm1": 520.7, "si_tol_cm1": 1.0, "saturation_frac": 0.98},
 }
 
@@ -286,8 +290,25 @@ def import_discovery(text: str, base: dict | None = None) -> tuple[dict, list[st
     det = _num(d.get("detector_temp_c"))
     if det is not None:
         notes.append(f"detector at {det:g} C (max_temp_c {prof['detector']['max_temp_c']:g})")
+    # the self-tests of methods outside the 2018 manual (TESTING.md T1.3, T1.4)
+    probes = {k[len("selftest."):]: d[k] for k in d if k.startswith("selftest.")}
+    methods = {m: probes.get(k) == "1" for m, k in (("GetLastErrorInfo", "last_error_info"),
+                                                     ("GetValueEx", "get_value_ex"),
+                                                     ("GetValueSimplePart", "get_value_simple_part"),
+                                                     ("GetConfigParam", "get_config_param")) if k in probes}
+    if methods:
+        notes.append("extra LabSpec methods: " + ", ".join(f"{m} {'works' if ok else 'missing'}"
+                                                           for m, ok in methods.items()))
+        if methods.get("GetValueSimplePart") is False:
+            prof.setdefault("mapping", {})["export_chunk"] = 0
+            notes.append("GetValueSimplePart missing: native maps are read whole (mapping.export_chunk 0)")
+    cps = sorted({k.split(".")[1] for k in d if k.startswith("config_param.")}, key=lambda v: int(v) if v.isdigit() else 0)
+    config_params = [{f: d.get(f"config_param.{i}.{f}") for f in ("name", "unit", "type", "value")} for i in cps]
+    if config_params:
+        notes.append(f"{len(config_params)} script configuration parameter(s) (GetConfigParam): "
+                     + ", ".join(str(c["name"]) for c in config_params[:10]))
     prof["discovered"] = {"time": d.get("time"), "labspec_path": d.get("labspec_path"),
-                          "motors": sorted(names)}
+                          "motors": sorted(names), "methods": methods, "config_params": config_params}
     return prof, notes
 
 

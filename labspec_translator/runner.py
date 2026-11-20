@@ -1,5 +1,5 @@
 """runner.py — runs a request's studies on the instrument, one command at a time, and checks every result.
-Version: 2026.11.19.9
+Version: 2026.11.20.1
 
 A request runs in its own process (`ls6t run-request FOLDER`, started detached by api.start), so it outlives the
 MCP call that started it. One request at a time holds the instrument (a lock file under LS6T_HOME); others wait
@@ -93,6 +93,7 @@ class Ctx:
         self.start: dict = {}
         self.home_xy: tuple = (None, None)   # where offsets start: the operator's spot, or where a 'move' stayed
         self.z_focus = None                 # the focus: the operator's, or the last autofocus / focus scan
+        self.saved_config = None            # LabSpec's configuration saved at the start (session.restore_config)
         self.confirmed = False
         self.last_beat = 0.0
         self.bridge_version = None
@@ -196,6 +197,13 @@ def run_request(folder: Path | str) -> dict:
         ctx.home_xy = (ctx.start["x_um"], ctx.start["y_um"])
         ctx.z_focus = ctx.start["z_um"]
         write_json(folder / "start.json", {"status": st, "time": time.time()})
+        if prof.get("session", {}).get("restore_config"):
+            ini = folder / "labspec_before.ini"
+            r = ctx.call("config", timeout_s=60, action="save", path=str(ini))
+            ctx.saved_config = str(ini) if r["ok"] else None
+            if not r["ok"]:
+                raise Stop(f"session.restore_config: LabSpec could not save its configuration ({r.get('error')})",
+                           "bridge")
         ctx.call("message", text=f"ls6t: request {folder.name} started ({len(studies)} studies)")
         stopped = None
         for name, study in studies.items():
@@ -219,6 +227,11 @@ def run_request(folder: Path | str) -> dict:
                      why=stopped.why if stopped else None, stopped_by=stopped.by if stopped else None)
         if not stopped:
             state["returned"] = _return_home(ctx)
+            if getattr(ctx, "saved_config", None):
+                r = ctx.call("config", timeout_s=60, action="load", path=ctx.saved_config)
+                state["config_restored"] = bool(r["ok"])
+                if not r["ok"]:
+                    state["config_restore_error"] = r.get("error")
     except Stop as exc:
         state.update(state="cancelled" if exc.by in ("cancel", "operator") else "failed", why=exc.why,
                      stopped_by=exc.by, finished=time.time())
@@ -1604,7 +1617,8 @@ def _native_map(ctx: Ctx, name: str, study: dict, sd: Path, rng: dict, laser: fl
     r = ctx.call("map_native", timeout_s=600 + 3 * n * per_s, out=str(sd / name), center_nm=rng.get("from_nm"),
                  from_nm=rng.get("from_nm"), to_nm=rng.get("to_nm"), exposure_s=acq.get("exposure_s"),
                  accumulations=acq.get("accumulations", 1), mode_flags=flags, swift=bool(m.get("swift")),
-                 acq_time=mp.get("acq_time", "interface"), **params, **motor_args(prof))
+                 acq_time=mp.get("acq_time", "interface"), chunk=int(mp.get("export_chunk", 65536) or 0),
+                 **params, **motor_args(prof))
     if not r["ok"]:
         if r.get("stopped_by"):
             raise Stop("stopped by the operator in LabSpec" if r.get("stopped_by") == "operator" else "cancelled",
@@ -1617,7 +1631,7 @@ def _native_map(ctx: Ctx, name: str, study: dict, sd: Path, rng: dict, laser: fl
         warnings.append(f"LabSpec's map has {len(recs)} points, the study {n}: check the axes (TESTING Q29)")
     for rec in recs:
         rec.update(file=r["out"], exposure_s=float(acq.get("exposure_s") or 1.0),
-                   accumulations=float(acq.get("accumulations", 1)), id=r.get("id"))
+                   accumulations=float(acq.get("accumulations", 1)), id=r.get("id"), data_via=r.get("data_via"))
     return recs
 
 

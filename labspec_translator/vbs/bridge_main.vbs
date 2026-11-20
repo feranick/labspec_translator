@@ -15,7 +15,7 @@
 Const POLL_MS = 100
 
 Dim gInbox, gOutbox, gHb, gStopFlag, gHalted, gQuit, gLastBeat, gLastPopup, gPopupOpen, gViews, gStoppedBy
-Dim gVerb, gSeq, gLastSeq
+Dim gVerb, gSeq, gLastSeq, gChunk
 gInbox = LS6T_BRIDGE_DIR & "\inbox"
 gOutbox = LS6T_BRIDGE_DIR & "\outbox"
 gHb = LS6T_BRIDGE_DIR & "\heartbeat.txt"
@@ -28,6 +28,7 @@ gLastPopup = Timer - 100
 gVerb = ""
 gSeq = ""
 gLastSeq = ""
+gChunk = 0
 Set gViews = CreateObject("Scripting.Dictionary")
 
 ' ---------------------------------------------------------------- heartbeat and operator
@@ -145,8 +146,16 @@ End Function
 
 ' LabSpec's own last error (GetLastErrorInfo: in the ActiveX type library, not in the 2018 manual), if it has one
 Function LabSpecErrorInfo()
-    Dim v, i, s
+    Dim s
+    s = LabSpecError()
     LabSpecErrorInfo = ""
+    If s <> "" Then LabSpecErrorInfo = " [LabSpec: " & s & "]"
+End Function
+
+' The same, bare ("" when LabSpec reports none)
+Function LabSpecError()
+    Dim v, i, s
+    LabSpecError = ""
     On Error Resume Next
     v = LabSpec.GetLastErrorInfo()
     If Err.Number <> 0 Then
@@ -162,7 +171,7 @@ Function LabSpecErrorInfo()
         s = CStr(v)
     End If
     Err.Clear
-    If Trim(s) <> "" And Trim(s) <> "0" Then LabSpecErrorInfo = " [LabSpec: " & Trim(s) & "]"
+    If Trim(s) <> "0" Then LabSpecError = Trim(s)
 End Function
 
 ' ---------------------------------------------------------------- waiting for motors
@@ -222,6 +231,37 @@ Sub VStatus(cmd, res)
     res("exposure_s") = LSValue(0, "LabSpecExposureTime")
     res("accumulations") = LSValue(0, "LabSpecAccumulation")
     res("shutter_mode") = LSValue(0, "ShutterMode")
+    res("last_error") = LabSpecError()
+End Sub
+
+' LabSpec's configuration as a file: SaveConfig / LoadConfig (in the type library, not in the 2018 manual)
+Sub VConfig(cmd, res)
+    Dim action, path, show, r
+    action = GetP(cmd, "action", "")
+    path = GetP(cmd, "path", "")
+    show = CLng(ParseNum(GetP(cmd, "show", "0")))
+    If path = "" Then
+        Fail res, "config needs 'path'"
+        Exit Sub
+    End If
+    On Error Resume Next
+    If action = "save" Then
+        r = LabSpec.SaveConfig(path, show)
+    ElseIf action = "load" Then
+        r = LabSpec.LoadConfig(path, show)
+    Else
+        Fail res, "config action: save or load"
+        Exit Sub
+    End If
+    If Err.Number <> 0 Then
+        Fail res, ErrText(action & "Config")
+        Err.Clear
+        Exit Sub
+    End If
+    On Error GoTo 0
+    res("returned") = r
+    res("path") = path
+    res("exists") = Bit(fso.FileExists(path))
 End Sub
 
 Sub VMove(cmd, res)
@@ -623,19 +663,40 @@ End Function
 ' and its values in LabSpec's order, comma-separated, 256 per line.
 Function WriteData(id, outPath, res, kind)
     Dim data, at, sz, au, ax, ts, tmp, i, j, n, line, d2, n1, n2
+    Dim total, chunk, start, part, cnt, k, via
     WriteData = False
     On Error Resume Next
-    LabSpec.GetValue id, "Data", data
-    If Err.Number <> 0 Or Not IsArray(data) Then
-        Fail res, ErrText("GetValue Data (" & kind & ")")
-        Err.Clear
-        Exit Function
-    End If
-    LabSpec.GetValue id, "AxisType", at
-    LabSpec.GetValue id, "AxisSize", sz
-    LabSpec.GetValue id, "AxisUnits", au
-    LabSpec.GetValue id, "Axis", ax
+    GetArr id, "AxisType", LS_VT_BSTR, at
+    GetArr id, "AxisSize", LS_VT_R8, sz
+    GetArr id, "AxisUnits", LS_VT_BSTR, au
+    GetArr id, "Axis", LS_VT_R8, ax
     Err.Clear
+    ' maps: the values in chunks (GetValueSimplePart, in the type library), so a large map is never one array
+    chunk = 0
+    If kind = "map" Then chunk = CLng(gChunk)
+    total = 0
+    If chunk > 0 And IsArray(sz) Then
+        total = 1
+        For i = 0 To UBound(sz)
+            If CLng(sz(i)) > 0 Then total = total * CLng(sz(i))
+        Next
+        part = LabSpec.GetValueSimplePart(id, "Data", 0, LS_VT_R4, 0, 1)
+        If Err.Number <> 0 Or Not IsArray(part) Then
+            chunk = 0
+            Err.Clear
+        End If
+    End If
+    If chunk = 0 Then
+        via = GetArr(id, "Data", LS_VT_R4, data)
+        If via = "" Then
+            Fail res, ErrText("GetValue Data (" & kind & ")")
+            Err.Clear
+            Exit Function
+        End If
+        res("data_via") = via
+    Else
+        res("data_via") = "GetValueSimplePart"
+    End If
     tmp = outPath & ".tmp"
     Set ts = fso.CreateTextFile(tmp, True, True)
     If Err.Number <> 0 Then
@@ -676,6 +737,43 @@ Function WriteData(id, outPath, res, kind)
             line = line & Fmt(ax(i))
         Next
         ts.WriteLine "# axis_values=" & line
+    End If
+    If chunk > 0 Then
+        ts.WriteLine "# data_dims=" & total
+        start = 0
+        Do While start < total
+            cnt = chunk
+            If start + cnt > total Then cnt = total - start
+            part = LabSpec.GetValueSimplePart(id, "Data", 0, LS_VT_R4, start, cnt)
+            If Err.Number <> 0 Or Not IsArray(part) Then
+                Fail res, ErrText("GetValueSimplePart at " & start)
+                Err.Clear
+                ts.Close
+                Exit Function
+            End If
+            line = ""
+            k = 0
+            For j = LBound(part) To UBound(part)
+                If line <> "" Then line = line & ","
+                line = line & Fmt(part(j))
+                k = k + 1
+                If k Mod 256 = 0 Then
+                    ts.WriteLine line
+                    line = ""
+                End If
+            Next
+            If line <> "" Then ts.WriteLine line
+            start = start + cnt
+            BeatNow
+        Loop
+        ts.Close
+        If fso.FileExists(outPath) Then fso.DeleteFile outPath, True
+        fso.MoveFile tmp, outPath
+        Err.Clear
+        On Error GoTo 0
+        res("pixels") = total
+        WriteData = True
+        Exit Function
     End If
     ' the pixel values: one or two dimensions
     n2 = -1
@@ -794,7 +892,32 @@ Sub VVideo(cmd, res)
     vid = LabSpec.Video(LS_GET_VIDEO_ID)
     If Err.Number = 0 And vid > 0 Then wasOn = True
     Err.Clear
-    If Not wasOn Then
+    clone = 0
+    If GetP(cmd, "extended", "0") = "1" Then
+        ' LabSpec's extended video: a still image stitched over the area and settings made in LabSpec's interface
+        ' (SetExtendedVideo, which would set them, is in the manual but not in this build). The stage moves.
+        If laserS > 0 Or acqS > 0 Then
+            Fail res, "extended video takes no laser (laser_s, during_acq_s)"
+            Exit Sub
+        End If
+        tA = Timer
+        r = LabSpec.Video(LS_START_EXTENDED_VIDEO)
+        If Err.Number <> 0 Or r = -1 Then
+            Fail res, ErrText("extended video (returned " & r & ")")
+            Err.Clear
+            Exit Sub
+        End If
+        res("extended") = 1
+        res("extended_returned") = r
+        res("extended_s") = Fmt(Elapsed(tA))
+        ' a returned id > 0 is the image; otherwise the active video image
+        If r > 0 Then clone = LabSpec.Exec(r, LS_CLONE_DATA, p)
+        If Err.Number <> 0 Then
+            clone = 0
+            Err.Clear
+        End If
+        wasOn = True
+    ElseIf Not wasOn Then
         LabSpec.Video LS_START_VIDEO
         If Err.Number <> 0 Then
             Fail res, ErrText("Video start")
@@ -805,7 +928,6 @@ Sub VVideo(cmd, res)
     ' let the camera settle (exposure, live image)
     ok = WaitStoppable(settle)
     clone0 = 0
-    clone = 0
     If ok And laserS > 0 Then
         ' a frame without the laser first: the difference with the lit frame shows the spot alone
         clone0 = GrabFrame(res)
@@ -1214,6 +1336,7 @@ End Sub
 Sub VMapNative(cmd, res)
     Dim ax, i, mname, f, t, st, n, ex, acc, sw, swOk, id, t0, started, who, tmo, outBase, r, mode, tval, axes
     outBase = GetP(cmd, "out", "")
+    gChunk = CLng(ParseNum(GetP(cmd, "chunk", "65536")))
     ex = ParseNum(GetP(cmd, "exposure_s", "1"))
     acc = CLng(ParseNum(GetP(cmd, "accumulations", "1")))
     tmo = ParseNum(GetP(cmd, "timeout_s", "36000"))
@@ -1470,6 +1593,8 @@ Sub HandleFile(path)
             Case "safe": VSafe cmd, res
             Case "video": VVideo cmd, res
             Case "map_native": VMapNative cmd, res
+            Case "config": VConfig cmd, res
+            Case "last_error": res("info") = LabSpecError()
             Case "guide": VGuide cmd, res
             Case "notice": VNotice cmd, res
             Case "resume": VResume cmd, res

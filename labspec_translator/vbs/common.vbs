@@ -57,6 +57,10 @@ Const LS_MB_ICONINFORMATION = 20
 Const LS_ACQ_AUTO_SHOW = 10
 Const LS_ACQ_NO_SPIKE_REMOVING = 100
 Const LS_ACQ_SPECTRAL_IMAGE = 3
+Const LS_START_EXTENDED_VIDEO = 3
+Const LS_VT_R4 = 4
+Const LS_VT_R8 = 5
+Const LS_VT_BSTR = 8
 Const LS_INCREMENT_STEP = 1
 Const LS_DISABLE_ALL_MOTORS = 3
 Const LS_ENABLE_AXIS = 1
@@ -173,7 +177,7 @@ Function MotorValue(name)
 End Function
 
 Function MotorLabel(name)
-    Dim idx
+    Dim idx, e, v
     MotorLabel = ""
     If name = "" Then Exit Function
     On Error Resume Next
@@ -186,6 +190,39 @@ Function MotorLabel(name)
         Err.Clear
         MotorLabel = ""
     End If
+    If MotorLabel = "" Then
+        ' the manual's other way: GetValueEx "CurrentPositionName:<motor>" (missing from some builds)
+        v = LabSpec.GetValueEx(0, "CurrentPositionName:" & name, e, LS_VT_BSTR)
+        If Err.Number = 0 And Not IsArray(v) Then MotorLabel = CStr(v)
+        Err.Clear
+    End If
+    On Error GoTo 0
+End Function
+
+' An array value of data object `id`: GetValue, else GetValueEx (documented, missing from some builds), else
+' GetValueSimple (no by-reference argument). Returns the method that worked, or "".
+Function GetArr(id, what, vt, ByRef v)
+    Dim e
+    GetArr = ""
+    On Error Resume Next
+    LabSpec.GetValue id, what, v
+    If Err.Number = 0 And IsArray(v) Then
+        GetArr = "GetValue"
+        Exit Function
+    End If
+    Err.Clear
+    v = LabSpec.GetValueEx(id, what, e, vt)
+    If Err.Number = 0 And IsArray(v) Then
+        GetArr = "GetValueEx"
+        Exit Function
+    End If
+    Err.Clear
+    v = LabSpec.GetValueSimple(id, what, 0, vt)
+    If Err.Number = 0 And IsArray(v) Then
+        GetArr = "GetValueSimple"
+        Exit Function
+    End If
+    Err.Clear
     On Error GoTo 0
 End Function
 
@@ -229,7 +266,7 @@ End Function
 ' ---------------------------------------------------------------- discovery (no laser, no movement)
 ' withPopup: also test the non-blocking window (not from the bridge: it would close the bridge's own window)
 Function DiscoverTo(outPath, withPopup)
-    Dim d, names, i, j, name, size, n, okPopup, ret
+    Dim d, names, i, j, name, size, n, okPopup, ret, e0, probe, part, cpN, cpU, cpT, cpV
     Set d = CreateObject("Scripting.Dictionary")
     d("time") = Year(Now) & "-" & Right("0" & Month(Now), 2) & "-" & Right("0" & Day(Now), 2) & "T" & _
                 Right("0" & Hour(Now), 2) & ":" & Right("0" & Minute(Now), 2) & ":" & Right("0" & Second(Now), 2)
@@ -300,6 +337,30 @@ Function DiscoverTo(outPath, withPopup)
     Err.Clear
     ret = LabSpec.GetLastErrorInfo()                            ' not in the 2018 manual; in the type library
     d("selftest.last_error_info") = Bit(Err.Number = 0)
+    Err.Clear
+    ' methods found in the type library (or in the manual but missing from some builds): read-only probes
+    ret = LabSpec.GetValueEx(0, "SystemName", e0, LS_VT_BSTR)
+    d("selftest.get_value_ex") = Bit(Err.Number = 0)
+    Err.Clear
+    probe = LabSpec.CreateDataObject("Spectrum", 16, 0, -1)       ' a scratch spectrum, removed below
+    If Err.Number = 0 And probe > 0 Then
+        part = LabSpec.GetValueSimplePart(probe, "Data", 0, LS_VT_R4, 4, 8)
+        d("selftest.get_value_simple_part") = Bit(Err.Number = 0 And IsArray(part))
+        If IsArray(part) Then d("selftest.get_value_simple_part_size") = UBound(part) - LBound(part) + 1
+        Err.Clear
+        LabSpec.Exec probe, LS_REMOVE_DATA, ret
+    End If
+    Err.Clear
+    LabSpec.GetConfigParam cpN, cpU, cpT, cpV
+    d("selftest.get_config_param") = Bit(Err.Number = 0)
+    If Err.Number = 0 And IsArray(cpN) Then
+        For j = LBound(cpN) To UBound(cpN)
+            d("config_param." & j & ".name") = CStr(cpN(j))
+            If IsArray(cpU) Then d("config_param." & j & ".unit") = CStr(cpU(j))
+            If IsArray(cpT) Then d("config_param." & j & ".type") = CStr(cpT(j))
+            If IsArray(cpV) Then d("config_param." & j & ".value") = CStr(cpV(j))
+        Next
+    End If
     Err.Clear
     LabSpec.Message "ls6t discovery running", LS_MB_STATUS_BAR
     d("selftest.status_bar") = Bit(Err.Number = 0)

@@ -16,7 +16,7 @@ it runs **locally**: on the instrument PC, next to the Claude desktop app. It ha
 machines. Unlike the other translators, the backend has no Python API: LabSpec is automated with VBScript
 (*LabSpec 5/6 Automation*, HORIBA, 2018). That is why the bridge script exists.
 
-First instrument: **XploRA** (LabSpec 6, Windows 11). Version 2026.11.19.9.
+First instrument: **XploRA** (LabSpec 6, Windows 11). Version 2026.11.20.1.
 
 **Scope of version 1**
 
@@ -70,7 +70,7 @@ detectors. See `planning.md`.
 ## Installation
 
 On the instrument PC (Windows 11, next to LabSpec 6 and the Claude desktop app): Python 3.10+ and Git, a venv,
-`pip install -e ".[mcp,render,test,windows]"`, `ls6t bridge install`, the two scripts in LabSpec, the discovery and
+`pip install -e ".[mcp,render,test,windows]"`, `ls6t bridge install`, the discovery and bridge scripts in LabSpec, the discovery and
 the machine profile, then the MCP entry in the Claude app. The steps, the offline install, updating and
 troubleshooting are in **[INSTALL.md](INSTALL.md)**.
 
@@ -103,8 +103,10 @@ ls6t run my_studies.json                     # start a request and wait for it (
 ls6t status <request folder>                 # results, or progress while it runs
 ls6t cancel <request folder>                 # stop it: the acquisition or move in progress stops
 ls6t jobs                                    # recent requests; which one holds the instrument
-ls6t instrument status | discover | resume
+ls6t instrument status | discover | resume | last-error
 ls6t instrument snapshot [--laser]           # a video frame with the laser position marked (PNG)
+ls6t instrument snapshot --extended          # LabSpec's extended video (the stage moves; video.allow_extended)
+ls6t instrument config list | save NAME | load NAME   # LabSpec's whole configuration (maintainer)
 ls6t bridge call <verb> key=value ...        # one bridge command, for the maintainer (TESTING.md)
 ls6t profile show | default | import <dump>
 ls6t profile set <key> <JSON value>          # one profile value, e.g. video.laser_offset_um "[1.4, -0.6]"
@@ -247,6 +249,27 @@ it is refused while a request holds the instrument. In a study, the frame is tak
 
 Use it before a calibration or a measurement to check that the beam is on the intended spot. From the Claude app, the
 `snapshot` tool returns the image itself, so Claude sees where the beam is.
+
+**Extended video** (`snapshot(extended=true)`, `ls6t instrument snapshot --extended`): LabSpec's own stitched still
+image (`Video(3)`) over the area and settings chosen in LabSpec's interface, wider than one field of view. The stage
+moves while it is taken, so it is off until the maintainer has tried it (`video.allow_extended`, TESTING.md T5b.6),
+and the operator answers Yes each time. No laser. (`SetExtendedVideo`, which would set the area from a script, is in
+the manual but not in the installed LabSpec.)
+
+## LabSpec configurations
+
+LabSpec can save and load its whole configuration as an `.ini` file (`SaveConfig` / `LoadConfig`, in the installed
+LabSpec's type library but not in the 2018 manual). For the maintainer:
+
+```powershell
+ls6t instrument config save before_tests     # LS6T_HOME\configs\before_tests.ini
+ls6t instrument config list
+ls6t instrument config load before_tests     # the operator confirms in LabSpec; --show opens LabSpec's dialog
+```
+
+With `session.restore_config` true in the profile, every request saves LabSpec's configuration when it starts
+(`labspec_before.ini` in the request folder) and loads it back when it ends normally, so the operator finds LabSpec
+as they left it. It is off until TESTING.md T1.4 shows what the file holds.
 
 ## Stage and focus
 
@@ -536,7 +559,7 @@ Claude app ──MCP──> ls6t-mcp ──> request folder + runner process (ls
 | `sim.py` | A simulated LabSpec + XploRA speaking the same protocol (`LS6T_MODE=sim`, tests, benchmarks) |
 | `bench.py` | The benchmarks |
 | `api.py`, `cli.py`, `mcp_server.py` | The functions, the command line, the MCP server |
-| `vbs/common.vbs`, `vbs/bridge_main.vbs`, `vbs/discover_main.vbs` | The LabSpec scripts' parts; `ls6t bridge install` puts them together |
+| `vbs/common.vbs`, `vbs/bridge_main.vbs`, `vbs/discover_main.vbs`, `vbs/script_motor_main.vbs` | The LabSpec scripts' parts; `ls6t bridge install` puts them together (the script-motor logger is optional: TESTING.md T1.4) |
 
 **The bridge protocol (1).** ls6t writes a command as `inbox\<seq>.cmd`: `key=value` lines, UTF-16, written to a
 `.tmp` file and renamed. `verb` and `seq` come first, and `seq` is a 20-digit number; the bridge runs the lowest
@@ -549,9 +572,10 @@ names.
 
 Verbs: `ping`, `status`, `discover`, `move` (`motor`, `mode`: value, label or index, `value`), `move_xy`,
 `autofocus`, `acquire`, `view` (live map or profile in LabSpec: create, add, save), `save`, `remove`, `confirm`,
-`message` (status bar), `safe`, `resume`, `quit`, `map_native` (LabSpec's mapping engine), `video` (a frame: `out`, `settle_s`, `laser_s`,
-`m_laser_shutter`, `formats`, `camera`; written as `<out>.video.txt`, with `<out>.nolaser.video.txt` when the
-laser was on), `guide` (the fast loop: `text`, `mode`, `target`, `from_nm`/`to_nm`, the line's window
+`message` (status bar), `safe`, `resume`, `quit`, `map_native` (LabSpec's mapping engine; `chunk` values per
+`GetValueSimplePart` when written out, 0 for one `GetValue`), `video` (a frame: `out`, `settle_s`, `laser_s`,
+`m_laser_shutter`, `formats`, `camera`, `extended`; written as `<out>.video.txt`, with `<out>.nolaser.video.txt` when
+the laser was on), `config` (`action` save or load, `path`, `show`), `last_error`, `guide` (the fast loop: `text`, `mode`, `target`, `from_nm`/`to_nm`, the line's window
 `lo_nm`/`hi_nm` and `lo_cm1`/`hi_cm1`, `exposure_s`, `max_s`, `stable_n`, `drop_frac`, `sat`, `out`, `ui`),
 `notice` (a message the operator acknowledges: OK or Cancel).
 
@@ -625,6 +649,7 @@ frames, LabSpec's image files, `snapshot.json`); a study's frames go to its `vid
 
 | Version | Changes |
 |---|---|
+| 2026.11.20.1 | Methods from the installed LabSpec's type library. `SaveConfig`/`LoadConfig`: `ls6t instrument config save/load/list` and the profile's `session.restore_config` (LabSpec restored after each request). `GetValueSimplePart`: native maps written out in chunks (`mapping.export_chunk`). `GetValueEx` (manual only) as a fallback after `GetValue`, and for motor position names. `GetLastErrorInfo`: `ls6t instrument last-error` and in `status`. Extended video (`Video(3)`; `SetExtendedVideo` is missing from the build): `snapshot --extended`, off by default (`video.allow_extended`). Discovery probes `GetValueEx`, `GetValueSimplePart` and `GetConfigParam` (its parameters listed). `ls6t_script_motor.vbs`: a virtual script-controlled motor that logs `GetMotorAction`/`SetMotorInfo`, to learn the protocol. `SetConfigParam` and `SetScriptPath` are deliberately not called. TESTING Q35–Q40, T1.4, T5b.6. |
 | 2026.11.19.9 | `ls6t-typelib` reads the type library straight from the `.ocx` (its TYPELIB resource, MSFT format) in pure Python, on Windows, macOS or Linux; identical libraries are listed once. Read on the instrument's `NFActiveX.ocx` (32- and 64-bit builds, 2021): 60 methods, 15 not in the 2018 manual (see planning.md). The bridge adds LabSpec's own last error (`GetLastErrorInfo`) to its error messages; discovery tests it. |
 | 2026.11.19.8 | `ls6t-typelib`: a separate, read-only tool that reads LabSpec's ActiveX type library (comtypes or pywin32) and lists every method and property of the installed version, marking those not in the 2018 manual and those of interest (alignment, calibration, lamp, progress...); text, markdown or JSON; extra `windows`. |
 | 2026.11.19.7 | Native mapping: `map.engine` (`auto`, `points`, `native`) and `swift`; bridge verb `map_native` (`SetMappingParams` per axis, interface exposure and accumulations, spectrometer centred, SWIFT, `Acq` spectral image, wait and cancel, the map written for ls6t and saved as `.l6s` and text); ls6t splits it into spectra and analyses it like point-by-point maps; profile `mapping` settings for what the manual leaves open; benchmark `native_map`. |
