@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.20.18)
+## Architecture (version 2026.11.20.19)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -283,6 +283,17 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   (adjust labspec) records labspec_parameters before/after/changed; labels and discovery use 100+/200+ codes for
   motors with more than ten positions. Writing LabSpec's calibration (OperVar 1) stays off until Q27 says which
   parameter to change and the maintainer agrees. 101 tests.
+- 2026-11-20, 2026.11.20.19: decision with Nicola: ls6t checks the calibration (fast, structured, no dialogs);
+  LabSpec's own AutoCalibration corrects it (HORIBA's validated procedure) rather than ls6t writing OperVar values;
+  the service/QC scripts are not called (interactive, results to Excel/QC folders, slow). autocal.py: candidates
+  (OLSetup's script, <LabSpec>\AutoCalibration\*.vbs), assess (LabSpec calls, operator dialogs, what it changes,
+  includes, top-level names shared with the composed bridge = 'Name redefined' at ExecuteGlobal). Bridge verb
+  run_vbs (ExecuteGlobal of a .vbs under LabSpecPath; heartbeat pauses: Bridge.alive treats busy/run_vbs like a
+  modal question). calibration.adjust 'auto' + profile calibration.autocal {enabled false, script, timeout_s,
+  sample}; instrument autocal_info / autocal_run (values changed, read with calib_params). TESTING T4.9.
+  CI (.18) failed in the installed copy's benchmarks on Windows (native_map passed; which failed is not in the
+  pasted tail; they pass on Linux): the workflow now prints the failing case, its checks, state.json and runner.log,
+  and keeps bench.json. 102 tests.
 
 ## To do next
 

@@ -1,5 +1,5 @@
 """format.py — the study format and its static checks (no instrument needed).
-Version: 2026.11.20.18
+Version: 2026.11.20.19
 """
 from __future__ import annotations
 
@@ -108,7 +108,8 @@ def study_format(status: dict | None = None) -> dict:
             "move": "(kind move) {x_um, y_um | to_um: [x, y] (absolute, from a snapshot), dz_um, stay: true, "
                     "snapshot: true}; setup may only give the objective",
             "calibration": "(kind calibration) {reference: si | polystyrene | cyclohexane | naphthalene | "
-                           "diamond, lines_cm1: [...] (your own), tol_cm1 (1), adjust: none | labspec | ls6t}",
+                           "diamond, lines_cm1: [...] (your own), tol_cm1 (1), adjust: none | labspec | ls6t | auto "
+                           "(LabSpec's AutoCalibration when enabled in the profile, else guided like labspec)}",
             "background": "(kind background) {name, laser_off: shutter | operator}; acquire as for the spectra "
                           "it will correct (same grating and range)",
             "depth": "(kind depth) {from_um (-5: above the focus), to_um (20), step_um (1): nominal depth, the "
@@ -210,8 +211,8 @@ def validate_study(name: str, study: dict, prof: dict) -> dict:
         if cal.get("lines_cm1") is not None and not (isinstance(cal["lines_cm1"], list) and cal["lines_cm1"]
                                                      and all(_num(v) for v in cal["lines_cm1"])):
             errors.append("calibration.lines_cm1: a list of Raman shifts (cm-1)")
-        if cal.get("adjust", "none") not in ("none", "labspec", "ls6t"):
-            errors.append("calibration.adjust: none, labspec or ls6t")
+        if cal.get("adjust", "none") not in ("none", "labspec", "ls6t", "auto"):
+            errors.append("calibration.adjust: none, labspec, ls6t or auto")
         if cal.get("tol_cm1") is not None and (not _num(cal["tol_cm1"]) or cal["tol_cm1"] <= 0):
             errors.append("calibration.tol_cm1: > 0")
     if kind == "background":

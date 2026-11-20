@@ -1,5 +1,5 @@
 """api.py — the functions behind the command line and the MCP server (JSON in, JSON out).
-Version: 2026.11.20.18
+Version: 2026.11.20.19
 """
 from __future__ import annotations
 
@@ -285,6 +285,10 @@ def instrument(action: str = "status", camera=None, setup: dict | None = None, s
             return laser(action == "laser_on", seconds)
         if action == "calibration":
             return labspec_calibration(b)
+        if action == "autocal_info":
+            return autocal_info()
+        if action == "autocal_run":
+            return autocal_run()
         if action in ("camera_on", "camera_off"):
             prof = P.load()
             num, err = P.camera_number(prof, camera)
@@ -300,10 +304,54 @@ def instrument(action: str = "status", camera=None, setup: dict | None = None, s
     except BridgeError as exc:
         return {"ok": False, "error": str(exc)}
     raise ValueError(f"action {action!r}: status, set, laser_on, laser_off, camera_on, camera_off, calibration, "
-                     "discover, resume or last_error")
+                     "autocal_info, autocal_run, discover, resume or last_error")
 
 
 SET_KEYS = ("filter", "laser_nm", "grating", "objective", "hole_um", "slit_um")
+
+
+def autocal_info() -> dict:
+    """LabSpec's AutoCalibration scripts on this PC and, from their text, whether the bridge can run them unattended
+    (it asks the operator? it shares names with the bridge?). Nothing runs."""
+    from . import autocal
+    bridge_text = compose_vbs(config.bridge_dir(), config.home())["ls6t_bridge.vbs"]
+    return {"ok": True, **autocal.info(P.load(), bridge_text)}
+
+
+def autocal_run() -> dict:
+    """Runs LabSpec's AutoCalibration once from the bridge (profile calibration.autocal enabled by a person; the
+    operator says Yes in LabSpec first), with LabSpec's calibration read before and after. For the maintainer's test
+    (TESTING T4.9); calibration studies with adjust 'auto' do the same when the calibration is off."""
+    prof = P.load()
+    ac = prof.get("calibration", {}).get("autocal") or {}
+    if not ac.get("enabled") or not ac.get("script"):
+        return {"ok": False, "error": "LabSpec's AutoCalibration is not enabled in the profile (calibration.autocal): "
+                                      "see instrument autocal_info"}
+    if runner.read_json(runner.lock_path(), None):
+        return {"ok": False, "error": "a request holds the instrument: wait or cancel it"}
+    b = Bridge()
+    if config.mode() == "sim":
+        from . import sim as S
+        S.ensure(b.dir)
+    try:
+        before = labspec_calibration(b)
+        r = b.call("confirm", timeout_s=3600,
+                   text=f"ls6t asks to run LabSpec's AutoCalibration ({ac['script']})."
+                        + (f" Put {ac['sample']} under the objective first." if ac.get("sample") else "") + " Continue?")
+        if r.get("answer") != "yes":
+            return {"ok": False, "error": "the operator declined in LabSpec"}
+        t0 = time.time()
+        r = b.call("run_vbs", timeout_s=float(ac.get("timeout_s", 1800)), path=str(ac["script"]))
+        after = labspec_calibration(b)
+    except BridgeError as exc:
+        return {"ok": False, "error": str(exc)}
+    out = {"ok": bool(r.get("ok")), "error": r.get("error") or None, "seconds": round(time.time() - t0, 1)}
+    if before.get("ok") and after.get("ok"):
+        out["changed"] = {g: {k: [v, after["gratings"].get(g, {}).get(k)] for k, v in vals.items()
+                              if after["gratings"].get(g, {}).get(k) != v}
+                          for g, vals in before["gratings"].items()}
+        out["changed"] = {g: c for g, c in out["changed"].items() if c}
+    return out
 
 
 def labspec_calibration(b: Bridge | None = None) -> dict:

@@ -1337,3 +1337,32 @@ def test_labspec_ini_completes_the_profile(monkeypatch):
     green = lc["oneclick_presets"]["OneClick Green"]
     assert green == {"enabled": True, "laser": "532nm_Edge", "grating": "600 (750nm)", "center": 1001.38070121135,
                      "range": [100.0, 3500.0]} or green["laser"] == 2      # the made-up ini lists no laser names
+
+
+def test_autocalibration_flow(tmp_path, monkeypatch):
+    from labspec_translator import autocal
+    script = tmp_path / "LabSpec" / "AutoCalibration" / "AutoCal.vbs"
+    script.parent.mkdir(parents=True)
+    script.write_text("Option Explicit\nDim fso, Angle\nSub Main()\n  LabSpec.OperVar 1, \"ACT_INSTRUMENT[BF][0]\", 1, 0\n"
+                      "  LabSpec.Dialog DIALOG_SHOW, \"\", \"\", \"\", \"\"\nEnd Sub\nMain\n", encoding="cp1252")
+    a = autocal.assess(script, api.compose_vbs(config.bridge_dir(), config.home())["ls6t_bridge.vbs"])
+    assert "fso" in a["names_shared_with_the_bridge"] and not a["runs_inside_the_bridge"]
+    assert "LabSpec dialogs" in a["asks_the_operator"] and any("OperVar" in c for c in a["changes"])
+    bdir = config.active_bridge_dir()
+    S.ensure(bdir)
+    (bdir / "sim_xshift").write_text("2.0,1.0")
+    study = {"c": {"kind": "calibration", "sample": {"name": "Si"}, "setup": SETUP,
+                   "calibration": {"adjust": "auto"}}}
+    st = run_inline(study)                                       # not enabled: guided, like 'labspec'
+    cal = st["studies"]["c"]["calibration"]
+    assert cal["pass"] and "not enabled" in cal["autocalibration"]
+    (bdir / "sim_xshift").write_text("2.0,1.0")
+    P.save(dict(P.load(), calibration=dict(P.load()["calibration"], autocal={
+        "enabled": True, "script": str(script), "timeout_s": 60, "sample": "the Si wafer"})))
+    st = run_inline(study)
+    cal = st["studies"]["c"]["calibration"]
+    assert cal["pass"] and cal["autocalibration"][0]["ok"] and [x["pass"] for x in cal["attempts"]] == [False, True]
+    (bdir / "sim_xshift").write_text("2.0,1.0")
+    r = api.instrument("autocal_run")
+    assert r["ok"] and r["changed"]["1800"]["BF"]                      # the zero moved back
+    assert api.instrument("autocal_info")["enabled"]

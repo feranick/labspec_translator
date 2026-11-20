@@ -12,7 +12,7 @@ stops and cancel on the simulator, and `ls6t bench` gives known answers. What re
 LabSpec and hardware. The plan goes from no laser and no motion to Claude driving a full map, in stages. Each stage
 starts only when the previous one passed.
 
-Version under test: 2026.11.20.18 (bridge protocol 1).
+Version under test: 2026.11.20.19 (bridge protocol 1).
 
 ---
 
@@ -361,6 +361,21 @@ Compare with the maintainer's own spectrum of the same sample.
    is at 520.7 ± 0.3. Clear it with `ls6t references clear correction` afterwards, unless the maintainer wants to
    keep it.
 
+**T4.9 LabSpec's AutoCalibration from ls6t (Q42; maintainer).** ls6t checks the calibration; LabSpec's own
+AutoCalibration should correct it.
+
+1. `ls6t instrument autocal-info`: the AutoCalibration script(s) on this PC and, from their text, whether the bridge
+   can run them (`runs_inside_the_bridge`: no name shared with the bridge) and whether they ask the operator
+   (`asks_the_operator`). Nothing runs. Send the output to the ls6t maintainer.
+2. Run LabSpec's AutoCalibration once by hand from LabSpec's menu, to see what it needs (sample, lamp) and does.
+3. If step 1 says it can run inside the bridge: `ls6t profile set calibration.autocal '{"enabled": true, "script":
+   "<path>", "timeout_s": 1800, "sample": "<what it needs>"}'`, then `ls6t instrument autocal-run`. Pass: LabSpec asks
+   first; the script runs (its dialogs, if any, appear); `changed` lists LabSpec's calibration values it changed; the
+   bridge answers again afterwards. If LabSpec hangs or shows an error, close it, restart the bridge, set
+   `calibration.autocal.enabled` back to false and note what happened.
+4. A `calibration` study with `"adjust": "auto"` on the Si wafer, after shifting the zero slightly by hand in
+   LabSpec. Pass: the check fails, AutoCalibration runs (after Yes), the second check passes.
+
 **T4.8 White-light background (Q28).** With the maintainer: the white light on as for routine measurements.
 
 1. Run `{"bg": {"kind": "background", "sample": {"name": "lamp"}, "setup": {... grating 600 ...}, "acquire":
@@ -665,6 +680,7 @@ With the Claude desktop app connected ([INSTALL.md](INSTALL.md) step 8):
 | T4.6 | | | | | |
 | T4.7 | | | | Q27 (names in LabSpec, offset before/after): | |
 | T4.8 | | | | Q28: | |
+| T4.9 | | | | Q42 (script found, runs inside the bridge?, asks?, values changed): | |
 | T5 | | | | Q8: | |
 | T5b.1 | | | | Q13 (formats saved): | |
 | T5b.2 | | | | Q14 (order, packing, axes): | |

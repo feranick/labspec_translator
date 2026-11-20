@@ -1,5 +1,5 @@
 """runner.py — runs a request's studies on the instrument, one command at a time, and checks every result.
-Version: 2026.11.20.18
+Version: 2026.11.20.19
 
 A request runs in its own process (`ls6t run-request FOLDER`, started detached by api.start), so it outlives the
 MCP call that started it. One request at a time holds the instrument (a lock file under LS6T_HOME); others wait
@@ -347,7 +347,7 @@ def run_any(name: str, study: dict, ctx: Ctx) -> dict:
         return run_focus(name, study, ctx)
     if kind == "spot":
         return run_spot(name, study, ctx)
-    if kind == "calibration" and (study.get("calibration") or {}).get("adjust") == "labspec":
+    if kind == "calibration" and (study.get("calibration") or {}).get("adjust") in ("labspec", "auto"):
         return run_calibration(name, study, ctx)
     if kind == "background":
         return run_background(name, study, ctx)
@@ -991,6 +991,9 @@ def run_calibration(name: str, study: dict, ctx: Ctx) -> dict:
     attempts, res = [], None
     n_max = 1 + int(prof.get("calibration", {}).get("max_retries", 2))
     params_before = _labspec_params(ctx)
+    auto = (study.get("calibration") or {}).get("adjust") == "auto"
+    ac = prof.get("calibration", {}).get("autocal") or {}
+    autocal_runs = []
     for k in range(1, n_max + 1):
         res = run_study(name, study, ctx, sd / f"attempt{k}")
         cal = res.get("calibration") or {}
@@ -999,6 +1002,21 @@ def run_calibration(name: str, study: dict, ctx: Ctx) -> dict:
                          "labspec_parameters": _labspec_params(ctx)})
         if cal.get("pass") or k == n_max or not cal.get("lines_used"):
             break
+        if auto and not autocal_runs and ac.get("enabled") and ac.get("script"):
+            # LabSpec's own AutoCalibration, once; then measure again
+            txt = (f"ls6t: the calibration is off ({cal.get('offset_cm1')} cm-1). ls6t asks to run LabSpec's "
+                   f"AutoCalibration ({ac['script']})."
+                   + (f" Put {ac['sample']} under the objective first." if ac.get("sample") else "")
+                   + " Continue?")
+            ans = ctx.call("confirm", timeout_s=3600, text=txt)
+            if ans.get("answer") == "yes":
+                t0 = time.time()
+                r = ctx.call("run_vbs", timeout_s=float(ac.get("timeout_s", 1800)), path=str(ac["script"]))
+                autocal_runs.append({"ok": bool(r["ok"]), "error": r.get("error"), "seconds": round(time.time() - t0, 1)})
+                if r["ok"]:
+                    continue                       # measure again
+            else:
+                autocal_runs.append({"ok": False, "error": "the operator declined"})
         laser = (res.get("instrument") or {}).get("laser_nm") or 532.0
         ref, meas = cal["reference_cm1"], cal["measured_cm1"]
         err = meas - ref
@@ -1016,6 +1034,9 @@ def run_calibration(name: str, study: dict, ctx: Ctx) -> dict:
     result = dict(res or {})
     cal = dict(result.get("calibration") or {})
     cal["attempts"] = attempts
+    if auto:
+        cal["autocalibration"] = autocal_runs or ("not enabled in the profile (calibration.autocal): guided instead"
+                                                  if not ac.get("enabled") else "not needed")
     after = attempts[-1].get("labspec_parameters") if attempts else None
     if params_before and after:
         changed = {k: [params_before.get(k), after.get(k)] for k in after if after.get(k) != params_before.get(k)}

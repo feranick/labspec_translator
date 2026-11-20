@@ -1,5 +1,5 @@
 """profile.py — the machine profile: what the instrument has (from the discovery script) and the limits a person sets.
-Version: 2026.11.20.18
+Version: 2026.11.20.19
 
 The profile is a JSON file (LS6T_PROFILE, default ~/ls6t/profile.json). Studies never change it: an LLM can only
 ask for what the profile allows. Without a file, the built-in XploRA defaults below apply and every result says so
@@ -69,7 +69,11 @@ DEFAULT_PROFILE: dict = {
     "spot": {"max_offset_um": 10.0, "drift_warn_um": 1.0, "max_age_h": 24.0},
     # spectral calibration: corrections older than max_age_h are flagged; guided LabSpec adjustments repeat at most
     # max_retries times
-    "calibration": {"max_age_h": 24.0, "max_retries": 2},
+    "calibration": {"max_age_h": 24.0, "max_retries": 2,
+                    # LabSpec's own AutoCalibration, run by the bridge (calibration.adjust 'auto'): off until it was
+                    # tried with the maintainer (TESTING T4.9); script: its .vbs; sample: what it needs under the
+                    # objective, told to the operator first
+                    "autocal": {"enabled": False, "script": None, "timeout_s": 1800.0, "sample": None}},
     # LabSpec's own mapping engine (map.engine 'native'): used by 'auto' from native_min_points points; whether
     # SetMappingParams takes absolute stage positions or offsets; the order of the exported values; whether
     # Acq(ACQ_SPECTRAL_IMAGE) takes the interface's exposure (-1) or ours; the time per point beyond the exposure;

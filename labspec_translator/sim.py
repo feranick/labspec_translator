@@ -1,5 +1,5 @@
 """sim.py — a simulated LabSpec + XploRA behind the same bridge protocol as ls6t_bridge.vbs.
-Version: 2026.11.20.18
+Version: 2026.11.20.19
 
 It answers every verb of the bridge with the same keys, so the runner, the checks and the MCP server are tested
 without the instrument (LS6T_MODE=sim, and the tests). The simulated sample is a silicon wafer with a graphene
@@ -241,6 +241,19 @@ class SimLabSpec:
             return {"ok": 0, "error": "laser on needs m_laser_shutter and seconds"}
         self.laser_until = time.time() + float(p["seconds"])
         return {"open": 1, "seconds": p["seconds"]}
+
+    def v_run_vbs(self, p):
+        """LabSpec's AutoCalibration: in the simulator it corrects the spectral zero (removes sim_xshift)."""
+        if not str(p.get("path", "")).lower().endswith(".vbs"):
+            return {"ok": 0, "error": "run_vbs: only a .vbs inside LabSpec's folder"}
+        if (self.dir / "sim_autocal_fails").exists():
+            return {"ok": 0, "error": "running the script: Name redefined (simulated)"}
+        try:
+            (self.dir / "sim_xshift").unlink()
+        except FileNotFoundError:
+            pass
+        self.autocal_runs = getattr(self, "autocal_runs", 0) + 1
+        return {"seconds": "42", "path": p["path"]}
 
     def v_calib_params(self, p):
         """LabSpec's spectrometer calibration per grating (OperVar ACT_INSTRUMENT[...]): made-up, XploRA-like."""

@@ -281,6 +281,41 @@ Sub VCalibParams(cmd, res)
     On Error GoTo 0
 End Sub
 
+' One of LabSpec's own scripts (its AutoCalibration), run inside the bridge the way HORIBA's scripts include each
+' other (ExecuteGlobal). Experimental: only for a .vbs in LabSpec's folder, which ls6t asks for when the profile
+' allows it (calibration.autocal) and the operator said Yes. The heartbeat stops while it runs.
+Sub VRunVbs(cmd, res)
+    Dim path, code, t0, lsPath
+    path = GetP(cmd, "path", "")
+    lsPath = LCase(LSValue(0, "LabSpecPath"))
+    If path = "" Or Not fso.FileExists(path) Then
+        Fail res, "run_vbs: no such script: " & path
+        Exit Sub
+    End If
+    If LCase(Right(path, 4)) <> ".vbs" Or lsPath = "" Or InStr(LCase(path), lsPath) <> 1 Then
+        Fail res, "run_vbs: only a .vbs inside LabSpec's folder (" & lsPath & ")"
+        Exit Sub
+    End If
+    LabSpec.Message "ls6t: running LabSpec's script " & path, LS_MB_STATUS_BAR
+    t0 = Timer
+    On Error Resume Next
+    code = fso.OpenTextFile(path, 1).ReadAll
+    If Err.Number <> 0 Then
+        Fail res, ErrText("reading " & path)
+        Err.Clear
+        Exit Sub
+    End If
+    ExecuteGlobal code
+    If Err.Number <> 0 Then
+        Fail res, ErrText("running " & path)
+        Err.Clear
+    End If
+    On Error GoTo 0
+    res("seconds") = Fmt(Elapsed(t0))
+    res("path") = path
+    BeatNow
+End Sub
+
 ' A motor's named positions (labels and values, up to 60) and the current one
 Sub VLabels(cmd, res)
     Dim motor, n, i
@@ -1801,6 +1836,7 @@ Sub HandleFile(path)
             Case "camera": VCamera cmd, res
             Case "labels": VLabels cmd, res
             Case "calib_params": VCalibParams cmd, res
+            Case "run_vbs": VRunVbs cmd, res
             Case "map_native": VMapNative cmd, res
             Case "config": VConfig cmd, res
             Case "last_error": res("info") = LabSpecError()
