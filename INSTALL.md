@@ -18,22 +18,23 @@ network: it carries its own Python with every package. Use it unless you develop
 
 1. **Get it**: from the repository's *Releases* page (it is built for every version, see
    [Building the installer](#building-the-installer)), or build it yourself. Copy it to the instrument PC.
-2. **Log in with the Windows account that runs LabSpec**, and quit the Claude app (right-click its icon in the
-   taskbar's notification area, *Quit*).
+2. **Log in with the Windows account that runs LabSpec**, and quit the LLM apps (Claude: right-click its icon in the
+   taskbar's notification area, *Quit*; ChatGPT; Codex; Gemini CLI).
 3. **Run it.** The installer is not code-signed, so Windows SmartScreen may say *"Windows protected your PC"*: *More
    info > Run anyway*. Choose the components:
 
    | Component | Default | What it does |
    |---|---|---|
    | ls6t | always | The commands, the MCP server, a private Python, the guides; writes the LabSpec scripts to `%USERPROFILE%\ls6t\vbs` |
-   | Connect to the Claude app | on | Adds the `ls6t` server to `claude_desktop_config.json` (backed up first; other servers and your ls6t settings are kept) |
+   | Connect ls6t to the LLM apps found | the apps found are ticked | Adds the `ls6t` MCP server to the Claude desktop app, the ChatGPT desktop app / Codex, and Gemini CLI: each one ticked (see [step 8](#8-connect-an-llm-app); files backed up first) |
    | Add ls6t to PATH | on | `ls6t`, `ls6t-mcp`, `ls6t-typelib` in any new PowerShell window |
    | Start menu shortcuts | on | *ls6t PowerShell*, *LabSpec scripts (ls6t)*, *ls6t guides*, *Uninstall ls6t* |
-   | Simulator connection | off | Also adds `ls6t-sim`, the same tools on the built-in simulator, to practise |
+   | Also the simulator | off | Also adds `ls6t-sim`, the same tools on the built-in simulator, to those apps |
 
-   It checks that everything loads and precompiles the packages (a minute or two).
+   It checks that everything loads and precompiles the packages (a minute or two). An app installed after ls6t:
+   `ls6t connect auto` ([step 8](#8-connect-an-llm-app)).
 4. **Then** continue with: adding the scripts in LabSpec (step [6](#6-install-the-labspec-scripts), from *"In LabSpec
-   6"*), the machine profile (step [7](#7-the-machine-profile)), restarting the Claude app, and the check with the
+   6"*), the machine profile (step [7](#7-the-machine-profile)), restarting the connected apps, and the check with the
    instrument (step [9](#9-check-with-the-instrument)). Steps 1–5 and 8 are done. Use *Start > ls6t PowerShell* (or
    any new PowerShell window) for the `ls6t` commands.
 
@@ -49,10 +50,11 @@ start the new `ls6t_bridge.vbs`, and start the Claude app again. (If ls6t is sti
 waits.)
 
 **Uninstalling:** *Settings > Apps > Installed apps > labspec-translator (ls6t) > Uninstall*, or *Start > ls6t >
-Uninstall ls6t*. It removes the program, the PATH entry and the Claude app's `ls6t` entries; your data stays.
+Uninstall ls6t*. It removes the program, the PATH entry and the `ls6t` entries it finds in the LLM apps; your data stays.
 
-**Silent install** (for IT): `ls6t-setup-<version>.exe /S` installs with the defaults; `/D=C:\path\ls6t` (last on the
-line) changes the folder.
+**Silent install** (for IT): `ls6t-setup-<version>.exe /S` installs with the defaults (the apps found are connected);
+`/CLAUDE /CODEX /GEMINI` choose the apps instead, `/NOAPPS` none, `/SIM` adds the simulator entries; `/D=C:\path\ls6t`
+(last on the line) changes the folder.
 
 ### Building the installer
 
@@ -225,34 +227,64 @@ limits a person sets. Until one exists, ls6t uses built-in XploRA defaults and s
    Only a person edits this file. Studies cannot change it, and the MCP tools can only *propose* a profile
    (`instrument(action="discover")` writes `profile.proposed.json`).
 
-## 8. Connect the Claude desktop app
+## 8. Connect an LLM app
 
-Install the Claude desktop app for Windows. In the app: *Settings > Developer > Edit Config* opens
-`claude_desktop_config.json`. That is usually `%APPDATA%\Claude\claude_desktop_config.json`; for the Microsoft Store
-version it sits under `%LOCALAPPDATA%\Packages\Claude_...\LocalCache\Roaming\Claude\`. Add the server (keep any other
-entries; backslashes are doubled in JSON):
+ls6t's MCP server works with every app that starts local (stdio) MCP servers. On Windows:
+
+| `ls6t connect` name | App | Its MCP file |
+|---|---|---|
+| `claude` | Claude desktop app | `%APPDATA%\Claude\claude_desktop_config.json` (Microsoft Store version: `%LOCALAPPDATA%\Packages\Claude_...\LocalCache\Roaming\Claude\`) |
+| `codex` | ChatGPT desktop app, Codex CLI and Codex IDE extension: they share one file | `%USERPROFILE%\.codex\config.toml` (or `%CODEX_HOME%`) |
+| `gemini` | Gemini CLI | `%USERPROFILE%\.gemini\settings.json` |
+
+The Gemini app and ChatGPT on the web take only remote servers (an internet address). ls6t does not put the
+instrument on the internet, so they cannot use it; use Gemini CLI or the ChatGPT desktop app on the instrument PC.
+
+```powershell
+ls6t connect                 # which apps are here, and which already run ls6t
+ls6t connect auto            # add "ls6t" to every app found (or name them: ls6t connect codex gemini)
+ls6t connect auto --sim      # also "ls6t-sim": the same tools on the simulator, to practise
+ls6t connect codex --remove  # take this install's entries out again
+```
+
+Each file is backed up first (`<file>.ls6t-backup-<date>`); other servers and settings in an existing ls6t entry are
+kept. Every entry gets the same `LS6T_HOME` and `LS6T_OUT`, so all apps share one instrument lock, one bridge and
+one profile: two apps cannot drive the instrument at the same time. The entry runs the Python that ran `ls6t connect`
+(`python.exe -m labspec_translator.mcp_server`).
+
+Then quit the app completely (Claude: right-click its icon in the taskbar's notification area, *Quit*) and start it
+again; the ls6t tools appear in a new chat or session. Notes per app:
+
+- **ChatGPT desktop app / Codex**: tool calls may wait up to an hour for the operator's answer in LabSpec, so the entry
+  sets `tool_timeout_sec = 3600` (and `startup_timeout_sec = 60`). A report from 2026 says local servers' tools may
+  not reach ordinary chats in the Windows desktop app; Codex tasks do get them.
+- **Gemini CLI**: the entry keeps `trust: false`, so Gemini CLI asks before each tool call; `timeout` is one hour.
+
+By hand (Claude, JSON; backslashes doubled):
 
 ```json
 {
   "mcpServers": {
     "ls6t": {
-      "command": "C:\\Users\\<you>\\Software\\labspec_translator\\.venv\\Scripts\\ls6t-mcp.exe",
+      "command": "C:\\Users\\<you>\\Software\\labspec_translator\\.venv\\Scripts\\python.exe",
+      "args": ["-m", "labspec_translator.mcp_server"],
       "env": {"LS6T_CONFIRM": "request"}
     }
   }
 }
 ```
 
-Quit the app completely (right-click its icon in the taskbar's notification area, *Quit*) and start it again. The ls6t
-tools then appear in a new chat. Settings go in `env`, for example a different `LS6T_OUT`.
+Gemini CLI takes the same `mcpServers` block in its `settings.json`. Codex (TOML):
 
-To practise without the instrument, add a second entry that uses the simulator, and remove it later:
+```toml
+[mcp_servers.ls6t]
+command = 'C:\Users\<you>\Software\labspec_translator\.venv\Scripts\python.exe'
+args = ["-m", "labspec_translator.mcp_server"]
+startup_timeout_sec = 60
+tool_timeout_sec = 3600
 
-```json
-    "ls6t-sim": {
-      "command": "C:\\Users\\<you>\\Software\\labspec_translator\\.venv\\Scripts\\ls6t-mcp.exe",
-      "env": {"LS6T_MODE": "sim", "LS6T_OUT": "C:\\Users\\<you>\\ls6t_sim_runs"}
-    }
+[mcp_servers.ls6t.env]
+LS6T_CONFIRM = "request"
 ```
 
 ## 9. Check with the instrument

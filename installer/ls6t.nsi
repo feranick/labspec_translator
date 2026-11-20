@@ -2,7 +2,7 @@
 ;   makensis /DVERSION=<version> /DSTAGE=<staged files> /DOUTFILE=<setup exe> ls6t.nsi
 ; STAGE holds python\ (the embeddable Python with every package in Lib\site-packages), bin\ (launchers), docs\,
 ; examples\. Per-user install (no administrator rights): %LOCALAPPDATA%\Programs\ls6t.
-; Python does the rest (labspec_translator.winsetup): checks, LabSpec scripts, PATH, the Claude app's configuration.
+; Python does the rest (labspec_translator.winsetup): checks, LabSpec scripts, PATH, the LLM apps' MCP configuration.
 
 Unicode true
 SetCompressor /SOLID lzma
@@ -55,10 +55,10 @@ VIAddVersionKey "LegalCopyright" "MIT license"
 
 !define MUI_ABORTWARNING
 !define MUI_WELCOMEPAGE_TITLE "${APPNAME} ${VERSION}"
-!define MUI_WELCOMEPAGE_TEXT "This installs ls6t, which lets the Claude desktop app run Raman measurements on a HORIBA instrument through LabSpec 6, while the operator watches and can stop it at any time.$\r$\n$\r$\nEverything is installed for your Windows account only (no administrator rights): a private Python, the ls6t commands, and the LabSpec scripts in $PROFILE\ls6t\vbs.$\r$\n$\r$\nInstall it with the Windows account that runs LabSpec. Close the Claude app before continuing."
+!define MUI_WELCOMEPAGE_TEXT "This installs ls6t, which lets an LLM app (the Claude desktop app, the ChatGPT desktop app / Codex, or Gemini CLI) run Raman measurements on a HORIBA instrument through LabSpec 6, while the operator watches and can stop it at any time.$\r$\n$\r$\nEverything is installed for your Windows account only (no administrator rights): a private Python, the ls6t commands, and the LabSpec scripts in $PROFILE\ls6t\vbs.$\r$\n$\r$\nInstall it with the Windows account that runs LabSpec. Close those apps before continuing."
 !define MUI_COMPONENTSPAGE_SMALLDESC
 !define MUI_FINISHPAGE_TITLE "ls6t is installed"
-!define MUI_FINISHPAGE_TEXT "Next steps (INSTALL.md, 'With the installer'):$\r$\n$\r$\n1. In LabSpec 6: Processing > Scripts, add ls6t_discover.vbs from $PROFILE\ls6t\vbs and run it once.$\r$\n2. Start menu > ls6t PowerShell:  ls6t profile import <the dump's path>, then review the limits with the maintainer.$\r$\n3. In LabSpec, start ls6t_bridge.vbs whenever ls6t should drive the instrument.$\r$\n4. Quit and restart the Claude app: the ls6t tools appear in a new chat."
+!define MUI_FINISHPAGE_TEXT "Next steps (INSTALL.md, 'The installer'):$\r$\n$\r$\n1. In LabSpec 6: Processing > Scripts, add ls6t_discover.vbs from $PROFILE\ls6t\vbs and run it once.$\r$\n2. Start menu > ls6t PowerShell:  ls6t profile import <the dump's path>, then review the limits with the maintainer.$\r$\n3. In LabSpec, start ls6t_bridge.vbs whenever ls6t should drive the instrument.$\r$\n4. Quit and restart the LLM apps connected: the ls6t tools appear in a new chat or session. (Later, for an app installed after ls6t: ls6t connect auto.)"
 !define MUI_FINISHPAGE_RUN
 !define MUI_FINISHPAGE_RUN_TEXT "Open the LabSpec scripts folder"
 !define MUI_FINISHPAGE_RUN_FUNCTION OpenScripts
@@ -89,20 +89,13 @@ VIAddVersionKey "LegalCopyright" "MIT license"
       FileClose $0
       ${ExitDo}
     ${EndIf}
-    MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "ls6t is running from $INSTDIR: the Claude app, an ls6t window, or a measurement in progress.$\r$\n$\r$\nQuit the Claude app (right-click its tray icon, Quit), close ls6t windows, let any measurement finish, then press Retry." /SD IDCANCEL IDRETRY +2
+    MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "ls6t is running from $INSTDIR: an LLM app using it (Claude, ChatGPT, Codex, Gemini CLI), an ls6t window, or a measurement in progress.$\r$\n$\r$\nQuit those apps (Claude: right-click its tray icon, Quit), close ls6t windows, let any measurement finish, then press Retry." /SD IDCANCEL IDRETRY +2
     Abort "ls6t is still running: nothing was changed."
   ${Loop}
 !macroend
 
 Function OpenScripts
   ExecShell "open" "$PROFILE\ls6t\vbs"
-FunctionEnd
-
-Function .onInit
-  ${IfNot} ${RunningX64}
-    MessageBox MB_OK|MB_ICONSTOP "ls6t needs 64-bit Windows (10 or 11)." /SD IDOK
-    Abort
-  ${EndIf}
 FunctionEnd
 
 ; ------------------------------------------------------------------------------------------------ sections
@@ -134,8 +127,16 @@ Section "ls6t (required)" SecCore
   WriteRegDWORD HKCU "${UNINSTKEY}" "EstimatedSize" "$0"
 SectionEnd
 
-Section "Connect to the Claude app" SecClaude
-SectionEnd
+SectionGroup /e "Connect ls6t to the LLM apps found" SecApps
+  Section /o "Claude desktop app" SecClaude
+  SectionEnd
+  Section /o "ChatGPT desktop app / Codex" SecCodex
+  SectionEnd
+  Section /o "Gemini CLI" SecGemini
+  SectionEnd
+  Section /o "Also the simulator (ls6t-sim, to practise)" SecSim
+  SectionEnd
+SectionGroupEnd
 
 Section "Add ls6t to PATH" SecPath
 SectionEnd
@@ -149,13 +150,16 @@ Section "Start menu shortcuts" SecMenu
   CreateShortcut "$SMPROGRAMS\ls6t\Uninstall ls6t.lnk" "$INSTDIR\uninstall.exe"
 SectionEnd
 
-Section /o "Simulator connection (practice without the instrument)" SecSim
-SectionEnd
-
 Section "-setup" SecSetup
   StrCpy $1 "--compile"
   ${If} ${SectionIsSelected} ${SecClaude}
     StrCpy $1 "$1 --claude"
+  ${EndIf}
+  ${If} ${SectionIsSelected} ${SecCodex}
+    StrCpy $1 "$1 --codex"
+  ${EndIf}
+  ${If} ${SectionIsSelected} ${SecGemini}
+    StrCpy $1 "$1 --gemini"
   ${EndIf}
   ${If} ${SectionIsSelected} ${SecSim}
     StrCpy $1 "$1 --sim"
@@ -163,7 +167,7 @@ Section "-setup" SecSetup
   ${If} ${SectionIsSelected} ${SecPath}
     StrCpy $1 "$1 --path"
   ${EndIf}
-  DetailPrint "Setting up (checks, precompiling, LabSpec scripts, PATH, Claude app): this takes a minute or two"
+  DetailPrint "Setting up (checks, precompiling, LabSpec scripts, PATH, LLM apps): this takes a minute or two"
   nsExec::ExecToLog '"${PY}" -m labspec_translator.winsetup install $1'
   Pop $0
   ${If} $0 == "1"
@@ -179,18 +183,113 @@ SectionEnd
 
 !insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
   !insertmacro MUI_DESCRIPTION_TEXT ${SecCore} "The ls6t commands, the MCP server, a private Python with every package, the guides and the LabSpec scripts (in $PROFILE\ls6t\vbs)."
-  !insertmacro MUI_DESCRIPTION_TEXT ${SecClaude} "Adds the 'ls6t' server to the Claude app's configuration (backed up first; your other servers and ls6t settings are kept)."
+  !insertmacro MUI_DESCRIPTION_TEXT ${SecApps} "Adds the 'ls6t' MCP server to the apps ticked (each file is backed up first; your other servers and ls6t settings are kept). The apps found on this PC are ticked. Later: ls6t connect."
+  !insertmacro MUI_DESCRIPTION_TEXT ${SecClaude} "Claude desktop app: claude_desktop_config.json."
+  !insertmacro MUI_DESCRIPTION_TEXT ${SecCodex} "ChatGPT desktop app, Codex CLI and Codex IDE extension (they share %USERPROFILE%\.codex\config.toml)."
+  !insertmacro MUI_DESCRIPTION_TEXT ${SecGemini} "Gemini CLI: %USERPROFILE%\.gemini\settings.json. (The Gemini app and ChatGPT on the web take only internet servers and cannot use ls6t.)"
   !insertmacro MUI_DESCRIPTION_TEXT ${SecPath} "Lets any new PowerShell window run ls6t, ls6t-mcp and ls6t-typelib."
   !insertmacro MUI_DESCRIPTION_TEXT ${SecMenu} "Start menu: ls6t PowerShell, the LabSpec scripts folder, the guides, Uninstall."
-  !insertmacro MUI_DESCRIPTION_TEXT ${SecSim} "Also adds 'ls6t-sim', the same tools on the built-in simulator (results in $PROFILE\ls6t_sim_runs). Remove it from the Claude configuration when no longer needed."
+  !insertmacro MUI_DESCRIPTION_TEXT ${SecSim} "Also adds 'ls6t-sim' to the apps ticked: the same tools on the built-in simulator (results in $PROFILE\ls6t_sim_runs)."
 !insertmacro MUI_FUNCTION_DESCRIPTION_END
+
+;------------------------------------------------------------------------------------------------- choosing the apps
+
+; ticks the apps found on this PC (the same checks as labspec_translator.clients.detect). From the command line
+; (/S installs), /CLAUDE /CODEX /GEMINI /SIM choose instead, and /NOAPPS connects none.
+!macro TickIf sec
+  ${If} $R9 == "1"
+    !insertmacro SelectSection ${sec}
+  ${EndIf}
+!macroend
+
+!macro FoundGlob pattern
+  FindFirst $R7 $R8 "${pattern}"
+  ${If} $R8 != ""
+    StrCpy $R9 "1"
+  ${EndIf}
+  FindClose $R7
+!macroend
+
+!macro FoundExe exe
+  ClearErrors
+  SearchPath $R7 "${exe}"
+  ${IfNot} ${Errors}
+    StrCpy $R9 "1"
+  ${EndIf}
+!macroend
+
+Function .onInit
+  ${IfNot} ${RunningX64}
+    MessageBox MB_OK|MB_ICONSTOP "ls6t needs 64-bit Windows (10 or 11)." /SD IDOK
+    Abort
+  ${EndIf}
+  ${GetParameters} $R0
+  StrCpy $R1 "0"
+  ClearErrors
+  ${GetOptions} $R0 "/CLAUDE" $R2
+  ${IfNot} ${Errors}
+    StrCpy $R1 "1"
+    !insertmacro SelectSection ${SecClaude}
+  ${EndIf}
+  ClearErrors
+  ${GetOptions} $R0 "/CODEX" $R2
+  ${IfNot} ${Errors}
+    StrCpy $R1 "1"
+    !insertmacro SelectSection ${SecCodex}
+  ${EndIf}
+  ClearErrors
+  ${GetOptions} $R0 "/GEMINI" $R2
+  ${IfNot} ${Errors}
+    StrCpy $R1 "1"
+    !insertmacro SelectSection ${SecGemini}
+  ${EndIf}
+  ClearErrors
+  ${GetOptions} $R0 "/NOAPPS" $R2
+  ${IfNot} ${Errors}
+    StrCpy $R1 "1"
+  ${EndIf}
+  ClearErrors
+  ${GetOptions} $R0 "/SIM" $R2
+  ${IfNot} ${Errors}
+    !insertmacro SelectSection ${SecSim}
+  ${EndIf}
+  ${If} $R1 == "1"
+    Return
+  ${EndIf}
+  ; Claude desktop app
+  StrCpy $R9 "0"
+  ${If} ${FileExists} "$APPDATA\Claude\*.*"
+  ${OrIf} ${FileExists} "$LOCALAPPDATA\AnthropicClaude\*.*"
+    StrCpy $R9 "1"
+  ${EndIf}
+  !insertmacro FoundGlob "$LOCALAPPDATA\Packages\Claude_*"
+  !insertmacro TickIf ${SecClaude}
+  ; ChatGPT desktop app / Codex
+  StrCpy $R9 "0"
+  ${If} ${FileExists} "$PROFILE\.codex\*.*"
+    StrCpy $R9 "1"
+  ${EndIf}
+  !insertmacro FoundGlob "$LOCALAPPDATA\Packages\OpenAI.ChatGPT*"
+  !insertmacro FoundGlob "$LOCALAPPDATA\Packages\OpenAI.Codex*"
+  !insertmacro FoundExe "codex.cmd"
+  !insertmacro FoundExe "codex.exe"
+  !insertmacro TickIf ${SecCodex}
+  ; Gemini CLI
+  StrCpy $R9 "0"
+  ${If} ${FileExists} "$PROFILE\.gemini\*.*"
+    StrCpy $R9 "1"
+  ${EndIf}
+  !insertmacro FoundExe "gemini.cmd"
+  !insertmacro FoundExe "gemini.exe"
+  !insertmacro TickIf ${SecGemini}
+FunctionEnd
 
 ; ------------------------------------------------------------------------------------------------ uninstall
 
 Section "Uninstall"
   !insertmacro WaitUnlocked
   ${If} ${FileExists} "${PY}"
-    DetailPrint "Removing the PATH entry and the Claude app's ls6t entries"
+    DetailPrint "Removing the PATH entry and the ls6t entries of the LLM apps"
     nsExec::ExecToLog '"${PY}" -m labspec_translator.winsetup uninstall'
     Pop $0
   ${EndIf}

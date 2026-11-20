@@ -966,37 +966,88 @@ def test_vbs_new_methods(tmp_path):
 
 # --------------------------------------------------------------------------------------------- Windows installer
 
-def test_winsetup_path_and_claude_config(tmp_path, monkeypatch):
+def test_winsetup_path_and_json_entries(tmp_path, monkeypatch):
+    from labspec_translator import clients as C
     from labspec_translator import winsetup as W
     new, ch = W.path_add(r"C:\a;C:\b", r"C:\ls6t\bin")
     assert ch and new.endswith(r";C:\ls6t\bin")
-    assert W.path_add(new, r"C:\ls6t\bin\\") == (new, False)
+    assert W.path_add(new, "C:\\ls6t\\bin\\") == (new, False)
     assert W.path_remove(new, r"C:\ls6t\bin") == (r"C:\a;C:\b", True)
     py = str(tmp_path / "python" / "python.exe")
     cfg = {"mcpServers": {"other": {"command": "x"},
                           "ls6t": {"command": "old.exe", "env": {"LS6T_OUT": "D:\\runs", "LS6T_CONFIRM": "study"}}},
            "globalShortcut": "x"}
-    cfg2, note = W.merge_server(cfg, "ls6t", py, {"LS6T_CONFIRM": "request"})
+    cfg2, note = C.merge_server(cfg, "ls6t", py, {"LS6T_CONFIRM": "request"})
     e = cfg2["mcpServers"]["ls6t"]
     assert "replaced" in note and e["command"] == py and e["args"] == ["-m", "labspec_translator.mcp_server"]
     assert e["env"] == {"LS6T_OUT": "D:\\runs", "LS6T_CONFIRM": "study"}          # the person's settings kept
     assert cfg2["mcpServers"]["other"] == {"command": "x"} and cfg2["globalShortcut"] == "x"
-    cfg3, _ = W.merge_server(cfg2, "ls6t-sim", py, {"LS6T_OUT": "s"}, forced={"LS6T_MODE": "sim"})
+    g, _ = C.merge_server({"mcpServers": {"ls6t": {"command": py, "trust": True}}}, "ls6t", py, {}, client="gemini")
+    assert g["mcpServers"]["ls6t"]["trust"] is True and g["mcpServers"]["ls6t"]["timeout"] == 3600000
+    cfg3, _ = C.merge_server(cfg2, "ls6t-sim", py, {"LS6T_OUT": "s"}, forced={"LS6T_MODE": "sim"})
     assert cfg3["mcpServers"]["ls6t-sim"]["env"] == {"LS6T_OUT": "s", "LS6T_MODE": "sim"}
-    cfg4, gone = W.remove_server(cfg3, "ls6t", py)
+    cfg4, gone = C.remove_server(cfg3, "ls6t", py)
     assert gone and "ls6t" not in cfg4["mcpServers"]
-    assert W.remove_server(cfg, "ls6t", py) == (cfg, False)                       # another install's entry stays
-    monkeypatch.setenv("APPDATA", str(tmp_path / "Roaming"))
-    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "Local"))
-    store = tmp_path / "Local" / "Packages" / "Claude_abc" / "LocalCache" / "Roaming" / "Claude"
-    store.mkdir(parents=True)
-    assert W.claude_configs(create=False) == [store / "claude_desktop_config.json"]
-    paths = W.claude_configs(create=True)
-    assert paths[0] == tmp_path / "Roaming" / "Claude" / "claude_desktop_config.json"
-    paths[0].parent.mkdir(parents=True)
-    paths[0].write_text(json.dumps(cfg), encoding="utf-8")
-    backup = W._write_cfg(paths[0], cfg2)
-    assert backup and json.loads(backup.read_text()) == cfg and W._read_cfg(paths[0]) == cfg2
+    assert C.remove_server(cfg, "ls6t", py) == (cfg, False)                       # another install's entry stays
+    p = tmp_path / "c.json"
+    p.write_text(json.dumps(cfg), encoding="utf-8")
+    backup = C.write_json(p, cfg2)
+    assert backup and json.loads(backup.read_text()) == cfg and C.read_json(p) == cfg2
+
+
+def test_codex_toml_entry():
+    from labspec_translator import clients as C
+    tomllib = C.tomllib
+    py = r"C:\Users\o'neil\AppData\Local\Programs\ls6t\python\python.exe"
+    text = ('model = "gpt-5"\n\n[mcp_servers.context7]\ncommand = "npx"\nargs = ["-y", "c7"]\n\n'
+            '[mcp_servers.ls6t]\ncommand = \'C:\\old\\python.exe\'\ntool_timeout_sec = 120\n\n'
+            '[mcp_servers.ls6t.env]\nLS6T_OUT = \'D:\\runs\'\n\n[profiles.x]\nmodel = "o3"\n')
+    new, note = C.toml_merge(text, "ls6t", py, {"LS6T_CONFIRM": "request", "LS6T_OUT": "x"})
+    d = tomllib.loads(new)
+    e = d["mcp_servers"]["ls6t"]
+    assert "replaced" in note and e["command"] == py and e["args"] == ["-m", "labspec_translator.mcp_server"]
+    assert e["tool_timeout_sec"] == 120 and e["env"] == {"LS6T_CONFIRM": "request", "LS6T_OUT": "D:\\runs"}
+    assert d["model"] == "gpt-5" and d["mcp_servers"]["context7"]["command"] == "npx" and d["profiles"]["x"]
+    new2, _ = C.toml_merge(new, "ls6t-sim", py, {}, forced={"LS6T_MODE": "sim"})
+    assert tomllib.loads(new2)["mcp_servers"]["ls6t-sim"]["env"] == {"LS6T_MODE": "sim"}
+    gone, ok = C.toml_remove(new2, "ls6t", py)
+    d = tomllib.loads(gone)
+    assert ok and "ls6t" not in d["mcp_servers"] and "ls6t-sim" in d["mcp_servers"] and d["profiles"]["x"]
+    assert C.toml_remove(gone, "ls6t-sim", "other.exe") == (gone, False)
+    with pytest.raises(ValueError):
+        C.toml_merge("mcp_servers = { ls6t = { command = 'x' } }\n", "ls6t", py, {})
+    with pytest.raises(ValueError):
+        C.toml_merge("[broken\n", "ls6t", py, {})
+
+
+def test_connect_detect_and_disconnect(tmp_path, monkeypatch, capsys):
+    from labspec_translator import cli
+    from labspec_translator import clients as C
+    monkeypatch.setenv("HOME", str(tmp_path / "u"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "u"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "u" / ".config"))
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    monkeypatch.setattr(C.Path, "home", classmethod(lambda cls: tmp_path / "u"))
+    monkeypatch.setattr(C.shutil, "which", lambda exe: None)
+    assert not any(C.detect().values())
+    (tmp_path / "u" / ".gemini").mkdir(parents=True)
+    (tmp_path / "u" / ".gemini" / "settings.json").write_text('{"theme": "dark"}')
+    found = C.detect()
+    assert found["gemini"] and not found["codex"] and not found["claude"]
+    assert cli.main(["connect", "auto", "--sim"]) == 0
+    g = json.loads((tmp_path / "u" / ".gemini" / "settings.json").read_text())
+    assert g["theme"] == "dark" and set(g["mcpServers"]) == {"ls6t", "ls6t-sim"}
+    assert g["mcpServers"]["ls6t"]["env"]["LS6T_HOME"] == g["mcpServers"]["ls6t-sim"]["env"]["LS6T_HOME"]
+    assert cli.main(["connect", "codex", "claude"]) == 0
+    toml = C.tomllib.loads((tmp_path / "u" / ".codex" / "config.toml").read_text())
+    assert toml["mcp_servers"]["ls6t"]["command"] == sys.executable
+    st = C.status()
+    assert all(st[c]["files"] and any("ls6t" in v for v in st[c]["files"].values()) for c in C.CLIENTS)
+    capsys.readouterr()
+    assert cli.main(["connect", "gemini", "codex", "claude", "--remove"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert sorted(sum((r["removed"] for r in out["files"]), [])) == ["ls6t", "ls6t", "ls6t", "ls6t-sim"]
+    assert json.loads((tmp_path / "u" / ".gemini" / "settings.json").read_text())["mcpServers"] == {}
 
 
 def test_installer_files(tmp_path):

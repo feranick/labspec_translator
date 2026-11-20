@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.20.3)
+## Architecture (version 2026.11.20.4)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -161,6 +161,17 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
 - 2026-11-20, 2026.11.20.3: first CI build failed: Windows makensis found no files for `File /r "<stage>/*"`
   (mixed separators); the script now picks the separator (NSIS_WIN32_MAKENSIS). Workflow actions moved to Node 24
   (checkout v5, setup-python v6, upload-artifact v6); release upload via `gh` instead of softprops/action-gh-release.
+- 2026-11-20, 2026.11.20.4: other LLM apps (the instrument PC may run ChatGPT or Gemini). clients.py: detect + connect
+  / disconnect / status for claude (claude_desktop_config.json, APPDATA + Store package; macOS/Linux paths too),
+  codex (ChatGPT desktop app, Codex CLI and IDE extension share ~/.codex/config.toml or %CODEX_HOME%; TOML edited
+  by removing [mcp_servers.<name>] tables and appending ours, validated with tomllib; inline/dotted forms refused;
+  tool_timeout_sec 3600, startup 60) and gemini (Gemini CLI ~/.gemini/settings.json, trust false, timeout 1 h).
+  Every entry gets the same LS6T_HOME/LS6T_OUT (one lock and bridge for all apps). `ls6t connect [auto|apps]
+  [--sim] [--remove]`. Installer: a section group with one section per app, ticked in .onInit when found (folders,
+  Store packages, codex/gemini on PATH); silent /CLAUDE /CODEX /GEMINI /NOAPPS /SIM; CI installs with all three and
+  checks each file, then that uninstall removed them. Not supported: the Gemini app and ChatGPT web (remote servers
+  only). Known: a 2026 report that the ChatGPT Windows desktop app may not expose local stdio tools to ordinary chats
+  (openai/codex #38162). tomli added for Python 3.10. 88 tests.
 
 ## To do next
 

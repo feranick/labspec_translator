@@ -34,7 +34,7 @@ jobs:
         shell: pwsh
         run: |
           $exe = Get-ChildItem dist\ls6t-setup-*.exe | Select-Object -First 1
-          $p = Start-Process $exe.FullName -ArgumentList "/S" -Wait -PassThru
+          $p = Start-Process $exe.FullName -ArgumentList "/S /CLAUDE /CODEX /GEMINI" -Wait -PassThru
           $dir = "$env:LOCALAPPDATA\Programs\ls6t"
           if (Test-Path "$dir\install.log") { Get-Content "$dir\install.log" }
           if ($p.ExitCode -ne 0) { throw "installer exit code $($p.ExitCode)" }
@@ -44,11 +44,19 @@ jobs:
           $env:LS6T_MODE = "sim"
           & "$dir\bin\ls6t.cmd" bench si_calibration graphene_map native_map
           if ($LASTEXITCODE -ne 0) { throw "benchmarks failed" }
-          $cfg = Get-Content "$env:APPDATA\Claude\claude_desktop_config.json" | ConvertFrom-Json
-          if (-not $cfg.mcpServers.ls6t) { throw "no ls6t entry in the Claude configuration" }
+          $claude = "$env:APPDATA\Claude\claude_desktop_config.json"
+          $gemini = "$env:USERPROFILE\.gemini\settings.json"
+          $codex = "$env:USERPROFILE\.codex\config.toml"
+          if (-not (Get-Content $claude | ConvertFrom-Json).mcpServers.ls6t) { throw "no ls6t entry for Claude" }
+          if (-not (Get-Content $gemini | ConvertFrom-Json).mcpServers.ls6t) { throw "no ls6t entry for Gemini CLI" }
+          if (-not (Select-String -Path $codex -Pattern '^\[mcp_servers\.ls6t\]' -Quiet)) { throw "no ls6t entry for Codex" }
+          Get-Content $codex
+          & "$dir\bin\ls6t.cmd" connect
           $u = Start-Process "$dir\uninstall.exe" -ArgumentList "/S" -Wait -PassThru
           Start-Sleep -Seconds 20
           if (Test-Path "$dir\python") { throw "the uninstaller left the program files" }
+          if ((Get-Content $claude | ConvertFrom-Json).mcpServers.ls6t) { throw "the Claude entry is still there" }
+          if (Select-String -Path $codex -Pattern '^\[mcp_servers\.ls6t\]' -Quiet) { throw "the Codex entry is still there" }
 
       - uses: actions/upload-artifact@v6
         with:

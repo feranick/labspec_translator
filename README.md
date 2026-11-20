@@ -16,7 +16,7 @@ it runs **locally**: on the instrument PC, next to the Claude desktop app. It ha
 machines. Unlike the other translators, the backend has no Python API: LabSpec is automated with VBScript
 (*LabSpec 5/6 Automation*, HORIBA, 2018). That is why the bridge script exists.
 
-First instrument: **XploRA** (LabSpec 6, Windows 11). Version 2026.11.20.3.
+First instrument: **XploRA** (LabSpec 6, Windows 11). Version 2026.11.20.4.
 
 **Scope of version 1**
 
@@ -71,7 +71,8 @@ detectors. See `planning.md`.
 
 On the instrument PC (Windows 11, next to LabSpec 6 and the Claude desktop app), run **`ls6t-setup-<version>.exe`**
 (from the repository's Releases, built for every version): per user, no administrator rights, no network; it brings its
-own Python, writes the LabSpec scripts, and connects the Claude app. Then add the scripts in LabSpec, run the
+own Python, writes the LabSpec scripts, and connects the LLM apps it finds (Claude desktop app, ChatGPT desktop app /
+Codex, Gemini CLI). Then add the scripts in LabSpec, run the
 discovery and set the machine profile. From source instead: Python 3.10+ and Git, a venv,
 `pip install -e ".[mcp,render,test,windows]"`, `ls6t bridge install`, and the MCP entry in the Claude app by hand.
 The steps, building the installer, the offline install, updating and troubleshooting are in **[INSTALL.md](INSTALL.md)**.
@@ -561,7 +562,8 @@ Claude app ──MCP──> ls6t-mcp ──> request folder + runner process (ls
 | `sim.py` | A simulated LabSpec + XploRA speaking the same protocol (`LS6T_MODE=sim`, tests, benchmarks) |
 | `bench.py` | The benchmarks |
 | `api.py`, `cli.py`, `mcp_server.py` | The functions, the command line, the MCP server |
-| `winsetup.py` | What the Windows installer does beyond copying files: checks, precompiling, the LabSpec scripts, PATH, the Claude app's configuration (and undoing them) |
+| `clients.py` | `ls6t connect`: finds the LLM apps (Claude desktop app, ChatGPT desktop app / Codex, Gemini CLI) and adds or removes the MCP server in their files (JSON or TOML), backed up, other settings kept |
+| `winsetup.py` | What the Windows installer does beyond copying files: checks, precompiling, the LabSpec scripts, PATH, the LLM apps (and undoing them) |
 | `installer/` | The Windows installer: `ls6t.nsi` (NSIS), `build_installer.py`, the launchers (`bin/`) |
 | `vbs/common.vbs`, `vbs/bridge_main.vbs`, `vbs/discover_main.vbs`, `vbs/script_motor_main.vbs` | The LabSpec scripts' parts; `ls6t bridge install` puts them together (the script-motor logger is optional: TESTING.md T1.4) |
 
@@ -586,7 +588,9 @@ the laser was on), `config` (`action` save or load, `path`, `show`), `last_error
 ## For LLM tools: the MCP server
 
 `ls6t-mcp` (stdio; `--http PORT` for streamable HTTP on 127.0.0.1). It answers the handshake at once (0.3 s
-measured).
+measured). Any app that starts local MCP servers can use it: the Claude desktop app, the ChatGPT desktop app / Codex,
+Gemini CLI. `ls6t connect` (and the installer) adds it to those found on the PC ([INSTALL.md, step
+8](INSTALL.md#8-connect-an-llm-app)).
 
 | Tool | What it does |
 |---|---|
@@ -655,6 +659,7 @@ frames, LabSpec's image files, `snapshot.json`); a study's frames go to its `vid
 
 | Version | Changes |
 |---|---|
+| 2026.11.20.4 | Not only Claude: `ls6t connect` and the installer find the LLM apps on the PC (Claude desktop app; ChatGPT desktop app, Codex CLI and IDE extension, which share `~/.codex/config.toml`; Gemini CLI, `~/.gemini/settings.json`) and add the MCP server to those chosen, sharing one `LS6T_HOME`; TOML edited in place (the rest of the file untouched), backups, other settings kept; uninstalling removes only this install's entries. Installer: one component per app, ticked when found; silent `/CLAUDE /CODEX /GEMINI /NOAPPS /SIM`. The Gemini app and ChatGPT on the web take only internet servers and are not supported. |
 | 2026.11.20.3 | Installer build fixed for makensis on Windows (the staged files' path separator); the GitHub workflow uses Node 24 actions (checkout v5, setup-python v6, upload-artifact v6) and the GitHub CLI for the release. |
 | 2026.11.20.2 | A Windows installer, `ls6t-setup-<version>.exe` (NSIS): per user, no administrator rights, offline (python.org's embeddable Python 3.12 with every package preinstalled); launchers, Start menu, PATH, the LabSpec scripts, and the Claude app's configuration (backed up; an `ls6t-sim` entry optional); updates in place, uninstalls cleanly keeping the data. `installer/build_installer.py` builds it on macOS, Windows or Linux; a GitHub workflow builds, installs, tests and attaches it to each tagged release. |
 | 2026.11.20.1 | Methods from the installed LabSpec's type library. `SaveConfig`/`LoadConfig`: `ls6t instrument config save/load/list` and the profile's `session.restore_config` (LabSpec restored after each request). `GetValueSimplePart`: native maps written out in chunks (`mapping.export_chunk`). `GetValueEx` (manual only) as a fallback after `GetValue`, and for motor position names. `GetLastErrorInfo`: `ls6t instrument last-error` and in `status`. Extended video (`Video(3)`; `SetExtendedVideo` is missing from the build): `snapshot --extended`, off by default (`video.allow_extended`). Discovery probes `GetValueEx`, `GetValueSimplePart` and `GetConfigParam` (its parameters listed). `ls6t_script_motor.vbs`: a virtual script-controlled motor that logs `GetMotorAction`/`SetMotorInfo`, to learn the protocol. `SetConfigParam` and `SetScriptPath` are deliberately not called. TESTING Q35–Q40, T1.4, T5b.6. |

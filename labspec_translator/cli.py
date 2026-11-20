@@ -1,5 +1,5 @@
 """cli.py — the command line. Every command prints JSON; '-' reads the studies from stdin.
-Version: 2026.11.20.3
+Version: 2026.11.20.4
 
   ls6t status [REQUEST] [--wait S]   versions, the bridge, the profile; or a request's studies
   ls6t format                        the study format
@@ -26,6 +26,11 @@ Version: 2026.11.20.3
                                      spectral corrections, white-light backgrounds, beam offsets, alignment
   ls6t alignment record REQUEST [--study NAME] [--attempt N]
                                      after a successful AutoAlignment: the check becomes the laser's baseline
+  ls6t connect                       which LLM apps are here and which run ls6t's MCP server
+  ls6t connect APP... [--sim] [--remove]
+                                     add (or remove) the MCP server in: claude (Claude desktop app), codex (ChatGPT
+                                     desktop app, Codex CLI and IDE extension), gemini (Gemini CLI), or auto (every
+                                     app found); --sim also adds 'ls6t-sim' (the simulator)
   ls6t sim [--seconds S]             run the simulator in the foreground (LS6T_MODE=sim tests by hand)
   ls6t run-request FOLDER            what the detached runner runs
 """
@@ -104,6 +109,10 @@ def main(argv=None) -> int:
     s.add_argument("request", nargs="?")
     s.add_argument("--study")
     s.add_argument("--attempt", type=int)
+    s = sub.add_parser("connect")
+    s.add_argument("apps", nargs="*", help="claude, codex, gemini, or auto (every app found)")
+    s.add_argument("--sim", action="store_true", help="also add 'ls6t-sim' (the simulator)")
+    s.add_argument("--remove", action="store_true", help="remove this install's entries instead")
     s = sub.add_parser("sim")
     s.add_argument("--seconds", type=float, default=0, help="0: until Ctrl-C")
     s = sub.add_parser("run-request")
@@ -199,6 +208,28 @@ def main(argv=None) -> int:
             if not a.request:
                 ap.error("alignment record needs the request folder")
             _print(api.alignment_record(a.request, a.study, a.attempt))
+    elif a.cmd == "connect":
+        from . import clients as C
+        if not a.apps:
+            _print(C.status())
+            return 0
+        apps = list(a.apps)
+        if "auto" in apps:
+            found = C.detect()
+            apps = [c for c in C.CLIENTS if found[c]]
+            if not apps:
+                _print({"ok": False, "error": "no LLM app found (Claude desktop app, ChatGPT desktop app / Codex, "
+                                              "Gemini CLI): name one to prepare its file anyway"})
+                return 1
+        bad = [x for x in apps if x not in C.CLIENTS]
+        if bad:
+            ap.error(f"connect: unknown app {', '.join(bad)} (claude, codex, gemini, auto)")
+        reps = (C.disconnect(apps, sys.executable) if a.remove
+                else C.connect(apps, sys.executable, sim=a.sim))
+        ok = all(r.get("ok") for r in reps)
+        _print({"ok": ok, "python": sys.executable, "files": reps,
+                "next": "quit and restart each app changed: the ls6t tools appear in a new chat or session"})
+        return 0 if ok else 1
     elif a.cmd == "sim":
         from . import sim as S
         bdir = config.sim_bridge_dir()

@@ -1,38 +1,34 @@
 """winsetup.py — what the Windows installer does beyond copying files (installer/ls6t.nsi calls it).
-Version: 2026.11.20.3
+Version: 2026.11.20.4
 
 The installer puts a private Python (python.org's embeddable build, with every dependency already in its
 Lib/site-packages) in <install>/python and the launchers in <install>/bin. Then it runs, with that Python:
 
-  python -m labspec_translator.winsetup install [--claude] [--sim] [--path] [--compile]
+  python -m labspec_translator.winsetup detect
+  python -m labspec_translator.winsetup install [--claude] [--codex] [--gemini] [--sim] [--path] [--compile]
   python -m labspec_translator.winsetup uninstall
   python -m labspec_translator.winsetup check
 
+detect:    which LLM apps are here (Claude desktop app; ChatGPT desktop app / Codex; Gemini CLI): clients.detect.
 install:   checks that every package imports; precompiles the packages (a faster first start); writes the LabSpec
-           scripts (`ls6t bridge install`); adds <install>/bin to the user's PATH (--path); adds the MCP server to the
-           Claude desktop app's configuration as "ls6t" (--claude) and a simulator entry "ls6t-sim" (--sim). The
-           configuration is backed up first; settings already in an existing entry's env are kept.
-uninstall: removes the PATH entry and the Claude entries that point to this Python. The profile, the bridge folder
-           and the results (LS6T_HOME, LS6T_OUT) are kept.
+           scripts (`ls6t bridge install`); adds <install>/bin to the user's PATH (--path); adds the MCP server "ls6t"
+           to each chosen app's configuration (--claude, --codex, --gemini) and the simulator "ls6t-sim" (--sim):
+           clients.connect (backed up first; settings already in an existing entry are kept).
+uninstall: removes the PATH entry and, in every app, the entries that run this Python. The profile, the bridge
+           folder and the results (LS6T_HOME, LS6T_OUT) are kept.
 Exit codes: 0 done, 1 failed, 2 done with warnings (the installer then asks to read its details).
-Nothing here needs administrator rights: everything is per user.
+Nothing here needs administrator rights: everything is per user. `ls6t connect` does the same for one app later.
 """
 from __future__ import annotations
 
 import argparse
-import json
 import os
-import shutil
 import sys
 import time
 from pathlib import Path
 
-ENTRY = "ls6t"
-SIM_ENTRY = "ls6t-sim"
-MODULE_ARGS = ["-m", "labspec_translator.mcp_server"]
+from . import clients as C
 
-
-# --------------------------------------------------------------------------------------------- pure helpers
 
 def _norm(p) -> str:
     return os.path.normcase(os.path.normpath(str(p))).rstrip("\\/")
@@ -52,83 +48,7 @@ def path_remove(current: str, d: str) -> tuple[str, bool]:
     return ";".join(keep), len(keep) != len(parts)
 
 
-def server_entry(python: str, env: dict) -> dict:
-    return {"command": str(python), "args": list(MODULE_ARGS), "env": dict(env)}
-
-
-def merge_server(cfg: dict, name: str, python: str, defaults: dict, forced: dict | None = None) -> tuple[dict, str]:
-    """cfg with mcpServers[name] pointing to this Python. Settings already in the entry's env are kept (defaults
-    fill the missing ones; forced always win). Returns (cfg, what happened)."""
-    cfg = dict(cfg or {})
-    servers = dict(cfg.get("mcpServers") or {})
-    old = servers.get(name)
-    env = dict(defaults)
-    if isinstance(old, dict) and isinstance(old.get("env"), dict):
-        env.update(old["env"])
-    env.update(forced or {})
-    servers[name] = server_entry(python, env)
-    cfg["mcpServers"] = servers
-    if not old:
-        note = f"added '{name}'"
-    elif _norm(old.get("command", "")) == _norm(python):
-        note = f"updated '{name}'"
-    else:
-        note = f"replaced '{name}' (it ran {old.get('command')})"
-    return cfg, note
-
-
-def remove_server(cfg: dict, name: str, python: str) -> tuple[dict, bool]:
-    """Removes mcpServers[name] only if it runs this Python (an entry of another install is left alone)."""
-    cfg = dict(cfg or {})
-    servers = dict(cfg.get("mcpServers") or {})
-    old = servers.get(name)
-    if isinstance(old, dict) and _norm(old.get("command", "")) == _norm(python):
-        servers.pop(name)
-        cfg["mcpServers"] = servers
-        return cfg, True
-    return cfg, False
-
-
 # --------------------------------------------------------------------------------------------- the machine
-
-def claude_configs(create: bool) -> list[Path]:
-    """The Claude desktop app's configuration files: %APPDATA%\\Claude (created when `create`, so an app installed
-    later finds the entry) and the Microsoft Store version's folder, if present."""
-    out = []
-    appdata = os.environ.get("APPDATA")
-    if appdata:
-        d = Path(appdata) / "Claude"
-        if d.is_dir() or create:
-            out.append(d / "claude_desktop_config.json")
-    local = os.environ.get("LOCALAPPDATA")
-    if local:
-        for pkg in sorted((Path(local) / "Packages").glob("Claude_*")):
-            d = pkg / "LocalCache" / "Roaming" / "Claude"
-            if d.is_dir():
-                out.append(d / "claude_desktop_config.json")
-    return out
-
-
-def _read_cfg(path: Path) -> dict:
-    if not path.exists() or not path.read_text(encoding="utf-8-sig").strip():
-        return {}
-    cfg = json.loads(path.read_text(encoding="utf-8-sig"))
-    if not isinstance(cfg, dict):
-        raise ValueError("not a JSON object")
-    return cfg
-
-
-def _write_cfg(path: Path, cfg: dict) -> Path | None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    backup = None
-    if path.exists():
-        backup = path.with_name(path.name + f".ls6t-backup-{time.strftime('%Y%m%d_%H%M%S')}")
-        shutil.copy2(path, backup)
-    tmp = path.with_name(path.name + ".ls6t-tmp")
-    tmp.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
-    return backup
-
 
 def _user_path() -> tuple[str, int]:
     import winreg
@@ -191,18 +111,17 @@ def check(log: Log) -> bool:
     return ok
 
 
-def _existing_env() -> dict:
-    """LS6T_* settings of an existing "ls6t" Claude entry: the scripts must use the same folders as the server."""
-    for p in claude_configs(create=False):
-        try:
-            env = (_read_cfg(p).get("mcpServers", {}).get(ENTRY) or {}).get("env") or {}
-        except (OSError, ValueError):
-            continue
-        return {k: str(v) for k, v in env.items() if k.startswith("LS6T_")}
-    return {}
+def report(reps: list, log: Log):
+    for r in reps:
+        if r.get("ok"):
+            what = ", ".join(r.get("notes") or []) or (("removed " + ", ".join(r["removed"])) if r.get("removed") else "")
+            if what:
+                log(f"{r['app']}: {r['file']}: {what}" + (f" (backup: {Path(r['backup']).name})" if r.get("backup") else ""))
+        else:
+            log.warn(f"{r['app']}: {r['file']}: {r.get('error')}")
 
 
-def install(python: Path, bindir: Path, claude: bool, sim: bool, add_path: bool, compile_: bool, log: Log) -> int:
+def install(python: Path, bindir: Path, apps: list, sim: bool, add_path: bool, compile_: bool, log: Log) -> int:
     from . import __version__
     log(f"ls6t {__version__}: Python {sys.version.split()[0]} at {python}")
     if not check(log):
@@ -214,12 +133,12 @@ def install(python: Path, bindir: Path, claude: bool, sim: bool, add_path: bool,
         site = Path(python).parent / "Lib" / "site-packages"
         log(f"precompiling {site} (a minute or two)")
         compileall.compile_dir(str(site), quiet=1, rx=re.compile(r"[\\/](tests?|testing)[\\/]"), workers=1)
-    # the LabSpec scripts, with the folders an existing server entry uses
-    env = _existing_env()
+    # the LabSpec scripts, with the folders an existing server entry uses (all apps and the scripts must agree)
+    env = C.existing_env()
     for k in ("LS6T_HOME", "LS6T_BRIDGE_DIR"):
         if env.get(k):
             os.environ[k] = env[k]
-            log(f"using {k}={env[k]} from the existing Claude entry")
+            log(f"using {k}={env[k]} from an existing ls6t entry")
     try:
         from . import api
         r = api.install_bridge()
@@ -239,29 +158,14 @@ def install(python: Path, bindir: Path, claude: bool, sim: bool, add_path: bool,
                 log(f"PATH: {bindir} already there")
         except Exception as exc:  # noqa: BLE001
             log.warn(f"PATH not changed ({exc}): use the Start menu's 'ls6t PowerShell'")
-    if claude or sim:
-        home = Path(os.environ.get("USERPROFILE") or Path.home())
-        for cfgp in claude_configs(create=True):
-            try:
-                cfg = _read_cfg(cfgp)
-            except (OSError, ValueError) as exc:
-                log.warn(f"{cfgp} is not valid JSON ({exc}): left unchanged; add the server by hand (INSTALL.md)")
-                continue
-            notes = []
-            if claude:
-                cfg, n = merge_server(cfg, ENTRY, str(python), {"LS6T_CONFIRM": "request"})
-                notes.append(n)
-            if sim:
-                cfg, n = merge_server(cfg, SIM_ENTRY, str(python), {"LS6T_OUT": str(home / "ls6t_sim_runs")},
-                                      forced={"LS6T_MODE": "sim"})
-                notes.append(n)
-            try:
-                backup = _write_cfg(cfgp, cfg)
-            except OSError as exc:
-                log.warn(f"{cfgp} could not be written ({exc})")
-                continue
-            log(f"Claude configuration {cfgp}: {', '.join(notes)}" + (f" (backup: {backup.name})" if backup else ""))
-        log("restart the Claude app (Quit from its tray icon, then start it) to load the ls6t tools")
+    found = C.detect()
+    for c in C.CLIENTS:
+        log(f"{C.LABELS[c]}: " + (", ".join(found[c]) if found[c] else "not found"))
+    if apps or sim:
+        report(C.connect(apps or [c for c in C.CLIENTS if found[c]], str(python), sim=sim, main=bool(apps)), log)
+        log("restart the apps you connected (quit them completely, then start them) to load the ls6t tools")
+    else:
+        log("no LLM app connected: run `ls6t connect` once one is installed")
     return 2 if log.warnings else 0
 
 
@@ -274,43 +178,36 @@ def uninstall(python: Path, bindir: Path, log: Log) -> int:
             log(f"PATH: removed {bindir}")
     except Exception as exc:  # noqa: BLE001
         log.warn(f"PATH not changed ({exc})")
-    for cfgp in claude_configs(create=False):
-        try:
-            cfg = _read_cfg(cfgp)
-        except (OSError, ValueError):
-            continue
-        removed = []
-        for name in (ENTRY, SIM_ENTRY):
-            cfg, gone = remove_server(cfg, name, str(python))
-            if gone:
-                removed.append(name)
-        if removed:
-            _write_cfg(cfgp, cfg)
-            log(f"Claude configuration {cfgp}: removed {', '.join(removed)}")
+    report(C.disconnect(list(C.CLIENTS), str(python)), log)
     log("kept: the profile, the bridge folder, the LabSpec scripts and the results (LS6T_HOME, LS6T_OUT)")
     return 2 if log.warnings else 0
 
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="winsetup", description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
-    ap.add_argument("action", choices=["install", "uninstall", "check"])
-    ap.add_argument("--claude", action="store_true", help="add the 'ls6t' server to the Claude app")
-    ap.add_argument("--sim", action="store_true", help="add the 'ls6t-sim' server (the simulator)")
+    ap.add_argument("action", choices=["install", "uninstall", "check", "detect"])
+    for c in C.CLIENTS:
+        ap.add_argument(f"--{c}", action="store_true", help=f"add the 'ls6t' server to the {C.LABELS[c]}")
+    ap.add_argument("--sim", action="store_true", help="also add 'ls6t-sim' (the simulator) to those apps")
     ap.add_argument("--path", action="store_true", help="add the launchers' folder to the user's PATH")
     ap.add_argument("--compile", action="store_true", help="precompile the packages")
-    ap.add_argument("--python", help="the Python the Claude entries run (default: this one)")
+    ap.add_argument("--python", help="the Python the entries run (default: this one)")
     ap.add_argument("--bin", help="the launchers' folder (default: <python>/../bin)")
     a = ap.parse_args(argv)
     python = Path(a.python or sys.executable).resolve()
     bindir = Path(a.bin).resolve() if a.bin else python.parent.parent / "bin"
-    log = Log(python.parent.parent / "install.log" if a.action != "check" else None)
+    log = Log(python.parent.parent / "install.log" if a.action in ("install", "uninstall") else None)
     if a.action == "check":
         return 0 if check(log) else 1
+    if a.action == "detect":
+        for c, where in C.detect().items():
+            log(f"{c}={'1' if where else '0'}  {C.LABELS[c]}: {', '.join(where) or 'not found'}")
+        return 0
     if os.name != "nt":
-        log("winsetup install/uninstall are for Windows")
+        log("winsetup install/uninstall are for Windows (elsewhere: ls6t connect)")
         return 1
     if a.action == "install":
-        return install(python, bindir, a.claude, a.sim, a.path, a.compile, log)
+        return install(python, bindir, [c for c in C.CLIENTS if getattr(a, c)], a.sim, a.path, a.compile, log)
     return uninstall(python, bindir, log)
 
 
