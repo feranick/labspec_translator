@@ -12,7 +12,7 @@ stops and cancel on the simulator, and `ls6t bench` gives known answers. What re
 LabSpec and hardware. The plan goes from no laser and no motion to an LLM app driving a full map, in stages. Each
 stage starts only when the previous one passed.
 
-Version under test: 2026.11.20.23 (bridge protocol 1).
+Version under test: 2026.11.20.24 (bridge protocol 1).
 
 **Already known** (2026-11-20, from the instrument's discovery dump, its `NFActiveX.ocx`, `OLConfig.ini`,
 `OLSetup.ini` and LabSpec 6.7.1's service scripts): the motors and their positions (lasers 532, 637.75, 785.04 nm;
@@ -115,6 +115,7 @@ files already showed.
 | Q41 | `OLConfig.ini` (`Parameters\ACQUISITION`): ls6t reads the camera names, the objectives' NA and their field of view (inferred) from it. Is the field of view right (a snapshot's `field_um`)? **Known:** cameras Top = 0 and Internal = 1, confirmed by switching in LabSpec. | T5b.1 |
 | Q42 | LabSpec's AutoCalibration (`OLSetup.ini` names `...\AutoCalibration\UniversalAutoCalibrationv3.vbs`, an older install's path): is the script on this PC, and can the bridge run it (`instrument autocal_info`)? | T4.9 |
 | Q43 | LabSpec 6.7's constants read a motor's positions with 100+i (value) and 200+i (name); the 2018 manual's 10+i / 20+i worked here for motors of up to ten positions. ls6t uses 100+/200+ beyond ten: check such a motor's labels, if any. | T1.1 |
+| Q44 | Cameras: does `Video(10 + id)` switch LabSpec's camera, with the live video running and with it stopped, and are the ids OLConfig.ini's order (Top 0, Internal 1)? Does `Video(STOP_VIDEO)` from a script return? **Known (2026-11-20, .23):** with the video running LabSpec stayed on camera 1 when asked for 0, and `Video(STOP_VIDEO)` never returned (the bridge hung, no dialog). | T3.11 |
 
 ---
 
@@ -134,7 +135,7 @@ this plan's results table filled in, with the answers to the open questions (`ls
 shows what is done and what is next).
 
 After the session, the tester adds a dated entry to `planning.md` (*State log*). It says what passed, the answers to
-Q1–Q43, and the measured times, and lists anything to change.
+Q1–Q44, and the measured times, and lists anything to change.
 
 ---
 
@@ -303,7 +304,7 @@ the single command underneath.
 | T3.8 | Stop during a move: `ls6t bridge call move_xy x_um=<X+1000> y_um=<Y> --timeout 60`, and the maintainer closes the ls6t window while it moves | the stage stops; the answer says `stopped_by: operator`; the bridge is halted. Resume (T2.3) and move back. |
 | T3.9 | `ls6t bridge call safe` | answers ok; nothing moves |
 | T3.10 | Polarisers: `instrument set` with `laser_pol` Vertical and `raman_pol` None (from the chat, or `ls6t bridge call move motor=LaserPol mode=label value=Vertical`), then back | each moves and reads back; `ls6t instrument status` shows `laser_pol` / `raman_pol` |
-| T3.11 | Cameras: `ls6t instrument camera-on --camera internal`, then `--camera top`, then `camera-off` | LabSpec's live view switches cameras and stops; `camera_name` read back (Q41) |
+| T3.11 | Cameras (**Q44**): with the live video **stopped** in LabSpec, `ls6t instrument camera-on --camera top`; stop the video in LabSpec, then `--camera internal`. Then, with the video running, `--camera top` once. Then `camera-off` with the video running | Each answer's `camera` is LabSpec's read-back: `ok` only when it is the camera asked; if not, the answer says LabSpec stayed on another camera (record `camera_set_returned`, `camera_before`, `camera_after` for each try). `camera-off` is refused (the operator stops the video in LabSpec). Optional, with the maintainer ready to stop the bridge: `ls6t profile set video.stop_from_script true`, then `camera-off` once: record whether it returns; set it back to false if it hangs |
 
 Also record the times of T3.3, T3.4 and T3.6. They replace the defaults in the profile's `timing` (`grating_s`,
 `laser_s`, `xy_um_per_s`, `xy_settle_s`), which feed the time estimates.
@@ -434,7 +435,7 @@ Record whether autofocus left a spectrum in LabSpec.
 Si wafer or the contrast sample in focus, then run `ls6t instrument snapshot`. Pass: `ok`; `frame.png` shows the same
 view as LabSpec's video window; `um_axes` is true and `field_um` matches the objective's field of view
 (`objectives_info` in `ls6t format`, from `OLConfig.ini`: **Q41**). Record which formats appear under `native`.
-Repeat with the live video stopped: the bridge starts it, takes the frame and stops it again.
+Repeat with the live video stopped: the bridge starts it and takes the frame; it leaves the video on (`video_left_on`) unless `video.stop_from_script` is true (T3.11).
 
 **T5b.2 Orientation and colours (Q14).** Choose a feature that is easy to recognise (an edge, a corner, a coloured
 object).
@@ -699,7 +700,7 @@ With the LLM app connected (test mode off), in a new chat:
 | T2.3 | | | | | |
 | T2.4 | | | | Q2: | |
 | T2.5 | | | | | |
-| T3.1–T3.11 | | | | Q4: Q5 (turret motorised?): times (grating, laser, XY): | |
+| T3.1–T3.11 | | | | Q4: Q5 (turret motorised?): times (grating, laser, XY): Q44 (camera switch live / stopped, stop from script): | |
 | T4.1 | | | | Q6 (x unit, AcqInfo): | |
 | T4.2 | | | | Si = ; FWHM = ; Q9: | |
 | T4.3 | | | | Q6 (exposure line): | |

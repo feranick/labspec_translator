@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.20.23)
+## Architecture (version 2026.11.20.24)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -339,6 +339,16 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   or discovery_latest.txt -> profile.proposed.json, current limits kept; also what instrument discover does), edit,
   `ls6t profile import` it. Editing profile.json in place is not the route: an automatic profile.json is rebuilt at
   the next bridge start. 109 tests.
+- 2026-11-20, 2026.11.20.24: from the instrument (.23): camera_on top/0 left LabSpec on camera 1 though the
+  answer said ok (the bridge never checked Video(10+id)'s return nor read the camera back); camera_off with the live
+  video on never returned: heartbeat 'busy', no dialog, LabSpec running, i.e. Video(STOP_VIDEO) blocked inside
+  LabSpec (the manual's example is ActiveX-mode, with GET_VIDEO_ID polled throughout; from a script it may wait for
+  a loop that never comes). Fix: SetCamera (Video(10+id), Pause 300, read back; camera_before/after/
+  set_returned in the answer) used by VCamera and VVideo, failing when LabSpec did not follow (message differs with
+  the video live: stop it first; or the ids may not be OLConfig's order); STOP_VIDEO only with stop_video=1 from
+  profile video.stop_from_script (default false; testmode forces the profile's value); VVideo leaves a video it
+  started on (video_left_on). labspec_hint(verb): LabSpec running, no dialog -> stuck in a LabSpec call. Sim mirrors
+  (sim_camera_locked). TESTING T3.11 / Q44. 110 tests.
 
 ## To do next
 
