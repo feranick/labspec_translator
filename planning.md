@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.20.5)
+## Architecture (version 2026.11.20.6)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -180,6 +180,11 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   position, laser verbs need filter within caps + exposure/accumulation limits + the operator's Yes in LabSpec every
   time; acquire returns a spectrum summary; every call logged. record validates step/result/Q ids; report.md is the
   results table filled in plus the answers to Q1-Q40. `ls6t test plan|step|record|report`. 91 tests.
+- 2026-11-20, 2026.11.20.6: Nicola: every request had a long "looking for..." phase (e.g. "where to turn the camera
+  on"): the LLM searched for how to do simple things (there was no way to turn the live view on). Now: bridge verb
+  `camera` (Video START/STOP/GET_VIDEO_ID, waits up to 5 s for the live id), `instrument camera_on/off`, status
+  `live_video`; the instructions map direct requests to tools in two lines; in test mode the hardware_test
+  description starts with the direct-request map and `move` takes roles (filter, grating, z...). 92 tests.
 
 ## To do next
 

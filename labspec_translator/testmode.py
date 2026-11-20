@@ -1,5 +1,5 @@
 """testmode.py — the instrument tests of TESTING.md from the chat: the MCP tool `hardware_test`, and `ls6t test`.
-Version: 2026.11.20.5
+Version: 2026.11.20.6
 
 Off unless a person turns it on for an app (LS6T_TEST_MODE=1 in its MCP entry: `ls6t connect APP --test`). Then the
 LLM walks the maintainer through TESTING.md: it reads a test's instructions and pass criteria (`step`), asks the
@@ -32,7 +32,7 @@ from . import __version__, config
 
 RESULTS = ("pass", "fail", "partial", "skipped", "blocked")
 VERBS = ("ping", "status", "discover", "move", "move_xy", "autofocus", "acquire", "view", "save", "remove", "confirm",
-         "message", "safe", "video", "map_native", "guide", "notice", "resume", "last_error")
+         "message", "safe", "video", "camera", "map_native", "guide", "notice", "resume", "last_error")
 PATH_KEYS = ("out", "native", "path")
 
 
@@ -317,6 +317,14 @@ def call(verb: str, params: dict | None = None, step_id: str | None = None, time
     if runner.read_json(runner.lock_path(), None):
         return {"ok": False, "error": "a request holds the instrument: wait for it or cancel it"}
     prof = P.load()
+    if verb == "move" and str(p.get("motor", "")).lower() in prof["motors"] and prof["motors"].get(
+            str(p.get("motor", "")).lower()):
+        p["motor"] = prof["motors"][str(p["motor"]).lower()]       # a role (filter, z...) to LabSpec's name
+    if verb in ("camera", "video") and p.get("camera") not in (None, ""):
+        num, err = P.camera_number(prof, p["camera"])
+        if err:
+            return {"ok": False, "error": err}
+        p["camera"] = num
     b = Bridge()
     if config.mode() == "sim":
         from . import sim as S

@@ -1,5 +1,5 @@
 """api.py — the functions behind the command line and the MCP server (JSON in, JSON out).
-Version: 2026.11.20.5
+Version: 2026.11.20.6
 """
 from __future__ import annotations
 
@@ -242,7 +242,7 @@ def jobs(limit: int = 20, active: bool = False) -> dict:
 
 # --------------------------------------------------------------------------------------------- the instrument
 
-def instrument(action: str = "status") -> dict:
+def instrument(action: str = "status", camera=None) -> dict:
     """status: the bridge's ping and the instrument's state. discover: the discovery dump and a proposed profile
     (written next to the profile as profile.proposed.json; a person applies it with `ls6t profile import`).
     resume: asks the operator in LabSpec to lift a halt."""
@@ -270,9 +270,21 @@ def instrument(action: str = "status") -> dict:
             return b.call("resume", timeout_s=600)
         if action == "last_error":
             return b.call("last_error", timeout_s=15)
+        if action in ("camera_on", "camera_off"):
+            prof = P.load()
+            num, err = P.camera_number(prof, camera)
+            if err:
+                return {"ok": False, "error": err}
+            r = b.call("camera", timeout_s=30, action=action[7:], **({"camera": num} if num is not None else {}))
+            names = {int(v): k for k, v in (prof.get("video", {}).get("cameras") or {}).items()}
+            try:
+                r["camera_name"] = names.get(int(float(r.get("camera"))))
+            except (TypeError, ValueError):
+                pass
+            return r
     except BridgeError as exc:
         return {"ok": False, "error": str(exc)}
-    raise ValueError(f"action {action!r}: status, discover, resume or last_error")
+    raise ValueError(f"action {action!r}: status, discover, resume, last_error, camera_on or camera_off")
 
 
 def configs_dir() -> Path:

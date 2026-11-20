@@ -1,5 +1,5 @@
 """mcp_server.py — MCP server: lets LLM-based tools run Raman measurements on a HORIBA instrument through LabSpec 6.
-Version: 2026.11.20.5
+Version: 2026.11.20.6
 
 Tools (all JSON):
   study_format      the study format, the profile's choices and limits, the bridge's state. Read it first.
@@ -44,6 +44,8 @@ except ImportError:  # 1.x
 INSTRUCTIONS = """labspec-translator runs Raman measurements on a HORIBA XploRA through LabSpec 6. A script inside LabSpec (the
 bridge) carries out each command: the operator sees every move and spectrum, confirms the first laser exposure and
 can stop everything there. Fits, bands, maps and depth profiles are computed here from the exported spectra.
+Only these tools reach the instrument. Never use scripts, shell commands, COM/ActiveX (NFActiveX) or the bridge's
+files: they bypass the operator's checks and can freeze LabSpec. If no tool does it, say so; do not look for a way.
 Workflow: study_format once (this instrument's lasers, gratings, filters, objectives, limits; is the bridge
 running); write {name: study}; validate_studies and fix every error; run_studies, then study_status until done.
 Kinds: spectrum (points), map (XY/Z grids), depth (spectra down through the sample, interfaces, refractive-index
@@ -63,15 +65,15 @@ Manual adjustments (power at the source, focus by hand): a 'guide' study; the br
 second and shows the operator STOP in LabSpec when the goal is met; report the result afterwards.
 Safety: the filter (power) is capped per laser and lower for samples marked sensitive; moves are limited; ask the
 user before raising power or long maps. If the bridge is not running, ask the user to start ls6t_bridge.vbs.
-Polling costs tokens: when a run needs more than about 5 minutes, tell the user when it should finish and stop;
-collect it later with study_status.
-Pictures: "images": true writes PNGs (images.<name>.path); get_image shows them; the snapshot tool shows the
-sample with the beam marked. Units: Raman shift cm-1, positions µm, time s, intensities counts."""
+Polling costs tokens: past about 5 minutes, tell the user when a run should finish and stop; then study_status.
+Direct requests: live camera view: instrument camera_on/off (camera: a name in profile.cameras, e.g. "top"); a
+picture or the beam: snapshot; the state: instrument status; a spectrum, a stage move, focus: a study. Pictures:
+"images": true writes PNGs (get_image). Units: Raman shift cm-1, positions µm, time s, intensities counts."""
 
 if testmode.enabled():
     INSTRUCTIONS += """
-TEST MODE (TESTING.md, the maintainer at the instrument): hardware_test plan, then per test step: tell the maintainer
-what to do in LabSpec, check with the tools, call single bridge commands, record the result and the answers."""
+TEST MODE: a direct request (camera, one motor, a spectrum, the state): hardware_test call at once (its description
+maps them). The tests of TESTING.md: hardware_test plan, then per test step, act with the maintainer, record."""
 
 server = _Server("labspec-translator", instructions=INSTRUCTIONS)
 
@@ -146,11 +148,14 @@ def jobs(limit: int = 20, active: bool = False) -> dict:
 
 
 @server.tool()
-def instrument(action: str = "status") -> dict:
+def instrument(action: str = "status", camera: str | None = None) -> dict:
     """status: the bridge's version and the instrument's state now (laser, grating, filter, objective, stage,
-    detector temperature). discover: runs the discovery in LabSpec and proposes a machine profile (a person applies
-    it). resume: asks the operator in LabSpec to lift a halt after they stopped the bridge."""
-    return api.instrument(action)
+    detector temperature, live_video, the active camera). camera_on / camera_off: LabSpec's live camera view (no
+    laser, nothing moves; for a picture use snapshot); camera: a name from study_format's profile.cameras (e.g.
+    "top") or a number; none: LabSpec's active camera. discover: runs the discovery in LabSpec and proposes a machine profile (a person
+    applies it). resume: asks the operator in LabSpec to lift a halt after they stopped the bridge.
+    last_error: LabSpec's last error."""
+    return api.instrument(action, camera)
 
 
 @server.tool()
@@ -203,7 +208,12 @@ if testmode.enabled():
     def hardware_test(action: str, step: str | None = None, verb: str | None = None, params: dict | None = None,
                       result: str | None = None, notes: str = "", values: dict | None = None,
                       answers: dict | None = None, who: str = "", timeout_s: float = 120) -> dict:
-        """The instrument tests of TESTING.md, run with the maintainer (test mode only). Actions:
+        """Direct control and the instrument tests of TESTING.md (test mode only). Direct requests, no lookup:
+        camera live view: call camera {action: on|off}; laser, grating, filter, objective, hole, slit: call move
+        {motor: "filter" (a role, or LabSpec's name), mode: "label"|"value", value: "1%"}; the stage: call move_xy
+        {x_um, y_um} (absolute µm; status says where it is) or move {motor: "z", mode: "value", value}; one
+        spectrum: call acquire {exposure_s, accumulations, from_nm, to_nm}; the state: call status; a picture:
+        the snapshot tool. Use plan / step only to run the numbered tests. Actions:
         plan: every test with its last result and the next one to do. step (step="T3.4"): its instructions, pass
         criteria, the open questions it answers, and how its commands map to these tools. call (verb, params,
         step): one bridge command (ping, status, discover, move {motor, mode: value|label|index, value}, move_xy
@@ -215,7 +225,8 @@ if testmode.enabled():
         appends to the test log and rewrites the report (TESTING.md's results table filled in). report: the
         report's path and counts. status: versions, settings, the bridge. last_error: LabSpec's last error.
         config (params {action: list|save|load, name}): LabSpec's configuration files.
-        Go in order; tell the maintainer what to do and wait for them; ask what only a person can see (the video
+        Never reach LabSpec another way (scripts, shell, COM/ActiveX, the bridge's files). Go in order; tell the
+        maintainer what to do and wait for them; ask what only a person can see (the video
         window, sounds, the stage moving); never record a pass you did not check. Profile changes, alignment
         baselines, clearing references and installing the scripts stay with a person: give the exact command."""
         return testmode.hardware_test(action, step, verb, params, result, notes, values, answers, who, timeout_s)

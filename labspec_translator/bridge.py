@@ -1,5 +1,5 @@
 """bridge.py — the Python side of the LabSpec bridge: commands as files in a folder the bridge script watches.
-Version: 2026.11.20.5
+Version: 2026.11.20.6
 
 Protocol 1 (the same for ls6t_bridge.vbs inside LabSpec and for sim.py):
 
@@ -149,7 +149,9 @@ class Bridge:
             if not self.alive():
                 self._withdraw(cmd)
                 raise BridgeGone(f"{verb}: the LabSpec bridge stopped answering (heartbeat older than "
-                                 f"{config.heartbeat_s():.0f} s)")
+                                 f"{config.heartbeat_s():.0f} s). If LabSpec shows a dialog or message box, the "
+                                 "operator closes it (LabSpec's scripts wait while one is open); otherwise the "
+                                 "operator restarts ls6t_bridge.vbs")
             time.sleep(poll_s)
 
     def _withdraw(self, cmd: Path):

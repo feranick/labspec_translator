@@ -217,6 +217,7 @@ Sub VPing(cmd, res)
 End Sub
 
 Sub VStatus(cmd, res)
+    Dim v
     res("system") = LSValue(0, "SystemName")
     res("detector_temp_c") = DetectorTemp()
     res("laser_nm") = MotorValue(GetP(cmd, "m_laser", "Laser"))
@@ -232,6 +233,64 @@ Sub VStatus(cmd, res)
     res("accumulations") = LSValue(0, "LabSpecAccumulation")
     res("shutter_mode") = LSValue(0, "ShutterMode")
     res("last_error") = LabSpecError()
+    On Error Resume Next
+    v = LabSpec.Video(LS_GET_VIDEO_ID)
+    res("live_video") = Bit(Err.Number = 0 And v > 0)
+    Err.Clear
+    res("camera") = LabSpec.Video(LS_GET_ACTIVE_CAMERA)
+    Err.Clear
+    On Error GoTo 0
+End Sub
+
+' The camera's live view in LabSpec: on, off, or its state (camera: the active camera's number, optional)
+Sub VCamera(cmd, res)
+    Dim action, cam, vid, t0
+    action = GetP(cmd, "action", "status")
+    cam = GetP(cmd, "camera", "")
+    If action <> "on" And action <> "off" And action <> "status" Then
+        Fail res, "camera action: on, off or status"
+        Exit Sub
+    End If
+    On Error Resume Next
+    If cam <> "" Then LabSpec.Video LS_SET_ACTIVE_CAMERA + CLng(ParseNum(cam))
+    Err.Clear
+    vid = LabSpec.Video(LS_GET_VIDEO_ID)
+    If Err.Number <> 0 Then vid = 0
+    Err.Clear
+    If action = "on" And Not (vid > 0) Then
+        LabSpec.Video LS_START_VIDEO
+        If Err.Number <> 0 Then
+            Fail res, ErrText("Video start")
+            Err.Clear
+            Exit Sub
+        End If
+        t0 = Timer
+        Do
+            LabSpec.Pause 100
+            vid = LabSpec.Video(LS_GET_VIDEO_ID)
+            If Err.Number <> 0 Then
+                vid = 0
+                Err.Clear
+            End If
+            If vid > 0 Or Elapsed(t0) > 5 Then Exit Do
+        Loop
+    ElseIf action = "off" And vid > 0 Then
+        LabSpec.Video LS_STOP_VIDEO
+        If Err.Number <> 0 Then
+            Fail res, ErrText("Video stop")
+            Err.Clear
+            Exit Sub
+        End If
+        LabSpec.Pause 200
+        vid = LabSpec.Video(LS_GET_VIDEO_ID)
+        If Err.Number <> 0 Then vid = 0
+        Err.Clear
+    End If
+    res("live") = Bit(vid > 0)
+    res("video_id") = vid
+    res("camera") = LabSpec.Video(LS_GET_ACTIVE_CAMERA)
+    Err.Clear
+    On Error GoTo 0
 End Sub
 
 ' LabSpec's configuration as a file: SaveConfig / LoadConfig (in the type library, not in the 2018 manual)
@@ -1592,6 +1651,7 @@ Sub HandleFile(path)
                 On Error GoTo 0
             Case "safe": VSafe cmd, res
             Case "video": VVideo cmd, res
+            Case "camera": VCamera cmd, res
             Case "map_native": VMapNative cmd, res
             Case "config": VConfig cmd, res
             Case "last_error": res("info") = LabSpecError()

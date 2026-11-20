@@ -1162,3 +1162,28 @@ def test_mcp_test_mode_and_connect_flag(tmp_path, monkeypatch):
     assert C.read_json(C.claude_files()[0])["mcpServers"]["ls6t"]["env"]["LS6T_TEST_MODE"] == "1"   # kept
     C.connect(["claude"], "py", test=False)
     assert C.read_json(C.claude_files()[0])["mcpServers"]["ls6t"]["env"]["LS6T_TEST_MODE"] == "0"
+
+
+def test_camera_on_off_and_roles(monkeypatch):
+    from labspec_translator import testmode as T
+    S.ensure(config.active_bridge_dir())
+    assert api.instrument("status")["status"]["live_video"] == "0"
+    r = api.instrument("camera_on")
+    assert r["ok"] and r["live"] == "1" and api.instrument("status")["status"]["live_video"] == "1"
+    assert api.instrument("camera_off")["live"] == "0"
+    monkeypatch.setenv("LS6T_TEST_MODE", "1")
+    assert T.hardware_test("call", verb="camera", params={"action": "on"})["live"] == "1"
+    r = T.hardware_test("call", verb="move", params={"motor": "grating", "mode": "value", "value": 600})
+    assert r["ok"] and r["motor"] == "Grating"
+
+
+def test_camera_by_name():
+    S.ensure(config.active_bridge_dir())
+    P.save(dict(P.load(), video=dict(P.load()["video"], cameras={"top": 0, "side": 1})))
+    r = api.instrument("camera_on", camera="Top camera")
+    assert r["ok"] and r["camera_name"] == "top"
+    r = api.instrument("camera_on", camera="bottom")
+    assert not r["ok"] and "top (0)" in r["error"]
+    assert api.study_format()["profile"]["cameras"] == {"top": 0, "side": 1}
+    from labspec_translator import mcp_server
+    assert "NFActiveX" in mcp_server.INSTRUCTIONS

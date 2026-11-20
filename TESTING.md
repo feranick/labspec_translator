@@ -12,7 +12,7 @@ stops and cancel on the simulator, and `ls6t bench` gives known answers. What re
 LabSpec and hardware. The plan goes from no laser and no motion to Claude driving a full map, in stages. Each stage
 starts only when the previous one passed.
 
-Version under test: 2026.11.20.5 (bridge protocol 1).
+Version under test: 2026.11.20.6 (bridge protocol 1).
 
 ---
 
@@ -135,6 +135,8 @@ single bridge commands, and records the result and the answers to the open quest
 
    Restart the app. A new tool, `hardware_test`, appears. `ls6t connect claude --no-test` turns it off again.
 2. Say, for example: *"We are testing ls6t on the instrument. Start with T0 and go in order."* or *"Let's do T3.4."*
+   Direct requests work too and are carried out at once: *"turn the camera on"*, *"filter to 1 %"*, *"grating
+   600"*, *"move the stage 10 µm in X"*, *"take a 1 s spectrum around 520 cm⁻¹"*, *"what is the state?"*.
 3. For each test the LLM:
    - reads it (`hardware_test step`), and tells the maintainer what to prepare or do;
    - runs the commands. `ls6t bridge call ...` in this plan becomes `hardware_test call`, and `ls6t instrument

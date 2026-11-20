@@ -1,5 +1,5 @@
 """profile.py — the machine profile: what the instrument has (from the discovery script) and the limits a person sets.
-Version: 2026.11.20.5
+Version: 2026.11.20.6
 
 The profile is a JSON file (LS6T_PROFILE, default ~/ls6t/profile.json). Studies never change it: an LLM can only
 ask for what the profile allows. Without a file, the built-in XploRA defaults below apply and every result says so
@@ -52,7 +52,9 @@ DEFAULT_PROFILE: dict = {
     # the pixel data, the image formats LabSpec is asked to save, the settle time and the laser time (s)
     "video": {"laser_offset_um": [0.0, 0.0], "marker": "stage", "packing": "colorref", "order": "x_fastest",
               "formats": ["png", "jpg", "bmp", "tif"], "settle_s": 1.5, "laser_s": 1.0, "max_laser_s": 5.0,
-              "camera": None, "allow_extended": False, "extended_max_s": 600.0},
+              "camera": None, "allow_extended": False, "extended_max_s": 600.0,
+              # LabSpec's cameras by name, as a person sees them, e.g. {"top": 0, "side": 1}: requests may name them
+              "cameras": {}},
     # alignment checks (kind 'alignment'): per laser the fixed settings and the baseline the maintainer recorded
     # right after a successful AutoAlignment (`ls6t alignment record`); a check passes when the Si signal is at least
     # min_ratio of the baseline and its width at most max_fwhm_ratio of it; studies warn when a laser's last check
@@ -337,8 +339,26 @@ def summary(prof: dict) -> dict:
             "limits": prof.get("limits"),
             "alignment_lasers": sorted(prof.get("alignment", {}).get("baselines", {})),
             "laser_shutter": bool(prof.get("motors", {}).get("laser_shutter")),
+            "cameras": prof.get("video", {}).get("cameras") or {},
             "laser_limits": {k: {"max_filter_pct": v.get("max_filter_pct", 100), "power_mw": v.get("power_mw")}
                              for k, v in prof.get("lasers", {}).items()}}
+
+
+def camera_number(prof: dict, camera) -> tuple:
+    """A camera given by name (the profile's video.cameras), number, or nothing (LabSpec's active one).
+    Returns (number or None, error or None)."""
+    if camera in (None, ""):
+        return None, None
+    cams = {str(k).lower(): v for k, v in (prof.get("video", {}).get("cameras") or {}).items()}
+    key = str(camera).strip().lower()
+    for cand in (key, key.replace(" camera", "").strip()):
+        if cand in cams:
+            return int(cams[cand]), None
+    try:
+        return int(float(camera)), None
+    except (TypeError, ValueError):
+        known = ", ".join(f"{k} ({v})" for k, v in cams.items()) or "none named in the profile (video.cameras)"
+        return None, f"camera {camera!r}: known cameras: {known}; or give its number"
 
 
 def stamp() -> str:
