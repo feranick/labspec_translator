@@ -1,5 +1,5 @@
 """cli.py — the command line. Every command prints JSON; '-' reads the studies from stdin.
-Version: 2026.11.20.24
+Version: 2026.11.20.26
 
   ls6t status [REQUEST] [--wait S]   versions, the bridge, the profile; or a request's studies
   ls6t format                        the study format
@@ -9,7 +9,7 @@ Version: 2026.11.20.24
   ls6t cancel REQUEST                stop a request (the current acquisition or move stops)
   ls6t jobs [--limit N] [--active]   recent requests
   ls6t bench [NAMES...]              the benchmarks (on the simulator)
-  ls6t instrument status|discover|resume|last-error|camera-on|camera-off [--camera N] | laser-on [--seconds S] | laser-off
+  ls6t instrument status|discover|resume|last-error|end-bridge|camera-on|camera-off [--camera N] | laser-on [--seconds S] | laser-off
   ls6t instrument set [--laser-nm 532] [--grating 1800] [--filter 10%] [--objective x100] [--hole 300] [--slit 100]
                                      change the set-up now (no laser; the objective asks the operator)
   ls6t instrument snapshot [--laser | --extended]
@@ -91,7 +91,7 @@ def main(argv=None) -> int:
     s = sub.add_parser("instrument")
     s.add_argument("action", choices=["status", "set", "discover", "resume", "last-error", "snapshot", "config",
                                       "camera-on", "camera-off", "laser-on", "laser-off", "calibration",
-                                      "autocal-info", "autocal-run"])
+                                      "autocal-info", "autocal-run", "end-bridge"])
     s.add_argument("--seconds", type=float, help="laser-on: how long (at most limits.max_laser_on_s)")
     s.add_argument("--camera", help="camera-on/off: a number or a name from the profile's video.cameras")
     s.add_argument("what", nargs="?", help="config: list, save or load")

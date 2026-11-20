@@ -1,5 +1,5 @@
 """mcp_server.py — MCP server: lets LLM-based tools run Raman measurements on a HORIBA instrument through LabSpec 6.
-Version: 2026.11.20.24
+Version: 2026.11.20.26
 
 Tools (all JSON):
   study_format      the study format, the profile's choices and limits, the bridge's state. Read it first.
@@ -158,10 +158,11 @@ def instrument(action: str = "status", camera: str | int | None = None, setup: d
     profile's limit; default 30): the laser shutter open so the beam shows on the camera, after the operator's Yes
     in LabSpec; the bridge closes it when the time is up, at laser_off, at a halt, or before any other command.
     laser_off. camera_on / camera_off (camera: a number, or a name in study_format's profile.cameras such as
-    "top"; none: the active one): LabSpec's live view; for a picture use snapshot. The answer's camera is
-    LabSpec's read-back: if it says LabSpec stayed on another camera, tell the operator (do not retry). camera_off
-    is refused while the video runs unless the profile allows it: the operator stops it in LabSpec. discover: runs
-    the discovery
+    "top"; none: the active one): LabSpec's live view; for a picture use snapshot. ls6t does not switch
+    cameras or stop the video on this instrument: for another camera, and for camera_off, the answer refuses and
+    says what the operator does: relay it, do not retry. end_bridge: ends the bridge cleanly
+    (before the operator uses LabSpec's video buttons, which end a running script); a person starts it again.
+    discover: runs the discovery
     and proposes a machine profile (a person applies it). resume: asks the operator to lift a halt. last_error:
     LabSpec's last error. calibration: LabSpec's spectrometer calibration per grating (read only). autocal_info:
     LabSpec's AutoCalibration script(s) here and whether they can run unattended (nothing runs)."""

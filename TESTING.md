@@ -12,7 +12,7 @@ stops and cancel on the simulator, and `ls6t bench` gives known answers. What re
 LabSpec and hardware. The plan goes from no laser and no motion to an LLM app driving a full map, in stages. Each
 stage starts only when the previous one passed.
 
-Version under test: 2026.11.20.24 (bridge protocol 1).
+Version under test: 2026.11.20.26 (bridge protocol 1).
 
 **Already known** (2026-11-20, from the instrument's discovery dump, its `NFActiveX.ocx`, `OLConfig.ini`,
 `OLSetup.ini` and LabSpec 6.7.1's service scripts): the motors and their positions (lasers 532, 637.75, 785.04 nm;
@@ -36,10 +36,14 @@ manual, and where LabSpec keeps its calibration. The open questions below say wh
 5. **How to stop**, in order of preference:
    - close the ls6t window in LabSpec (stops the current command, halts the bridge, closes the laser shutter);
    - cancel the acquisition in LabSpec;
-   - LabSpec's script stop button (ends the bridge);
+   - `ls6t instrument end-bridge` (ends the bridge cleanly; this XploRA's LabSpec has no stop button for scripts);
    - the instrument's own stop or emergency controls.
 
-   The maintainer should try each of them during the plan (T2, T3, T4).
+   The maintainer should try each of them during the plan (T2, T3, T4). **Do not use LabSpec's live video buttons
+   while the bridge runs**: LabSpec ends a running script when its video is started or stopped, and on 2026-11-20 a
+   bridge restarted after that got stuck in its first command; after Cancel in the ls6t window LabSpec froze (STOP
+   ALL did not respond). End the bridge first (`end-bridge`), use the video, then start the bridge again. If the
+   bridge is stuck inside LabSpec (ls6t says so), nothing in LabSpec frees it: restart LabSpec.
 6. **Stop the plan** at any unexpected motion, a move beyond what was asked, a dialog nobody understands, or LabSpec
    not responding. Record what happened (see [Recording](#recording)) before continuing.
 7. **The LLM reaches the instrument only through ls6t's tools.** An app that can also run commands on the PC
@@ -73,7 +77,7 @@ files already showed.
 | ID | Question | Test |
 |---|---|---|
 | Q1 | Can LabSpec scripts use `Scripting.FileSystemObject` and `Scripting.Dictionary` (file access)? Without it the bridge cannot work as designed. **Known: yes** (the bridge wrote the discovery dump). | T1.1 |
-| Q2 | Does the non-blocking window (`Message(..., 8)`) open, report -1 while open and 0 once closed? Does `MessageEx("", 14)` see LabSpec's script stop button? (The bridge's discovery gave `selftest.stop_button` empty, not 0: check what it returns when pressed.) | T1.1, T2.3, T2.4 |
+| Q2 | Does the non-blocking window (`Message(..., 8)`) open, report -1 while open and 0 once closed? Does `MessageEx("", 14)` see a stop button for scripts, where LabSpec has one (this XploRA's has none)? (The bridge's discovery gave `selftest.stop_button` empty, not 0: check what it returns when pressed.) | T1.1, T2.3, T2.4 |
 | Q3 | Does LabSpec stay usable (live video, menus) while the bridge loops? | T2.2 |
 | Q4 | Do `MoveMotor(..., +10)` and `GetMotorStatus` behave as assumed? Does `MoveXY` return at once or block until the move ends? | T3 |
 | Q5 | What are the motor names and position labels of the filter wheel and the objective turret? Is the turret manual (LabSpec prompts the operator)? **Known: names and labels** (Filter 100 %–0.1 %; Objective x100_VIS, x10_VIS, x5_VIS); motorised or manual is still to see. | T3.2 |
@@ -115,7 +119,7 @@ files already showed.
 | Q41 | `OLConfig.ini` (`Parameters\ACQUISITION`): ls6t reads the camera names, the objectives' NA and their field of view (inferred) from it. Is the field of view right (a snapshot's `field_um`)? **Known:** cameras Top = 0 and Internal = 1, confirmed by switching in LabSpec. | T5b.1 |
 | Q42 | LabSpec's AutoCalibration (`OLSetup.ini` names `...\AutoCalibration\UniversalAutoCalibrationv3.vbs`, an older install's path): is the script on this PC, and can the bridge run it (`instrument autocal_info`)? | T4.9 |
 | Q43 | LabSpec 6.7's constants read a motor's positions with 100+i (value) and 200+i (name); the 2018 manual's 10+i / 20+i worked here for motors of up to ten positions. ls6t uses 100+/200+ beyond ten: check such a motor's labels, if any. | T1.1 |
-| Q44 | Cameras: does `Video(10 + id)` switch LabSpec's camera, with the live video running and with it stopped, and are the ids OLConfig.ini's order (Top 0, Internal 1)? Does `Video(STOP_VIDEO)` from a script return? **Known (2026-11-20, .23):** with the video running LabSpec stayed on camera 1 when asked for 0, and `Video(STOP_VIDEO)` never returned (the bridge hung, no dialog). | T3.11 |
+| Q44 | Cameras. **Answered (2026-11-20): ls6t cannot switch cameras reliably on this XploRA.** `Video(10 + 0)` was ignored; `Video(10 + 1)` changed LabSpec's selection (what `GET_ACTIVE_CAMERA` reports) but the view only from the next video start; a script's `Video(STOP_VIDEO)` hung the bridge (twice, no dialog, LabSpec running); stopping or starting the video in LabSpec's interface ends the bridge script, and a bridge started right after got stuck in `ping`; after Cancel in the ls6t window LabSpec froze. So ls6t never stops the video and does not switch cameras (`video.switch_camera` false); the operator changes cameras in LabSpec with the bridge ended. Open: does a bridge started after a clean `end-bridge` and a video change by hand answer normally? Does HORIBA's own stop sequence (STOP, then `GetMotorStatus("Video")` until 0) return where ls6t's did not? | T3.11, T3.12 |
 
 ---
 
@@ -279,8 +283,9 @@ the spectrum window, moving the stage with the joystick or software. Pass: LabSp
 - `ls6t instrument resume`: LabSpec asks whether ls6t may control the instrument again. The maintainer answers
   **No**: the bridge stays halted. Repeat and answer **Yes**: the window reappears and the state is `idle`.
 
-**T2.4 The script stop button (Q2).** The maintainer presses LabSpec's stop button for scripts. Pass: the window
-closes, `heartbeat.state` is `stopped`, and `ls6t status` shows the bridge not running. Start the bridge again.
+**T2.4 Ending the bridge (Q2).** `ls6t instrument end-bridge`. Pass: the ls6t window closes, `heartbeat.state` is
+`stopped`, and `ls6t status` says the bridge was stopped (not "ended without stopping"). Start the bridge again. If
+this LabSpec has a stop button for scripts (this XploRA's does not), also try it once: record what happens.
 
 **T2.5 Stale stop.** While idle: `ls6t bridge call ping`, then create an old stop request by running
 `ls6t bridge call move motor=Grating mode=value value=<current> --timeout 0.1` (it times out on purpose), then
@@ -304,7 +309,8 @@ the single command underneath.
 | T3.8 | Stop during a move: `ls6t bridge call move_xy x_um=<X+1000> y_um=<Y> --timeout 60`, and the maintainer closes the ls6t window while it moves | the stage stops; the answer says `stopped_by: operator`; the bridge is halted. Resume (T2.3) and move back. |
 | T3.9 | `ls6t bridge call safe` | answers ok; nothing moves |
 | T3.10 | Polarisers: `instrument set` with `laser_pol` Vertical and `raman_pol` None (from the chat, or `ls6t bridge call move motor=LaserPol mode=label value=Vertical`), then back | each moves and reads back; `ls6t instrument status` shows `laser_pol` / `raman_pol` |
-| T3.11 | Cameras (**Q44**): with the live video **stopped** in LabSpec, `ls6t instrument camera-on --camera top`; stop the video in LabSpec, then `--camera internal`. Then, with the video running, `--camera top` once. Then `camera-off` with the video running | Each answer's `camera` is LabSpec's read-back: `ok` only when it is the camera asked; if not, the answer says LabSpec stayed on another camera (record `camera_set_returned`, `camera_before`, `camera_after` for each try). `camera-off` is refused (the operator stops the video in LabSpec). Optional, with the maintainer ready to stop the bridge: `ls6t profile set video.stop_from_script true`, then `camera-off` once: record whether it returns; set it back to false if it hangs |
+| T3.11 | Cameras (**Q44**: concluded 2026-11-20, ls6t does not switch cameras on this instrument). With the video stopped and the camera chosen in LabSpec: `ls6t instrument camera-on`. Then `camera-on --camera <the other one>`, and `camera-off` | The first starts the live video on LabSpec's camera (`video_started` 1). The other two are refused, nothing changes, the bridge keeps running, and the answers say what to do (`end-bridge`, change the video and camera in LabSpec, start the bridge). Then do that once: after `end-bridge` and the change by hand, the restarted bridge answers `ls6t instrument status` (if not: record it, restart LabSpec) |
+| T3.12 | Stopping the video HORIBA's way (**Q44**; optional; maintainer ready to restart LabSpec; save work first). HORIBA's own service scripts (`SERVICE\StandardMapping XploRA.vbs`, `SWIFTMapping XploRA.vbs`) stop the video with `Video STOP_VIDEO`, then poll `GetMotorStatus("Video", id)` until 0, with no other video call in between; ls6t's earlier stop called `Video(GET_VIDEO_ID)` right after, and hung. With the video started by ls6t (`camera-on`): `ls6t profile set video.stop_from_script true`, then `ls6t instrument camera-off` once | It returns within 15 s with `live` 0 and `video_stop_status` 0, LabSpec's video is stopped, and the bridge answers `ls6t instrument status`. Record `video_stop_s`. If it hangs: restart LabSpec, set `video.stop_from_script` back to false, and record it (then no script way to stop the video is known) |
 
 Also record the times of T3.3, T3.4 and T3.6. They replace the defaults in the profile's `timing` (`grating_s`,
 `laser_s`, `xy_um_per_s`, `xy_settle_s`), which feed the time estimates.
@@ -435,7 +441,7 @@ Record whether autofocus left a spectrum in LabSpec.
 Si wafer or the contrast sample in focus, then run `ls6t instrument snapshot`. Pass: `ok`; `frame.png` shows the same
 view as LabSpec's video window; `um_axes` is true and `field_um` matches the objective's field of view
 (`objectives_info` in `ls6t format`, from `OLConfig.ini`: **Q41**). Record which formats appear under `native`.
-Repeat with the live video stopped: the bridge starts it and takes the frame; it leaves the video on (`video_left_on`) unless `video.stop_from_script` is true (T3.11).
+Repeat with the live video stopped: the bridge starts it and takes the frame, and leaves the video on (`video_left_on`: ls6t never stops it). With `video.camera` set to another camera than LabSpec's, the snapshot is refused (no frame from the wrong camera).
 
 **T5b.2 Orientation and colours (Q14).** Choose a feature that is easy to recognise (an edge, a corner, a coloured
 object).
@@ -677,7 +683,7 @@ With the LLM app connected (test mode off), in a new chat:
 | Step | What | Pass |
 |---|---|---|
 | T9.1 (**Q12**) | Start a 5-minute map from the LLM app, then quit the app | Either the request finishes (`ls6t status` afterwards: done), or it ends `interrupted` and the instrument is idle. Record which. |
-| T9.2 | During a map, stop the bridge with LabSpec's script stop button | The acquisition in progress stops; the request ends `cancelled` with `stopped_by: operator` (or `failed`, bridge gone, within `LS6T_HEARTBEAT_S` if LabSpec ended the script outright: record which); measured points are kept |
+| T9.2 | During a map, the operator cancels the acquisition in LabSpec; then, during another, `ls6t instrument end-bridge` | The acquisition in progress stops; the request ends `cancelled` with `stopped_by: operator`; measured points are kept. `end-bridge` is refused while a request holds the instrument (cancel the request first) |
 | T9.3 | Two requests at once (two `ls6t run`) | The second waits as `queued` ("the instrument is busy with ...") and runs after the first |
 | T9.4 | Close LabSpec during an idle period, reopen it, restart the bridge | `ls6t status` follows (not running, then running); the next study runs normally |
 
@@ -700,7 +706,7 @@ With the LLM app connected (test mode off), in a new chat:
 | T2.3 | | | | | |
 | T2.4 | | | | Q2: | |
 | T2.5 | | | | | |
-| T3.1–T3.11 | | | | Q4: Q5 (turret motorised?): times (grating, laser, XY): Q44 (camera switch live / stopped, stop from script): | |
+| T3.1–T3.12 | | | | Q4: Q5 (turret motorised?): times (grating, laser, XY): Q44 (bridge after end-bridge + video by hand; HORIBA-style stop returns?): | |
 | T4.1 | | | | Q6 (x unit, AcqInfo): | |
 | T4.2 | | | | Si = ; FWHM = ; Q9: | |
 | T4.3 | | | | Q6 (exposure line): | |

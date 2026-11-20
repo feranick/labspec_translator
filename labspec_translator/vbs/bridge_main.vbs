@@ -8,7 +8,8 @@
 ' The operator stays in charge:
 '   - a small window says ls6t is in control; closing it stops the acquisition or move in progress and HALTS the
 '     bridge (it refuses commands until ls6t asks to resume and the operator answers Yes);
-'   - LabSpec's own stop button (scripts) ends the bridge;
+'   - LabSpec's own stop button for scripts, where LabSpec has one, ends the bridge (this XploRA's LabSpec shows
+'     none: ls6t ends it with its 'quit' command, `instrument end_bridge`);
 '   - cancelling an acquisition in LabSpec counts as an operator stop.
 ' ---------------------------------------------------------------------------------------------------------------
 
@@ -66,8 +67,10 @@ End Sub
 Sub OpenPopup()
     On Error Resume Next
     LabSpec.Message "ls6t (labspec-translator) is controlling the instrument." & vbCrLf & vbCrLf & _
-                    "Close this window to STOP: the acquisition or move in progress stops and ls6t waits." & _
-                    vbCrLf & "Use LabSpec's script stop button to end the bridge.", LS_MB_NON_BLOCKING
+                    "Close this window (Cancel) to STOP: the acquisition or move in progress stops and ls6t " & _
+                    "waits." & vbCrLf & "Before using LabSpec's live video buttons, end the bridge from ls6t " & _
+                    "(instrument end_bridge): LabSpec ends a running script when its video is started or stopped.", _
+                    LS_MB_NON_BLOCKING
     gPopupOpen = (Err.Number = 0)
     Err.Clear
     On Error GoTo 0
@@ -346,10 +349,17 @@ Sub VLabels(cmd, res)
 End Sub
 
 ' The camera's live view in LabSpec: on, off, or its state (camera: the active camera's number, optional)
-' The active camera: Video(10 + id), then read back with Video(GET_ACTIVE_CAMERA). On 2026-11-20 LabSpec reported
-' success but stayed on camera 1 while the live video ran; the read-back is what counts. True when it is `want`.
+' The camera. On this XploRA (2026-11-20) ls6t cannot switch cameras reliably: what LabSpec reports
+' (Video(GET_ACTIVE_CAMERA)) is the camera selected, not the one shown; a switch to camera 0 was ignored; a switch to
+' camera 1 showed only from the next video start; a script's Video(STOP_VIDEO) hung the bridge (twice); and stopping
+' or starting the video in LabSpec's interface ends the bridge script. So the bridge never stops the video, and
+' switches cameras only where the profile allows it (video.switch_camera, for another instrument, with the video
+' stopped); otherwise a camera other than the active one is refused with what the operator does.
+Const LS6T_VIDEO_BY_HAND = "end the bridge from ls6t first (instrument end_bridge: LabSpec ends a running script when its video is stopped or started in its interface), then in LabSpec stop the video, choose the camera and start the video, then start ls6t_bridge.vbs again"
+
+' Video(10 + id) with the video stopped, then the selection read back (polled up to 2 s). True when it is `want`.
 Function SetCamera(want, res)
-    Dim before, after, r
+    Dim before, after, r, t0
     SetCamera = False
     On Error Resume Next
     before = LabSpec.Video(LS_GET_ACTIVE_CAMERA)
@@ -363,19 +373,80 @@ Function SetCamera(want, res)
     res("camera_set_returned") = r
     res("camera_set_error") = Err.Description
     Err.Clear
-    LabSpec.Pause 300
-    after = LabSpec.Video(LS_GET_ACTIVE_CAMERA)
-    Err.Clear
+    t0 = Timer
+    Do
+        LabSpec.Pause 200
+        after = LabSpec.Video(LS_GET_ACTIVE_CAMERA)
+        Err.Clear
+        If CStr(after) = CStr(want) Or Elapsed(t0) > 2 Then Exit Do
+    Loop
     res("camera_after") = after
+    res("camera_set_s") = Fmt(Elapsed(t0))
     On Error GoTo 0
     SetCamera = (CStr(after) = CStr(want))
 End Function
 
-' Stopping LabSpec's live video from a script (Video(STOP_VIDEO)) did not return on the instrument on 2026-11-20
-' and hung the bridge, so it runs only when the command allows it (profile video.stop_from_script, for a test with
-' the maintainer); otherwise the operator stops the video in LabSpec.
+' The checks before a camera is used: "" when ok (switched if needed, the video stopped), else the error.
+Function CameraFor(cam, live, allowSwitch, res)
+    Dim cur
+    CameraFor = ""
+    If cam = "" Then Exit Function
+    On Error Resume Next
+    cur = LabSpec.Video(LS_GET_ACTIVE_CAMERA)
+    Err.Clear
+    On Error GoTo 0
+    res("camera_before") = cur
+    If CStr(cur) = CStr(CLng(ParseNum(cam))) Then Exit Function
+    If Not allowSwitch Then
+        CameraFor = "LabSpec's camera is " & cur & ", not " & cam & ", and ls6t does not switch cameras on this " & _
+                    "instrument (unreliable: tested 2026-11-20). To use camera " & cam & ": " & LS6T_VIDEO_BY_HAND
+        Exit Function
+    End If
+    If live Then
+        CameraFor = "the live video runs on camera " & cur & ": LabSpec switches cameras only when the video " & _
+                    "starts, and ls6t cannot stop it. To use camera " & cam & ": " & LS6T_VIDEO_BY_HAND
+        Exit Function
+    End If
+    If Not SetCamera(CLng(ParseNum(cam)), res) Then
+        CameraFor = "LabSpec stayed on camera " & res("camera_after") & " (asked " & cam & "; Video(" & _
+                    (LS_SET_ACTIVE_CAMERA + CLng(ParseNum(cam))) & ") returned " & res("camera_set_returned") & _
+                    "). To use camera " & cam & ": " & LS6T_VIDEO_BY_HAND
+    End If
+End Function
+
+' Stopping the live video the way HORIBA's own service scripts do (StandardMapping / SWIFTMapping XploRA.vbs):
+' Video STOP_VIDEO as a statement, then GetMotorStatus("Video", id) polled until 0, and no other Video() call in
+' between. ls6t's earlier stop (then Pause and Video(GET_VIDEO_ID)) hung twice on the XploRA (2026-11-20); this one
+' runs only when the profile allows it (video.stop_from_script), for a test with the maintainer (TESTING T3.12).
+Function StopVideoHoriba(res)
+    Dim st, mid, t0
+    StopVideoHoriba = False
+    On Error Resume Next
+    LabSpec.Video LS_STOP_VIDEO
+    If Err.Number <> 0 Then
+        res("video_stop_error") = Err.Description
+        Err.Clear
+        Exit Function
+    End If
+    t0 = Timer
+    Do
+        st = LabSpec.GetMotorStatus("Video", mid)
+        If Err.Number <> 0 Then
+            res("video_stop_status_error") = Err.Description
+            Err.Clear
+            Exit Do
+        End If
+        BeatNow
+        If st = 0 Or Elapsed(t0) > 15 Then Exit Do
+    Loop
+    res("video_stop_status") = st
+    res("video_stop_s") = Fmt(Elapsed(t0))
+    On Error GoTo 0
+    StopVideoHoriba = (CStr(st) = "0")
+End Function
+
 Sub VCamera(cmd, res)
-    Dim action, cam, vid, t0, live0
+    Dim action, cam, vid, t0, live0, e
     action = GetP(cmd, "action", "status")
     cam = GetP(cmd, "camera", "")
     If action <> "on" And action <> "off" And action <> "status" Then
@@ -387,26 +458,30 @@ Sub VCamera(cmd, res)
     If Err.Number <> 0 Then vid = 0
     Err.Clear
     live0 = (vid > 0)
-    If action = "off" And live0 And GetP(cmd, "stop_video", "0") <> "1" Then
-        res("live") = 1
+    res("live") = Bit(live0)
+    If action = "off" And live0 Then
+        If GetP(cmd, "stop_video", "0") = "1" Then
+            If StopVideoHoriba(res) Then
+                res("live") = 0
+                res("video_id") = 0
+            Else
+                Fail res, "LabSpec's video did not report stopped within 15 s (GetMotorStatus Video = " & _
+                          res("video_stop_status") & ")"
+            End If
+            Exit Sub
+        End If
         res("camera") = LabSpec.Video(LS_GET_ACTIVE_CAMERA)
         Err.Clear
-        Fail res, "ls6t does not stop LabSpec's live video (it hung the bridge on this instrument): the operator " & _
-                  "stops it with LabSpec's video button"
+        Fail res, "ls6t does not stop LabSpec's live video (a script's Video(STOP_VIDEO) hung the bridge on this " & _
+                  "instrument): end the bridge from ls6t first (instrument end_bridge), then stop the video in LabSpec"
         Exit Sub
     End If
-    If cam <> "" And action <> "off" Then
-        If Not SetCamera(CLng(ParseNum(cam)), res) Then
-            res("live") = Bit(live0)
-            If live0 Then
-                Fail res, "LabSpec stayed on camera " & res("camera_after") & " (asked " & cam & "; Video(" & _
-                          (LS_SET_ACTIVE_CAMERA + CLng(ParseNum(cam))) & ") returned " & res("camera_set_returned") & _
-                          ") while the live video runs: the operator stops the live video in LabSpec, then asks again"
-            Else
-                Fail res, "LabSpec stayed on camera " & res("camera_after") & " (asked " & cam & "; Video(" & _
-                          (LS_SET_ACTIVE_CAMERA + CLng(ParseNum(cam))) & ") returned " & res("camera_set_returned") & _
-                          "): the camera numbers may differ from OLConfig.ini's order; the operator switches it in LabSpec"
-            End If
+    If action <> "off" Then
+        e = CameraFor(cam, live0, GetP(cmd, "switch_camera", "0") = "1", res)
+        If e <> "" Then
+            res("camera") = LabSpec.Video(LS_GET_ACTIVE_CAMERA)
+            Err.Clear
+            Fail res, e
             Exit Sub
         End If
     End If
@@ -427,21 +502,11 @@ Sub VCamera(cmd, res)
             End If
             If vid > 0 Or Elapsed(t0) > 5 Then Exit Do
         Loop
-    ElseIf action = "off" And live0 Then
-        LabSpec.Video LS_STOP_VIDEO
-        If Err.Number <> 0 Then
-            Fail res, ErrText("Video stop")
-            Err.Clear
-            Exit Sub
-        End If
-        LabSpec.Pause 200
-        vid = LabSpec.Video(LS_GET_VIDEO_ID)
-        If Err.Number <> 0 Then vid = 0
-        Err.Clear
     End If
     res("live") = Bit(vid > 0)
     res("video_id") = vid
-    res("camera") = LabSpec.Video(LS_GET_ACTIVE_CAMERA)
+    res("camera") = LabSpec.Video(LS_GET_ACTIVE_CAMERA)     ' the selection; the view follows it from a video start
+    res("video_started") = Bit(action = "on" And Not live0)
     Err.Clear
     On Error GoTo 0
 End Sub
@@ -1108,18 +1173,15 @@ Sub VVideo(cmd, res)
     opened = False
     ok = True
     On Error Resume Next
-    If cam <> "" Then
-        If Not SetCamera(CLng(ParseNum(cam)), res) Then
-            Fail res, "LabSpec stayed on camera " & res("camera_after") & " (asked " & cam & "): no frame taken from " & _
-                      "the wrong camera; the operator switches the camera in LabSpec (with the live video stopped)"
-            Exit Sub
-        End If
-    End If
-    Err.Clear
     wasOn = False
     vid = LabSpec.Video(LS_GET_VIDEO_ID)
     If Err.Number = 0 And vid > 0 Then wasOn = True
     Err.Clear
+    r = CameraFor(cam, wasOn, GetP(cmd, "switch_camera", "0") = "1", res)   ' no frame from another camera
+    If r <> "" Then
+        Fail res, r
+        Exit Sub
+    End If
     clone = 0
     If GetP(cmd, "extended", "0") = "1" Then
         ' LabSpec's extended video: a still image stitched over the area and settings made in LabSpec's interface
@@ -1213,9 +1275,9 @@ Sub VVideo(cmd, res)
     res("laser_s") = laserS
     If Not wasOn Then
         If GetP(cmd, "stop_video", "0") = "1" Then
-            LabSpec.Video LS_STOP_VIDEO
+            res("video_stopped") = Bit(StopVideoHoriba(res))
         Else
-            res("video_left_on") = 1          ' Video(STOP_VIDEO) hung the bridge on the instrument (VCamera)
+            res("video_left_on") = 1         ' not stopped from a script unless allowed: Video(STOP_VIDEO) hung
         End If
     End If
     Err.Clear
@@ -1945,10 +2007,12 @@ Sub BridgeMain()
     ' the instrument's inventory (motors, positions, detector; no probes, nothing moves): ls6t builds or checks its
     ' machine profile from it
     On Error Resume Next
+    gVerb = "inventory"                 ' in the heartbeat: a bridge stuck here is told apart from one in a command
     Beat "busy", True
     DiscoverTo LS6T_HOME_DIR & "\discovery_latest.txt", False
     Err.Clear
     On Error GoTo 0
+    gVerb = ""
     Beat "idle", True
     Do While Not gQuit
         BeatNow

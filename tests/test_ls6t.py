@@ -946,7 +946,7 @@ def test_native_map_export_and_discovery_probes(tmp_path):
     assert st["studies"]["m"]["reliable"]
     S.ensure(config.active_bridge_dir())
     r = bridge.Bridge().call("discover", timeout_s=10, out=str(tmp_path / "dump.txt"))
-    # discovery no longer probes these (2026.11.20.24): dumps from older bridges still carry them
+    # discovery no longer probes these (2026.11.20.26): dumps from older bridges still carry them
     old = (tmp_path / "dump.txt").read_text() + "\n".join([
         "selftest.get_value_ex=0", "selftest.get_value_simple_part=1", "selftest.get_value_simple_part_size=8",
         "selftest.get_value_simple_part_values=4,5,6,7,8,9,10,11", "selftest.get_config_param=1",
@@ -1185,7 +1185,7 @@ def test_camera_on_off_and_roles(monkeypatch):
     assert not r["ok"] and r["live"] == "1"
     monkeypatch.setenv("LS6T_TEST_MODE", "1")
     assert T.hardware_test("call", verb="camera", params={"action": "on"})["live"] == "1"
-    assert not T.hardware_test("call", verb="camera", params={"action": "off", "stop_video": 1})["ok"]
+    assert not T.hardware_test("call", verb="camera", params={"action": "off"})["ok"]
     r = T.hardware_test("call", verb="move", params={"motor": "grating", "mode": "value", "value": 600})
     assert r["ok"] and r["motor"] == "Grating"
 
@@ -1341,7 +1341,8 @@ def test_labspec_ini_completes_the_profile(monkeypatch):
     assert prof["video"]["cameras"] == {"top": 0, "internal": 1}
     assert prof["objectives_info"]["x10_VIS"]["na"] == 0.25 and "x5_VIS" in prof["objectives_info"]
     assert any("cameras from LabSpec" in n for n in prof["auto"]["notes"])
-    assert api.instrument("camera_on", camera="internal")["camera_name"] == "internal"
+    r = api.instrument("camera_on", camera="internal")         # 'internal' is camera 1 (no switching: refused)
+    assert not r["ok"] and "not 1," in r["error"]
     lc = prof["labspec_config"]
     assert lc["autocalibration_script"].endswith("UniversalAutoCalibrationv3.vbs")
     green = lc["oneclick_presets"]["OneClick Green"]
@@ -1527,27 +1528,60 @@ def test_profile_propose_is_the_one_review_route(tmp_path):
 
 
 def test_camera_switch_is_checked_and_video_stop_is_not_from_script(tmp_path):
-    """2026-11-20: camera_on reported success while LabSpec stayed on camera 1; camera_off hung the bridge in
-    Video(STOP_VIDEO)."""
+    """2026-11-20 on the XploRA: a switch to camera 0 was ignored, to camera 1 it showed only from the next video
+    start, a script's Video(STOP_VIDEO) hung the bridge (twice), and the UI's video buttons end the bridge. ls6t never
+    stops the video and does not switch cameras unless the profile allows it (video.switch_camera)."""
     br = Path(api.install_bridge(tmp_path / "vbs")["files"]["ls6t_bridge.vbs"]).read_text()
-    cam = br[br.index("Sub VCamera("):]
-    cam = cam[:cam.index("End Sub")]
-    assert 'GetP(cmd, "stop_video", "0") <> "1"' in cam and "SetCamera(" in cam
-    assert cam.index('"stop_video"') < cam.index("LS_STOP_VIDEO")
+    assert br.count("LabSpec.Video LS_STOP_VIDEO") == 1 and "Video(LS_STOP_VIDEO)" not in br   # StopVideoHoriba only
+    cf = br[br.index("Function CameraFor("):]
+    cf = cf[:cf.index("End Function")]
+    assert cf.index("If Not allowSwitch Then") < cf.index("If live Then") < cf.index("SetCamera(")
     vid = br[br.index("Sub VVideo("):]
-    vid = vid[:vid.index("End Sub")]
-    assert 'If GetP(cmd, "stop_video", "0") = "1" Then' in vid and "SetCamera(" in vid
-    assert "after = LabSpec.Video(LS_GET_ACTIVE_CAMERA)" in br
+    assert 'CameraFor(cam, wasOn, GetP(cmd, "switch_camera", "0") = "1", res)' in vid[:vid.index("End Sub")]
+    assert P.load()["video"]["switch_camera"] is False
     S.ensure(config.active_bridge_dir())
     P.save(dict(P.load(), video=dict(P.load()["video"], cameras={"top": 0, "internal": 1})))
-    assert api.instrument("camera_on", camera="internal")["camera_name"] == "internal"
-    (config.active_bridge_dir() / "sim_camera_locked").write_text("1")
-    r = api.instrument("camera_on", camera="top")
-    assert not r["ok"] and "stayed on camera 1" in r["error"]
+    r = api.instrument("camera_on", camera="top")              # sim starts on camera 0: the active one is fine
+    assert r["ok"] and r["camera_name"] == "top" and r["video_started"] == "1"
+    r = api.instrument("camera_on", camera="internal")         # another camera: refused, with what to do
+    assert not r["ok"] and "does not switch cameras" in r["error"] and "end_bridge" in r["error"]
     r = api.instrument("camera_off")
-    assert not r["ok"] and "video button" in r["error"]
+    assert not r["ok"] and "end_bridge" in r["error"]
+    sv = br[br.index("Function StopVideoHoriba("):]
+    sv = sv[:sv.index("End Function")]
+    assert 'GetMotorStatus("Video", mid)' in sv and "GET_VIDEO_ID" not in sv     # HORIBA's own way, opt-in
     P.save(dict(P.load(), video=dict(P.load()["video"], stop_from_script=True)))
-    assert api.instrument("camera_off")["ok"]
-    assert api.instrument("camera_on", camera="top")["camera_name"] == "top"     # switched with the video off
-    assert "stuck inside a LabSpec call" not in bridge.labspec_hint("camera")      # not Windows here: generic
+    r = api.instrument("camera_off")
+    assert r["ok"] and r["live"] == "0"
+    assert api.instrument("camera_on")["video_started"] == "1"
+    # another instrument where a person allowed switching: only with the video stopped
+    P.save(dict(P.load(), video=dict(P.load()["video"], switch_camera=True)))
+    r = api.instrument("camera_on", camera="internal")
+    assert not r["ok"] and "switches cameras only when the video starts" in r["error"]
+    S.ensure(config.active_bridge_dir())
+    (config.active_bridge_dir() / "sim_camera_locked").write_text("1")
     assert "camera" in bridge.labspec_hint("camera")
+
+
+def test_bridge_diagnosis_is_one_story_and_end_bridge(tmp_path):
+    """2026-11-20: the same stuck bridge was reported once as stuck in 'ping', seconds later as not running; and the
+    advice named a script stop button this LabSpec does not have."""
+    hb = {"state": "busy", "verb": "ping", "age_s": 40}
+    a = bridge.diagnose(hb, tmp_path)
+    assert "busy in ping" in a and "not running" not in a and "stop button" not in a and "Cancel" in a
+    assert "start-up inventory" in bridge.diagnose({"state": "busy", "verb": "", "age_s": 30}, tmp_path)
+    idle = bridge.diagnose({"state": "idle", "verb": "", "age_s": 30}, tmp_path)
+    assert "ended without stopping" in idle and "video" in idle
+    assert "has not run here" in bridge.diagnose(None, tmp_path)
+    # both paths (before sending, while waiting) use it
+    b = bridge.Bridge(tmp_path / "br")
+    (b.dir / "heartbeat.txt").write_text("state=busy\nverb=ping\n", encoding="utf-8")
+    old = time.time() - 100
+    os.utime(b.dir / "heartbeat.txt", (old, old))
+    with pytest.raises(bridge.BridgeGone, match="busy in ping"):
+        b.call("status", timeout_s=2)
+    S.ensure(config.active_bridge_dir())
+    r = api.instrument("end_bridge")
+    assert r["ok"] and "start ls6t_bridge.vbs" in r["next"].lower().replace("start ls6t", "start ls6t")
+    br = Path(api.install_bridge(tmp_path / "vbs")["files"]["ls6t_bridge.vbs"]).read_text()
+    assert "script stop button" not in br and 'gVerb = "inventory"' in br

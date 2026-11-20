@@ -1,5 +1,5 @@
 """api.py — the functions behind the command line and the MCP server (JSON in, JSON out).
-Version: 2026.11.20.24
+Version: 2026.11.20.26
 """
 from __future__ import annotations
 
@@ -343,6 +343,15 @@ def _instrument(action, camera, setup, seconds) -> dict:
             return {**out, "dump": str(dump)}
         if action == "resume":
             return b.call("resume", timeout_s=600)
+        if action == "end_bridge":
+            # the bridge ends itself cleanly (laser closed, window closed, heartbeat 'stopped'): before the operator
+            # uses LabSpec's live video buttons, which end a running script abruptly. A person starts it again.
+            if runner.read_json(runner.lock_path(), None):
+                return {"ok": False, "error": "a request holds the instrument: cancel it first"}
+            r = b.call("quit", timeout_s=30)
+            r["next"] = ("the bridge has ended; LabSpec's interface is free (video, camera). Start ls6t_bridge.vbs "
+                         "again in LabSpec (Processing > Scripts) when done")
+            return r
         if action == "last_error":
             return b.call("last_error", timeout_s=15)
         if action == "set":
@@ -361,6 +370,7 @@ def _instrument(action, camera, setup, seconds) -> dict:
             if err:
                 return {"ok": False, "error": err}
             r = b.call("camera", timeout_s=30, action=action[7:],
+                       switch_camera=int(bool(prof.get("video", {}).get("switch_camera"))),
                        stop_video=int(bool(prof.get("video", {}).get("stop_from_script"))),
                        **({"camera": num} if num is not None else {}))
             names = {int(v): k for k, v in (prof.get("video", {}).get("cameras") or {}).items()}
@@ -372,7 +382,7 @@ def _instrument(action, camera, setup, seconds) -> dict:
     except BridgeError as exc:
         return {"ok": False, "error": str(exc)}
     raise ValueError(f"action {action!r}: status, set, laser_on, laser_off, camera_on, camera_off, calibration, "
-                     "autocal_info, autocal_run, discover, resume or last_error")
+                     "autocal_info, autocal_run, discover, resume, end_bridge or last_error")
 
 
 def profile_propose(dump=None) -> dict:
@@ -813,6 +823,7 @@ def snapshot(with_laser: bool = False, extended: bool = False) -> dict:
         r = b.call("video", timeout_s=60 + settle + laser_s + (float(v.get("extended_max_s", 600)) if extended else 0),
                    out=str(base), settle_s=settle, laser_s=laser_s, extended=int(extended),
                    formats=",".join(v.get("formats", [])), camera=v.get("camera"),
+                   switch_camera=int(bool(v.get("switch_camera"))),
                    stop_video=int(bool(v.get("stop_from_script"))), **runner.motor_args(prof))
     except BridgeError as exc:
         return {"ok": False, "error": str(exc)}

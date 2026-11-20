@@ -1,5 +1,5 @@
 """bridge.py — the Python side of the LabSpec bridge: commands as files in a folder the bridge script watches.
-Version: 2026.11.20.24
+Version: 2026.11.20.26
 
 Protocol 1 (the same for ls6t_bridge.vbs inside LabSpec and for sim.py):
 
@@ -75,25 +75,47 @@ def labspec_windows() -> dict | None:
         return None
 
 
+STUCK_ADVICE = ("the bridge cannot react to anything while it waits inside LabSpec, not even the ls6t window's "
+                "Cancel (on 2026-11-20 LabSpec froze after a Cancel in this state). Wait a minute; if it stays "
+                "stuck, save what you can, close LabSpec (Task Manager if it does not respond), start LabSpec again, "
+                "then ls6t_bridge.vbs. Tell the ls6t maintainer the command it was in.")
+
+
 def labspec_hint(verb: str | None = None) -> str:
-    """What to tell the operator when the bridge stops answering: LabSpec's open dialog by its title, that LabSpec
-    is not running any more, or (no dialog) that the bridge is stuck inside a LabSpec call."""
+    """What to tell the operator when the bridge does not answer while busy: LabSpec's open dialog by its title,
+    that LabSpec is not running any more, or (no dialog) that the bridge is stuck inside a LabSpec call."""
     w = labspec_windows()
+    what = f"'{verb}'" if verb else "a command"
     if w is not None and not w["running"]:
-        return ("LabSpec is not running any more (it closed or crashed): restart it, then ls6t_bridge.vbs. If it "
+        return ("LabSpec is not running any more (it closed or crashed): start it again, then ls6t_bridge.vbs. If it "
                 f"crashed, send {config.home() / 'discovery_progress.txt'} (when a discovery ran) and the request's "
                 "runner.log to the ls6t maintainer.")
     if w and w["dialogs"]:
         return ("LabSpec shows a dialog that blocks its scripts: " + "; ".join(f"'{t}'" for t in w["dialogs"]) +
-                ". The operator closes it; the bridge then goes on (or restart ls6t_bridge.vbs).")
+                ". The operator closes it; the bridge then goes on.")
     if w is not None:
-        return (f"LabSpec runs and shows no dialog: the bridge is stuck inside a LabSpec call"
-                + (f" (command '{verb}')" if verb else "") + ". The operator stops the bridge with LabSpec's script "
-                "stop button and starts ls6t_bridge.vbs again; if LabSpec does not respond, restart LabSpec. Tell "
-                "the ls6t maintainer which command it was.")
-    return ("LabSpec may be showing a dialog or message box: its scripts wait while one is open, so the operator "
-            "closes it; otherwise the operator restarts ls6t_bridge.vbs"
-            + (f" (it was running '{verb}')" if verb else ""))
+        return f"LabSpec runs and shows no dialog: the bridge is stuck inside LabSpec, in {what}: " + STUCK_ADVICE
+    return (f"the bridge is in {what} and LabSpec does not let it go on: if LabSpec shows a dialog or message box, "
+            "the operator closes it (scripts wait while one is open); if there is none, " + STUCK_ADVICE)
+
+
+def diagnose(hb: dict | None, folder=None) -> str:
+    """One explanation of a bridge that does not answer, from its heartbeat, the same whether a call was about to be
+    sent or was waiting: never started, ended normally, ended by LabSpec (last heartbeat idle), or stuck in a
+    command (last heartbeat busy)."""
+    if not hb:
+        return (f"the LabSpec bridge has not run here (no heartbeat in {folder}): start ls6t_bridge.vbs in LabSpec "
+                "(Processing > Scripts)")
+    age = f"{hb.get('age_s', 0):.0f} s ago"
+    state, verb = hb.get("state"), hb.get("verb") or None
+    if state == "stopped":
+        return f"the LabSpec bridge was stopped ({age}): start ls6t_bridge.vbs in LabSpec (Processing > Scripts)"
+    if state == "busy":
+        return (f"the LabSpec bridge stopped answering {age}, busy in {verb or 'its start-up inventory'}. "
+                + labspec_hint(verb or "its start-up inventory"))
+    return (f"the LabSpec bridge ended without stopping (last heartbeat {state} {age}): LabSpec ended the script, as "
+            "it does when the live video is started or stopped in LabSpec's interface. Start ls6t_bridge.vbs again "
+            "(Processing > Scripts); if it then does not answer, start LabSpec again first.")
 
 
 class BridgeError(RuntimeError):
@@ -176,11 +198,7 @@ class Bridge:
         bridge is not running (before or during the call) and BridgeTimeout after timeout_s; should_stop() true
         asks the bridge to stop the command (its result then says so)."""
         if not self.alive():
-            hb = self.heartbeat()
-            raise BridgeGone("the LabSpec bridge is not running: start ls6t_bridge.vbs in LabSpec "
-                             "(Processing > Scripts)" + (f"; last heartbeat {hb['age_s']:.0f} s ago, state "
-                                                         f"{hb.get('state')}" if hb else "; no heartbeat file in "
-                                                         f"{self.dir}"))
+            raise BridgeGone(f"{verb}: " + diagnose(self.heartbeat(), self.dir))
         seq = f"{time.time_ns():020d}"
         cmd = self.inbox / f"{seq}.cmd"
         res = self.outbox / f"{seq}.res"
@@ -217,8 +235,7 @@ class Bridge:
                 raise BridgeTimeout(f"{verb}: no result within {timeout_s:g} s (stop requested)")
             if not self.alive():
                 self._withdraw(cmd)
-                raise BridgeGone(f"{verb}: the LabSpec bridge stopped answering (heartbeat older than "
-                                 f"{config.heartbeat_s():.0f} s). " + labspec_hint(verb))
+                raise BridgeGone(f"{verb}: " + diagnose(self.heartbeat(), self.dir))
             time.sleep(poll_s)
 
     def _withdraw(self, cmd: Path):

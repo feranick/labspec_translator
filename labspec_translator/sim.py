@@ -1,5 +1,5 @@
 """sim.py — a simulated LabSpec + XploRA behind the same bridge protocol as ls6t_bridge.vbs.
-Version: 2026.11.20.24
+Version: 2026.11.20.26
 
 It answers every verb of the bridge with the same keys, so the runner, the checks and the MCP server are tested
 without the instrument (LS6T_MODE=sim, and the tests). The simulated sample is a silicon wafer with a graphene
@@ -286,24 +286,42 @@ class SimLabSpec:
         action = p.get("action", "status")
         if action not in ("on", "off", "status"):
             return {"ok": 0, "error": "camera action: on, off or status"}
-        # as on the instrument (2026-11-20): ls6t does not stop the live video unless allowed (Video(STOP) hung);
-        # sim_camera_locked: LabSpec keeps its camera while the live video runs, whatever is asked
-        if action == "off" and self.live and str(p.get("stop_video", "0")) != "1":
+        # as on the instrument (2026-11-20): ls6t never stops the live video (Video(STOP) hung) and switches cameras
+        # only where the profile allows it (video.switch_camera), with the video stopped
+        by_hand = ("end the bridge from ls6t first (instrument end_bridge: LabSpec ends a running script when its "
+                   "video is stopped or started in its interface), then in LabSpec stop the video, choose the camera "
+                   "and start the video, then start ls6t_bridge.vbs again")
+        if action == "off" and self.live and str(p.get("stop_video", "0")) == "1":
+            self.live = False
+            return {"live": 0, "video_id": 0, "camera": self.camera, "video_stop_status": 0, "video_started": 0}
+        if action == "off" and self.live:
             return {"ok": 0, "live": 1, "camera": self.camera,
-                    "error": "ls6t does not stop LabSpec's live video (it hung the bridge on this instrument): the "
-                             "operator stops it with LabSpec's video button"}
+                    "error": "ls6t does not stop LabSpec's live video (a script's Video(STOP_VIDEO) hung the bridge on "
+                             "this instrument): end the bridge from ls6t first (instrument end_bridge), then stop the "
+                             "video in LabSpec"}
         if p.get("camera") not in (None, "") and action != "off":
             want = int(float(p["camera"]))
             if want != self.camera:
-                if self.live and (self.dir / "sim_camera_locked").exists():
-                    return {"ok": 0, "live": 1, "camera_before": self.camera, "camera_after": self.camera,
+                if str(p.get("switch_camera", "0")) != "1":
+                    return {"ok": 0, "live": int(self.live), "camera_before": self.camera, "camera": self.camera,
+                            "error": f"LabSpec's camera is {self.camera}, not {want}, and ls6t does not switch cameras "
+                                     f"on this instrument (unreliable: tested 2026-11-20). To use camera {want}: "
+                                     + by_hand}
+                if self.live:
+                    return {"ok": 0, "live": 1, "camera_before": self.camera, "camera": self.camera,
+                            "error": f"the live video runs on camera {self.camera}: LabSpec switches cameras only "
+                                     f"when the video starts, and ls6t cannot stop it. To use camera {want}: " + by_hand}
+                if (self.dir / "sim_camera_locked").exists():
+                    return {"ok": 0, "live": 0, "camera_before": self.camera, "camera_after": self.camera,
                             "camera_set_returned": 0,
-                            "error": f"LabSpec stayed on camera {self.camera} (asked {want}) while the live video "
-                                     "runs: the operator stops the live video in LabSpec, then asks again"}
+                            "error": f"LabSpec stayed on camera {self.camera} (asked {want}). To use camera {want}: "
+                                     + by_hand}
                 self.camera = want
+        started = action == "on" and not self.live
         if action != "status":
             self.live = action == "on"
-        return {"live": int(self.live), "video_id": 900 if self.live else 0, "camera": self.camera}
+        return {"live": int(self.live), "video_id": 900 if self.live else 0, "camera": self.camera,
+                "video_started": int(started)}
 
     def v_last_error(self, p):
         return {"info": self.last_error}

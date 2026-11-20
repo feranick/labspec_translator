@@ -1,6 +1,6 @@
 # labspec-translator (ls6t): what it can do
 
-This is the complete list of functions in version 2026.11.20.24. It covers:
+This is the complete list of functions in version 2026.11.20.26. It covers:
 
 - what a study can ask for;
 - the tools an LLM sees;
@@ -158,7 +158,8 @@ documented; `SetExtendedVideo` is not in the installed build (the extended video
 
 - closing the bridge's window halts it;
 - cancelling an acquisition in LabSpec counts as a stop;
-- LabSpec's script stop button ends the bridge;
+- `instrument end_bridge` ends the bridge cleanly (LabSpec's video buttons end a running script abruptly: end the
+  bridge first);
 - the first laser exposure of a request needs a Yes.
 
 ---

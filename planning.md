@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.20.24)
+## Architecture (version 2026.11.20.26)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -349,6 +349,38 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   profile video.stop_from_script (default false; testmode forces the profile's value); VVideo leaves a video it
   started on (video_left_on). labspec_hint(verb): LabSpec running, no dialog -> stuck in a LabSpec call. Sim mirrors
   (sim_camera_locked). TESTING T3.11 / Q44. 110 tests.
+- 2026-11-20, 2026.11.20.25: Nicola on .24: GET_ACTIVE_CAMERA is the selection, not the camera shown; with the
+  video running a switch is reported while the view (and snapshots) stay on the old camera; a switch takes effect at
+  a video start, which ls6t cannot cause while the video runs (STOP hangs); stopping/starting the video in LabSpec's
+  UI ends the bridge script (last heartbeat idle), so .24's advice ("use LabSpec's video button") ends the bridge;
+  one internal -> top switch with the video stopped failed (repeat to tell reproducible from timing). Fix: CameraFor
+  (cam, live): same camera -> ok; another while live -> refused (what to do: stop by hand, restart the bridge, ask
+  again); video stopped -> SetCamera (read-back polled up to 2 s, camera_set_s) then the video is started
+  (video_started). VCamera and VVideo use it; camera_off refused while live (unless video.stop_from_script).
+  Messages and BridgeGone say the UI's video button ends the bridge. Sim mirrors. TESTING T3.11 (three repeats; look
+  at the view), Q44. 110 tests.
+- 2026-11-20, 2026.11.20.26: from the instrument (.25 advice followed): video stopped by hand (ends the bridge),
+  bridge restarted: it never answered, heartbeat busy from start, ls6t said stuck in 'ping' then, seconds later,
+  'not running' (two code paths, two stories: the pre-call check said not running for any stale heartbeat). No
+  script stop button in this LabSpec (the popup's Cancel only); after Cancel LabSpec froze (no restart of the script,
+  STOP ALL dead). Reading: ping is one GetValue(SystemName); if it blocks, LabSpec's scripting was already wedged,
+  most likely left so when the UI's video control ended the previous script (cause not proven). Fix: bridge.diagnose
+  (hb) for both paths (no heartbeat / stopped / ended without stopping = last beat idle or halted / busy in <verb>,
+  'inventory' at start-up) + labspec_hint with STUCK_ADVICE (nothing frees it; wait, restart LabSpec; not Cancel);
+  instrument end_bridge (quit verb; refused while a request holds the lock) so the operator never uses LabSpec's
+  video buttons under a running script; camera refusals give that order; popup text and all docs drop the 'script
+  stop button'; TESTING ground rule 5, T2.4, T3.11, T9.2, Q2, Q44. Then T3.11's optional step: with
+  stop_from_script true, camera_off hung inside Video(STOP_VIDEO) again (command camera, no dialog). Conclusion
+  (Nicola): no reliable camera switching on this XploRA. Video(STOP_VIDEO) removed from the bridge altogether
+  (stop_from_script removed); switching only with profile video.switch_camera (default false; for another
+  instrument, video stopped): CameraFor(cam, live, allowSwitch) refuses another camera with the end_bridge
+  sequence. Then, from LabSpec 6.8.1's SERVICE scripts (Nicola's request): StandardMapping / SWIFTMapping
+  XploRA.vbs start the video with `Video START_VIDEO` + GET_VIDEO_ID polled until > 0, and stop it with `Video
+  STOP_VIDEO` (a statement) followed by `GetMotorStatus("Video", MoveID)` polled until 0, with no Video() call in
+  between; Cut-Off.vbs uses the manual's pattern. No script uses SET_ACTIVE_CAMERA. ls6t's stop called
+  Video(GET_VIDEO_ID) 200 ms after STOP: a call into the video while it stops is the likely place of the hang (not
+  proven). StopVideoHoriba reproduces HORIBA's sequence (15 s limit, heartbeat kept), opt-in via
+  video.stop_from_script for TESTING T3.12. 111 tests.
 
 ## To do next
 

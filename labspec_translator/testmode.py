@@ -1,5 +1,5 @@
 """testmode.py — the instrument tests of TESTING.md from the chat: the MCP tool `hardware_test`, and `ls6t test`.
-Version: 2026.11.20.24
+Version: 2026.11.20.26
 
 Off unless a person turns it on for an app (LS6T_TEST_MODE=1 in its MCP entry: `ls6t connect APP --test`). Then the
 LLM walks the maintainer through TESTING.md: it reads a test's instructions and pass criteria (`step`), asks the
@@ -326,7 +326,8 @@ def call(verb: str, params: dict | None = None, step_id: str | None = None, time
         if err:
             return {"ok": False, "error": err}
         p["camera"] = num
-    if verb in ("camera", "video"):        # stopping the live video from a script hung the bridge: the profile decides
+    if verb in ("camera", "video"):        # camera switching was unreliable on the instrument: the profile decides
+        p["switch_camera"] = int(bool(prof.get("video", {}).get("switch_camera")))
         p["stop_video"] = int(bool(prof.get("video", {}).get("stop_from_script")))
     b = Bridge()
     if config.mode() == "sim":

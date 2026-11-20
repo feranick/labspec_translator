@@ -1,5 +1,5 @@
 """profile.py — the machine profile: what the instrument has (from the discovery script) and the limits a person sets.
-Version: 2026.11.20.24
+Version: 2026.11.20.26
 
 The profile is a JSON file (LS6T_PROFILE, default ~/ls6t/profile.json). Studies never change it: an LLM can only
 ask for what the profile allows. Without a file, the built-in XploRA defaults below apply and every result says so
@@ -60,8 +60,11 @@ DEFAULT_PROFILE: dict = {
     "video": {"laser_offset_um": [0.0, 0.0], "marker": "stage", "packing": "colorref", "order": "x_fastest",
               "formats": ["png", "jpg", "bmp", "tif"], "settle_s": 1.5, "laser_s": 1.0, "max_laser_s": 5.0,
               "camera": None, "allow_extended": False, "extended_max_s": 600.0,
-              # Video(STOP_VIDEO) from a script hung the bridge on the instrument (2026-11-20): ls6t never stops the
-              # live video unless a person turns this on after trying it with the maintainer (TESTING T3.11)
+              # camera switching from a script was unreliable on the XploRA (2026-11-20, TESTING Q44): off; ls6t
+              # then refuses a camera other than LabSpec's active one. ls6t never stops the live video (it hung).
+              "switch_camera": False,
+              # stopping the video as HORIBA's service scripts do (STOP, then GetMotorStatus "Video" until 0): off
+              # until tried with the maintainer (TESTING T3.12); ls6t's earlier way hung the bridge twice
               "stop_from_script": False,
               # LabSpec's cameras by name, as a person sees them, e.g. {"top": 0, "side": 1}: requests may name them
               "cameras": {}},

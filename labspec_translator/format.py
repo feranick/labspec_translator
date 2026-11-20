@@ -1,5 +1,5 @@
 """format.py — the study format and its static checks (no instrument needed).
-Version: 2026.11.20.24
+Version: 2026.11.20.26
 """
 from __future__ import annotations
 
@@ -157,7 +157,8 @@ def study_format(status: dict | None = None) -> dict:
             "Stage moves are offsets from where the operator left the stage at the start of the request; Z is "
             "always relative to the operator's focus. Absolute positions are never used.",
             "The laser shutter opens only during acquisitions. The operator watches in LabSpec and can stop "
-            "everything from the bridge's popup or LabSpec's stop button.",
+            "everything from the bridge's window (Cancel) or by cancelling the acquisition in LabSpec. LabSpec's "
+            "live video buttons end the bridge: before the operator uses them, instrument end_bridge.",
             "Before the first exposure of a request the operator confirms in LabSpec (LS6T_CONFIRM).",
             "Saturation, a warm detector, a move not reached or an operator stop make a result unreliable.",
         ],
