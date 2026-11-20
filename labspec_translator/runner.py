@@ -1,5 +1,5 @@
 """runner.py — runs a request's studies on the instrument, one command at a time, and checks every result.
-Version: 2026.11.20.9
+Version: 2026.11.20.14
 
 A request runs in its own process (`ls6t run-request FOLDER`, started detached by api.start), so it outlives the
 MCP call that started it. One request at a time holds the instrument (a lock file under LS6T_HOME); others wait
@@ -292,6 +292,15 @@ def _setup(name: str, study: dict, ctx: Ctx, warnings: list, unreliable: list, c
     before = ctx.call("status", timeout_s=15, **motor_args(prof))
     readback = []
     for step in plan.setup_steps(study, prof):
+        if step["mode"] == "label":
+            # LabSpec's own name for the position ('x100' -> 'x100_VIS' when the profile is not from discovery)
+            lr = ctx.call("labels", timeout_s=30, motor=step["motor"])
+            labs = [lr.get(f"label.{i}", "") for i in range(min(int(float(lr.get("size") or 0)), 10))] \
+                if lr.get("ok") else []
+            if labs:
+                lab, err = P.match_label(step["value"], labs)
+                if lab:
+                    step = dict(step, value=lab)
         p = {k: v for k, v in step.items() if k not in ("verb", "why")}
         long_move = p["motor"] in (prof["motors"]["laser"], prof["motors"]["grating"], prof["motors"]["objective"])
         r = ctx.call("move", timeout_s=600 if long_move else 120, **p)

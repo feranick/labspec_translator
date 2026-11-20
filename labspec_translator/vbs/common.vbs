@@ -265,8 +265,8 @@ End Function
 
 ' ---------------------------------------------------------------- discovery (no laser, no movement)
 ' withPopup: also test the non-blocking window (not from the bridge: it would close the bridge's own window)
-Function DiscoverTo(outPath, withPopup)
-    Dim d, names, i, j, name, size, n, okPopup, ret, e0, probe, part, cpN, cpU, cpT, cpV
+Function DiscoverTo(outPath, withPopup, withProbes)
+    Dim d, names, i, j, name, size, n, okPopup, ret, e0, probe, part, cpN, cpU, cpT, cpV, ramp, s
     Set d = CreateObject("Scripting.Dictionary")
     d("time") = Year(Now) & "-" & Right("0" & Month(Now), 2) & "-" & Right("0" & Day(Now), 2) & "T" & _
                 Right("0" & Hour(Now), 2) & ":" & Right("0" & Minute(Now), 2) & ":" & Right("0" & Second(Now), 2)
@@ -338,15 +338,33 @@ Function DiscoverTo(outPath, withPopup)
     ret = LabSpec.GetLastErrorInfo()                            ' not in the 2018 manual; in the type library
     d("selftest.last_error_info") = Bit(Err.Number = 0)
     Err.Clear
-    ' methods found in the type library (or in the manual but missing from some builds): read-only probes
+    ' methods found in the type library (or in the manual but missing from some builds): read-only probes, not
+    ' when the bridge takes its inventory at start (the scratch spectrum would flash a window)
+    If withProbes Then
     ret = LabSpec.GetValueEx(0, "SystemName", e0, LS_VT_BSTR)
     d("selftest.get_value_ex") = Bit(Err.Number = 0)
     Err.Clear
     probe = LabSpec.CreateDataObject("Spectrum", 16, 0, -1)       ' a scratch spectrum, removed below
     If Err.Number = 0 And probe > 0 Then
+        ' values 0..15, so the part read shows the units of StartAt and DataSize (values or bytes)
+        ReDim ramp(15)
+        For j = 0 To 15
+            ramp(j) = CSng(j)
+        Next
+        LabSpec.PutValue probe, "Data", ramp
+        d("selftest.put_value_ramp") = Bit(Err.Number = 0)
+        Err.Clear
         part = LabSpec.GetValueSimplePart(probe, "Data", 0, LS_VT_R4, 4, 8)
         d("selftest.get_value_simple_part") = Bit(Err.Number = 0 And IsArray(part))
-        If IsArray(part) Then d("selftest.get_value_simple_part_size") = UBound(part) - LBound(part) + 1
+        If IsArray(part) Then
+            d("selftest.get_value_simple_part_size") = UBound(part) - LBound(part) + 1
+            s = ""
+            For j = LBound(part) To UBound(part)
+                If s <> "" Then s = s & ","
+                s = s & Fmt(part(j))
+            Next
+            d("selftest.get_value_simple_part_values") = s
+        End If
         Err.Clear
         LabSpec.Exec probe, LS_REMOVE_DATA, ret
     End If
@@ -362,6 +380,7 @@ Function DiscoverTo(outPath, withPopup)
         Next
     End If
     Err.Clear
+    End If
     LabSpec.Message "ls6t discovery running", LS_MB_STATUS_BAR
     d("selftest.status_bar") = Bit(Err.Number = 0)
     Err.Clear

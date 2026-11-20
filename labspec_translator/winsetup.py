@@ -1,5 +1,5 @@
 """winsetup.py — what the Windows installer does beyond copying files (installer/ls6t.nsi calls it).
-Version: 2026.11.20.9
+Version: 2026.11.20.14
 
 The installer puts a private Python (python.org's embeddable build, with every dependency already in its
 Lib/site-packages) in <install>/python and the launchers in <install>/bin. Then it runs, with that Python:
@@ -147,6 +147,16 @@ def install(python: Path, bindir: Path, apps: list, sim: bool, add_path: bool, c
         for name, f in r["files"].items():
             log(f"LabSpec script: {f}")
         log(f"bridge folder: {r['bridge_dir']}")
+        from . import profile as P
+        prof = P.load()               # makes the profile from the bridge's last inventory, if there is one
+        if prof.get("auto"):
+            log(f"machine profile: made automatically from {prof['auto']['from']} (lasers capped at "
+                f"{prof['auto']['max_filter_pct']} % until a person reviews it)")
+        elif prof.get("measured"):
+            log(f"machine profile: {prof.get('path')} ({prof.get('source')})")
+        else:
+            log("machine profile: none yet; the bridge takes the instrument's inventory when it first starts in "
+                "LabSpec, and ls6t builds the profile from it")
     except Exception as exc:  # noqa: BLE001
         log.warn(f"the LabSpec scripts were not written ({exc}): run `ls6t bridge install` later")
     if add_path:

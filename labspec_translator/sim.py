@@ -1,5 +1,5 @@
 """sim.py — a simulated LabSpec + XploRA behind the same bridge protocol as ls6t_bridge.vbs.
-Version: 2026.11.20.9
+Version: 2026.11.20.14
 
 It answers every verb of the bridge with the same keys, so the runner, the checks and the MCP server are tested
 without the instrument (LS6T_MODE=sim, and the tests). The simulated sample is a silicon wafer with a graphene
@@ -58,6 +58,7 @@ class SimLabSpec:
         self.halted = False
         self.last_error = ""
         self.live = False
+        self.laser_until = 0.0
         self.next_id = 100
         self.views: dict = {}
         self.data: dict = {}
@@ -199,6 +200,8 @@ class SimLabSpec:
     # ------------------------------------------------------------------ verbs
     def handle(self, p: dict) -> dict:
         verb = p.get("verb")
+        if verb not in ("ping", "status", "camera", "labels", "last_error", "message", "laser"):
+            self.laser_until = 0.0              # the bridge closes the shutter before any other command
         if self.halted and verb not in ("ping", "status", "resume", "quit", "safe", "message"):
             return {"ok": 0, "error": "halted by the operator: resume in LabSpec", "halted": 1}
         fn = getattr(self, "v_" + str(verb), None)
@@ -223,7 +226,31 @@ class SimLabSpec:
                 "slit_um": self.m["Slit"]["value"], "x_um": self.m["X"]["value"], "y_um": self.m["Y"]["value"],
                 "z_um": self.m["Z"]["value"], "exposure_s": self.exposure, "accumulations": self.accumulations,
                 "shutter_mode": 0, "halted": int(self.halted), "last_error": self.last_error,
-                "live_video": int(self.live), "camera": 0}
+                "live_video": int(self.live), "camera": 0, "laser_open": int(time.time() < self.laser_until)}
+
+    def v_laser(self, p):
+        state = p.get("state")
+        if state == "off":
+            was = time.time() < self.laser_until
+            self.laser_until = 0.0
+            return {"was_open": int(was), "open": 0}
+        if state != "on":
+            return {"ok": 0, "error": "laser state: on or off"}
+        if p.get("m_laser_shutter", "") not in self.m or float(p.get("seconds") or 0) <= 0:
+            return {"ok": 0, "error": "laser on needs m_laser_shutter and seconds"}
+        self.laser_until = time.time() + float(p["seconds"])
+        return {"open": 1, "seconds": p["seconds"]}
+
+    def v_labels(self, p):
+        m = self.m.get(p.get("motor"))
+        if m is None:
+            return {"ok": 0, "error": f"motor {p.get('motor')} is not present"}
+        if "values" not in m:
+            return {"size": 0}
+        out = {"size": len(m["values"]), "current": m["labels"][m["i"]]}
+        for i, (v, lab) in enumerate(zip(m["values"], m["labels"])):
+            out[f"label.{i}"], out[f"value.{i}"] = lab, v
+        return out
 
     def v_camera(self, p):
         action = p.get("action", "status")
@@ -280,7 +307,8 @@ class SimLabSpec:
             else:
                 lines += [f"motor.{name}.size=0", f"motor.{name}.current={m['value']}"]
         lines += ["selftest.last_error_info=1", "selftest.get_value_ex=0", "selftest.get_value_simple_part=1",
-                  "selftest.get_value_simple_part_size=8", "selftest.get_config_param=1",
+                  "selftest.get_value_simple_part_size=8",
+                  "selftest.get_value_simple_part_values=4,5,6,7,8,9,10,11", "selftest.get_config_param=1",
                   "config_param.0.name=Delay", "config_param.0.unit=s", "config_param.0.type=double",
                   "config_param.0.value=0"]
         out = Path(p["out"])

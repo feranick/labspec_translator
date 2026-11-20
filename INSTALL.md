@@ -194,7 +194,20 @@ It only reads the file: nothing starts or moves.
 ## 7. The machine profile
 
 The profile says what the instrument has: lasers, gratings, filters, objectives and stage axes. It also holds the
-limits a person sets. Until one exists, ls6t uses built-in XploRA defaults and says so in every result.
+limits a person sets.
+
+**Automatic at first.** Each time `ls6t_bridge.vbs` starts in LabSpec, it records the instrument's inventory
+(motors and their positions, the detector; nothing moves, no laser) in `%USERPROFILE%\ls6t\discovery_latest.txt`.
+While no person has reviewed a profile, ls6t builds `profile.json` from it automatically and keeps it in step with
+later inventories. An automatic profile is cautious:
+- every laser is capped at a 10 % filter;
+- the laser shutter is not used, so snapshots with the laser stay off.
+
+`ls6t status` and `study_format` say when the profile is automatic. Once a person runs `ls6t profile import` or
+`ls6t profile set`, the profile is theirs: it is never replaced again, and `ls6t status` reports any difference
+with a newer inventory (a new objective, say).
+
+**Reviewing it** (TESTING.md T1.2), with the maintainer:
 
 1. In LabSpec, run **`ls6t_discover.vbs`**. A message box shows where it wrote the dump, e.g.
    `C:\Users\<you>\ls6t\discovery_20261120_101500.txt`.
@@ -356,7 +369,7 @@ pip install --no-index --find-links wheels -e ".[mcp,render,test,windows]"
 
 | Symptom | Cause and fix |
 |---|---|
-| The LLM app does not show ls6t's tools | Copy `tools\ls6t_diagnose.ps1` to the PC and run `powershell -ExecutionPolicy Bypass -File .\ls6t_diagnose.ps1` as the user who runs the app. It changes nothing and writes `ls6t_diagnose.txt` on the Desktop: which configuration file Claude reads, whether the ls6t entry is there and valid, whether the server starts and answers, and Claude's MCP logs. With ls6t 2026.11.20.8 or later, `ls6t connect check` does the main checks too. |
+| The LLM app does not show ls6t's tools | Copy `tools\ls6t_diagnose.ps1` to the PC and run `powershell -ExecutionPolicy Bypass -File .\ls6t_diagnose.ps1` as the user who runs the app. It changes nothing and writes `ls6t_diagnose.txt` on the Desktop: which configuration file Claude reads, whether the ls6t entry is there and valid, whether the server starts and answers, and Claude's MCP logs. With ls6t 2026.11.20.8 or later, `ls6t connect check` does the main checks too. If the report shows the Claude file Claude reads (`READS:`) without an `ls6t` entry: `tools\ls6t_fix_claude.ps1` (same way) waits for Claude to be closed and adds it there. |
 | `ls6t : The term 'ls6t' is not recognized` | The venv is not active: `.\.venv\Scripts\Activate.ps1`, or use the full path `.\.venv\Scripts\ls6t.exe`. |
 | `Activate.ps1 cannot be loaded` | `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` (once). |
 | `ls6t status` shows the bridge not running while it runs in LabSpec | The two use different folders: the script's `LS6T_BRIDGE_DIR` line must match `ls6t status` → `settings.LS6T_BRIDGE_DIR`. Run `ls6t bridge install` with the same settings the server uses, then restart the script. LabSpec running under another Windows account also causes it. |

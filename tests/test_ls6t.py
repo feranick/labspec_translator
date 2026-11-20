@@ -1223,3 +1223,90 @@ def test_connect_check_starts_the_server(tmp_path, monkeypatch):
     assert r["ok"] and "study_format" in r["tools"], r
     r = C.handshake(sys.executable, ["-c", "import sys; sys.exit('boom')"])
     assert not r["ok"] and "boom" in r["stderr"]
+
+
+def test_placeholders_from_the_docs_are_replaced():
+    from labspec_translator import clients as C
+    cfg = {"mcpServers": {"ls6t": {"command": "C:\\Users\\<you>\\py.exe",
+                                   "env": {"LS6T_HOME": "C:\\Users\\<you>\\ls6t", "LS6T_CONFIRM": "study"}}}}
+    new, _ = C.merge_server(cfg, "ls6t", "C:\\Users\\jo\\py.exe", {"LS6T_HOME": "C:\\Users\\jo\\ls6t"})
+    assert new["mcpServers"]["ls6t"]["env"] == {"LS6T_HOME": "C:\\Users\\jo\\ls6t", "LS6T_CONFIRM": "study"}
+
+
+def test_instrument_set_and_label_matching():
+    from labspec_translator.profile import match_label
+    assert match_label("x100", ["x10_VIS", "x50_VIS", "x100_VIS"]) == ("x100_VIS", None)
+    assert match_label("x10", ["x10_VIS", "x100_VIS"]) == ("x10_VIS", None)
+    assert match_label("X50_vis", ["x50_VIS"]) == ("x50_VIS", None)
+    assert match_label("x100", ["x100_VIS", "x100_LWD"])[0] is None
+    S.ensure(config.active_bridge_dir())
+    r = api.instrument("set", setup={"laser_nm": 638, "grating": 600, "filter": "1%"})
+    assert r["ok"], r
+    assert float(r["after"]["laser_nm"]) == 638 and float(r["after"]["grating"]) == 600 and r["after"]["filter"] == "1%"
+    assert [m["set"] for m in r["moves"]] == ["filter", "laser", "grating"]
+    assert not runner.read_json(runner.lock_path(), None)                          # the lock is released
+    r = api.instrument("set", setup={"objective": "x50"})
+    assert r["ok"] and r["after"]["objective"] == "x50"
+    (config.active_bridge_dir() / "sim_confirm_no").write_text("1")
+    assert "declined" in api.instrument("set", setup={"objective": "x10"})["error"]
+    assert not api.instrument("set", setup={"laser_nm": 405})["ok"]
+    assert not api.instrument("set", setup={"power": 5})["ok"]
+    assert F.validate({"s": {"kind": "spectrum", "sample": {"name": "x"},
+                             "setup": dict(SETUP, objective="X100")}})["s"]["ok"]
+    P.save(dict(P.load(), limits=dict(P.load()["limits"], max_filter_pct=5)))
+    assert "cap" in api.instrument("set", setup={"filter": "25%"})["error"]
+
+
+def test_profile_from_the_bridge_inventory(tmp_path):
+    dump = ROOT / "tests" / "data" / "discovery_xplora_plus.txt"
+    home = config.home()
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "discovery_latest.txt").write_bytes(dump.read_bytes())
+    prof = P.load()                                                         # made automatically
+    assert prof["auto"] and config.profile_path().exists() and prof["system"] == "XploRA Plus"
+    assert prof["objectives"] == ["x100_VIS", "x10_VIS", "x5_VIS"] and "0.1%" in prof["filters"]
+    assert all(v["max_filter_pct"] == 10 for v in prof["lasers"].values())
+    assert prof["motors"]["laser_shutter"] is None and prof["mapping"]["export_chunk"] == 0
+    assert any("bytes" in n for n in prof["auto"]["notes"])
+    st = api.tool_status()["profile"]
+    assert "automatic" in st and "drift" not in st
+    assert F.validate({"s": {"kind": "spectrum", "sample": {"name": "Si"},
+                             "setup": {"laser_nm": 638, "grating": 1800, "filter": "1%", "objective": "x100"}}})["s"]["ok"]
+    r = api.profile_set("lasers.532.max_filter_pct", "25")                  # a person's edit ends the automatic state
+    assert r["note"] and "auto" not in P.load()
+    text = (home / "discovery_latest.txt").read_text(encoding="utf-16").replace("x5_VIS", "x50_VIS")
+    (home / "discovery_latest.txt").write_text(text.replace("13:50:59", "14:00:00"), encoding="utf-16")
+    prof = P.load()
+    assert "x5_VIS" in prof["objectives"]                                   # not replaced: a person's profile
+    assert any("x50_VIS" in d for d in api.tool_status()["profile"]["drift"])
+
+
+def test_laser_on_for_viewing(tmp_path):
+    S.ensure(config.active_bridge_dir())
+    assert "no laser shutter" in api.instrument("laser_on")["error"]             # built-in profile: none
+    _profile_with_shutter(tmp_path)
+    api.instrument("set", setup={"filter": "1%"})
+    assert "max_laser_on_s" in api.instrument("laser_on", seconds=600)["error"]
+    (config.active_bridge_dir() / "sim_confirm_no").write_text("1")
+    assert "declined" in api.instrument("laser_on", seconds=10)["error"]
+    (config.active_bridge_dir() / "sim_confirm_no").unlink()
+    r = api.instrument("laser_on", seconds=10)
+    assert r["ok"] and r["open"] == "1"
+    assert api.instrument("status")["status"]["laser_open"] == "1"
+    api.instrument("set", setup={"grating": 600})                               # another command closes it
+    assert api.instrument("status")["status"]["laser_open"] == "0"
+    api.instrument("laser_on", seconds=10)
+    assert api.instrument("laser_off")["was_open"] == "1"
+    P.save(dict(P.load(), limits=dict(P.load()["limits"], max_filter_pct=0.5)))
+    assert "cap" in api.instrument("laser_on", seconds=10)["error"]
+
+
+def test_mcp_instrument_takes_a_camera_number():
+    pytest.importorskip("mcp")
+    import asyncio
+    from labspec_translator import mcp_server
+    S.ensure(config.active_bridge_dir())
+    srv = mcp_server.server
+    res = asyncio.run(srv.call_tool("instrument", {"action": "camera_on", "camera": 1}))
+    text = str(res)
+    assert "is_error=False" in text and "live" in text and "camera_on failed" not in text, text

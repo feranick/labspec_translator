@@ -12,7 +12,7 @@ stops and cancel on the simulator, and `ls6t bench` gives known answers. What re
 LabSpec and hardware. The plan goes from no laser and no motion to Claude driving a full map, in stages. Each stage
 starts only when the previous one passed.
 
-Version under test: 2026.11.20.9 (bridge protocol 1).
+Version under test: 2026.11.20.14 (bridge protocol 1).
 
 ---
 
@@ -195,7 +195,9 @@ Pass:
 If the dump is missing, **stop**: file access is not available to scripts, and the transport must change before
 anything else (see planning.md). Note any error message LabSpec showed.
 
-**T1.2 Import and review the profile.**
+**T1.2 Import and review the profile.** (Until this step, ls6t uses the profile it built automatically from the
+bridge's inventory, `discovery_latest.txt`: the real lasers, filters and objectives, every laser capped at 10 %, no
+laser shutter.)
 
 ```powershell
 ls6t profile import "<the dump's path>"
@@ -421,6 +423,12 @@ cross now sits on the spot.
 
 **T5b.5 In a calibration study.** Run the calibration study with `"video": {"after": true}`. Pass: `video.before`
 and `video.after` are in the result and the images, and the Si result is as in T4.2.
+
+**T5b.7 The laser on for viewing (LASER).** After T5b.3 (the shutter motor confirmed in the profile), at the
+lowest filter: `instrument laser_on` with `seconds` 20 (or ask the LLM *"turn the laser on so I can see it"*). Pass:
+LabSpec asks first; the beam shows on the camera; the shutter closes by itself after 20 s and the status bar says
+so. Then open it again and (a) ask for `laser_off`, (b) close the ls6t window, (c) send any move: each closes it at
+once. Answer No once: nothing opens.
 
 **T5b.6 Extended video (no laser; THE STAGE MOVES; Q39).** The maintainer sets a small extended-video area in
 LabSpec's interface (a few fields of view), at x10 or x50, and checks the objective's clearance over it. Then
@@ -661,6 +669,7 @@ With the Claude desktop app connected ([INSTALL.md](INSTALL.md) step 8):
 | T5b.4 | | | | Q16 offsets x10 / x50 / x100: | |
 | T5b.5 | | | | | |
 | T5b.6 | | | | Q39 (returned, seconds, stage left at): | |
+| T5b.7 | | | | laser on: closes by time / laser_off / window / a move: | |
 | T5c.1 | | | | Q17: | |
 | T5c.2 | | | | Q18: ratio repeat: | |
 | T5c.3 | | | | | |

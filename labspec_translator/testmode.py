@@ -1,5 +1,5 @@
 """testmode.py — the instrument tests of TESTING.md from the chat: the MCP tool `hardware_test`, and `ls6t test`.
-Version: 2026.11.20.9
+Version: 2026.11.20.14
 
 Off unless a person turns it on for an app (LS6T_TEST_MODE=1 in its MCP entry: `ls6t connect APP --test`). Then the
 LLM walks the maintainer through TESTING.md: it reads a test's instructions and pass criteria (`step`), asks the
@@ -32,7 +32,8 @@ from . import __version__, config
 
 RESULTS = ("pass", "fail", "partial", "skipped", "blocked")
 VERBS = ("ping", "status", "discover", "move", "move_xy", "autofocus", "acquire", "view", "save", "remove", "confirm",
-         "message", "safe", "video", "camera", "map_native", "guide", "notice", "resume", "last_error")
+         "message", "safe", "video", "camera", "labels", "laser", "map_native", "guide", "notice", "resume",
+         "last_error")
 PATH_KEYS = ("out", "native", "path")
 
 
@@ -431,6 +432,11 @@ def hardware_test(action: str, step: str | None = None, verb: str | None = None,
     if action == "call":
         if not verb:
             return {"ok": False, "error": "call needs verb (and params)"}
+        if verb == "laser":                       # the guarded path: caps, time limit, the operator's Yes
+            q = params or {}
+            r = api.laser(q.get("state") == "on", q.get("seconds"))
+            _append({"kind": "call", "step": step, "verb": verb, "params": q, "ok": bool(r.get("ok"))})
+            return r
         return call(verb, params, step, timeout_s)
     if action == "record":
         return record(step or "", result or "", notes, values, answers, who)

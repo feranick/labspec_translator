@@ -1,5 +1,5 @@
 """plan.py — a study as bridge commands: the setup moves, the points, the acquisitions; and the time estimate.
-Version: 2026.11.20.9
+Version: 2026.11.20.14
 
 Everything here is computed from the study and the profile alone: wavelengths from Raman shifts, the number of
 detector windows, the stage positions (always offsets from where the operator left the stage, Z from the
@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 
-from .profile import laser_key, shift_to_nm
+from .profile import laser_key, match_label, shift_to_nm
 
 SPIKE_MODES = {"labspec": 0, "none": 100, "single": 200, "double": 300, "double_auto": 400}
 
@@ -139,7 +139,8 @@ def setup_steps(study: dict, prof: dict) -> list[dict]:
         steps.append({"verb": "move", "motor": mot["grating"], "mode": "value", "value": float(s["grating"]),
                       "why": "grating"})
     if s.get("objective") is not None:
-        steps.append({"verb": "move", "motor": mot["objective"], "mode": "label", "value": str(s["objective"]),
+        obj = match_label(s["objective"], prof.get("objectives", []))[0] or str(s["objective"])
+        steps.append({"verb": "move", "motor": mot["objective"], "mode": "label", "value": obj,
                       "why": "objective" + (" (manual turret: LabSpec asks the operator)"
                                             if prof.get("manual_objective") else "")})
     if s.get("hole_um") is not None:

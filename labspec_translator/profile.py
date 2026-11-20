@@ -1,5 +1,5 @@
 """profile.py — the machine profile: what the instrument has (from the discovery script) and the limits a person sets.
-Version: 2026.11.20.9
+Version: 2026.11.20.14
 
 The profile is a JSON file (LS6T_PROFILE, default ~/ls6t/profile.json). Studies never change it: an LLM can only
 ask for what the profile allows. Without a file, the built-in XploRA defaults below apply and every result says so
@@ -43,7 +43,8 @@ DEFAULT_PROFILE: dict = {
     "limits": {"max_xy_um": 5000.0,          # farthest a study may move from where the operator left the stage
                "max_dz_um": 100.0,           # farthest from the operator's focus (Z is always relative)
                "max_exposure_s": 600.0, "max_accumulations": 500, "max_points": 10000,
-               "max_minutes": 480.0, "max_filter_pct": 100.0, "sensitive_max_filter_pct": 10.0},
+               "max_minutes": 480.0, "max_filter_pct": 100.0, "sensitive_max_filter_pct": 10.0,
+               "max_laser_on_s": 60.0},     # longest the laser may be left on for viewing (instrument laser_on)
     "timing": {"command_s": 0.3, "move_s": 2.0, "laser_s": 15.0, "grating_s": 15.0, "objective_s": 20.0,
                "xy_um_per_s": 2000.0, "xy_settle_s": 0.3, "autofocus_s": 10.0, "readout_s": 0.5,
                "window_move_s": 2.0},
@@ -72,9 +73,10 @@ DEFAULT_PROFILE: dict = {
     # LabSpec's own mapping engine (map.engine 'native'): used by 'auto' from native_min_points points; whether
     # SetMappingParams takes absolute stage positions or offsets; the order of the exported values; whether
     # Acq(ACQ_SPECTRAL_IMAGE) takes the interface's exposure (-1) or ours; the time per point beyond the exposure;
-    # export_chunk: values read per GetValueSimplePart call when the map is written out (0: one GetValue)
+    # export_chunk: values read per GetValueSimplePart call when the map is written out (0: one GetValue; discovery
+    # turns it on once its probe shows that StartAt and DataSize count values, TESTING Q35)
     "mapping": {"native_min_points": 400, "positions": "absolute", "data_order": "spectral_fastest",
-                "point_order": "x_fastest", "acq_time": "interface", "native_point_s": 0.05, "export_chunk": 65536},
+                "point_order": "x_fastest", "acq_time": "interface", "native_point_s": 0.05, "export_chunk": 0},
     # LabSpec's configuration around each request: with restore_config, the bridge saves it (SaveConfig) when a
     # request starts and loads it back (LoadConfig) when the request ends normally
     "session": {"restore_config": False},
@@ -92,9 +94,78 @@ def _merge(base: dict, over: dict) -> dict:
     return out
 
 
+AUTO_MAX_FILTER_PCT = 10.0     # per laser, in a profile built automatically, until a person sets the caps
+
+
+def latest_dump() -> Path | None:
+    """The inventory the bridge writes each time it starts (LS6T_HOME/discovery_latest.txt)."""
+    p = config.home() / "discovery_latest.txt"
+    return p if p.is_file() else None
+
+
+def auto_profile(dump: Path) -> dict:
+    """A profile from the bridge's inventory, made without a person: the instrument as LabSpec reports it (lasers,
+    gratings, filters, objectives, holes, slits, motors) with the default limits, every laser capped at
+    AUTO_MAX_FILTER_PCT % and no laser shutter (snapshots with the laser stay off) until a person reviews it
+    (`ls6t profile import` or `ls6t profile set`, which end the automatic state)."""
+    prof, notes = import_discovery(read_text(dump), base=copy.deepcopy(DEFAULT_PROFILE))
+    for v in prof.get("lasers", {}).values():
+        v["max_filter_pct"] = min(float(v.get("max_filter_pct") or 100), AUTO_MAX_FILTER_PCT)
+    if prof["motors"].get("laser_shutter"):
+        notes.append(f"laser shutter motor {prof['motors']['laser_shutter']!r} found but not used until a person "
+                     f"confirms it: ls6t profile set motors.laser_shutter \"{prof['motors']['laser_shutter']}\"")
+        prof["motors"]["laser_shutter"] = None
+    prof["auto"] = {"from": str(dump), "dump_time": prof.get("discovered", {}).get("time"),
+                    "max_filter_pct": AUTO_MAX_FILTER_PCT, "notes": notes,
+                    "review": "a person reviews it: ls6t profile import \"" + str(dump) + "\" (then sets the "
+                              "caps and limits), or ls6t profile set <key> <value>"}
+    prof["source"] = f"automatic, from the bridge's inventory {prof['auto']['dump_time']}"
+    return prof
+
+
+def drift(prof: dict) -> list[str]:
+    """What the bridge's latest inventory has that a person's profile does not (or the reverse): a new objective,
+    a laser line, filters... Empty when they agree, when the profile is automatic, or without an inventory."""
+    dump = latest_dump()
+    if dump is None or prof.get("auto") or not prof.get("measured"):
+        return []
+    try:
+        inv, _ = import_discovery(read_text(dump), base=copy.deepcopy(DEFAULT_PROFILE))
+    except (OSError, ValueError):
+        return []
+    out = []
+
+    def cmp(what, have, now):
+        have, now = set(map(str, have)), set(map(str, now))
+        if have != now:
+            extra = ", ".join(sorted(now - have))
+            gone = ", ".join(sorted(have - now))
+            out.append(f"{what}: LabSpec reports {', '.join(sorted(now))}" + (f" (new: {extra})" if extra else "") +
+                       (f" (not there any more: {gone})" if gone else ""))
+    cmp("lasers (nm)", [f"{float(v['nm']):g}" for v in prof.get("lasers", {}).values()],
+        [f"{float(v['nm']):g}" for v in inv.get("lasers", {}).values()])
+    cmp("gratings", prof.get("gratings", {}), inv.get("gratings", {}))
+    cmp("filters", prof.get("filters", {}), inv.get("filters", {}))
+    cmp("objectives", prof.get("objectives", []), inv.get("objectives", []))
+    return out
+
+
 def load(path: Path | None = None) -> dict:
-    """The profile in use: the file merged over the defaults ('measured': false when there is no file)."""
+    """The profile in use: the file merged over the defaults ('measured': false when there is no file). With no
+    file but an inventory from the bridge, a profile is made from it automatically (auto_profile); an automatic
+    profile follows newer inventories until a person has reviewed it."""
     p = Path(path) if path else config.profile_path()
+    if path is None:
+        dump = latest_dump()
+        if dump is not None:
+            try:
+                cur = json.loads(p.read_text(encoding="utf-8")) if p.is_file() else None
+                stale = cur is not None and isinstance(cur.get("auto"), dict) and \
+                    cur["auto"].get("dump_time") != parse_kv(read_text(dump)).get("time")
+                if cur is None or stale:
+                    save(auto_profile(dump), p)
+            except (OSError, ValueError, KeyError):
+                pass
     if p.is_file():
         data = json.loads(p.read_text(encoding="utf-8"))
         prof = _merge(DEFAULT_PROFILE, data)
@@ -215,6 +286,7 @@ def import_discovery(text: str, base: dict | None = None) -> tuple[dict, list[st
     Returns (profile, notes): the notes say what was found and what a person should check."""
     d = parse_kv(text)
     prof = copy.deepcopy(base or load())
+    prof.pop("auto", None)
     prof.pop("measured", None)
     prof.pop("path", None)
     notes: list[str] = []
@@ -301,7 +373,24 @@ def import_discovery(text: str, base: dict | None = None) -> tuple[dict, list[st
     if methods:
         notes.append("extra LabSpec methods: " + ", ".join(f"{m} {'works' if ok else 'missing'}"
                                                            for m, ok in methods.items()))
-        if methods.get("GetValueSimplePart") is False:
+        part = [x for x in str(probes.get("get_value_simple_part_values", "")).split(",") if x.strip()]
+        if methods.get("GetValueSimplePart") and part:
+            try:
+                vals = [float(x) for x in part]
+            except ValueError:
+                vals = []
+            if vals == [float(i) for i in range(4, 12)]:
+                prof.setdefault("mapping", {})["export_chunk"] = 65536
+                notes.append("GetValueSimplePart counts values: native maps are written out in chunks")
+            else:
+                prof.setdefault("mapping", {})["export_chunk"] = 0
+                notes.append(f"GetValueSimplePart(start 4, size 8) gave {len(vals)} values ({', '.join(part)}): its "
+                             "units are not values (bytes?): native maps are read whole (TESTING Q35)")
+        elif methods.get("GetValueSimplePart") and probes.get("get_value_simple_part_size") not in (None, "8"):
+            prof.setdefault("mapping", {})["export_chunk"] = 0
+            notes.append(f"GetValueSimplePart(start 4, size 8) gave {probes.get('get_value_simple_part_size')} "
+                         "values: its units are not values (bytes?): native maps are read whole (TESTING Q35)")
+        elif methods.get("GetValueSimplePart") is False:
             prof.setdefault("mapping", {})["export_chunk"] = 0
             notes.append("GetValueSimplePart missing: native maps are read whole (mapping.export_chunk 0)")
     cps = sorted({k.split(".")[1] for k in d if k.startswith("config_param.")}, key=lambda v: int(v) if v.isdigit() else 0)
@@ -331,6 +420,7 @@ def set_key(prof: dict, dotted: str, value) -> dict:
 def summary(prof: dict) -> dict:
     """The compact view study_format shows: what may be asked for."""
     return {"system": prof.get("system"), "measured": prof.get("measured", False), "source": prof.get("source"),
+            "automatic": bool(prof.get("auto")),
             "lasers_nm": [v["nm"] for v in prof.get("lasers", {}).values()],
             "gratings": [float(g) for g in prof.get("gratings", {})],
             "filters": list(prof.get("filters", {})),
@@ -342,6 +432,24 @@ def summary(prof: dict) -> dict:
             "cameras": prof.get("video", {}).get("cameras") or {},
             "laser_limits": {k: {"max_filter_pct": v.get("max_filter_pct", 100), "power_mw": v.get("power_mw")}
                              for k, v in prof.get("lasers", {}).items()}}
+
+
+def match_label(value, labels) -> tuple:
+    """A position name as people say it ('x100', '10%') matched to LabSpec's labels ('x100_VIS', '10%'): the same
+    name (any case), else the one label that starts with it and goes on with something other than a letter or
+    digit ('x10' is not 'x100_VIS'). Returns (label or None, error or None)."""
+    labs = [str(x) for x in labels or []]
+    v = str(value).strip()
+    for lab in labs:
+        if lab.lower() == v.lower():
+            return lab, None
+    cands = [lab for lab in labs if lab.lower().startswith(v.lower()) and
+             (len(lab) == len(v) or not lab[len(v)].isalnum())]
+    if len(cands) == 1:
+        return cands[0], None
+    if len(cands) > 1:
+        return None, f"{value!r} could be {', '.join(cands)}: say which"
+    return None, f"{value!r}: not one of {', '.join(labs) or 'the known positions'}"
 
 
 def camera_number(prof: dict, camera) -> tuple:

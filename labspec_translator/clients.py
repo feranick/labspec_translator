@@ -1,5 +1,5 @@
 """clients.py — connecting ls6t's MCP server to the LLM apps on this computer (`ls6t connect`, and the installer).
-Version: 2026.11.20.9
+Version: 2026.11.20.14
 
 Each app keeps its MCP servers in its own file. ls6t knows three that start local (stdio) servers:
 
@@ -206,6 +206,11 @@ def _entry(client: str, python: str, env: dict) -> dict:
     return e
 
 
+def _real(v) -> bool:
+    """A setting someone filled in, not a placeholder copied from the docs (C:\\Users\\<you>\\...)."""
+    return not re.search(r"<[^<>]*>", str(v))
+
+
 def merge_server(cfg: dict, name: str, python: str, defaults: dict, forced: dict | None = None,
                  client: str = "claude") -> tuple[dict, str]:
     """cfg (a JSON client's) with mcpServers[name] running this Python. Settings already in the entry's env are kept
@@ -215,7 +220,7 @@ def merge_server(cfg: dict, name: str, python: str, defaults: dict, forced: dict
     old = servers.get(name)
     env = dict(defaults)
     if isinstance(old, dict) and isinstance(old.get("env"), dict):
-        env.update(old["env"])
+        env.update({k: v for k, v in old["env"].items() if _real(v)})
     env.update(forced or {})
     new = _entry(client, python, env)
     if isinstance(old, dict):                 # keep the person's other keys (timeout, trust, includeTools...)
@@ -327,7 +332,7 @@ def toml_merge(text: str, name: str, python: str, defaults: dict, forced: dict |
     old = (cfg.get("mcp_servers") or {}).get(name)
     env = dict(defaults)
     if isinstance(old, dict) and isinstance(old.get("env"), dict):
-        env.update(old["env"])
+        env.update({k: v for k, v in old["env"].items() if _real(v)})
     env.update(forced or {})
     rest = _strip_table(text, name)
     if name in ((tomllib.loads(rest) if rest.strip() else {}).get("mcp_servers") or {}):
@@ -381,7 +386,7 @@ def existing_env() -> dict:
                     env = (read_json(p).get("mcpServers", {}).get(ENTRY) or {}).get("env") or {}
             except (OSError, ValueError):
                 continue
-            env = {k: str(v) for k, v in env.items() if k.startswith("LS6T_") and k != "LS6T_MODE"}
+            env = {k: str(v) for k, v in env.items() if k.startswith("LS6T_") and k != "LS6T_MODE" and _real(v)}
             if env:
                 return env
     return {}

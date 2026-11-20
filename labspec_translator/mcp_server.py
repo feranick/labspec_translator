@@ -1,5 +1,5 @@
 """mcp_server.py — MCP server: lets LLM-based tools run Raman measurements on a HORIBA instrument through LabSpec 6.
-Version: 2026.11.20.9
+Version: 2026.11.20.14
 
 Tools (all JSON):
   study_format      the study format, the profile's choices and limits, the bridge's state. Read it first.
@@ -66,9 +66,9 @@ second and shows the operator STOP in LabSpec when the goal is met; report the r
 Safety: the filter (power) is capped per laser and lower for samples marked sensitive; moves are limited; ask the
 user before raising power or long maps. If the bridge is not running, ask the user to start ls6t_bridge.vbs.
 Polling costs tokens: past about 5 minutes, tell the user when a run should finish and stop; then study_status.
-Direct requests: live camera view: instrument camera_on/off (camera: a name in profile.cameras, e.g. "top"); a
-picture or the beam: snapshot; the state: instrument status; a spectrum, a stage move, focus: a study. Pictures:
-"images": true writes PNGs (get_image). Units: Raman shift cm-1, positions µm, time s, intensities counts."""
+Direct requests: laser, grating, filter, objective, hole, slit: instrument set; camera view: instrument camera_on
+/off; the beam on for viewing: instrument laser_on/off; a picture: snapshot; the state: instrument status; a
+spectrum, a stage move, focus: a study. PNGs: "images": true, get_image. Units: cm-1, µm, s, counts."""
 
 if testmode.enabled():
     INSTRUCTIONS += """
@@ -148,14 +148,20 @@ def jobs(limit: int = 20, active: bool = False) -> dict:
 
 
 @server.tool()
-def instrument(action: str = "status", camera: str | None = None) -> dict:
+def instrument(action: str = "status", camera: str | int | None = None, setup: dict | None = None,
+               seconds: float | None = None) -> dict:
     """status: the bridge's version and the instrument's state now (laser, grating, filter, objective, stage,
-    detector temperature, live_video, the active camera). camera_on / camera_off: LabSpec's live camera view (no
-    laser, nothing moves; for a picture use snapshot); camera: a name from study_format's profile.cameras (e.g.
-    "top") or a number; none: LabSpec's active camera. discover: runs the discovery in LabSpec and proposes a machine profile (a person
-    applies it). resume: asks the operator in LabSpec to lift a halt after they stopped the bridge.
-    last_error: LabSpec's last error."""
-    return api.instrument(action, camera)
+    detector temperature, live_video, the active camera, laser_open). set: change the set-up now without
+    measuring, setup {laser_nm, grating, filter, objective, hole_um, slit_um} (any of them, named as people say
+    them: objective "x100", filter "10%"); the filter stays within the caps; turning the objective asks the
+    operator in LabSpec; nothing fires the laser; returns what LabSpec read back. laser_on (seconds, up to the
+    profile's limit; default 30): the laser shutter open so the beam shows on the camera, after the operator's Yes
+    in LabSpec; the bridge closes it when the time is up, at laser_off, at a halt, or before any other command.
+    laser_off. camera_on / camera_off (camera: a number, or a name in study_format's profile.cameras such as
+    "top"; none: the active one): LabSpec's live view; for a picture use snapshot. discover: runs the discovery
+    and proposes a machine profile (a person applies it). resume: asks the operator to lift a halt. last_error:
+    LabSpec's last error."""
+    return api.instrument(action, camera, setup, seconds)
 
 
 @server.tool()

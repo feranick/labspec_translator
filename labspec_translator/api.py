@@ -1,5 +1,5 @@
 """api.py — the functions behind the command line and the MCP server (JSON in, JSON out).
-Version: 2026.11.20.9
+Version: 2026.11.20.14
 """
 from __future__ import annotations
 
@@ -55,6 +55,15 @@ def tool_status() -> dict:
                                  "(ls6t bridge install writes it)")
     prof = P.load()
     out["profile"] = {"path": prof.get("path"), "measured": prof.get("measured"), "source": prof.get("source")}
+    if prof.get("auto"):
+        out["profile"]["automatic"] = {"note": f"made from the bridge's inventory without a person: every laser is "
+                                               f"capped at {prof['auto'].get('max_filter_pct')} % and snapshots with "
+                                               "the laser are off until a person reviews it",
+                                       "review": prof["auto"].get("review"), "notes": prof["auto"].get("notes")}
+    d = P.drift(prof)
+    if d:
+        out["profile"]["drift"] = d + ["the profile was reviewed by a person: they import the new inventory "
+                                       f"(ls6t profile import \"{P.latest_dump()}\") if it is right"]
     lock = runner.read_json(runner.lock_path(), None)
     out["instrument_busy"] = lock.get("request") if lock else None
     return out
@@ -242,7 +251,7 @@ def jobs(limit: int = 20, active: bool = False) -> dict:
 
 # --------------------------------------------------------------------------------------------- the instrument
 
-def instrument(action: str = "status", camera=None) -> dict:
+def instrument(action: str = "status", camera=None, setup: dict | None = None, seconds: float | None = None) -> dict:
     """status: the bridge's ping and the instrument's state. discover: the discovery dump and a proposed profile
     (written next to the profile as profile.proposed.json; a person applies it with `ls6t profile import`).
     resume: asks the operator in LabSpec to lift a halt."""
@@ -270,6 +279,10 @@ def instrument(action: str = "status", camera=None) -> dict:
             return b.call("resume", timeout_s=600)
         if action == "last_error":
             return b.call("last_error", timeout_s=15)
+        if action == "set":
+            return set_instrument(setup or {})
+        if action in ("laser_on", "laser_off"):
+            return laser(action == "laser_on", seconds)
         if action in ("camera_on", "camera_off"):
             prof = P.load()
             num, err = P.camera_number(prof, camera)
@@ -284,7 +297,167 @@ def instrument(action: str = "status", camera=None) -> dict:
             return r
     except BridgeError as exc:
         return {"ok": False, "error": str(exc)}
-    raise ValueError(f"action {action!r}: status, discover, resume, last_error, camera_on or camera_off")
+    raise ValueError(f"action {action!r}: status, set, laser_on, laser_off, camera_on, camera_off, discover, resume "
+                     "or last_error")
+
+
+SET_KEYS = ("filter", "laser_nm", "grating", "objective", "hole_um", "slit_um")
+
+
+def laser(on: bool, seconds: float | None = None) -> dict:
+    """The laser on for viewing (the beam on the camera, aligning by eye): the laser shutter open for `seconds`
+    (at most limits.max_laser_on_s, default 60 s), then closed by the bridge. Only with the laser shutter motor
+    confirmed in the profile, the current filter within the caps, and the operator's Yes in LabSpec each time. The
+    bridge also closes it when the operator halts it, and before any other command but quick reads. Off: at once."""
+    lock = runner.read_json(runner.lock_path(), None)
+    if on and lock:
+        return {"ok": False, "error": f"the instrument is busy with {lock.get('request')}: wait or cancel it"}
+    prof = P.load()
+    shutter = prof["motors"].get("laser_shutter")
+    b = Bridge()
+    if config.mode() == "sim":
+        from . import sim as S
+        S.ensure(b.dir)
+    try:
+        if not on:
+            return b.call("laser", timeout_s=30, state="off")
+        if not shutter:
+            return {"ok": False, "error": "no laser shutter motor in the profile: a person confirms it with the "
+                                          "maintainer and sets it (ls6t profile set motors.laser_shutter "
+                                          "\"<name from discovery>\")"}
+        mx = float(prof["limits"].get("max_laser_on_s", 60.0))
+        secs = float(seconds or min(30.0, mx))
+        if secs <= 0 or secs > mx:
+            return {"ok": False, "error": f"seconds: up to limits.max_laser_on_s = {mx:g} s (a person may change it)"}
+        st = b.call("status", timeout_s=15, **runner.motor_args(prof))
+        from .profile import filter_pct, laser_key
+        pct = prof.get("filters", {}).get(st.get("filter"))
+        pct = pct if pct is not None else filter_pct(st.get("filter", ""))
+        lk = laser_key(prof, st.get("laser_nm"))
+        caps = [float(prof["limits"].get("max_filter_pct", 100))]
+        if lk:
+            caps.append(float(prof["lasers"][lk].get("max_filter_pct", 100)))
+        if pct is None or pct > min(caps) + 1e-9:
+            return {"ok": False, "error": f"the current filter {st.get('filter')!r} is unknown or above the cap "
+                                          f"({min(caps):g} %): a stronger filter first (instrument set)"}
+        r = b.call("confirm", timeout_s=3600,
+                   text=f"ls6t asks to open the laser shutter for {secs:g} s to show the beam (laser "
+                        f"{st.get('laser_nm')} nm, filter {st.get('filter')}, objective {st.get('objective')}). "
+                        "Close the ls6t window to stop it at any time. Continue?")
+        if r.get("answer") != "yes":
+            return {"ok": False, "error": "the operator declined in LabSpec"}
+        r = b.call("laser", timeout_s=30, state="on", seconds=secs, m_laser_shutter=shutter)
+        if r.get("ok"):
+            r["note"] = (f"the shutter closes by itself after {secs:g} s, or with instrument laser_off, or when the "
+                         "operator closes the ls6t window")
+        return r
+    except BridgeError as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+def _labels(b: Bridge, motor: str) -> tuple:
+    r = b.call("labels", timeout_s=30, motor=motor)
+    if not r.get("ok"):
+        return [], []
+    n = min(int(float(r.get("size") or 0)), 10)
+    return [r.get(f"label.{i}", "") for i in range(n)], [r.get(f"value.{i}") for i in range(n)]
+
+
+def set_instrument(setup: dict) -> dict:
+    """Changes the set-up now, without measuring: filter, laser_nm, grating, objective, hole_um, slit_um (any of
+    them). Positions are matched to LabSpec's own names ('x100' finds 'x100_VIS'); the filter must be within the
+    caps of the laser that will be in use; turning the objective turret asks the operator in LabSpec first (the
+    objective's working distance changes). Nothing fires the laser. Refused while a request holds the instrument.
+    Returns each move with what LabSpec read back, and the instrument before and after."""
+    from .profile import filter_pct, laser_key, match_label
+    s = {k: v for k, v in (setup or {}).items() if v not in (None, "")}
+    bad = [k for k in s if k not in SET_KEYS]
+    if bad or not s:
+        return {"ok": False, "error": f"setup keys: {', '.join(SET_KEYS)}" + (f" (not {', '.join(bad)})" if bad else "")}
+    lp = runner.lock_path()
+    lp.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        fd = os.open(lp, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        lock = runner.read_json(lp, {})
+        return {"ok": False, "error": f"the instrument is busy with {lock.get('request')}: wait or cancel it"}
+    with os.fdopen(fd, "w") as fh:
+        fh.write(json.dumps({"request": "instrument set", "pid": os.getpid(), "time": time.time()}))
+    prof = P.load()
+    mot = prof["motors"]
+    b = Bridge()
+    if config.mode() == "sim":
+        from . import sim as S
+        S.ensure(b.dir)
+    moves, out = [], {"ok": False}
+    try:
+        before = b.call("status", timeout_s=15, **runner.motor_args(prof))
+        if not before.get("ok"):
+            return {"ok": False, "error": f"status: {before.get('error')}"}
+        # the target laser (for the filter caps)
+        lk = laser_key(prof, s["laser_nm"] if "laser_nm" in s else before.get("laser_nm"))
+        if "laser_nm" in s and not laser_key(prof, s["laser_nm"]):
+            have = ", ".join("%g" % v["nm"] for v in prof["lasers"].values())
+            return {"ok": False, "error": f"laser {s['laser_nm']} nm: not on this instrument ({have} nm)"}
+        if "filter" in s:
+            labs, _ = _labels(b, mot["filter"])
+            lab, err = match_label(s["filter"], labs or list(prof.get("filters", {})))
+            if err:
+                return {"ok": False, "error": f"filter {err}"}
+            pct = prof.get("filters", {}).get(lab)
+            pct = pct if pct is not None else filter_pct(lab)
+            caps = [float(prof["limits"].get("max_filter_pct", 100))]
+            if lk:
+                caps.append(float(prof["lasers"][lk].get("max_filter_pct", 100)))
+            if pct is None or pct > min(caps) + 1e-9:
+                return {"ok": False, "error": f"filter {lab!r}: unknown transmission or above the cap ({min(caps):g} %)"}
+            moves.append(("filter", mot["filter"], "label", lab))
+        if "laser_nm" in s:
+            moves.append(("laser", mot["laser"], "value", float(prof["lasers"][laser_key(prof, s["laser_nm"])]["nm"])))
+        if "grating" in s:
+            moves.append(("grating", mot["grating"], "value", float(s["grating"])))
+        if "objective" in s:
+            labs, _ = _labels(b, mot["objective"])
+            lab, err = match_label(s["objective"], labs or prof.get("objectives", []))
+            if err:
+                return {"ok": False, "error": f"objective {err}"}
+            if lab != before.get("objective"):
+                if config.confirm_policy() != "never":
+                    r = b.call("confirm", timeout_s=3600,
+                               text=f"ls6t asks to turn the objective turret from {before.get('objective')} to {lab}. "
+                                    "Is there clearance between the objective and the sample? Continue?")
+                    if r.get("answer") != "yes":
+                        return {"ok": False, "error": "the operator declined in LabSpec"}
+                moves.append(("objective", mot["objective"], "label", lab))
+        for key, role in (("hole_um", "hole"), ("slit_um", "slit")):
+            if key in s:
+                moves.append((key, mot[role], "value", float(s[key])))
+        done = []
+        for what, motor, mode, value in moves:
+            r = b.call("move", timeout_s=600 if what in ("laser", "grating", "objective") else 120, motor=motor,
+                       mode=mode, value=value)
+            got = r.get("label") if mode == "label" else r.get("value")
+            ok = bool(r.get("ok")) and (str(got) == str(value) if mode == "label" else
+                                       abs(float(got or "nan") - float(value)) <= 0.5)
+            done.append({"set": what, "asked": value, "got": got, "ok": ok, "error": r.get("error") or None})
+            if not r.get("ok"):
+                if r.get("stopped_by"):
+                    done[-1]["error"] = f"stopped by the {r.get('stopped_by')}"
+                break
+        after = b.call("status", timeout_s=15, **runner.motor_args(prof))
+        out = {"ok": all(d["ok"] for d in done) and len(done) == len(moves), "moves": done,
+               "before": {k: before.get(k) for k in ("laser_nm", "grating", "filter", "objective", "hole_um", "slit_um")},
+               "after": {k: after.get(k) for k in ("laser_nm", "grating", "filter", "objective", "hole_um", "slit_um")}}
+        if not moves:
+            out.update(ok=True, note="already set")
+        return out
+    except BridgeError as exc:
+        return {"ok": False, "error": str(exc)}
+    finally:
+        try:
+            lp.unlink()
+        except OSError:
+            pass
 
 
 def configs_dir() -> Path:
@@ -548,7 +721,13 @@ def profile_set(key: str, value_json: str) -> dict:
     prof = P.load()
     old = runner.lookup(prof, key)
     P.set_key(prof, key, value)
-    return {"ok": True, "key": key, "old": old, "new": value, "profile": str(P.save(prof))}
+    was_auto = bool(prof.pop("auto", None))
+    if was_auto:
+        prof["source"] = str(prof.get("source", "")).replace("automatic", "reviewed by a person; first automatic", 1)
+    out = {"ok": True, "key": key, "old": old, "new": value, "profile": str(P.save(prof))}
+    if was_auto:
+        out["note"] = "the profile is now a person's: newer inventories from the bridge no longer replace it"
+    return out
 
 
 def spot_status() -> dict:

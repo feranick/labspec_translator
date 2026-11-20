@@ -1,12 +1,12 @@
 """format.py — the study format and its static checks (no instrument needed).
-Version: 2026.11.20.9
+Version: 2026.11.20.14
 """
 from __future__ import annotations
 
 import math
 
 from . import config, plan
-from .profile import filter_pct, laser_key
+from .profile import filter_pct, laser_key, match_label
 
 KINDS = ("spectrum", "map", "series", "calibration", "alignment", "guide", "focus", "move", "spot", "depth",
          "background")
@@ -340,7 +340,7 @@ def validate_study(name: str, study: dict, prof: dict) -> dict:
             if cap is not None and pct > float(cap) + 1e-9:
                 errors.append(f"setup.filter {s['filter']!r} ({pct:g}%) is above {what} = {cap:g}%: "
                               "choose a stronger attenuation")
-    if s.get("objective") is not None and str(s["objective"]) not in [str(o) for o in prof["objectives"]]:
+    if s.get("objective") is not None and match_label(s["objective"], prof["objectives"])[0] is None:
         errors.append(f"setup.objective {s['objective']!r}: use one of {', '.join(map(str, prof['objectives']))}")
     for key, allowed in (("hole_um", prof.get("holes_um")), ("slit_um", prof.get("slits_um"))):
         v = s.get(key)

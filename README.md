@@ -16,7 +16,7 @@ it runs **locally**: on the instrument PC, next to the Claude desktop app. It ha
 machines. Unlike the other translators, the backend has no Python API: LabSpec is automated with VBScript
 (*LabSpec 5/6 Automation*, HORIBA, 2018). That is why the bridge script exists.
 
-First instrument: **XploRA** (LabSpec 6, Windows 11). Version 2026.11.20.9.
+First instrument: **XploRA** (LabSpec 6, Windows 11). Version 2026.11.20.14.
 
 **Scope of version 1**
 
@@ -107,6 +107,7 @@ ls6t status <request folder>                 # results, or progress while it run
 ls6t cancel <request folder>                 # stop it: the acquisition or move in progress stops
 ls6t jobs                                    # recent requests; which one holds the instrument
 ls6t instrument status | discover | resume | last-error
+ls6t instrument set --laser-nm 532 --grating 1800 --filter 10% --objective x100   # change the set-up, no laser
 ls6t instrument snapshot [--laser]           # a video frame with the laser position marked (PNG)
 ls6t instrument snapshot --extended          # LabSpec's extended video (the stage moves; video.allow_extended)
 ls6t instrument config list | save NAME | load NAME   # LabSpec's whole configuration (maintainer)
@@ -662,6 +663,11 @@ frames, LabSpec's image files, `snapshot.json`); a study's frames go to its `vid
 
 | Version | Changes |
 |---|---|
+| 2026.11.20.14 | The laser on for viewing: `instrument laser_on` (seconds, at most `limits.max_laser_on_s`, default 60) / `laser_off`, `ls6t instrument laser-on/laser-off`: the laser shutter open so the beam shows on the camera, only with the shutter motor confirmed in the profile, the filter within the caps and the operator's Yes in LabSpec; the bridge closes it when the time is up, at a halt or stop, when it ends, and before any command other than quick reads (`status` shows `laser_open`, `laser_left_s`). Cameras: `instrument camera_on` takes a number as well as a name (a number was rejected). |
+| 2026.11.20.13 | The machine profile from discovery, automatically: the bridge records the instrument's inventory each time it starts (`discovery_latest.txt`: motors, positions, detector; no probes, nothing moves); with no reviewed profile, ls6t builds `profile.json` from it (every laser capped at 10 %, no laser shutter) and follows later inventories until a person imports or sets it; then differences are reported (`status` → `profile.drift`), never applied. The installer uses an existing inventory too. `GetValueSimplePart`: the instrument's discovery showed its sizes are not counts of values (8 asked, 2 returned: bytes?): chunked map export is off by default and turned on only when the probe (now on a 0..15 ramp) shows plain values; the bridge checks every chunk's length. Tested on the XploRA Plus's real discovery dump (`tests/data`). |
+| 2026.11.20.12 | Switching the set-up directly: `instrument set` (MCP) / `ls6t instrument set --laser-nm 532 --grating 1800 --filter 10% --objective x100` changes laser, grating, filter, objective, hole and slit without measuring: filter within the caps of the laser in use, the objective turret only after the operator's Yes in LabSpec, nothing fires the laser, read-back returned, refused during a request. Position names are matched to LabSpec's own (`x100` finds `x100_VIS`; new bridge verb `labels`), in studies too. |
+| 2026.11.20.11 | `ls6t connect`, the installer and `tools/ls6t_fix_claude.ps1` drop settings that are still placeholders copied from the docs (`C:\Users\<you>\...`) and put the real paths in; such a path made Claude fail to start ls6t (`spawn ... ENOENT`). |
+| 2026.11.20.10 | `tools/ls6t_fix_claude.ps1`: adds the ls6t entry to the Claude Store build's `Claude-Data` configuration with ls6t's own code, after making sure Claude is closed (for installs before 2026.11.20.8). |
 | 2026.11.20.9 | `tools/ls6t_diagnose.ps1`: a read-only PowerShell report for an app that does not show ls6t's tools (which Claude configuration file is read, the ls6t entry, JSON validity and BOM, the server's MCP handshake with the entry's settings, the install log, Claude's MCP logs); other servers' settings are left out of the report. |
 | 2026.11.20.8 | The Claude desktop app from the Microsoft Store now reads its configuration from `%LOCALAPPDATA%\Claude-Data\claude_<id>\` (not the package's `LocalCache`), so the installer's entry was not seen. `ls6t connect` and the installer now find the folder the app reads (the running app's `--user-data-dir`, `CLAUDE_USER_DATA_DIR`, `Claude-Data` once the app moved there, older Store builds' `LocalCache`, `Claude-3p`, `%APPDATA%\Claude`), take ls6t's entries out of folders it no longer reads, and warn when Claude is running (it rewrites the file on quit). `ls6t connect check`: starts each app's ls6t entry as the app would and lists its tools, or shows why it fails. |
 | 2026.11.20.7 | After a session where the LLM ran its own commands against LabSpec's ActiveX (it opened *About NFActiveX Control* and the bridge stopped): the instructions now say that only ls6t's tools reach the instrument (no scripts, shell, COM or bridge files; say so when no tool fits); INSTALL.md says how to make Codex, Gemini CLI and Claude ask before every command. Cameras by name: profile `video.cameras` (e.g. `{"top": 0}`), `instrument camera_on camera="top"`, status reports the active camera, study_format lists the names. A stalled bridge's error says a LabSpec dialog may be open. |

@@ -16,6 +16,7 @@ Const POLL_MS = 100
 
 Dim gInbox, gOutbox, gHb, gStopFlag, gHalted, gQuit, gLastBeat, gLastPopup, gPopupOpen, gViews, gStoppedBy
 Dim gVerb, gSeq, gLastSeq, gChunk
+Dim gLaserOpen, gLaserT0, gLaserS, gLaserMotor, gLaserOldMode
 gInbox = LS6T_BRIDGE_DIR & "\inbox"
 gOutbox = LS6T_BRIDGE_DIR & "\outbox"
 gHb = LS6T_BRIDGE_DIR & "\heartbeat.txt"
@@ -28,6 +29,10 @@ gLastPopup = Timer - 100
 gVerb = ""
 gSeq = ""
 gLastSeq = ""
+gLaserOpen = False
+gLaserS = 0
+gLaserMotor = ""
+gLaserOldMode = ""
 gChunk = 0
 Set gViews = CreateObject("Scripting.Dictionary")
 
@@ -233,11 +238,35 @@ Sub VStatus(cmd, res)
     res("accumulations") = LSValue(0, "LabSpecAccumulation")
     res("shutter_mode") = LSValue(0, "ShutterMode")
     res("last_error") = LabSpecError()
+    res("laser_open") = Bit(gLaserOpen)
+    If gLaserOpen Then res("laser_left_s") = Fmt(gLaserS - Elapsed(gLaserT0))
     On Error Resume Next
     v = LabSpec.Video(LS_GET_VIDEO_ID)
     res("live_video") = Bit(Err.Number = 0 And v > 0)
     Err.Clear
     res("camera") = LabSpec.Video(LS_GET_ACTIVE_CAMERA)
+    Err.Clear
+    On Error GoTo 0
+End Sub
+
+' A motor's named positions (labels and values; the first ten, see MotorLabel) and the current one
+Sub VLabels(cmd, res)
+    Dim motor, n, i
+    motor = GetP(cmd, "motor", "")
+    n = MotorSize(motor)
+    If n = -1 Then
+        Fail res, "motor " & motor & " is not present"
+        Exit Sub
+    End If
+    res("size") = n
+    If n > 10 Then n = 10
+    On Error Resume Next
+    For i = 0 To n - 1
+        res("label." & i) = LabSpec.GetMotorPosition(motor, LS_MOTOR_INDEXTOSTRING + i)
+        res("value." & i) = LabSpec.GetMotorPosition(motor, LS_MOTOR_INDEXTOVALUE + i)
+        Err.Clear
+    Next
+    res("current") = MotorLabel(motor)
     Err.Clear
     On Error GoTo 0
 End Sub
@@ -739,10 +768,14 @@ Function WriteData(id, outPath, res, kind)
         For i = 0 To UBound(sz)
             If CLng(sz(i)) > 0 Then total = total * CLng(sz(i))
         Next
-        part = LabSpec.GetValueSimplePart(id, "Data", 0, LS_VT_R4, 0, 1)
+        ' two values asked must give two values, else the call counts something else (bytes?): read it whole
+        part = LabSpec.GetValueSimplePart(id, "Data", 0, LS_VT_R4, 0, 2)
         If Err.Number <> 0 Or Not IsArray(part) Then
             chunk = 0
             Err.Clear
+        ElseIf UBound(part) - LBound(part) + 1 <> 2 Then
+            chunk = 0
+            res("chunk_note") = "GetValueSimplePart gave " & (UBound(part) - LBound(part) + 1) & " values for 2"
         End If
     End If
     If chunk = 0 Then
@@ -807,6 +840,12 @@ Function WriteData(id, outPath, res, kind)
             If Err.Number <> 0 Or Not IsArray(part) Then
                 Fail res, ErrText("GetValueSimplePart at " & start)
                 Err.Clear
+                ts.Close
+                Exit Function
+            End If
+            If UBound(part) - LBound(part) + 1 <> cnt Then
+                Fail res, "GetValueSimplePart gave " & (UBound(part) - LBound(part) + 1) & " values for " & cnt & _
+                          " at " & start & ": set mapping.export_chunk to 0"
                 ts.Close
                 Exit Function
             End If
@@ -1538,8 +1577,77 @@ Sub VConfirm(cmd, res)
     End If
 End Sub
 
+' The laser left on for viewing (verb laser): the shutter in manual mode, open for at most `seconds`. The bridge
+' closes it when the time is up, when the operator halts or stops the bridge, and before any other command but
+' a few quick reads (LaserGuard), so nothing else ever runs with it open.
+Sub LaserClose(why)
+    Dim m
+    If Not gLaserOpen Then Exit Sub
+    On Error Resume Next
+    LabSpec.MoveMotor gLaserMotor, 0, "", LS_MOTOR_VALUE
+    If CStr(gLaserOldMode) <> "" Then
+        m = gLaserOldMode
+        LabSpec.PutValue 0, "ShutterMode", m
+    End If
+    Err.Clear
+    On Error GoTo 0
+    gLaserOpen = False
+    LabSpec.Message "ls6t: laser shutter closed (" & why & ")", LS_MB_STATUS_BAR
+End Sub
+
+Sub LaserGuard(verb)
+    If gLaserOpen And InStr(",ping,status,camera,labels,last_error,message,laser,", "," & verb & ",") = 0 Then
+        LaserClose "before " & verb
+    End If
+End Sub
+
+Sub VLaser(cmd, res)
+    Dim state, secs, shutter, newMode
+    state = GetP(cmd, "state", "")
+    If state = "off" Then
+        res("was_open") = Bit(gLaserOpen)
+        LaserClose "asked"
+        res("open") = 0
+        Exit Sub
+    End If
+    If state <> "on" Then
+        Fail res, "laser state: on or off"
+        Exit Sub
+    End If
+    shutter = GetP(cmd, "m_laser_shutter", "")
+    secs = ParseNum(GetP(cmd, "seconds", "0"))
+    If shutter = "" Or secs <= 0 Then
+        Fail res, "laser on needs m_laser_shutter and seconds"
+        Exit Sub
+    End If
+    On Error Resume Next
+    If Not gLaserOpen Then
+        gLaserOldMode = LSValue(0, "ShutterMode")
+        newMode = LS_SHUTTER_MANUAL
+        LabSpec.PutValue 0, "ShutterMode", newMode
+        gLaserMotor = shutter
+        gLaserOpen = True                     ' closed by LaserClose on every path, even if opening failed
+        LabSpec.MoveMotor shutter, 1, "", LS_MOTOR_VALUE
+        If Err.Number <> 0 Then
+            Fail res, ErrText("opening the laser shutter (" & shutter & ")")
+            Err.Clear
+            On Error GoTo 0
+            LaserClose "error"
+            Exit Sub
+        End If
+    End If
+    Err.Clear
+    On Error GoTo 0
+    gLaserT0 = Timer
+    gLaserS = secs
+    res("open") = 1
+    res("seconds") = Fmt(secs)
+    LabSpec.Message "ls6t: laser shutter OPEN for " & Fmt(secs) & " s (close the ls6t window to stop)", LS_MB_STATUS_BAR
+End Sub
+
 Sub VSafe(cmd, res)
     Dim st
+    LaserClose "safe"
     On Error Resume Next
     st = LabSpec.GetMotorStatus("", 0)
     If st <> 0 Then
@@ -1613,15 +1721,17 @@ Sub HandleFile(path)
     res("error") = ""
     gStoppedBy = ""
     Beat "busy", True
+    LaserGuard verb
     If gHalted And InStr(",ping,status,resume,quit,safe,message,", "," & verb & ",") = 0 Then
         Fail res, "halted by the operator: resume in LabSpec"
     Else
         Select Case verb
+            Case "laser": VLaser cmd, res
             Case "ping": VPing cmd, res
             Case "status": VStatus cmd, res
             Case "discover"
                 On Error Resume Next
-                res("out") = DiscoverTo(GetP(cmd, "out", LS6T_BRIDGE_DIR & "\discovery.txt"), False)
+                res("out") = DiscoverTo(GetP(cmd, "out", LS6T_BRIDGE_DIR & "\discovery.txt"), False, True)
                 If Err.Number <> 0 Then Fail res, ErrText("discover")
                 Err.Clear
                 On Error GoTo 0
@@ -1652,6 +1762,7 @@ Sub HandleFile(path)
             Case "safe": VSafe cmd, res
             Case "video": VVideo cmd, res
             Case "camera": VCamera cmd, res
+            Case "labels": VLabels cmd, res
             Case "map_native": VMapNative cmd, res
             Case "config": VConfig cmd, res
             Case "last_error": res("info") = LabSpecError()
@@ -1693,6 +1804,13 @@ Sub BridgeMain()
     If fso.FileExists(gStopFlag) Then fso.DeleteFile gStopFlag, True
     OpenPopup
     LabSpec.Message "ls6t bridge " & LS6T_VERSION & " running (" & LS6T_BRIDGE_DIR & ")", LS_MB_STATUS_BAR
+    ' the instrument's inventory (motors, positions, detector; no probes, nothing moves): ls6t builds or checks its
+    ' machine profile from it
+    On Error Resume Next
+    Beat "busy", True
+    DiscoverTo LS6T_HOME_DIR & "\discovery_latest.txt", False, False
+    Err.Clear
+    On Error GoTo 0
     Beat "idle", True
     Do While Not gQuit
         BeatNow
@@ -1703,6 +1821,13 @@ Sub BridgeMain()
             gHalted = True
             LabSpec.Message "ls6t halted by the operator: it waits for a resume", LS_MB_STATUS_BAR
         End If
+        If gLaserOpen Then
+            If gHalted Or gQuit Then
+                LaserClose "operator"
+            ElseIf Elapsed(gLaserT0) >= gLaserS Then
+                LaserClose "time up"
+            End If
+        End If
         If gQuit Then Exit Do
         p = NextCommand()
         If p <> "" Then
@@ -1711,6 +1836,7 @@ Sub BridgeMain()
             LabSpec.Pause POLL_MS
         End If
     Loop
+    LaserClose "bridge stopped"
     ClosePopup
     gVerb = ""
     Beat "stopped", True

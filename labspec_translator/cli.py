@@ -1,5 +1,5 @@
 """cli.py — the command line. Every command prints JSON; '-' reads the studies from stdin.
-Version: 2026.11.20.9
+Version: 2026.11.20.14
 
   ls6t status [REQUEST] [--wait S]   versions, the bridge, the profile; or a request's studies
   ls6t format                        the study format
@@ -9,7 +9,9 @@ Version: 2026.11.20.9
   ls6t cancel REQUEST                stop a request (the current acquisition or move stops)
   ls6t jobs [--limit N] [--active]   recent requests
   ls6t bench [NAMES...]              the benchmarks (on the simulator)
-  ls6t instrument status|discover|resume|last-error
+  ls6t instrument status|discover|resume|last-error|camera-on|camera-off [--camera N] | laser-on [--seconds S] | laser-off
+  ls6t instrument set [--laser-nm 532] [--grating 1800] [--filter 10%] [--objective x100] [--hole 300] [--slit 100]
+                                     change the set-up now (no laser; the objective asks the operator)
   ls6t instrument snapshot [--laser | --extended]
                                      a video frame with the laser position marked (--laser: the beam shows;
                                      --extended: LabSpec's extended video, the stage moves)
@@ -84,12 +86,20 @@ def main(argv=None) -> int:
     s = sub.add_parser("bench")
     s.add_argument("names", nargs="*")
     s = sub.add_parser("instrument")
-    s.add_argument("action", choices=["status", "discover", "resume", "last-error", "snapshot", "config"])
+    s.add_argument("action", choices=["status", "set", "discover", "resume", "last-error", "snapshot", "config",
+                                      "camera-on", "camera-off", "laser-on", "laser-off"])
+    s.add_argument("--seconds", type=float, help="laser-on: how long (at most limits.max_laser_on_s)")
+    s.add_argument("--camera", help="camera-on/off: a number or a name from the profile's video.cameras")
     s.add_argument("what", nargs="?", help="config: list, save or load")
     s.add_argument("name", nargs="?", help="config save/load: the configuration's name")
     s.add_argument("--laser", action="store_true", help="snapshot: open the laser shutter briefly (asks in LabSpec)")
     s.add_argument("--extended", action="store_true", help="snapshot: LabSpec's extended video (the stage moves)")
     s.add_argument("--show", action="store_true", help="config: open LabSpec's own dialog")
+    for opt, key in (("--laser", None), ("--grating", "grating"), ("--filter", "filter"), ("--objective", "objective"),
+                     ("--hole", "hole_um"), ("--slit", "slit_um")):
+        if opt != "--laser":
+            s.add_argument(opt, dest=f"set_{key}", help=f"set: {key}")
+    s.add_argument("--laser-nm", dest="set_laser_nm", help="set: the laser line (nm)")
     s = sub.add_parser("bridge")
     s.add_argument("action", choices=["install", "call"])
     s.add_argument("verb", nargs="?")
@@ -166,13 +176,21 @@ def main(argv=None) -> int:
             r = api.snapshot(with_laser=a.laser, extended=a.extended)
             _print(r)
             return 0 if r.get("ok") else 1
+        if a.action == "set":
+            setup = {k[4:]: v for k, v in vars(a).items() if k.startswith("set_") and v is not None}
+            for k in ("laser_nm", "grating", "hole_um", "slit_um"):
+                if k in setup:
+                    setup[k] = float(setup[k])
+            r = api.set_instrument(setup)
+            _print(r)
+            return 0 if r.get("ok") else 1
         if a.action == "config":
             if a.what not in ("list", "save", "load"):
                 ap.error("instrument config list | save NAME | load NAME")
             r = api.labspec_config(a.what, a.name, show=a.show)
             _print(r)
             return 0 if r.get("ok") else 1
-        _print(api.instrument(a.action.replace("-", "_")))
+        _print(api.instrument(a.action.replace("-", "_"), camera=a.camera, seconds=a.seconds))
     elif a.cmd == "bridge":
         if a.action == "install":
             _print(api.install_bridge(Path(a.dest) if a.dest else None))

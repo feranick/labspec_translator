@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.20.9)
+## Architecture (version 2026.11.20.14)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -208,6 +208,42 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   processes and --user-data-dir, packages, every candidate config (validity, BOM, .user-data-left markers, server
   names, the ls6t entries), the ls6t python and install.log, the MCP handshake with the entry's env, and Claude's
   logs (mcp.log, mcp-server-ls6t.log, lines about ls6t/policies). Not run here (no PowerShell in the sandbox).
+- 2026-11-20, 2026.11.20.10: the diagnosis (Claude 5.11492.5.0, Store, reads Claude-Data\claude_pzs8sxrjxfjjc):
+  that file has no mcpServers (rewritten 13:29 by the running app: the hand edit was lost); the installer (.7) had
+  written APPDATA\Claude and the stale LocalCache file (marker .user-data-left present); ls6t's server answers the
+  MCP handshake in 1.5 s with all tools; Codex config.toml has ls6t. tools/ls6t_fix_claude.ps1: waits for Claude to
+  close (or force-closes on request), then merges the entry with clients.merge_server into each Claude-Data\claude_*.
+- 2026-11-20, 2026.11.20.11: Claude then loaded the entry but could not start it: "spawn C:\Users\<you>\...\python.exe
+  ENOENT" (and cmd's "The filename, directory name, or volume label syntax is incorrect": the < >): the hand-made
+  entry kept the docs' <you> placeholder (Nicola fixed it by hand; ls6t then started). merge_server / toml_merge /
+  existing_env drop env values with <...>; the fix script does too. 96 tests.
+- 2026-11-20, 2026.11.20.12: in Claude, "switch to 532 nm" could not be done: no tool changed the set-up without a
+  measuring study (the LLM rightly refused to work around it). api.set_instrument / instrument(action="set",
+  setup) / `ls6t instrument set`: filter (caps of the target laser), laser, grating, objective (operator's Yes in
+  LabSpec first), hole, slit; holds the instrument lock while moving; read-back. Also LabSpec labels x10_VIS vs the
+  default profile's x10: profile.match_label (same name any case, else the unique label starting with it and not
+  continuing with a letter/digit), bridge verb `labels`, used by set, by format's objective check, plan and the
+  runner's set-up moves. 97 tests.
+- 2026-11-20, 2026.11.20.13: first real discovery (XploRA Plus, LabSpec 6.8.1, bridge 2026.11.20.7, via the
+  discover verb): lasers 785.04 (785nm_Edge), 637.75 (638nm_Edge), 532 (532nm_Edge); gratings 600/1200/1800/2400
+  (labels "1800 (450-850nm)"); filters 100/50/25/10/1/0.1 %; objectives x100_VIS, x10_VIS, x5_VIS (no x50); hole
+  100/300/500, slit 50/100/200 (labels with µm); motors also Spectro, XT, YT, LaserShutter (Off/On); detector -60 C;
+  active camera 1, live video off; GetValueEx missing; GetValueSimplePart(start 4, size 8) returned 2 values: sizes
+  are not value counts (bytes?) -> chunked export off by default, enabled only when the ramp probe returns 4..11; the
+  bridge checks chunk lengths. Nicola: the installation should use discovery: the bridge now records an inventory at
+  each start (DiscoverTo(out, popup, probes=False) -> LS6T_HOME/discovery_latest.txt); P.load() builds an automatic
+  profile from it when none exists (lasers capped at 10 %, laser_shutter None, 'auto' block) and refreshes it from
+  newer inventories until a person imports/sets (then P.drift reports differences in tool_status). The dump is in
+  tests/data. 98 tests.
+- 2026-11-20, 2026.11.20.14: Claude on the instrument: camera_on with a number failed (the tool's camera was typed
+  str: now str | int); cameras cannot be listed by LabSpec's API, so names stay a person's (video.cameras; the
+  instrument showed top = 0, internal = 1); "turn the laser on so I can see it" had no tool: bridge verb `laser`
+  (on: manual shutter mode + shutter motor 1 for `seconds`; globals gLaserOpen/T0/S/Motor/OldMode; LaserClose on
+  time up in the main loop, halt/quit, safe, bridge end, and LaserGuard before any verb but
+  ping/status/camera/labels/last_error/message/laser), api.laser (shutter motor from the profile, filter within the
+  caps, seconds <= limits.max_laser_on_s = 60, the operator's Yes each time), instrument laser_on/laser_off, status
+  laser_open/laser_left_s; hardware_test routes `laser` through api.laser. Risk left: if the VBS script dies with an
+  error while open, the shutter stays open (the operator closes it in LabSpec; TESTING T5b.7). 100 tests.
 
 ## To do next
 
