@@ -1,5 +1,5 @@
 """cli.py — the command line. Every command prints JSON; '-' reads the studies from stdin.
-Version: 2026.11.20.7
+Version: 2026.11.20.8
 
   ls6t status [REQUEST] [--wait S]   versions, the bridge, the profile; or a request's studies
   ls6t format                        the study format
@@ -27,6 +27,7 @@ Version: 2026.11.20.7
   ls6t alignment record REQUEST [--study NAME] [--attempt N]
                                      after a successful AutoAlignment: the check becomes the laser's baseline
   ls6t connect                       which LLM apps are here and which run ls6t's MCP server
+  ls6t connect check [APP...]        start each app's ls6t entry as the app would and list its tools
   ls6t connect APP... [--sim] [--remove]
                                      add (or remove) the MCP server in: claude (Claude desktop app), codex (ChatGPT
                                      desktop app, Codex CLI and IDE extension), gemini (Gemini CLI), or auto (every
@@ -227,6 +228,10 @@ def main(argv=None) -> int:
         if not a.apps:
             _print(C.status())
             return 0
+        if a.apps[0] == "check":
+            r = C.check([x for x in a.apps[1:] if x in C.CLIENTS] or None)
+            _print(r)
+            return 0 if all(v.get("ok") for v in r.values() if "no 'ls6t' entry" not in str(v.get("error"))) else 1
         apps = list(a.apps)
         if "auto" in apps:
             found = C.detect()

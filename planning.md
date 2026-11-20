@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.20.7)
+## Architecture (version 2026.11.20.8)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -194,6 +194,15 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   rule 7. Cameras by name: profile video.cameras {name: number}, P.camera_number, instrument(camera_on, camera),
   status 'camera', study_format profile.cameras. BridgeGone mentions an open LabSpec dialog. Not done: a token in
   bridge commands (an LLM with a shell could read it too). 93 tests.
+- 2026-11-20, 2026.11.20.8: Nicola installed with Claude ticked, but Claude did not see ls6t. Cause (GitHub
+  TGoodhew/GPIB-MCP#175, jacob-bd/gemini-notebook-mcp-cli#378): current Microsoft Store builds of Claude Desktop
+  move their data to %LOCALAPPDATA%\Claude-Data\<package family name, lower case> (run with --user-data-dir) and
+  no longer read Packages\Claude_*\LocalCache\Roaming\Claude (left with a .user-data-left.<name> marker); two
+  identities (Claude_pzs8sxrjxfjjc, AnthropicPBC.Claude_fnn82j28hfe8t); CLAUDE_USER_DATA_DIR overrides; Claude-3p
+  for the third-party-cloud variant; the app rewrites the config while running. clients.claude_dirs follows that
+  order (running --user-data-dir via Get-CimInstance, env, packages -> Claude-Data or LocalCache, Claude-3p,
+  APPDATA); connect removes ours from stale files and warns when Claude runs; the NSIS detection adds the new
+  folders. `ls6t connect check`: an MCP stdio handshake with each app's entry (initialize + tools/list). 95 tests.
 
 ## To do next
 

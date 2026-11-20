@@ -52,6 +52,8 @@ jobs:
           if (-not (Select-String -Path $codex -Pattern '^\[mcp_servers\.ls6t\]' -Quiet)) { throw "no ls6t entry for Codex" }
           Get-Content $codex
           & "$dir\bin\ls6t.cmd" connect
+          & "$dir\bin\ls6t.cmd" connect check
+          if ($LASTEXITCODE -ne 0) { throw "an app's ls6t entry does not start" }
           $u = Start-Process "$dir\uninstall.exe" -ArgumentList "/S" -Wait -PassThru
           Start-Sleep -Seconds 20
           if (Test-Path "$dir\python") { throw "the uninstaller left the program files" }

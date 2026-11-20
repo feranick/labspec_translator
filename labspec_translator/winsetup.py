@@ -1,5 +1,5 @@
 """winsetup.py — what the Windows installer does beyond copying files (installer/ls6t.nsi calls it).
-Version: 2026.11.20.7
+Version: 2026.11.20.8
 
 The installer puts a private Python (python.org's embeddable build, with every dependency already in its
 Lib/site-packages) in <install>/python and the launchers in <install>/bin. Then it runs, with that Python:
@@ -117,6 +117,8 @@ def report(reps: list, log: Log):
             what = ", ".join(r.get("notes") or []) or (("removed " + ", ".join(r["removed"])) if r.get("removed") else "")
             if what:
                 log(f"{r['app']}: {r['file']}: {what}" + (f" (backup: {Path(r['backup']).name})" if r.get("backup") else ""))
+            if r.get("warning"):
+                log.warn(f"{r['app']}: {r['warning']}")
         else:
             log.warn(f"{r['app']}: {r['file']}: {r.get('error')}")
 

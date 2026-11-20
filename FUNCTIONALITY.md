@@ -1,6 +1,6 @@
 # labspec-translator (ls6t): what it can do
 
-This is the complete list of functions in version 2026.11.20.7. It covers:
+This is the complete list of functions in version 2026.11.20.8. It covers:
 
 - what a study can ask for;
 - the tools an LLM sees;
@@ -97,6 +97,7 @@ trusting numbers, the safety rules and the polling etiquette.
 | `ls6t alignment status` / `record REQUEST [--study] [--attempt]` | Alignment state; record a baseline after AutoAlignment (person only) |
 | `ls6t spot status / forget [--objective --laser]` | The beam's offsets |
 | `ls6t references show / clear correction [LASER@GRATING] / clear background NAME / clear spot` | Everything ls6t remembers between sessions |
+| `ls6t connect check [APP]` | Start each app's ls6t entry as the app would (stdio handshake): its tools and start-up time, or the error |
 | `ls6t connect [APP... --sim --remove]` | Which LLM apps are on the PC and which run ls6t; add or remove the MCP server in the Claude desktop app (`claude`), the ChatGPT desktop app / Codex (`codex`), Gemini CLI (`gemini`), or every app found (`auto`) |
 | `ls6t test plan / step ID / record ID RESULT / report` | TESTING.md's tests: progress, one test, recording a result and answers, the filled-in results table (`LS6T_HOME\testing`) |
 | `ls6t sim [--seconds S]` | Run the simulator by hand |
@@ -248,5 +249,5 @@ profile. The shutter mode is restored on every path.
   - `si_calibration`, `graphene_map`, `extended_range`, `saturation`, `series`;
   - `guided_focus`, `focus_scan`, `spot_raman`, `spot_video`;
   - `depth_profile`, `calibration_zero`, `white_light`, `native_map`, `operator_stop`.
-- **Test suite** (`pytest`, 93 tests), which also checks the LabSpec scripts' structure.
+- **Test suite** (`pytest`, 95 tests), which also checks the LabSpec scripts' structure.
 - **Instrument tests** with the maintainer: [TESTING.md](TESTING.md).

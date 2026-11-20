@@ -1,5 +1,5 @@
 """clients.py — connecting ls6t's MCP server to the LLM apps on this computer (`ls6t connect`, and the installer).
-Version: 2026.11.20.7
+Version: 2026.11.20.8
 
 Each app keeps its MCP servers in its own file. ls6t knows three that start local (stdio) servers:
 
@@ -20,6 +20,7 @@ warning. Removing takes out only entries that run this same Python.
 """
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
@@ -54,28 +55,105 @@ def _home() -> Path:
 
 # --------------------------------------------------------------------------------------------- where
 
-def claude_files(create: bool = False) -> list[Path]:
-    out = []
-    if sys.platform == "darwin":
-        d = Path.home() / "Library" / "Application Support" / "Claude"
-        if d.is_dir() or create:
-            out.append(d / "claude_desktop_config.json")
-        return out
+def _windows() -> bool:
+    return os.name == "nt"
+
+
+@functools.lru_cache(maxsize=1)
+def claude_running_dirs() -> tuple:
+    """The --user-data-dir of every running Claude.exe (Windows): the folder it reads its configuration from now."""
     if os.name != "nt":
+        return ()
+    import subprocess
+    try:
+        out = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                              "Get-CimInstance Win32_Process -Filter \"Name='claude.exe'\" | "
+                              "ForEach-Object { $_.CommandLine }"],
+                             capture_output=True, text=True, timeout=20,
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ()
+    dirs = re.findall(r'--user-data-dir=(?:"([^"]+)"|(\S+))', out or "")
+    return tuple(sorted({Path(a or b) for a, b in dirs}))
+
+
+def claude_is_running() -> bool:
+    if os.name != "nt":
+        return False
+    import subprocess
+    try:
+        out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq claude.exe", "/FO", "CSV", "/NH"], capture_output=True,
+                             text=True, timeout=15, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return "claude.exe" in (out or "").lower()
+
+
+def claude_dirs(create: bool = False, running: bool = True) -> list[Path]:
+    """The folders the Claude desktop app reads claude_desktop_config.json from (Windows, in this order):
+    the running app's --user-data-dir; CLAUDE_USER_DATA_DIR; for each Microsoft Store package (Claude_*,
+    AnthropicPBC.Claude_*) %LOCALAPPDATA%\\Claude-Data\\<package family name, lower case> once the app moved its data
+    there (current builds; the old folder then holds a .user-data-left.<name> marker), else the package's
+    LocalCache\\Roaming\\Claude (older builds); %LOCALAPPDATA%\\Claude-3p (the variant on a third-party cloud);
+    %APPDATA%\\Claude (the installer from claude.ai, or when nothing else is found and `create`)."""
+    if sys.platform == "darwin" and not _windows():
+        d = Path.home() / "Library" / "Application Support" / "Claude"
+        return [d] if (d.is_dir() or create) else []
+    if not _windows():
         d = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "Claude"
-        return [d / "claude_desktop_config.json"] if (d.is_dir() or create) else []
+        return [d] if (d.is_dir() or create) else []
+    out: list[Path] = []
+    if running:
+        out += list(claude_running_dirs())
+    if os.environ.get("CLAUDE_USER_DATA_DIR"):
+        out.append(Path(os.environ["CLAUDE_USER_DATA_DIR"]))
+    local = os.environ.get("LOCALAPPDATA")
+    if local:
+        data = Path(local) / "Claude-Data"
+        pkgs = sorted(list((Path(local) / "Packages").glob("Claude_*")) +
+                      list((Path(local) / "Packages").glob("AnthropicPBC.Claude_*")))
+        for pkg in pkgs:
+            name = pkg.name.lower()
+            old = pkg / "LocalCache" / "Roaming" / "Claude"
+            moved = (data / name).is_dir() or any(f.name.lower() == f".user-data-left.{name}"
+                                                  for f in (old.iterdir() if old.is_dir() else []))
+            out.append(data / name if moved else old)
+        if data.is_dir():
+            out += [d for d in sorted(data.iterdir()) if d.is_dir() and d.name.lower().startswith(("claude_",
+                                                                                                    "anthropicpbc"))]
+        if (Path(local) / "Claude-3p").is_dir():
+            out.append(Path(local) / "Claude-3p")
     appdata = os.environ.get("APPDATA")
     if appdata:
         d = Path(appdata) / "Claude"
-        if d.is_dir() or create:
-            out.append(d / "claude_desktop_config.json")
+        if d.is_dir() or (create and not out):
+            out.append(d)
+    seen, uniq = set(), []
+    for d in out:
+        k = _norm(d)
+        if k not in seen:
+            seen.add(k)
+            uniq.append(d)
+    return uniq
+
+
+def claude_stale_files() -> list[Path]:
+    """Configuration files the app no longer reads (Store builds that moved to Claude-Data): ls6t removes its entries
+    there so they do not mislead."""
     local = os.environ.get("LOCALAPPDATA")
-    if local:
-        for pkg in sorted((Path(local) / "Packages").glob("Claude_*")):
-            d = pkg / "LocalCache" / "Roaming" / "Claude"
-            if d.is_dir():
-                out.append(d / "claude_desktop_config.json")
+    if not _windows() or not local:
+        return []
+    active = {_norm(d) for d in claude_dirs(running=False)}
+    out = []
+    for pkg in sorted((Path(local) / "Packages").glob("*Claude_*")):
+        old = pkg / "LocalCache" / "Roaming" / "Claude"
+        if _norm(old) not in active and (old / "claude_desktop_config.json").exists():
+            out.append(old / "claude_desktop_config.json")
     return out
+
+
+def claude_files(create: bool = False) -> list[Path]:
+    return [d / "claude_desktop_config.json" for d in claude_dirs(create)]
 
 
 def codex_file() -> Path:
@@ -103,6 +181,7 @@ def detect() -> dict:
         found["claude"].append(str(p.parent))
     local = os.environ.get("LOCALAPPDATA")
     if os.name == "nt" and local:
+        found["claude"] += [str(p) for p in (Path(local) / "Packages").glob("AnthropicPBC.Claude_*")]
         if (Path(local) / "AnthropicClaude").is_dir():
             found["claude"].append(str(Path(local) / "AnthropicClaude"))
         for pat in ("OpenAI.ChatGPT*", "OpenAI.Codex*"):
@@ -344,16 +423,34 @@ def connect(clients: list, python: str, sim: bool = False, main: bool = True, te
                         notes.append(n)
                     rep["backup"] = _str(write_json(path, cfg))
                 rep.update(ok=True, notes=notes)
+                if client == "claude" and claude_is_running():
+                    rep["warning"] = ("the Claude app is running and rewrites this file when it quits: quit it fully "
+                                      "(tray icon > Quit), then run `ls6t connect claude` again")
             except (OSError, ValueError) as exc:
                 rep.update(ok=False, error=f"{type(exc).__name__}: {exc}: left unchanged; add ls6t by hand (INSTALL.md)")
             reports.append(rep)
+        if client == "claude":
+            for stale in claude_stale_files():          # a folder the app no longer reads: take ours out
+                try:
+                    cfg = read_json(stale)
+                    gone = []
+                    for name in (ENTRY, SIM_ENTRY):
+                        cfg, g = remove_server(cfg, name, python)
+                        if g:
+                            gone.append(name)
+                    if gone:
+                        write_json(stale, cfg)
+                        reports.append({"client": client, "app": LABELS[client], "file": str(stale), "ok": True,
+                                        "notes": [f"removed {', '.join(gone)}: Claude no longer reads this file"]})
+                except (OSError, ValueError):
+                    pass
     return reports
 
 
 def disconnect(clients: list, python: str) -> list[dict]:
     reports = []
     for client in clients:
-        for path in files(client):
+        for path in files(client) + (claude_stale_files() if client == "claude" else []):
             if not path.exists():
                 continue
             rep = {"client": client, "app": LABELS[client], "file": str(path), "removed": []}
@@ -411,3 +508,103 @@ def status(python: str | None = None) -> dict:
                                for n in (ENTRY, SIM_ENTRY) if n in servers}
         out[client] = {"app": LABELS[client], "found": found[client], "files": entries}
     return out
+
+
+# --------------------------------------------------------------------------------------------- does it start?
+
+def _entries(client: str) -> list:
+    out = []
+    for p in files(client):
+        try:
+            if client == "codex":
+                servers = (tomllib.loads(p.read_text(encoding="utf-8")).get("mcp_servers") or {}) \
+                    if (tomllib and p.exists()) else {}
+            else:
+                servers = read_json(p).get("mcpServers") or {}
+        except (OSError, ValueError):
+            continue
+        if isinstance(servers.get(ENTRY), dict):
+            out.append((p, servers[ENTRY]))
+    return out
+
+
+def handshake(command: str, args: list, env: dict | None = None, timeout_s: float = 60.0) -> dict:
+    """Starts an MCP server as an app would (stdio) and asks for its tools: {ok, seconds, tools | error, stderr}."""
+    import subprocess
+    import threading
+    t0 = time.monotonic()
+    full_env = {**os.environ, **{k: str(v) for k, v in (env or {}).items()}}
+    try:
+        proc = subprocess.Popen([command, *args], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, env=full_env, text=True, encoding="utf-8",
+                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0)
+    except OSError as exc:
+        return {"ok": False, "error": f"cannot start {command}: {exc}"}
+    lines: list = []
+    reader = threading.Thread(target=lambda: lines.extend(iter(proc.stdout.readline, "")), daemon=True)
+    reader.start()
+
+    def send(obj):
+        proc.stdin.write(json.dumps(obj) + "\n")
+        proc.stdin.flush()
+
+    def wait_for(mid):
+        while time.monotonic() - t0 < timeout_s:
+            for ln in list(lines):
+                try:
+                    msg = json.loads(ln)
+                except ValueError:
+                    continue
+                if msg.get("id") == mid:
+                    return msg
+            if proc.poll() is not None:
+                return None
+            time.sleep(0.05)
+        return None
+
+    out: dict = {"command": command, "args": args}
+    try:
+        send({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+              "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                         "clientInfo": {"name": "ls6t-connect-check", "version": "1"}}})
+        init = wait_for(1)
+        if not init or "result" not in init:
+            raise RuntimeError("no answer to initialize" if not init else f"initialize: {init.get('error')}")
+        out["initialize_s"] = round(time.monotonic() - t0, 2)
+        send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        send({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+        tl = wait_for(2)
+        if not tl or "result" not in tl:
+            raise RuntimeError("no answer to tools/list")
+        out.update(ok=True, seconds=round(time.monotonic() - t0, 2),
+                   tools=[t["name"] for t in tl["result"].get("tools", [])])
+    except (RuntimeError, OSError, ValueError) as exc:
+        out.update(ok=False, error=str(exc))
+    finally:
+        try:
+            proc.kill()
+            _, err = proc.communicate(timeout=5)
+        except (OSError, subprocess.SubprocessError):
+            err = ""
+        if not out.get("ok"):
+            out["stderr"] = (err or "")[-3000:]
+    return out
+
+
+def check(clients: list | None = None) -> dict:
+    """For each app: which file ls6t's entry is in, and whether that entry's server starts and lists its tools."""
+    res = {}
+    for client in clients or CLIENTS:
+        ents = _entries(client)
+        if not ents:
+            res[client] = {"app": LABELS[client], "ok": False,
+                           "error": "no 'ls6t' entry in " + (", ".join(str(p) for p in files(client)) or "any file") +
+                                    f": run `ls6t connect {client}`"}
+            continue
+        p, e = ents[0]
+        r = handshake(e.get("command", ""), e.get("args") or [], e.get("env") or {})
+        res[client] = {"app": LABELS[client], "file": str(p), **r}
+        if client == "claude":
+            res[client]["claude_running"] = claude_is_running()
+            res[client]["running_app_reads"] = [str(d) for d in claude_running_dirs()]
+    return res

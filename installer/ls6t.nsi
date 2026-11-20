@@ -184,7 +184,7 @@ SectionEnd
 !insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
   !insertmacro MUI_DESCRIPTION_TEXT ${SecCore} "The ls6t commands, the MCP server, a private Python with every package, the guides and the LabSpec scripts (in $PROFILE\ls6t\vbs)."
   !insertmacro MUI_DESCRIPTION_TEXT ${SecApps} "Adds the 'ls6t' MCP server to the apps ticked (each file is backed up first; your other servers and ls6t settings are kept). The apps found on this PC are ticked. Later: ls6t connect."
-  !insertmacro MUI_DESCRIPTION_TEXT ${SecClaude} "Claude desktop app: claude_desktop_config.json."
+  !insertmacro MUI_DESCRIPTION_TEXT ${SecClaude} "Claude desktop app: claude_desktop_config.json, where the app reads it (Microsoft Store builds: %LOCALAPPDATA%\Claude-Data\claude_...). Quit Claude (tray icon > Quit) before installing: it rewrites the file when it quits."
   !insertmacro MUI_DESCRIPTION_TEXT ${SecCodex} "ChatGPT desktop app, Codex CLI and Codex IDE extension (they share %USERPROFILE%\.codex\config.toml)."
   !insertmacro MUI_DESCRIPTION_TEXT ${SecGemini} "Gemini CLI: %USERPROFILE%\.gemini\settings.json. (The Gemini app and ChatGPT on the web take only internet servers and cannot use ls6t.)"
   !insertmacro MUI_DESCRIPTION_TEXT ${SecPath} "Lets any new PowerShell window run ls6t, ls6t-mcp and ls6t-typelib."
@@ -263,6 +263,8 @@ Function .onInit
     StrCpy $R9 "1"
   ${EndIf}
   !insertmacro FoundGlob "$LOCALAPPDATA\Packages\Claude_*"
+  !insertmacro FoundGlob "$LOCALAPPDATA\Packages\AnthropicPBC.Claude_*"
+  !insertmacro FoundGlob "$LOCALAPPDATA\Claude-Data\claude_*"
   !insertmacro TickIf ${SecClaude}
   ; ChatGPT desktop app / Codex
   StrCpy $R9 "0"

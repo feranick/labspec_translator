@@ -1187,3 +1187,39 @@ def test_camera_by_name():
     assert api.study_format()["profile"]["cameras"] == {"top": 0, "side": 1}
     from labspec_translator import mcp_server
     assert "NFActiveX" in mcp_server.INSTRUCTIONS
+
+
+def test_claude_desktop_config_folders(tmp_path, monkeypatch):
+    from labspec_translator import clients as C
+    local, roaming = tmp_path / "Local", tmp_path / "Roaming"
+    monkeypatch.setattr(C, "_windows", lambda: True)
+    monkeypatch.setattr(C, "claude_running_dirs", lambda: ())
+    monkeypatch.setattr(C, "claude_is_running", lambda: False)
+    monkeypatch.setenv("LOCALAPPDATA", str(local))
+    monkeypatch.setenv("APPDATA", str(roaming))
+    monkeypatch.delenv("CLAUDE_USER_DATA_DIR", raising=False)
+    assert C.claude_dirs(create=True) == [roaming / "Claude"]               # no Store app: the classic folder
+    old = local / "Packages" / "Claude_pzs8sxrjxfjjc" / "LocalCache" / "Roaming" / "Claude"
+    old.mkdir(parents=True)
+    assert C.claude_dirs(create=True) == [old]                              # a Store build that has not moved
+    py = str(tmp_path / "python.exe")
+    (old / "claude_desktop_config.json").write_text(json.dumps({"mcpServers": {"ls6t": {"command": py}}}))
+    (old / ".user-data-left.claude_pzs8sxrjxfjjc").write_text("")
+    new = local / "Claude-Data" / "claude_pzs8sxrjxfjjc"
+    assert C.claude_dirs(create=True) == [new]                              # moved: Claude-Data
+    reps = C.connect(["claude"], py)
+    assert C.read_json(new / "claude_desktop_config.json")["mcpServers"]["ls6t"]["command"] == py
+    assert C.read_json(old / "claude_desktop_config.json")["mcpServers"] == {}   # the stale entry taken out
+    assert any("no longer reads" in " ".join(r.get("notes", [])) for r in reps)
+    monkeypatch.setattr(C, "claude_running_dirs", lambda: (tmp_path / "custom",))
+    assert C.claude_dirs()[0] == tmp_path / "custom"                        # the running app's --user-data-dir
+
+
+def test_connect_check_starts_the_server(tmp_path, monkeypatch):
+    pytest.importorskip("mcp")
+    from labspec_translator import clients as C
+    r = C.handshake(sys.executable, ["-m", "labspec_translator.mcp_server"],
+                    {"PYTHONPATH": os.pathsep.join(sys.path), "LS6T_MODE": "sim"})
+    assert r["ok"] and "study_format" in r["tools"], r
+    r = C.handshake(sys.executable, ["-c", "import sys; sys.exit('boom')"])
+    assert not r["ok"] and "boom" in r["stderr"]

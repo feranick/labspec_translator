@@ -233,7 +233,7 @@ ls6t's MCP server works with every app that starts local (stdio) MCP servers. On
 
 | `ls6t connect` name | App | Its MCP file |
 |---|---|---|
-| `claude` | Claude desktop app | `%APPDATA%\Claude\claude_desktop_config.json` (Microsoft Store version: `%LOCALAPPDATA%\Packages\Claude_...\LocalCache\Roaming\Claude\`) |
+| `claude` | Claude desktop app | `claude_desktop_config.json` in the folder the app reads: Microsoft Store builds (current) `%LOCALAPPDATA%\Claude-Data\claude_<id>\`; older Store builds `%LOCALAPPDATA%\Packages\Claude_<id>\LocalCache\Roaming\Claude\`; the installer from claude.ai `%APPDATA%\Claude\` |
 | `codex` | ChatGPT desktop app, Codex CLI and Codex IDE extension: they share one file | `%USERPROFILE%\.codex\config.toml` (or `%CODEX_HOME%`) |
 | `gemini` | Gemini CLI | `%USERPROFILE%\.gemini\settings.json` |
 
@@ -242,6 +242,7 @@ instrument on the internet, so they cannot use it; use Gemini CLI or the ChatGPT
 
 ```powershell
 ls6t connect                 # which apps are here, and which already run ls6t
+ls6t connect check           # start each app's ls6t entry as the app would: its tools, or why it fails
 ls6t connect auto            # add "ls6t" to every app found (or name them: ls6t connect codex gemini)
 ls6t connect auto --sim      # also "ls6t-sim": the same tools on the simulator, to practise
 ls6t connect codex --remove  # take this install's entries out again
@@ -253,8 +254,11 @@ kept. Every entry gets the same `LS6T_HOME` and `LS6T_OUT`, so all apps share on
 one profile: two apps cannot drive the instrument at the same time. The entry runs the Python that ran `ls6t connect`
 (`python.exe -m labspec_translator.mcp_server`).
 
-Then quit the app completely (Claude: right-click its icon in the taskbar's notification area, *Quit*) and start it
-again; the ls6t tools appear in a new chat or session. Notes per app:
+**Quit the Claude app before** `ls6t connect claude` (or the installer): it rewrites its configuration file when it
+quits, which would undo the change (right-click its icon in the taskbar's notification area, *Quit*). The running
+app's `--user-data-dir` says which folder it reads; `ls6t connect` finds it (and the Store builds' newer
+`Claude-Data` folder) and removes ls6t's entries from folders the app no longer reads. Then start the app again; the
+ls6t tools appear in a new chat or session (Claude: the tools / connectors menu). Notes per app:
 
 - **ChatGPT desktop app / Codex**: tool calls may wait up to an hour for the operator's answer in LabSpec, so the entry
   sets `tool_timeout_sec = 3600` (and `startup_timeout_sec = 60`). A report from 2026 says local servers' tools may
