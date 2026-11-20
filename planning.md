@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.20.15)
+## Architecture (version 2026.11.20.16)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -244,6 +244,18 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   caps, seconds <= limits.max_laser_on_s = 60, the operator's Yes each time), instrument laser_on/laser_off, status
   laser_open/laser_left_s; hardware_test routes `laser` through api.laser. Risk left: if the VBS script dies with an
   error while open, the shutter stays open (the operator closes it in LabSpec; TESTING T5b.7). 100 tests.
+- 2026-11-20, 2026.11.20.16: Nicola sent LabSpec's OLConfig.ini (C:\HORIBA\LabSpec_6_8_1, Latin-1, numeric hash keys;
+  134243433 = internal name, 1835884910 = display name; Names[i]/Values[i] in sub-sections <motor>_<config>; active
+  configuration Hardware_Devices OLService[-605497649] = -355149504 = XploRA Plus). It names the cameras (Top = 0,
+  Internal = 1, IDS U3-388xLE-C and U3-356xXLE-C), objectives with NA (0.9/0.25/0.1) and arrays 85.6x58.3,
+  863x590, 1713x1170 (field of view in µm, inferred), motors discovery missed (LaserPol Circular/Horizontal/
+  Vertical, RamanPol Horizontal/Vertical/None, LaserFilter Notch/Edge/PL, FilterV, DuoPos Camera/Mirror/DuoScan,
+  Output Camera/Trinocular, IlluminatorV Dark/Bright field, Microscope, LaserSwitch, E-Cal_Neon, Laser position
+  VISU, Slit 0 µm), and per-grating device arrays (198.8, 12.2, 1.047e-5, 7.7-8...: likely focal length, angle,
+  Koeff, Zero: Q41). labspec_ini.py parses it (read only); import_discovery/auto_profile enrich the profile
+  (video.cameras when unset, objectives_info, labspec_config); `ls6t profile ini`; discovery's name list adds those
+  motors. Test fixture: a reduced made-up ini (the real file, with camera serial numbers, is not in the public
+  repo). Ideas: setup keys for the polarisers; the e-Cal neon lamp for the spectral zero. 101 tests.
 
 ## To do next
 

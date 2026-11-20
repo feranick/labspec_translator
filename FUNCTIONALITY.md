@@ -1,6 +1,6 @@
 # labspec-translator (ls6t): what it can do
 
-This is the complete list of functions in version 2026.11.20.15. It covers:
+This is the complete list of functions in version 2026.11.20.16. It covers:
 
 - what a study can ask for;
 - the tools an LLM sees;
@@ -12,7 +12,7 @@ How it all fits together: [README.md](README.md). Installation: [INSTALL.md](INS
 [TESTING.md](TESTING.md).
 
 Everything below runs on the built-in simulator and is covered by tests and benchmarks. Nothing has run on the
-instrument yet: TESTING.md lists what remains to be confirmed there (Q1–Q40).
+instrument yet: TESTING.md lists what remains to be confirmed there (Q1–Q41).
 
 ---
 
@@ -94,6 +94,7 @@ trusting numbers, the safety rules and the polling etiquette.
 | `ls6t instrument config list / save NAME / load NAME [--show]` | LabSpec's whole configuration as `LS6T_HOME\configs\NAME.ini` (`SaveConfig` / `LoadConfig`); loading asks the operator; `--show` opens LabSpec's dialog. Maintainer only |
 | `ls6t bridge install [--dest DIR]` | Write the LabSpec scripts for this PC: the bridge, the discovery, and the optional script-motor logger |
 | `ls6t bridge call VERB key=value ... [--laser]` | One bridge command, for the maintainer's tests |
+| `ls6t profile ini [FILE]` | What LabSpec's own configuration (`OLConfig.ini`) says: the instrument, cameras (names, numbers, models), objectives (NA, field of view), every motor and its positions. Profiles made from discovery take the camera names and objectives from it |
 | `ls6t profile show / default / import DUMP / set KEY VALUE` | The machine profile: view, create, import the discovery, change one value. Until a person does, the profile is built automatically from the inventory the bridge records when it starts (lasers capped at 10 %, no laser shutter) |
 | `ls6t alignment status` / `record REQUEST [--study] [--attempt]` | Alignment state; record a baseline after AutoAlignment (person only) |
 | `ls6t spot status / forget [--objective --laser]` | The beam's offsets |
@@ -252,5 +253,5 @@ profile. The shutter mode is restored on every path.
   - `si_calibration`, `graphene_map`, `extended_range`, `saturation`, `series`;
   - `guided_focus`, `focus_scan`, `spot_raman`, `spot_video`;
   - `depth_profile`, `calibration_zero`, `white_light`, `native_map`, `operator_stop`.
-- **Test suite** (`pytest`, 100 tests), which also checks the LabSpec scripts' structure.
+- **Test suite** (`pytest`, 101 tests), which also checks the LabSpec scripts' structure.
 - **Instrument tests** with the maintainer: [TESTING.md](TESTING.md).

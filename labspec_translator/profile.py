@@ -1,5 +1,5 @@
 """profile.py — the machine profile: what the instrument has (from the discovery script) and the limits a person sets.
-Version: 2026.11.20.15
+Version: 2026.11.20.16
 
 The profile is a JSON file (LS6T_PROFILE, default ~/ls6t/profile.json). Studies never change it: an LLM can only
 ask for what the profile allows. Without a file, the built-in XploRA defaults below apply and every result says so
@@ -398,6 +398,8 @@ def import_discovery(text: str, base: dict | None = None) -> tuple[dict, list[st
     if config_params:
         notes.append(f"{len(config_params)} script configuration parameter(s) (GetConfigParam): "
                      + ", ".join(str(c["name"]) for c in config_params[:10]))
+    from . import labspec_ini
+    labspec_ini.enrich(prof, d.get("labspec_path"), notes)
     prof["discovered"] = {"time": d.get("time"), "labspec_path": d.get("labspec_path"),
                           "motors": sorted(names), "methods": methods, "config_params": config_params}
     return prof, notes
@@ -430,6 +432,7 @@ def summary(prof: dict) -> dict:
             "alignment_lasers": sorted(prof.get("alignment", {}).get("baselines", {})),
             "laser_shutter": bool(prof.get("motors", {}).get("laser_shutter")),
             "cameras": prof.get("video", {}).get("cameras") or {},
+            "objectives_info": prof.get("objectives_info") or {},
             "laser_limits": {k: {"max_filter_pct": v.get("max_filter_pct", 100), "power_mw": v.get("power_mw")}
                              for k, v in prof.get("lasers", {}).items()}}
 

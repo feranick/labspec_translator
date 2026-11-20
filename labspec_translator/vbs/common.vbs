@@ -283,7 +283,9 @@ Function DiscoverTo(outPath, withPopup, withProbes)
     names = Array("Laser", "Grating", "Filter", "Density", "ND", "Attenuator", "Objective", "Objectives", _
                   "Microscope", "Nosepiece", "Hole", "Slit", "Spectro", "Premono", "X", "Y", "Z", "XT", "YT", _
                   "XL", "YL", "Polarizer", "Raman Polarizer", "Laser Polarizer", "DetectorShutter", _
-                  "Shutter", "LaserShutter", "Laser Shutter", "Laser shutter")
+                  "Shutter", "LaserShutter", "Laser Shutter", "Laser shutter", "LaserPol", "RamanPol", _
+                  "LaserFilter", "FilterV", "DuoPos", "Output", "Microscope", "IlluminatorV", "LaserSwitch", _
+                  "Fiber", "E-Cal_Neon")
     For i = 0 To UBound(names)
         name = names(i)
         size = MotorSize(name)

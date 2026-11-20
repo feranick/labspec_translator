@@ -1,5 +1,5 @@
 """sim.py — a simulated LabSpec + XploRA behind the same bridge protocol as ls6t_bridge.vbs.
-Version: 2026.11.20.15
+Version: 2026.11.20.16
 
 It answers every verb of the bridge with the same keys, so the runner, the checks and the MCP server are tested
 without the instrument (LS6T_MODE=sim, and the tests). The simulated sample is a silicon wafer with a graphene
@@ -58,6 +58,7 @@ class SimLabSpec:
         self.halted = False
         self.last_error = ""
         self.live = False
+        self.camera = 0
         self.laser_until = 0.0
         self.next_id = 100
         self.views: dict = {}
@@ -226,7 +227,7 @@ class SimLabSpec:
                 "slit_um": self.m["Slit"]["value"], "x_um": self.m["X"]["value"], "y_um": self.m["Y"]["value"],
                 "z_um": self.m["Z"]["value"], "exposure_s": self.exposure, "accumulations": self.accumulations,
                 "shutter_mode": 0, "halted": int(self.halted), "last_error": self.last_error,
-                "live_video": int(self.live), "camera": 0, "laser_open": int(time.time() < self.laser_until)}
+                "live_video": int(self.live), "camera": self.camera, "laser_open": int(time.time() < self.laser_until)}
 
     def v_laser(self, p):
         state = p.get("state")
@@ -256,9 +257,11 @@ class SimLabSpec:
         action = p.get("action", "status")
         if action not in ("on", "off", "status"):
             return {"ok": 0, "error": "camera action: on, off or status"}
+        if p.get("camera") not in (None, ""):
+            self.camera = int(float(p["camera"]))
         if action != "status":
             self.live = action == "on"
-        return {"live": int(self.live), "video_id": 900 if self.live else 0, "camera": 0}
+        return {"live": int(self.live), "video_id": 900 if self.live else 0, "camera": self.camera}
 
     def v_last_error(self, p):
         return {"info": self.last_error}

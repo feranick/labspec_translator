@@ -1310,3 +1310,21 @@ def test_mcp_instrument_takes_a_camera_number():
     res = asyncio.run(srv.call_tool("instrument", {"action": "camera_on", "camera": 1}))
     text = str(res)
     assert "is_error=False" in text and "live" in text and "camera_on failed" not in text, text
+
+
+def test_labspec_ini_completes_the_profile(monkeypatch):
+    from labspec_translator import labspec_ini as L
+    ini = ROOT / "tests" / "data" / "OLConfig_min.ini"
+    s = L.summary(L.read(ini))
+    assert s["instrument"] == "XploRA Plus"
+    assert s["cameras"]["Internal"]["number"] == 1 and s["motors"]["LaserPol"] == ["Circular", "Horizontal", "Vertical"]
+    assert s["objectives"]["x100_VIS"] == {"magnification": 100.0, "na": 0.9, "field_um": [85.56, 58.34]}
+    monkeypatch.setenv("LS6T_LABSPEC_INI", str(ini))
+    home = config.home()
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "discovery_latest.txt").write_bytes((ROOT / "tests" / "data" / "discovery_xplora_plus.txt").read_bytes())
+    prof = P.load()
+    assert prof["video"]["cameras"] == {"top": 0, "internal": 1}
+    assert prof["objectives_info"]["x10_VIS"]["na"] == 0.25 and "x5_VIS" in prof["objectives_info"]
+    assert any("cameras from LabSpec" in n for n in prof["auto"]["notes"])
+    assert api.instrument("camera_on", camera="internal")["camera_name"] == "internal"
