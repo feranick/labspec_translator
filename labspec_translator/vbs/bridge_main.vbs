@@ -134,11 +134,35 @@ Sub Fail(res, msg)
 End Sub
 
 Function ErrText(what)
+    Dim t
     If Err.Number <> 0 Then
-        ErrText = what & ": " & Err.Description & " (" & Err.Number & ")"
+        t = what & ": " & Err.Description & " (" & Err.Number & ")"
     Else
-        ErrText = what
+        t = what
     End If
+    ErrText = t & LabSpecErrorInfo()
+End Function
+
+' LabSpec's own last error (GetLastErrorInfo: in the ActiveX type library, not in the 2018 manual), if it has one
+Function LabSpecErrorInfo()
+    Dim v, i, s
+    LabSpecErrorInfo = ""
+    On Error Resume Next
+    v = LabSpec.GetLastErrorInfo()
+    If Err.Number <> 0 Then
+        Err.Clear
+        Exit Function
+    End If
+    s = ""
+    If IsArray(v) Then
+        For i = LBound(v) To UBound(v)
+            s = s & " " & CStr(v(i))
+        Next
+    Else
+        s = CStr(v)
+    End If
+    Err.Clear
+    If Trim(s) <> "" And Trim(s) <> "0" Then LabSpecErrorInfo = " [LabSpec: " & Trim(s) & "]"
 End Function
 
 ' ---------------------------------------------------------------- waiting for motors

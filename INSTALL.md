@@ -120,7 +120,8 @@ It only reads the file: nothing starts or moves.
 
 - `ls6t-typelib --format markdown --out labspec_commands.md` writes the list to a file.
 - `--path` reads another file (a `.tlb`, or LabSpec's `.exe`).
-- It also runs on its own: `python typelib.py`.
+- It also runs on its own: `python typelib.py`, and on any system: copy `NFActiveX.ocx` to a Mac or Linux PC and
+  run `ls6t-typelib --path NFActiveX.ocx` there (it reads the file itself; no Windows needed).
 
 ## 7. The machine profile
 

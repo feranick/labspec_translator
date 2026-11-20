@@ -1,5 +1,6 @@
 """Tests for labspec-translator: format, plan, protocol, analysis, runs on the simulator, the LabSpec scripts."""
 import json
+import os
 import re
 import time
 from pathlib import Path
@@ -873,3 +874,12 @@ def test_typelib_cli_off_windows(capsys):
     from labspec_translator import typelib
     rc = typelib.main(["--list"])
     assert rc == 1 and "no LabSpec ActiveX" in capsys.readouterr().out
+
+
+@pytest.mark.skipif(not os.environ.get("LS6T_TEST_OCX"), reason="set LS6T_TEST_OCX to LabSpec's NFActiveX.ocx")
+def test_typelib_reads_labspec_ocx():
+    from labspec_translator import typelib
+    lib = typelib.read(os.environ["LS6T_TEST_OCX"])
+    names = {m["name"] for t in lib["types"] for m in t["methods"]}
+    assert {"Acq", "GetAcqID", "MoveMotor", "SetMappingParams", "MoveXY"} <= names
+    assert lib["reader"].startswith("ls6t")

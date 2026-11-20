@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.19.8)
+## Architecture (version 2026.11.19.9)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -114,6 +114,23 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   or registered type libraries naming LabSpec/HORIBA; lists types, methods (signatures, in/out/optional, dispid,
   doc), properties, enum values; marks methods not in the 2018 manual (NEW) and words of interest; text, markdown,
   JSON. Not run on Windows yet (TESTING T1.3, Q34). 77 tests.
+- 2026-11-20, 2026.11.19.9: Nicola pulled NFActiveX.ocx from the Raman PC (32-bit, 2021-03-11, 995 kB; 64-bit,
+  2021-10-07, 865 kB; both "NFActiveX ActiveX Control Module" 1.0.0.1). ls6t-typelib now reads the TYPELIB resource
+  itself (PE resource tree + MSFT format, pure Python; Windows loaders only as fallback). Both builds carry the same
+  type library: NFACTIVEXLib 1.0 {8E2C42D5-A3C9-4D8D-996C-DD2D669F59DA}, MIDL 7.00.0500, 2019-01-02; dispinterface
+  _DNFActiveX (60 methods), _DNFActiveXEvents (no events: polling stays the only way), coclass NFActiveX.
+  In the manual: 45 (Autofocus is spelled AutoFocus). Not in this library though documented: GetValueEx,
+  SetExtendedVideo. Not in the manual (signatures in ~/Desktop/activeX/NFActiveX_commands.md):
+  GetLastErrorInfo() -> VARIANT (now appended to the bridge's error messages); SetScriptPath(path);
+  GetConfigParam(names, units, types, values) / SetConfigParam(description, names, units, types, values, show)
+  (look like script configuration parameters); SetMotorInfo(position, state) (script-controlled motors);
+  SaveConfig(ini, show) / LoadConfig(ini, show) (a whole configuration: could save and restore the instrument's
+  set-up around a request); Translate(text); GUI(mode, name, param, id, value*, state, format), OperVar(mode,
+  index, value*, param), PutGUI(index, value, mode), PutArrGUI(index, value*, mode) (generic access to the
+  interface's controls/variables: possibly the way to calibration settings, lamp, etc., semantics unknown: ask
+  HORIBA before trying); OpenCL(...) (GPU processing); GetValueSimplePart(id, name, value, vtype, start, size)
+  (chunked data reads: useful for exporting large native maps faster than GetValue); InitNA(root, status).
+  No method named for AutoAlignment, AutoCalibration, zero/coefficient, lamp or map progress.
 
 ## To do next
 

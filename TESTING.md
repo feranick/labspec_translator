@@ -12,7 +12,7 @@ stops and cancel on the simulator, and `ls6t bench` gives known answers. What re
 LabSpec and hardware. The plan goes from no laser and no motion to Claude driving a full map, in stages. Each stage
 starts only when the previous one passed.
 
-Version under test: 2026.11.19.8 (bridge protocol 1).
+Version under test: 2026.11.19.9 (bridge protocol 1).
 
 ---
 
@@ -85,7 +85,7 @@ The vendor manual (2018) leaves these open. Each is answered by the test listed.
 | Q30 | Native maps: does `Acq(ACQ_SPECTRAL_IMAGE, -1, ...)` use the interface's exposure and accumulations set by `PutValue`, or does it need them in `Acq` (`mapping.acq_time`)? Which spectral window does it use? | T6.7 |
 | Q31 | Native maps: does `GetAcqID` return the map when it ends, and does `ACQ_CANCEL` stop it? | T6.7 |
 | Q32 | Native maps: in which order are the values in `GetValue(map, "Data")` (`mapping.data_order`), and how long does writing out a 50 × 50 map take? Does `Save(map, "...txt", "txt")` write LabSpec's text export? | T6.7 |
-| Q34 | Which commands does the installed LabSpec's ActiveX offer beyond the 2018 manual (AutoAlignment, AutoCalibration, calibration settings, lamp, map progress)? | T1.3 |
+| Q34 | Which commands does the installed LabSpec's ActiveX offer beyond the 2018 manual? **Partly answered (2026-11-20)** from the instrument's `NFActiveX.ocx`: 15 methods not in the manual (planning.md), none named for alignment, calibration, lamp or map progress; no events. To ask HORIBA: what `GUI`, `PutGUI`, `PutArrGUI`, `OperVar`, `GetConfigParam`/`SetConfigParam`, `LoadConfig`/`SaveConfig` and `GetLastErrorInfo` do, and whether the VBS `LabSpec` object has the same methods | T1.3 |
 | Q33 | Is SWIFT available on this XploRA (`GetValue SWIFT`), and how much faster is it? Time per point native vs point by point (`mapping.native_point_s`) | T6.7 |
 | Q25 | How much does the beam drift from LabSpec's marker over a day, between objectives, after AutoAlignment? | T5e.3 |
 | Q21 | Does the focus scan find the same focus as the maintainer (and as LabSpec's autofocus) on Si and on a real sample? Is 1 µm a good step at x100, and what at x50 and x10? | T6.5 |

@@ -298,6 +298,9 @@ Function DiscoverTo(outPath, withPopup)
     d("video.id_now") = LabSpec.Video(LS_GET_VIDEO_ID)          ' > 0 when the live video runs
     d("video.error") = Err.Description
     Err.Clear
+    ret = LabSpec.GetLastErrorInfo()                            ' not in the 2018 manual; in the type library
+    d("selftest.last_error_info") = Bit(Err.Number = 0)
+    Err.Clear
     LabSpec.Message "ls6t discovery running", LS_MB_STATUS_BAR
     d("selftest.status_bar") = Bit(Err.Number = 0)
     Err.Clear

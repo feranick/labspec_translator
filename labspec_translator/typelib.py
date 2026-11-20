@@ -1,5 +1,5 @@
 """typelib.py — read LabSpec's ActiveX type library and print every command it offers (read-only).
-Version: 2026.11.19.8
+Version: 2026.11.19.9
 
 LabSpec 6's ActiveX control (NFActiveX.ocx; NGSActiveX.ocx for LabSpec 5) carries a type library: the list of
 every method and property of the installed version, with parameter names and types. Reading it loads no control,
@@ -7,9 +7,10 @@ starts nothing, and moves nothing. The list shows what the 2018 automation manua
 or never documented (AutoAlignment, AutoCalibration, calibration settings, lamp, map progress...). Each method is
 marked 'documented' (in the 2018 manual) or 'NEW', and names with words of interest are flagged.
 
-Windows only (it uses the system's type-library loader through comtypes, or pywin32 if comtypes is missing).
-Standalone: `python typelib.py [--path FILE] [--format text|markdown|json] [--out FILE]`, or `ls6t-typelib` once the
-package is installed. Without --path it looks for the control in LabSpec's usual folders and in the registry.
+It runs anywhere: the type library is read straight from the file (the TYPELIB resource of the .ocx/.dll/.exe,
+or a .tlb), in pure Python. On Windows, the system's loader (comtypes or pywin32) is the fallback. Standalone:
+`python typelib.py [--path FILE] [--format text|markdown|json] [--out FILE]`, or `ls6t-typelib` once the package
+is installed. Without --path it looks for the control in LabSpec's usual folders and in the registry (Windows).
 """
 from __future__ import annotations
 
@@ -17,6 +18,7 @@ import argparse
 import glob
 import json
 import os
+import struct
 import sys
 
 __all__ = ["KNOWN", "INTEREST", "find_files", "read", "render", "main"]
@@ -122,7 +124,188 @@ def _from_registry() -> list[str]:
     return out
 
 
-# --------------------------------------------------------------------------------------------- reading
+# --------------------------------------------------------------------------------------------- reading: the file itself
+
+def pe_resources(data, rtype="TYPELIB"):
+    """The resources of type `rtype` in a Windows PE file (32 or 64 bit), as bytes: section table, resource tree
+    (type, name, language), data entries."""
+    u16 = lambda o: struct.unpack_from("<H", data, o)[0]
+    u32 = lambda o: struct.unpack_from("<I", data, o)[0]
+    pe = u32(0x3c)
+    assert data[pe:pe+4] == b"PE\0\0", "not a PE file"
+    coff = pe + 4
+    nsec, optsize = u16(coff + 2), u16(coff + 16)
+    opt = coff + 20
+    magic = u16(opt)
+    dd = opt + (96 if magic == 0x10b else 112)
+    rsrc_rva, rsrc_size = u32(dd + 2 * 8), u32(dd + 2 * 8 + 4)
+    secs = []
+    so = opt + optsize
+    for i in range(nsec):
+        s = so + 40 * i
+        vsize, va, rawsize, rawptr = u32(s + 8), u32(s + 12), u32(s + 16), u32(s + 20)
+        secs.append((va, max(vsize, rawsize), rawptr))
+    def rva2off(rva):
+        for va, sz, raw in secs:
+            if va <= rva < va + sz:
+                return rva - va + raw
+        raise ValueError("rva outside sections")
+    base = rva2off(rsrc_rva)
+    def entries(dirofs):
+        n = u16(base + dirofs + 12) + u16(base + dirofs + 14)
+        out = []
+        for i in range(n):
+            e = base + dirofs + 16 + 8 * i
+            name, off = u32(e), u32(e + 4)
+            if name & 0x80000000:
+                no = base + (name & 0x7fffffff)
+                ln = u16(no)
+                key = data[no + 2: no + 2 + 2 * ln].decode("utf-16-le")
+            else:
+                key = name
+            out.append((key, off))
+        return out
+    blobs = []
+    for key, off in entries(0):
+        if key != rtype or not off & 0x80000000:
+            continue
+        for _, off2 in entries(off & 0x7fffffff):
+            for _, off3 in entries(off2 & 0x7fffffff) if off2 & 0x80000000 else [(None, off2)]:
+                de = base + (off3 & 0x7fffffff)
+                rva, size = u32(de), u32(de + 4)
+                o = rva2off(rva)
+                blobs.append(data[o:o + size])
+    return blobs
+
+def parse_msft(b):
+    """An MSFT-format type library (what MIDL writes; the layout Wine documents in typelib.h): header, segment
+    directory, type infos, names, strings, GUIDs, type descriptions; per type its functions (name, dispid, invoke
+    kind, return and parameter types, parameter names and flags, help string) and variables (enum values)."""
+    i32 = lambda o: struct.unpack_from("<i", b, o)[0]
+    u16 = lambda o: struct.unpack_from("<H", b, o)[0]
+    i16 = lambda o: struct.unpack_from("<h", b, o)[0]
+    assert b[:4] == b"MSFT", "not an MSFT type library"
+    posguid, lcid, lcid2, varflags, version, flags, ntypes = (i32(8 + 4 * k) for k in range(7))
+    helpstring = i32(36)
+    nameoffset_lib = i32(56)
+    pos = 0x54
+    if varflags & 0x100:
+        pos += 4
+    tinfo_offs = [i32(pos + 4 * k) for k in range(ntypes)]
+    pos += 4 * ntypes
+    segs = [(i32(pos + 16 * k), i32(pos + 16 * k + 4)) for k in range(15)]
+    (tinfotab, _), _, _, (reftab, _), _, (guidtab, _), _, (nametab, _), (strtab, _), (tdtab, tdlen), _, (custtab, _) = segs[:12]
+    def name(off):
+        if off < 0:
+            return None
+        o = nametab + off
+        ln = i32(o + 8) & 0xff
+        return b[o + 12: o + 12 + ln].decode("latin-1")
+    def string(off):
+        if off < 0:
+            return ""
+        o = strtab + off
+        ln = u16(o)
+        return b[o + 2: o + 2 + ln].decode("latin-1")
+    def guid(off):
+        if off < 0:
+            return ""
+        g = b[guidtab + off: guidtab + off + 16]
+        d1, d2, d3 = struct.unpack_from("<IHH", g)
+        return "{%08X-%04X-%04X-%s-%s}" % (d1, d2, d3, g[8:10].hex().upper(), g[10:16].hex().upper())
+    tnames = {}
+    def tdesc(dt):
+        if dt < 0:
+            return VT.get(dt & 0x7fff, f"vt{dt & 0x7fff}")
+        o = tdtab + dt
+        vt = u16(o) & 0x7fff
+        second = i32(o + 4)
+        if vt in (26, 27):
+            inner = tdesc(second) if second >= 0 and (second >> 16) < 0x7fff else VT.get(second & 0x7fff, "?")
+            return inner + "*" if vt == 26 else f"SAFEARRAY({inner})"
+        if vt == 29:
+            return tnames.get(second, f"userdefined@{second}")
+        return VT.get(vt, f"vt{vt}")
+    # first pass: type names (hreftype of an internal type = its offset in the typeinfo table)
+    for k in range(ntypes):
+        tb = tinfotab + 0x64 * k
+        tnames[0x64 * k] = name(i32(tb + 0x34))
+    lib = {"library": name(nameoffset_lib), "doc": string(helpstring), "guid": guid(posguid),
+           "version": f"{version & 0xffff}.{(version >> 16) & 0xffff}", "types": []}
+    for k in range(ntypes):
+        tb = tinfotab + 0x64 * k
+        tkind = i32(tb) & 0xf
+        memoff = i32(tb + 4)
+        celem = i32(tb + 0x18)
+        cfuncs, cvars = celem & 0xffff, (celem >> 16) & 0xffff
+        t = {"name": tnames[0x64 * k], "kind": TKIND.get(tkind, str(tkind)), "doc": string(i32(tb + 0x3c)),
+             "guid": guid(i32(tb + 0x2c)), "methods": [], "properties": [], "values": []}
+        if (cfuncs or cvars) and memoff >= 0:
+            infolen = i32(memoff)
+            rec = memoff + 4
+            ids = memoff + 4 + infolen
+            for fi in range(cfuncs):
+                reclen = u16(rec)
+                dtype = i32(rec + 4)
+                fkccic = i32(rec + 16)
+                nargs = u16(rec + 20)
+                memid = i32(ids + 4 * fi)
+                fname = name(i32(ids + 4 * (cfuncs + cvars + fi)))
+                optional = reclen - nargs * 12
+                doc = string(i32(rec + 28)) if optional > 28 else ""
+                params = []
+                p0 = rec + reclen - nargs * 12
+                for a in range(nargs):
+                    pd, pn, pf = i32(p0 + 12 * a), i32(p0 + 12 * a + 4), i32(p0 + 12 * a + 8)
+                    params.append({"name": name(pn) or f"p{a}", "type": tdesc(pd),
+                                   "dir": "in/out" if pf & 1 and pf & 2 else ("out" if pf & 2 else "in"),
+                                   "optional": bool(pf & 16)})
+                t["methods"].append({"name": fname, "invoke": INVKIND.get((fkccic >> 3) & 0xf, "method"),
+                                     "returns": tdesc(dtype), "params": params, "dispid": memid, "doc": doc})
+                rec += reclen
+            for vi in range(cvars):
+                reclen = u16(rec)
+                dtype = i32(rec + 4)
+                varkind = u16(rec + 12)
+                offsval = i32(rec + 16)
+                vname = name(i32(ids + 4 * (cfuncs + cvars + cfuncs + vi)))
+                entry = {"name": vname, "type": tdesc(dtype)}
+                if tkind == 0 or varkind == 2:
+                    if offsval < 0:
+                        entry["value"] = offsval & 0x3ffffff
+                    else:
+                        o = custtab + offsval
+                        vtv = u16(o)
+                        entry["value"] = i32(o + 2) if vtv in (3, 22, 19, 23) else u16(o + 2)
+                    t["values"].append(entry)
+                else:
+                    t["properties"].append(entry)
+                rec += reclen
+        lib["types"].append(t)
+    return lib
+
+
+def read_file(path: str) -> dict:
+    """The type library of a .tlb, or of the TYPELIB resource of a PE file (.ocx, .dll, .exe), parsed in Python."""
+    with open(path, "rb") as fh:
+        data = fh.read()
+    if data[:4] == b"MSFT":
+        blobs = [data]
+    elif data[:2] == b"MZ":
+        blobs = pe_resources(data)
+        if not blobs:
+            raise ValueError(f"{path}: no TYPELIB resource")
+    else:
+        raise ValueError(f"{path}: neither a type library nor a Windows executable")
+    lib = parse_msft(blobs[0])
+    lib["file"] = path
+    lib["reader"] = "ls6t (MSFT format)"
+    if len(blobs) > 1:
+        lib["more_typelibs"] = len(blobs) - 1
+    return lib
+
+
+# --------------------------------------------------------------------------------------------- reading: Windows
 
 def _type_name(ti, tdesc) -> str:
     vt = tdesc.vt
@@ -225,9 +408,13 @@ def _read_pywin32(path: str) -> dict:
 
 def read(path: str) -> dict:
     """The type library of `path` as {library, version, guid, types: [{name, kind, methods, properties,
-    values}]}, each method marked documented / new and flagged for words of interest."""
-    if os.name != "nt":
-        raise SystemExit("ls6t-typelib reads Windows type libraries: run it on the instrument PC")
+    values}]}, each method marked documented / new and flagged for words of interest. Read from the file itself;
+    on Windows the system's loader is the fallback."""
+    try:
+        return annotate(read_file(path))
+    except (ValueError, struct.error, IndexError, AssertionError, UnicodeDecodeError) as exc:
+        if os.name != "nt":
+            raise OSError(f"cannot read a type library: {exc}") from exc
     try:
         lib = _read_comtypes(path)
         lib["reader"] = "comtypes"
@@ -329,7 +516,7 @@ def main(argv=None) -> int:
         print("\n".join(paths) if paths else "no LabSpec ActiveX control or type library found: give --path "
                                              "(e.g. the NFActiveX.ocx in LabSpec's folder)")
         return 0 if paths else 1
-    texts, libs = [], []
+    texts, libs, seen = [], [], {}
     for p in paths:
         try:
             lib = read(p)
@@ -337,6 +524,11 @@ def main(argv=None) -> int:
             texts.append(f"{p}: cannot read a type library ({exc})")
             continue
         libs.append(lib)
+        sig = json.dumps([t["methods"] for t in lib["types"]], sort_keys=True)
+        if sig in seen and a.format != "json":
+            texts.append(f"{p}: the same type library as {seen[sig]} ({lib['library']} {lib['version']})")
+            continue
+        seen.setdefault(sig, p)
         if a.format != "json":
             texts.append(render(lib, a.format))
     text = json.dumps(libs, indent=1) if a.format == "json" else "\n\n".join(texts)

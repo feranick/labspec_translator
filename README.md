@@ -16,7 +16,7 @@ it runs **locally**: on the instrument PC, next to the Claude desktop app. It ha
 machines. Unlike the other translators, the backend has no Python API: LabSpec is automated with VBScript
 (*LabSpec 5/6 Automation*, HORIBA, 2018). That is why the bridge script exists.
 
-First instrument: **XploRA** (LabSpec 6, Windows 11). Version 2026.11.19.8.
+First instrument: **XploRA** (LabSpec 6, Windows 11). Version 2026.11.19.9.
 
 **Scope of version 1**
 
@@ -532,7 +532,7 @@ Claude app ──MCP──> ls6t-mcp ──> request folder + runner process (ls
 | `spot.py` | The beam's offsets per objective and laser, with history and drift |
 | `xcal.py` | Reference lines (ASTM E1840) and ls6t's spectral corrections per laser and grating |
 | `background.py` | White-light backgrounds: storing and subtracting them |
-| `typelib.py` | `ls6t-typelib`: reads LabSpec's ActiveX type library (read-only) and lists every method, marking those not in the 2018 manual |
+| `typelib.py` | `ls6t-typelib`: reads LabSpec's ActiveX type library straight from the file, on any system (read-only), and lists every method, marking those not in the 2018 manual |
 | `sim.py` | A simulated LabSpec + XploRA speaking the same protocol (`LS6T_MODE=sim`, tests, benchmarks) |
 | `bench.py` | The benchmarks |
 | `api.py`, `cli.py`, `mcp_server.py` | The functions, the command line, the MCP server |
@@ -625,6 +625,7 @@ frames, LabSpec's image files, `snapshot.json`); a study's frames go to its `vid
 
 | Version | Changes |
 |---|---|
+| 2026.11.19.9 | `ls6t-typelib` reads the type library straight from the `.ocx` (its TYPELIB resource, MSFT format) in pure Python, on Windows, macOS or Linux; identical libraries are listed once. Read on the instrument's `NFActiveX.ocx` (32- and 64-bit builds, 2021): 60 methods, 15 not in the 2018 manual (see planning.md). The bridge adds LabSpec's own last error (`GetLastErrorInfo`) to its error messages; discovery tests it. |
 | 2026.11.19.8 | `ls6t-typelib`: a separate, read-only tool that reads LabSpec's ActiveX type library (comtypes or pywin32) and lists every method and property of the installed version, marking those not in the 2018 manual and those of interest (alignment, calibration, lamp, progress...); text, markdown or JSON; extra `windows`. |
 | 2026.11.19.7 | Native mapping: `map.engine` (`auto`, `points`, `native`) and `swift`; bridge verb `map_native` (`SetMappingParams` per axis, interface exposure and accumulations, spectrometer centred, SWIFT, `Acq` spectral image, wait and cancel, the map written for ls6t and saved as `.l6s` and text); ls6t splits it into spectra and analyses it like point-by-point maps; profile `mapping` settings for what the manual leaves open; benchmark `native_map`. |
 | 2026.11.19.6 | Depth profiles (kind `depth`: Z steps into the sample, profiles and interfaces, refractive-index correction; profile `stage.z_into_sample`; Z-only maps get the same analysis and a live profile in LabSpec), the spectral zero (kind `calibration` with `reference`, `lines_cm1`, `adjust: labspec` (guided correction of LabSpec's zero, then a new check) or `ls6t` (a remembered correction applied to later spectra), offset and scale fit), white-light backgrounds (kind `background`, `acquire.subtract_background`; bridge `acquire` with `laser_off`), tool and command `references`; INSTALL.md (the installation, out of the README) and FUNCTIONALITY.md; benchmarks `depth_profile`, `calibration_zero`, `white_light`. |
