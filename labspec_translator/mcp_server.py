@@ -1,5 +1,5 @@
 """mcp_server.py — MCP server: lets LLM-based tools run Raman measurements on a HORIBA instrument through LabSpec 6.
-Version: 2026.11.20.29
+Version: 2026.11.20.30
 
 Tools (all JSON):
   study_format      the study format, the profile's choices and limits, the bridge's state. Read it first.
@@ -258,7 +258,7 @@ def get_file(path: str, max_mb: float = 20) -> dict:
 
 @server.tool()
 def get_image(path: str) -> Image:
-    """An image written by a study or a snapshot (results images.<name>.path, a snapshot's frame.png or LabSpec's
+    """An image written by a study or a snapshot (results images.<name>.path, a snapshot's frame.marked.png or LabSpec's
     own snapshot files), as an image you can see and show; images over about 1 MB or in other formats come as a
     reduced copy (also saved next to it as <name>.view.png/.jpg)."""
     data, fmt, _ = api.image_for_view(path)

@@ -12,7 +12,7 @@ stops and cancel on the simulator, and `ls6t bench` gives known answers. What re
 LabSpec and hardware. The plan goes from no laser and no motion to an LLM app driving a full map, in stages. Each
 stage starts only when the previous one passed.
 
-Version under test: 2026.11.20.29 (bridge protocol 1).
+Version under test: 2026.11.20.30 (bridge protocol 1).
 
 **Already known** (2026-11-20, from the instrument's discovery dump, its `NFActiveX.ocx`, `OLConfig.ini`,
 `OLSetup.ini` and LabSpec 6.7.1's service scripts): the motors and their positions (lasers 532, 637.75, 785.04 nm;
@@ -440,9 +440,9 @@ Record whether autofocus left a spectrum in LabSpec.
 ## T5b. Video and the beam (T5b.1, T5b.2, T5b.6 no laser; T5b.3–T5b.5, T5b.7 LASER)
 
 **T5b.1 A frame (Q13, Q41).** Start the live video in LabSpec (or `ls6t instrument camera-on --camera top`), with the
-Si wafer or the contrast sample in focus, then run `ls6t instrument snapshot`. Pass: `ok`; `frame.png` shows the same
+Si wafer or the contrast sample in focus, then run `ls6t instrument snapshot`. Pass: `ok`; `frame.marked.png` (ls6t's plot; LabSpec's own image stays `frame.png` / `.jpg`) shows the same
 view as LabSpec's video window; `um_axes` is true and `field_um` matches the objective's field of view
-(`objectives_info` in `ls6t format`, from `OLConfig.ini`: **Q41**). Record which formats appear under `native`, and `channels` in the decoded frame (the top camera gave 3 values per pixel). `get_image` shows any of these files, reduced when over about 1 MB.
+(`objectives_info` in `ls6t format`, from `OLConfig.ini`: **Q41**). Record which formats appear under `native`, `channels` and `pixels` (2026-11-20: the top camera gave 888 x 606 x 3, below its sensor's resolution: record the internal camera's too, and whether LabSpec's camera settings (binning, resolution) or its video window size change it). `get_image` shows any of these files, reduced when over about 1 MB.
 Repeat with the live video stopped: the bridge starts it and takes the frame, and leaves the video on (`video_left_on`: ls6t never stops it). With `video.camera` set to another camera than LabSpec's, the snapshot is refused (no frame from the wrong camera).
 
 **T5b.2 Orientation and colours (Q14).** Choose a feature that is easy to recognise (an edge, a corner, a coloured
@@ -482,7 +482,7 @@ and `video.after` are in the result and the images, and the Si result is as in T
 **T5b.6 Extended video (no laser; THE STAGE MOVES; Q39).** The maintainer sets a small extended-video area in
 LabSpec's interface (a few fields of view), at x10 or x5, and checks the objective's clearance over it. Then
 `ls6t profile set video.allow_extended true` and `ls6t instrument snapshot --extended`. Pass: LabSpec asks (answer
-Yes); the stage scans the area; `frame.png` shows the stitched image with µm axes over the whole area; record
+Yes); the stage scans the area; `frame.marked.png` shows the stitched image with µm axes over the whole area; record
 `extended_returned`, `extended_s`, and where the stage ended. If the image is not found or LabSpec misbehaves, set
 `video.allow_extended` back to false and note what happened.
 

@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.20.29)
+## Architecture (version 2026.11.20.30)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -410,6 +410,13 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   video.packing: colorref R,G,B, rgb B,G,R; data_dims with a channel axis); api.image_for_view: PNG <= 900 kB as is,
   anything else (size, JPEG/BMP/TIFF) reduced with Pillow (PNG, else JPEG, down to <= 900 kB) and saved as
   <name>.view.*; get_image uses it; an undecodable frame points to LabSpec's own image ('view'). 114 tests.
+  CI: the Windows graphene_map benchmark failure (.18, .27 tags) is fixed (Nicola, 2026-11-20).
+- 2026-11-20, 2026.11.20.30: .29 on the instrument: get_image shows the marked plot and LabSpec's JPEG (full size,
+  under the limit); frames 888 x 606 x 3 (RGB) decode right (black: light off, holder empty). LabSpec's own PNG was
+  overwritten by the plot (both <base>.png): the plot is now <base>.marked.png. Open: 888 x 606 is neither camera's
+  sensor (OLConfig names IDS uEye USB3 cameras: the top one's family is 3088 x 2076, the internal one's 1920 x 1200,
+  from public datasheets; models only, no serials here): likely LabSpec's video buffer (binning or the window);
+  check the internal camera's frame size and LabSpec's camera settings (TESTING T5b.1).
 
 ## To do next
 

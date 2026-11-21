@@ -1,5 +1,5 @@
 """video.py — video snapshots: decoding the bridge's frame file and drawing it with the laser position marked.
-Version: 2026.11.20.29
+Version: 2026.11.20.30
 
 The bridge writes a cloned video frame as '# key=value' header lines (axis types, sizes, units, values) and the
 pixel values in LabSpec's order. LabSpec's video axes are taken to be stage coordinates in µm ('mkm'), so the laser
@@ -333,7 +333,8 @@ def snapshot(res: dict, prof: dict, base: Path, title: str, laser_nm=None) -> di
     if feats:
         note += "; yellow: features to aim at"
     try:
-        out.update(render(dec, Path(f"{base}.png"), marker, title, note, spot, feats))
+        # its own name: LabSpec saves its own image as <base>.png (2026-11-20: the plot replaced it)
+        out.update(render(dec, Path(f"{base}.marked.png"), marker, title, note, spot, feats))
     except ImportError:
         out["warnings"].append("matplotlib is missing (pip install labspec-translator[render]): no PNG")
     out.update(marker_um=list(marker) if marker and dec["um"] else None, um_axes=dec["um"],
