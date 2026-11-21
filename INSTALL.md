@@ -19,7 +19,8 @@ network: it carries its own Python with every package. Use it unless you develop
 1. **Get it**: from the repository's *Releases* page (it is built for every version, see
    [Building the installer](#building-the-installer)), or build it yourself. Copy it to the instrument PC.
 2. **Log in with the Windows account that runs LabSpec**, and quit the LLM apps (Claude: right-click its icon in the
-   taskbar's notification area, *Quit*; ChatGPT; Codex; Gemini CLI).
+   taskbar's notification area, *Quit*; closing its window is not enough; ChatGPT; Codex; Gemini CLI): the
+   installation cannot go on while they run. LabSpec can stay open.
 3. **Run it.** The installer is not code-signed, so Windows SmartScreen may say *"Windows protected your PC"*: *More
    info > Run anyway*. Choose the components:
 
@@ -33,7 +34,10 @@ network: it carries its own Python with every package. Use it unless you develop
 
    It checks that everything loads and precompiles the packages (a minute or two). An app installed after ls6t:
    `ls6t connect auto` ([step 8](#8-connect-an-llm-app)).
-4. **Then** start `ls6t_bridge.vbs` in LabSpec (step [6](#6-install-the-labspec-scripts), from *"In LabSpec 6"*). When
+4. **Then** start `ls6t_bridge.vbs` in LabSpec (step [6](#6-install-the-labspec-scripts), from *"In LabSpec 6"*).
+   An update ends a running bridge cleanly first (its window closes; `deploy_log.jsonl` records it): start it again.
+   LabSpec need not be restarted for an update; after a LabSpec start, the grating answers its first status only
+   after about a minute (the bridge's start-up warm-up waits for it). When
    it starts, it reads the instrument's inventory and ls6t builds the machine profile from it by itself (cautious
    until reviewed: step [7](#7-the-machine-profile)); running `ls6t_discover.vbs` separately is optional. Restart
    the connected apps, and check with the instrument (step [9](#9-check-with-the-instrument)). Steps 1–5 and 8 are

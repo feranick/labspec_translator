@@ -1,5 +1,5 @@
 """clients.py — connecting ls6t's MCP server to the LLM apps on this computer (`ls6t connect`, and the installer).
-Version: 2026.11.21.1
+Version: 2026.11.21.3
 
 Each app keeps its MCP servers in its own file. ls6t knows three that start local (stdio) servers:
 

@@ -1,5 +1,5 @@
 """api.py — the functions behind the command line and the MCP server (JSON in, JSON out).
-Version: 2026.11.21.1
+Version: 2026.11.21.3
 """
 from __future__ import annotations
 
@@ -422,6 +422,7 @@ def _instrument(action, camera, setup, seconds) -> dict:
             # until the operator answered (.42/.43: 58.8 s and 99.6 s with the bridge idle and halted)
             try:
                 shown, ans = float(r["prompt_shown_after_s"]), float(r["answer_after_s"])
+                r["prompt_shown_after_s"], r["answer_after_s"] = round(shown, 2), round(ans, 2)   # plain numbers
                 r["picked_up_after_s"] = round(max(0.0, float(r["seconds"]) - shown - ans), 2)
             except (KeyError, TypeError, ValueError):
                 pass

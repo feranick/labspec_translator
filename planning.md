@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.21.1)
+## Architecture (version 2026.11.21.3)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -559,6 +559,20 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   touched a running bridge (it only rewrote the scripts): winsetup.end_running_bridge (quit, wait for 'stopped';
   not while a request holds the lock) runs before install_bridge in the installer and in `ls6t bridge install`,
   logging deploy_log.jsonl; log_warmup adds last_deploy. 128 tests.
+- 2026-11-21, 2026.11.21.2: 2026.11.21.1 at the instrument: dialog_appeared_after_s 0.31 s ('LabSpec', class OLGui,
+  labspec64.exe: not a #32770, hence the earlier miss); resume picked up 0.18 / prompt 0.02 / answer 10.9 s.
+  prompt_shown_after_s was '1.953125E-02' (CStr): common.vbs Secs(x) = Fmt(Round(x, 2)) for every Elapsed(); api
+  rounds resume's timings. Warm-up: this deploy found the bridge already stopped, yet Grating 29.5 s with LabSpec
+  started 1.2 min before: the likelier cause is the grating initialising for about a minute after LabSpec starts
+  (warmup_log's labspec_running_min will tell); the installer's clean ending still to test with a running bridge.
+  129 tests.
+- 2026-11-21, 2026.11.21.3: 2026.11.21.1 at the instrument: the installer ended a running idle bridge cleanly
+  (deploy_log bridge_was idle, ended cleanly); its window closed at Finish with no message: the welcome page now
+  says to quit the LLM apps (Claude from the tray) and that LabSpec may stay open, the finish page that a running
+  bridge was ended and must be started again; INSTALL.md the same. Warm-up settled: Grating 29.5 s with LabSpec
+  restarted right after the deploy (bridge 43 s later; ready ~73 s after LabSpec's launch), 0 s with LabSpec
+  running 8.3 min: the grating initialises for about a minute after LabSpec starts; WarmUp absorbs it. The
+  scientific-notation duration was fixed in 2026.11.21.2. 129 tests.
 
 ## To do next
 

@@ -104,6 +104,11 @@ Function Fmt(x)
     Fmt = Replace(Replace(Replace(s, "%", "%25"), vbCr, ""), vbLf, "%0A")
 End Function
 
+' A duration in seconds as a plain decimal (2 places): CStr gave "1.953125E-02" for short ones (2026-11-21)
+Function Secs(x)
+    Secs = Fmt(Round(CDbl(x), 2))
+End Function
+
 Function Elapsed(t0)
     Dim d
     d = Timer - t0

@@ -365,7 +365,7 @@ Sub VRunVbs(cmd, res)
         Err.Clear
     End If
     On Error GoTo 0
-    res("seconds") = Fmt(Elapsed(t0))
+    res("seconds") = Secs(Elapsed(t0))
     res("path") = path
     BeatNow
 End Sub
@@ -503,7 +503,7 @@ Function StopVideoHoriba(res)
         If st = 0 Or Elapsed(t0) > 15 Then Exit Do
     Loop
     res("video_stop_status") = st
-    res("video_stop_s") = Fmt(Elapsed(t0))
+    res("video_stop_s") = Secs(Elapsed(t0))
     On Error GoTo 0
     StopVideoHoriba = (CStr(st) = "0")
     If StopVideoHoriba Then
@@ -658,7 +658,7 @@ Sub VMove(cmd, res)
     Else
         moveId = LabSpec.MoveMotor(motor, posVal, posName, mc + LS_MOTOR_NO_WAIT)
     End If
-    res("move_call_s") = Fmt(Elapsed(t0))           ' how long MoveMotor itself took to return
+    res("move_call_s") = Secs(Elapsed(t0))           ' how long MoveMotor itself took to return
     gMoveN = gMoveN + 1
     res("bridge_move_n") = gMoveN
     If Err.Number <> 0 Then
@@ -680,14 +680,14 @@ Sub VMove(cmd, res)
     Else
         waited = WaitMotor(motor, gNoId, tmo, res)
     End If
-    res("wait_s") = Fmt(Elapsed(t1))
+    res("wait_s") = Secs(Elapsed(t1))
     ' and every motor (the manual's WaitForAllMotors: GetMotorStatus("", 0)): a grating change also moves the turret
     ' and the spectrometer; on the XploRA the grating reported idle and its new value 0.2 s after the command while it
     ' was still visibly moving (2026-11-20, T3.15)
     If waited Then
         t1 = Timer
         waited = WaitMotor("", 0, tmo, res)
-        res("all_wait_s") = Fmt(Elapsed(t1))
+        res("all_wait_s") = Secs(Elapsed(t1))
     End If
     ' then the position, read until it is the one asked: a motor passing through other positions (the pinhole read
     ' 100 on its way from 500 to 300) or reporting idle early (the slit is the slowest) is not taken as arrived
@@ -744,7 +744,7 @@ Sub SettleReadback(motor, mode, v, tmo, res)
         BeatNow
         LabSpec.Pause 200
     Loop
-    res("settle_s") = Fmt(Elapsed(t0))
+    res("settle_s") = Secs(Elapsed(t0))
 End Sub
 
 Sub VMoveXY(cmd, res)
@@ -1375,7 +1375,7 @@ Sub VVideo(cmd, res)
         End If
         res("extended") = 1
         res("extended_returned") = r
-        res("extended_s") = Fmt(Elapsed(tA))
+        res("extended_s") = Secs(Elapsed(tA))
         ' a returned id > 0 is the image; otherwise the active video image
         If r > 0 Then clone = LabSpec.Exec(r, LS_CLONE_DATA, p)
         If Err.Number <> 0 Then
@@ -2066,9 +2066,9 @@ Sub VResume(cmd, res)
     ClosePopup                              ' the HALTED window: not over the question
     On Error Resume Next
     t1 = Timer
-    res("prompt_shown_after_s") = Fmt(Elapsed(t0))
+    res("prompt_shown_after_s") = Secs(Elapsed(t0))
     b = LabSpec.Message("ls6t asks to control the instrument again. Allow it?", LS_MB_YESNO + LS_MB_ICONQUESTION)
-    res("answer_after_s") = Fmt(Elapsed(t1))
+    res("answer_after_s") = Secs(Elapsed(t1))
     Err.Clear
     On Error GoTo 0
     If b = LS_IDYES Then
@@ -2235,7 +2235,7 @@ Sub WarmUp()
                 End If
                 LabSpec.Pause 100
             Loop
-            gWarm = gWarm & nm & "=" & Fmt(Elapsed(t0)) & ";"
+            gWarm = gWarm & nm & "=" & Secs(Elapsed(t0)) & ";"
             If gHalted Or gQuit Then Exit For
         End If
     Next
