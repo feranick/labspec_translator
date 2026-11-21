@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.21.3)
+## Architecture (version 2026.11.21.4)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -573,6 +573,9 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   restarted right after the deploy (bridge 43 s later; ready ~73 s after LabSpec's launch), 0 s with LabSpec
   running 8.3 min: the grating initialises for about a minute after LabSpec starts; WarmUp absorbs it. The
   scientific-notation duration was fixed in 2026.11.21.2. 129 tests.
+- 2026-11-21, 2026.11.21.4: Nicola: the welcome page said a running bridge 'gets started again at the end'; the
+  installer cannot start a LabSpec script: it now says the operator starts ls6t_bridge.vbs again after the
+  installation, as the finish page does. (The 2026.11.21.2 tag was pushed after .3 on the same code; removed.)
 
 ## To do next
 
