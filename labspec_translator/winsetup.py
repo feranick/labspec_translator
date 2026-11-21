@@ -1,5 +1,5 @@
 """winsetup.py — what the Windows installer does beyond copying files (installer/ls6t.nsi calls it).
-Version: 2026.11.20.46
+Version: 2026.11.21.1
 
 The installer puts a private Python (python.org's embeddable build, with every dependency already in its
 Lib/site-packages) in <install>/python and the launchers in <install>/bin. Then it runs, with that Python:
@@ -123,6 +123,51 @@ def report(reps: list, log: Log):
             log.warn(f"{r['app']}: {r['file']}: {r.get('error')}")
 
 
+def end_running_bridge(log: Log) -> dict:
+    """Before the LabSpec scripts are replaced: a bridge still running in LabSpec is ended cleanly (its 'quit'
+    command, as `ls6t instrument end-bridge`), unless a request holds the instrument. Every slow first grating status
+    seen (36-51 s) came right after a deploy, when the old bridge had been left running or ended abruptly
+    (2026-11-21). Recorded in LS6T_HOME/deploy_log.jsonl with what was found."""
+    import json
+    import time
+    from . import __version__, config, runner
+    from .bridge import Bridge, BridgeError
+    rec = {"time": time.strftime("%Y-%m-%d %H:%M:%S"), "version": __version__}
+    try:
+        b = Bridge(config.active_bridge_dir())
+        hb = b.heartbeat() or {}
+        rec["bridge_was"] = hb.get("state") or "none"
+        if not b.alive():
+            rec["ended"] = "not running"
+        elif runner.read_json(runner.lock_path(), None):
+            rec["ended"] = "no: a request holds the instrument"
+            log.warn("a request holds the instrument: the running bridge was left as it is; end it "
+                     "(ls6t instrument end-bridge) once the request is done, then start the new ls6t_bridge.vbs")
+        else:
+            r = b.call("quit", timeout_s=30)
+            for _ in range(50):
+                if (b.heartbeat() or {}).get("state") == "stopped":
+                    break
+                time.sleep(0.2)
+            rec["ended"] = "cleanly" if (b.heartbeat() or {}).get("state") == "stopped" else f"asked: {r.get('ok')}"
+            log(f"the running ls6t bridge was ended ({rec['ended']}): start the new ls6t_bridge.vbs in LabSpec")
+    except BridgeError as exc:
+        rec["ended"] = f"failed: {exc}"[:200]
+        log.warn(f"the running bridge could not be ended ({exc}): end it in LabSpec (its window: Halt, then End "
+                 "bridge), then start the new ls6t_bridge.vbs")
+    except Exception as exc:  # noqa: BLE001 - the installation goes on
+        rec["ended"] = f"failed: {exc}"[:200]
+    try:
+        from . import config as _c
+        p = _c.home() / "deploy_log.jsonl"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with open(p, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec) + "\n")
+    except OSError:
+        pass
+    return rec
+
+
 def install(python: Path, bindir: Path, apps: list, sim: bool, add_path: bool, compile_: bool, log: Log) -> int:
     from . import __version__
     log(f"ls6t {__version__}: Python {sys.version.split()[0]} at {python}")
@@ -141,6 +186,7 @@ def install(python: Path, bindir: Path, apps: list, sim: bool, add_path: bool, c
         if env.get(k):
             os.environ[k] = env[k]
             log(f"using {k}={env[k]} from an existing ls6t entry")
+    end_running_bridge(log)
     try:
         from . import api
         r = api.install_bridge()

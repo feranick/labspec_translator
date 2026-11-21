@@ -1,5 +1,5 @@
 """sim.py — a simulated LabSpec + XploRA behind the same bridge protocol as ls6t_bridge.vbs.
-Version: 2026.11.20.46
+Version: 2026.11.21.1
 
 It answers every verb of the bridge with the same keys, so the runner, the checks and the MCP server are tested
 without the instrument (LS6T_MODE=sim, and the tests). The simulated sample is a silicon wafer with a graphene
@@ -217,8 +217,11 @@ class SimLabSpec:
         return res
 
     def v_ping(self, p):
+        if not getattr(self, "warm", None):         # as the bridge's start: each motor's first status (s)
+            self.warm = (f"started={time.strftime('%Y-%m-%dT%H:%M:%S')};grating_at={self._cur('Grating')[0]};"
+                         "Grating=0;Filter=0;Laser=0;Hole=0;Slit=0;Spectro=0;")
         return {"protocol": BRIDGE_PROTOCOL, "version": f"sim {__version__}", "system": "XploRA",
-                "labspec_version": "6.6 (simulated)", "halted": int(self.halted)}
+                "labspec_version": "6.6 (simulated)", "halted": int(self.halted), "warmup": self.warm}
 
     def v_status(self, p):
         las, _ = self._cur("Laser")

@@ -1,5 +1,5 @@
 """api.py — the functions behind the command line and the MCP server (JSON in, JSON out).
-Version: 2026.11.20.46
+Version: 2026.11.21.1
 """
 from __future__ import annotations
 
@@ -260,6 +260,48 @@ def jobs(limit: int = 20, active: bool = False) -> dict:
 QUIET_ACTIONS = ("status", "last_error", "autocal_info")      # reads that do not go to the action log
 
 
+def log_warmup(ping: dict) -> dict | None:
+    """Each bridge session's warm-up (ping 'warmup': each motor's first status, s; the grating's position then), once
+    per session, with its context: LabSpec's start, Windows' uptime, the last grating move ls6t made before it.
+    Appended to LS6T_HOME/warmup_log.jsonl (TESTING T3.16: slow 36-51 s after bridge restarts in a running session,
+    0 s after a fresh login). Returns the session's record."""
+    raw = str((ping or {}).get("warmup") or "")
+    if not raw:
+        return None
+    vals = dict(kv.split("=", 1) for kv in raw.strip(";").split(";") if "=" in kv)
+    rec = {"bridge_started": vals.pop("started", None), "grating_at": vals.pop("grating_at", None),
+           "motors_s": {k: float(v) for k, v in vals.items() if v not in ("", None)},
+           "version": (ping or {}).get("version")}
+    p = config.home() / "warmup_log.jsonl"
+    try:
+        seen = [json.loads(x) for x in p.read_text(encoding="utf-8").splitlines() if x.strip()]
+    except (OSError, ValueError):
+        seen = []
+    if any(s.get("bridge_started") == rec["bridge_started"] for s in seen):
+        return next(s for s in seen if s.get("bridge_started") == rec["bridge_started"])
+    from .bridge import session_context
+    rec.update(session_context())
+    last = next((a for a in action_log(200) if a.get("action") == "set" and "grating" in str(a.get("setup", ""))),
+                None)
+    if last:
+        rec["last_grating_set"] = last.get("time")
+    try:                                    # the last deploy before it (all slow warm-ups followed one, 2026-11-21)
+        deps = [json.loads(x) for x in (config.home() / "deploy_log.jsonl").read_text(encoding="utf-8").splitlines()
+                if x.strip()]
+        if deps:
+            rec["last_deploy"] = {k: deps[-1].get(k) for k in ("time", "version", "bridge_was", "ended")}
+    except (OSError, ValueError):
+        pass
+    rec["logged"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with open(p, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec) + "\n")
+    except OSError:
+        pass
+    return rec
+
+
 def discovery_progress() -> dict:
     """The last discovery's step log (LS6T_HOME/discovery_progress.txt, written by the bridge step by step): the
     step it was in when it stopped, whether it finished, and the steps skipped because they crashed LabSpec
@@ -308,6 +350,8 @@ def instrument(action: str = "status", camera=None, setup: dict | None = None, s
             row["error"] = str(r["error"])[:300]
         if action == "discover" and isinstance(r, dict):
             row.update({k: r[k] for k in ("dump", "stopped_in") if r.get(k)})
+        if action == "set" and setup:
+            row["setup"] = setup
         try:
             p = config.home() / "instrument_log.jsonl"
             p.parent.mkdir(parents=True, exist_ok=True)
@@ -325,8 +369,13 @@ def _instrument(action, camera, setup, seconds) -> dict:
         S.ensure(b.dir)
     try:
         if action == "status":
-            return {"ping": b.call("ping", timeout_s=15), "status": b.call("status", timeout_s=15, **runner.motor_args(P.load())),
-                    "bridge": str(b.dir)}
+            ping = b.call("ping", timeout_s=15)
+            out = {"ping": ping, "status": b.call("status", timeout_s=15, **runner.motor_args(P.load())),
+                   "bridge": str(b.dir)}
+            w = log_warmup(ping)
+            if w:
+                out["warmup"] = w
+            return out
         if action == "discover":
             dump = config.home() / f"discovery_{time.strftime('%Y%m%d_%H%M%S')}.txt"
             dump.parent.mkdir(parents=True, exist_ok=True)
@@ -345,22 +394,30 @@ def _instrument(action, camera, setup, seconds) -> dict:
             # on Windows, also when LabSpec's question window exists (a dialog of LabSpec's other than ls6t's own):
             # the bridge's timings cannot tell a question put on screen late from a slow answer
             from .bridge import labspec_windows
+            # any window of LabSpec's (or its helper processes') that appears during the call and is not ls6t's own:
+            # on .46 a #32770-only watch found nothing (the question may be another class, or another process's)
             seen: dict = {}
             t_call = time.monotonic()
             last = [0.0]
+            w0 = labspec_windows()
+            before = {x["hwnd"] for x in (w0 or {}).get("all", [])}
 
             def watch():
                 now = time.monotonic()
-                if "t" in seen or now - last[0] < 0.5:
+                if "t" in seen or now - last[0] < 0.25:
                     return
                 last[0] = now
-                w = labspec_windows()
-                others = [d for d in (w or {}).get("dialogs", []) if not d.startswith("ls6t:")]
-                if others:
-                    seen.update(t=round(now - t_call, 1), title=others[0])
+                w = labspec_windows() or {}
+                new = [x for x in w.get("all", []) if x["hwnd"] not in before and not x["title"].startswith("ls6t:")]
+                if new:
+                    seen.update(t=round(now - t_call, 2), title=new[0]["title"], cls=new[0]["class"],
+                                exe=new[0]["exe"])
             r = b.call("resume", timeout_s=600, on_wait=watch)
             if seen:
                 r["dialog_appeared_after_s"], r["dialog_title"] = seen["t"], seen["title"]
+                r["dialog_class"], r["dialog_process"] = seen["cls"], seen["exe"]
+            elif w0 is not None:
+                r["dialog_appeared_after_s"] = None      # watched, and no new LabSpec window was seen
             # where the time went: before the bridge took the command up, before the question was on screen, and
             # until the operator answered (.42/.43: 58.8 s and 99.6 s with the bridge idle and halted)
             try:

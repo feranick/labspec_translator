@@ -1,5 +1,5 @@
 """bridge.py — the Python side of the LabSpec bridge: commands as files in a folder the bridge script watches.
-Version: 2026.11.20.46
+Version: 2026.11.21.1
 
 Protocol 1 (the same for ls6t_bridge.vbs inside LabSpec and for sim.py):
 
@@ -37,20 +37,26 @@ def labspec_windows() -> dict | None:
         import ctypes
         from ctypes import wintypes
         u32, k32 = ctypes.windll.user32, ctypes.windll.kernel32
-        out = {"running": False, "dialogs": [], "windows": []}
+        out = {"running": False, "dialogs": [], "windows": [], "started": None, "all": []}
         names: dict = {}
 
         def exe(pid):
             if pid not in names:
                 h = k32.OpenProcess(0x1000, False, pid)          # PROCESS_QUERY_LIMITED_INFORMATION
-                name = ""
+                name, started = "", None
                 if h:
                     buf = ctypes.create_unicode_buffer(1024)
                     size = wintypes.DWORD(1024)
                     if k32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
                         name = os.path.basename(buf.value).lower()
+                    c, e, kt, ut = (wintypes.FILETIME() for _ in range(4))
+                    if k32.GetProcessTimes(h, ctypes.byref(c), ctypes.byref(e), ctypes.byref(kt), ctypes.byref(ut)):
+                        ft = (c.dwHighDateTime << 32) | c.dwLowDateTime        # 100 ns since 1601
+                        started = ft / 1e7 - 11644473600.0
                     k32.CloseHandle(h)
                 names[pid] = name
+                if name.startswith("labspec") and started:
+                    out["started"] = started                     # LabSpec's process start (Unix time)
             return names[pid]
 
         @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
@@ -59,13 +65,19 @@ def labspec_windows() -> dict | None:
                 return True
             pid = wintypes.DWORD()
             u32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-            if not exe(pid.value).startswith("labspec"):
+            name = exe(pid.value)
+            # LabSpec itself, and its helper processes (OLServer32, OLLabServer, OLExtern32), which may own its windows
+            if not (name.startswith("labspec") or name.startswith("ol")):
                 return True
-            out["running"] = True
             title = ctypes.create_unicode_buffer(512)
             u32.GetWindowTextW(hwnd, title, 512)
             cls = ctypes.create_unicode_buffer(256)
             u32.GetClassNameW(hwnd, cls, 256)
+            out["all"].append({"title": title.value or "(no title)", "class": cls.value, "exe": name,
+                               "hwnd": int(hwnd or 0)})
+            if not name.startswith("labspec"):
+                return True
+            out["running"] = True
             (out["dialogs"] if cls.value == "#32770" else out["windows"]).append(title.value or "(no title)")
             return True
 
@@ -79,6 +91,24 @@ STUCK_ADVICE = ("the bridge cannot react to anything while it waits inside LabSp
                 "Cancel (on 2026-11-20 LabSpec froze after a Cancel in this state). Wait a minute; if it stays "
                 "stuck, save what you can, close LabSpec (Task Manager if it does not respond), start LabSpec again, "
                 "then ls6t_bridge.vbs. Tell the ls6t maintainer the command it was in.")
+
+
+def session_context() -> dict:
+    """When LabSpec started and how long Windows has been up (Windows only): the context of a bridge start, for the
+    slow first grating status (36, 51 s after bridge restarts in a running session; 0 s after a fresh login)."""
+    out: dict = {}
+    w = labspec_windows()
+    if w and w.get("started"):
+        out["labspec_started"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(w["started"]))
+        out["labspec_running_min"] = round((time.time() - w["started"]) / 60, 1)
+    if os.name == "nt":
+        try:
+            import ctypes
+            ctypes.windll.kernel32.GetTickCount64.restype = ctypes.c_ulonglong
+            out["windows_up_min"] = round(ctypes.windll.kernel32.GetTickCount64() / 60000, 1)
+        except Exception:  # noqa: BLE001
+            pass
+    return out
 
 
 def labspec_hint(verb: str | None = None) -> str:

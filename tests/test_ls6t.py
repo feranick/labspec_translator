@@ -946,7 +946,7 @@ def test_native_map_export_and_discovery_probes(tmp_path):
     assert st["studies"]["m"]["reliable"]
     S.ensure(config.active_bridge_dir())
     r = bridge.Bridge().call("discover", timeout_s=10, out=str(tmp_path / "dump.txt"))
-    # discovery no longer probes these (2026.11.20.46): dumps from older bridges still carry them
+    # discovery no longer probes these (2026.11.21.1): dumps from older bridges still carry them
     old = (tmp_path / "dump.txt").read_text() + "\n".join([
         "selftest.get_value_ex=0", "selftest.get_value_simple_part=1", "selftest.get_value_simple_part_size=8",
         "selftest.get_value_simple_part_values=4,5,6,7,8,9,10,11", "selftest.get_config_param=1",
@@ -1967,3 +1967,44 @@ def test_resume_reports_where_the_time_went(tmp_path, monkeypatch):
                                                                             "dialogs": ["ls6t: HALTED", "LabSpec"]})
     r = api.instrument("resume")
     assert r["answer"] == "yes" and {"prompt_shown_after_s", "answer_after_s", "picked_up_after_s"} <= set(r)
+
+
+def test_warmup_logged_once_per_bridge_session(tmp_path):
+    """The slow first grating status (36, 51 s after bridge restarts in a running session; 0 s after a fresh login):
+    each bridge session's warm-up is logged once, with its context."""
+    br = Path(api.install_bridge(tmp_path / "vbs")["files"]["ls6t_bridge.vbs"]).read_text()
+    wu = br[br.index("Sub WarmUp("):]
+    assert 'gWarm = "started="' in wu and '"grating_at=" & MotorValue("Grating")' in wu
+    S.ensure(config.active_bridge_dir())
+    api.instrument("set", setup={"grating": 600})
+    a = api.instrument("status")["warmup"]
+    b = api.instrument("status")["warmup"]
+    assert a == b and a["motors_s"]["Grating"] == 0 and a["grating_at"] and a["last_grating_set"]
+    lines = (config.home() / "warmup_log.jsonl").read_text().splitlines()
+    assert len(lines) == 1
+    assert isinstance(bridge.session_context(), dict)
+
+
+def test_installer_ends_a_running_bridge_cleanly(tmp_path):
+    """Every slow first grating status followed a deploy: the installer now ends a running bridge cleanly first and
+    logs it; the warm-up log names the last deploy."""
+    from labspec_translator import winsetup as W
+
+    class L:
+        def __init__(self):
+            self.lines = []
+
+        def __call__(self, m):
+            self.lines.append(m)
+
+        def warn(self, m):
+            self.lines.append("WARN " + m)
+    S.ensure(config.active_bridge_dir())
+    rec = W.end_running_bridge(L())
+    assert rec["bridge_was"] in ("idle", "busy") and rec["ended"] in ("cleanly", "asked: True")
+    rec2 = W.end_running_bridge(L())
+    assert rec2["ended"] == "not running"
+    assert len((config.home() / "deploy_log.jsonl").read_text().splitlines()) == 2
+    S.ensure(config.active_bridge_dir())
+    w = api.instrument("status")["warmup"]
+    assert w["last_deploy"]["ended"] == "not running"

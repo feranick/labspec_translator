@@ -2210,7 +2210,10 @@ Sub WarmUp()
     gVerb = "warmup"
     Beat "busy", True
     names = Array("Grating", "Filter", "Laser", "Hole", "Slit", "Spectro")
+    gWarm = "started=" & Year(Now) & "-" & Right("0" & Month(Now), 2) & "-" & Right("0" & Day(Now), 2) & "T" & _
+            Right("0" & Hour(Now), 2) & ":" & Right("0" & Minute(Now), 2) & ":" & Right("0" & Second(Now), 2) & ";"
     On Error Resume Next
+    gWarm = gWarm & "grating_at=" & MotorValue("Grating") & ";"     ' where the grating was left
     For i = 0 To UBound(names)
         nm = names(i)
         If MotorSize(nm) <> -1 Then

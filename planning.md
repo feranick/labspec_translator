@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.20.46)
+## Architecture (version 2026.11.21.1)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -543,6 +543,22 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   (or behind a window over RDP) counts as answer_after_s. api resume watches labspec_windows() every 0.5 s during
   the call (Bridge.call on_wait) and reports dialog_appeared_after_s / dialog_title (first LabSpec dialog not titled
   'ls6t:'); z-order is not visible, so TESTING T2.3 asks the person to note when it became visible. 126 tests.
+- 2026-11-21, 2026.11.21.1 (versions follow the date from now on): fresh Windows login, LabSpec and bridge started
+  fresh: warm-up 0 s for every motor. The slow first grating status (36.0, 50.9 s) followed bridge restarts within
+  a running session: neither LabSpec's start nor the bridge's alone. Logged per bridge session from now on:
+  WarmUp's gWarm starts with started=<time>;grating_at=<value>; api.log_warmup (on instrument status) appends one
+  record per bridge start to warmup_log.jsonl with bridge.session_context() (LabSpec's process start via
+  GetProcessTimes, labspec_running_min, windows_up_min via GetTickCount64) and the last grating set from
+  instrument_log (set rows now carry their setup). Sim ping reports a warm-up. T2.3 on .46: all works; resume
+  picked_up 0.22 / prompt 0.02 / answer 10.1 s (the old 58.8 / 99.6 s: the question hidden behind the HALTED window);
+  #title#button confirmed. dialog_appeared_after_s missing: the watch looked only at #32770 dialogs of labspec*.exe;
+  now any new top-level window (hwnd not there before) of labspec* or OL* helper processes, not titled 'ls6t:',
+  with class and process; None when watched and nothing seen. Warm-up 0 s on a fresh login and on a bridge-only
+  restart: Nicola now tests whether grating moves before a restart are the trigger. Then: 0 s also after two clean
+  End-bridge restarts (one after two grating moves); all five slow cases followed a deploy. The installer never
+  touched a running bridge (it only rewrote the scripts): winsetup.end_running_bridge (quit, wait for 'stopped';
+  not while a request holds the lock) runs before install_bridge in the installer and in `ls6t bridge install`,
+  logging deploy_log.jsonl; log_warmup adds last_deploy. 128 tests.
 
 ## To do next
 

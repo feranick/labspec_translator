@@ -1,5 +1,5 @@
 """cli.py — the command line. Every command prints JSON; '-' reads the studies from stdin.
-Version: 2026.11.20.46
+Version: 2026.11.21.1
 
   ls6t status [REQUEST] [--wait S]   versions, the bridge, the profile; or a request's studies
   ls6t format                        the study format
@@ -198,6 +198,16 @@ def main(argv=None) -> int:
         _print(api.instrument(a.action.replace("-", "_"), camera=a.camera, seconds=a.seconds))
     elif a.cmd == "bridge":
         if a.action == "install":
+            if not a.dest:                      # replacing the scripts in use: end a running bridge cleanly first
+                from . import winsetup as W
+
+                class _Log:
+                    def __call__(self, m):
+                        print(m, file=sys.stderr)
+
+                    def warn(self, m):
+                        print("warning: " + m, file=sys.stderr)
+                W.end_running_bridge(_Log())
             _print(api.install_bridge(Path(a.dest) if a.dest else None))
         else:
             if not a.verb:
