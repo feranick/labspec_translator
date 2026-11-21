@@ -1,5 +1,5 @@
 """api.py — the functions behind the command line and the MCP server (JSON in, JSON out).
-Version: 2026.11.20.40
+Version: 2026.11.20.41
 """
 from __future__ import annotations
 
@@ -589,6 +589,8 @@ def _move_timing(r: dict) -> dict:
             out[k] = float(r[k]) if k.endswith("_s") else True
     if r.get("move_id") not in (None, ""):
         out["move_id"] = r["move_id"]
+    if r.get("bridge_move_n") not in (None, ""):
+        out["bridge_move_n"] = int(float(r["bridge_move_n"]))     # 1: the first move since this bridge started
     return out
 
 

@@ -946,7 +946,7 @@ def test_native_map_export_and_discovery_probes(tmp_path):
     assert st["studies"]["m"]["reliable"]
     S.ensure(config.active_bridge_dir())
     r = bridge.Bridge().call("discover", timeout_s=10, out=str(tmp_path / "dump.txt"))
-    # discovery no longer probes these (2026.11.20.40): dumps from older bridges still carry them
+    # discovery no longer probes these (2026.11.20.41): dumps from older bridges still carry them
     old = (tmp_path / "dump.txt").read_text() + "\n".join([
         "selftest.get_value_ex=0", "selftest.get_value_simple_part=1", "selftest.get_value_simple_part_size=8",
         "selftest.get_value_simple_part_values=4,5,6,7,8,9,10,11", "selftest.get_config_param=1",
@@ -1705,6 +1705,7 @@ def test_set_waits_for_motors_and_manual_objective(tmp_path):
     assert "If moveId > 0 Then WaitMotor" not in mv
     assert mv.index('waited = WaitMotor("", 0, tmo, res)') < mv.index("SettleReadback")    # all motors, then read
     assert 'res("move_call_s")' in mv and 'res("all_wait_s")' in mv
+    assert 'res("bridge_move_n") = gMoveN' in mv
     sr = br[br.index("Sub SettleReadback("):]
     assert "Abs(ParseNum(got) - ParseNum(v)) <= 0.5" in sr[:sr.index("End Sub")]
     S.ensure(config.active_bridge_dir())

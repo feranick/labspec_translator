@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.20.40)
+## Architecture (version 2026.11.20.41)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -502,6 +502,10 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   inventory: 24.1 s on the grating with status_before_s 0.21 s (bridge idle), 36.6 s on the filter another session:
   the first motor command after LabSpec starts is slow, whichever motor; possibly the only real turret move (T3.16
   now starts with it, after a LabSpec restart). The 600 s grating timeout and the MCP progress cover it. 121 tests.
+- 2026-11-20, 2026.11.20.41: Nicola: both slow first moves followed a bridge restart, LabSpec perhaps not; T3.16 now
+  has (a) bridge-only restart (remote, no watcher), (b) LabSpec + bridge restart with a watcher. VMove counts its
+  MoveMotor calls (gMoveN -> bridge_move_n in each move's answer). If (a) is slow: a deliberate warm-up at bridge
+  start (to design then: which harmless command warms it). 121 tests.
 
 ## To do next
 

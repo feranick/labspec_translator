@@ -16,6 +16,8 @@
 Const POLL_MS = 100
 Dim gNoId                 ' Empty: GetMotorStatus by the motor's name (HORIBA's scripts pass an unset MoveID)
 Dim gBlocking             ' the motor while a blocking MoveMotor runs (written in the heartbeat beforehand)
+Dim gMoveN                ' MoveMotor calls since this bridge started (1: its first; TESTING T3.16, a slow first move)
+gMoveN = 0
 gBlocking = ""
 
 Dim gInbox, gOutbox, gHb, gStopFlag, gHalted, gQuit, gLastBeat, gLastPopup, gPopupOpen, gViews, gStoppedBy
@@ -618,6 +620,8 @@ Sub VMove(cmd, res)
         moveId = LabSpec.MoveMotor(motor, posVal, posName, mc + LS_MOTOR_NO_WAIT)
     End If
     res("move_call_s") = Fmt(Elapsed(t0))           ' how long MoveMotor itself took to return
+    gMoveN = gMoveN + 1
+    res("bridge_move_n") = gMoveN
     If Err.Number <> 0 Then
         Fail res, ErrText("MoveMotor " & motor)
         Err.Clear
