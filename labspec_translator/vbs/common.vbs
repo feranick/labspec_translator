@@ -419,7 +419,7 @@ End Sub
 
 ' withPopup: also test the non-blocking window (not from the bridge: it would close the bridge's own window)
 Function DiscoverTo(outPath, withPopup)
-    Dim d, names, i, name, ret
+    Dim d, names, i, name, ret, n
     DiscStart
     Set d = CreateObject("Scripting.Dictionary")
     d("time") = Year(Now) & "-" & Right("0" & Month(Now), 2) & "-" & Right("0" & Day(Now), 2) & "T" & _
@@ -452,6 +452,23 @@ Function DiscoverTo(outPath, withPopup)
             DEnd "motor." & name
         End If
     Next
+    ' the spectrometer's range per grating, as LabSpec's calibration holds it (OperVar ACT_INSTRUMENT[SpMin|SpMax][i],
+    ' read only, as HORIBA's service scripts read it): nm on the XploRA (TESTING Q45), the limits of a study's range
+    If DStep("spectro_range") Then
+        On Error Resume Next
+        n = MotorSize("Grating")
+        If n > 10 Then n = 10
+        For i = 0 To n - 1
+            For Each name In Array("SpMin", "SpMax")
+                ret = Empty
+                LabSpec.OperVar 0, "ACT_INSTRUMENT[" & name & "][" & i & "]", ret, 0
+                If Err.Number = 0 And IsNumeric(ret) And Not IsEmpty(ret) Then d("grating." & i & "." & name) = ret
+                Err.Clear
+            Next
+        Next
+        On Error GoTo 0
+        DEnd "spectro_range"
+    End If
     ' self-tests for the bridge's design (no laser, no motion, no LabSpec data created)
     On Error Resume Next
     If DStep("selftest.pause") Then

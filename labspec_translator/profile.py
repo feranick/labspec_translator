@@ -1,5 +1,5 @@
 """profile.py — the machine profile: what the instrument has (from the discovery script) and the limits a person sets.
-Version: 2026.11.20.36
+Version: 2026.11.20.37
 
 The profile is a JSON file (LS6T_PROFILE, default ~/ls6t/profile.json). Studies never change it: an LLM can only
 ask for what the profile allows. Without a file, the built-in XploRA defaults below apply and every result says so
@@ -42,7 +42,8 @@ DEFAULT_PROFILE: dict = {
     "objectives": ["x10", "x50", "x100"],
     "manual_objective": True,      # LabSpec asks the operator to turn the turret
     # motors moved the blocking way (MoveMotor without NO_WAIT), as HORIBA's scripts move them: by role
-    "blocking_motors": ["grating"],
+    # (the grating's blocking move returned in 0.02-0.04 s like the other way, 2026-11-20: none by default)
+    "blocking_motors": [],
     "holes_um": None,              # null: any value LabSpec accepts
     "slits_um": None,
     "detector": {"full_scale": 65535, "max_temp_c": -50.0, "pixels": 1024},
@@ -405,15 +406,25 @@ def import_discovery(text: str, base: dict | None = None) -> tuple[dict, list[st
     gr = _motor(d, prof["motors"]["grating"])
     if gr and gr["size"] > 0:
         gratings = {}
-        for v in gr["values"]:
+        spans = []
+        for i, v in enumerate(gr["values"]):
             g = _num(v)
             if g and g > 0:
                 key = f"{g:g}"
                 old = prof.get("gratings", {}).get(key, {})
-                gratings[key] = {"window_nm": old.get("window_nm", round(46800.0 / g, 2))}
+                gratings[key] = {k: v_ for k, v_ in old.items() if k in ("window_nm", "max_nm")}
+                gratings[key].setdefault("window_nm", round(46800.0 / g, 2))
+                # the spectrometer's range for this grating, from LabSpec's calibration (SpMin / SpMax): nm on the
+                # XploRA (TESTING Q45: 600 1138, 1200 1112, 1800 935, 2400 690); kept only when plausible as nm
+                lo, hi = _num(d.get(f"grating.{i}.SpMin")), _num(d.get(f"grating.{i}.SpMax"))
+                if hi is not None and 200 < hi <= 2e6 / g * 1.05 and (lo is None or 0 <= lo < hi):
+                    gratings[key]["spectro_nm"] = [lo if lo is not None else 0.0, hi]
+                    spans.append(f"{key} up to {hi:g} nm")
         if gratings:
             prof["gratings"] = gratings
             notes.append("gratings: " + ", ".join(gratings) + " gr/mm (window_nm estimated: measure it)")
+            if spans:
+                notes.append("spectrometer range per grating (LabSpec's SpMin / SpMax): " + ", ".join(spans))
 
     for role, cand in (("filter", ["Filter", "Density", "ND", "Attenuator"]),
                        ("objective", ["Objective", "Objectives", "Microscope", "Nosepiece"])):

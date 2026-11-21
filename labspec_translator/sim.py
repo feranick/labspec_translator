@@ -1,5 +1,5 @@
 """sim.py — a simulated LabSpec + XploRA behind the same bridge protocol as ls6t_bridge.vbs.
-Version: 2026.11.20.36
+Version: 2026.11.20.37
 
 It answers every verb of the bridge with the same keys, so the runner, the checks and the MCP server are tested
 without the instrument (LS6T_MODE=sim, and the tests). The simulated sample is a silicon wafer with a graphene
@@ -381,11 +381,16 @@ class SimLabSpec:
                 lines += [f"motor.{name}.current={m['i']}", f"motor.{name}.current_label={m['labels'][m['i']]}"]
             else:
                 lines += [f"motor.{name}.size=0", f"motor.{name}.current={m['value']}"]
+        # LabSpec's spectrometer range per grating (SpMin / SpMax, nm), as the XploRA reported them (2026-11-20)
+        sp = {600.0: 1138, 1200.0: 1112, 1800.0: 935, 2400.0: 690}
+        for i, g in enumerate(self.m["Grating"]["values"]):
+            if float(g) in sp:
+                lines += [f"grating.{i}.SpMin=0", f"grating.{i}.SpMax={sp[float(g)]}"]
         lines += ["selftest.pause=1", "selftest.last_error_info=1", "selftest.status_bar=1"]
         # the bridge's step log (common.vbs DiscStart/DStep): a step begun and never ended is skipped next time
         prog = config.home() / "discovery_progress.txt"
         prog.parent.mkdir(parents=True, exist_ok=True)
-        steps = ["values", "detector"] + [f"motor.{n}" for n in self.m] + ["selftest.pause", "video",
+        steps = ["values", "detector"] + [f"motor.{n}" for n in self.m] + ["spectro_range", "selftest.pause", "video",
                                                                             "selftest.last_error_info",
                                                                             "selftest.status_bar"]
         cf = self.dir / "sim_discover_crash"           # a test: LabSpec "crashes" in the step this file names

@@ -946,7 +946,7 @@ def test_native_map_export_and_discovery_probes(tmp_path):
     assert st["studies"]["m"]["reliable"]
     S.ensure(config.active_bridge_dir())
     r = bridge.Bridge().call("discover", timeout_s=10, out=str(tmp_path / "dump.txt"))
-    # discovery no longer probes these (2026.11.20.36): dumps from older bridges still carry them
+    # discovery no longer probes these (2026.11.20.37): dumps from older bridges still carry them
     old = (tmp_path / "dump.txt").read_text() + "\n".join([
         "selftest.get_value_ex=0", "selftest.get_value_simple_part=1", "selftest.get_value_simple_part_size=8",
         "selftest.get_value_simple_part_values=4,5,6,7,8,9,10,11", "selftest.get_config_param=1",
@@ -1761,11 +1761,15 @@ def test_grating_blocking_short_stop_timing_and_keepalive(tmp_path):
     assert 'GetP(cmd, "blocking", "0") = "1"' in mv and "moveId = LabSpec.MoveMotor(motor, posVal, posName, mc)\n" in mv
     assert 'Execute "BeatNow"' in br                    # the start-up inventory keeps the heartbeat going
     prof = P.load()
+    assert runner.move_extra(prof, prof["motors"]["grating"]) == {}       # blocking changed nothing: off (.37)
+    P.save(dict(prof, blocking_motors=["grating"]))
+    prof = P.load()
     assert runner.move_extra(prof, prof["motors"]["grating"]) == {"blocking": 1}
     assert runner.move_extra(prof, prof["motors"]["filter"]) == {}
     S.ensure(config.active_bridge_dir())
     r = api.instrument("set", setup={"grating": 600})
     assert r["ok"] and r["moves"][0]["blocking"] is True and {"total_s", "status_before_s", "moves_s"} <= set(r["timing"])
+    assert "not visible to ls6t" in r["note"]
     (config.active_bridge_dir() / "sim_grating_stuck").write_text("2400:1800")
     r = api.instrument("set", setup={"grating": 2400})
     assert not r["ok"] and "stopped at" in r["moves"][0]["error"] and "SpMax" in r["moves"][0]["error"]
@@ -1814,3 +1818,25 @@ def test_grating_reach_and_blocking_heartbeat(tmp_path, monkeypatch):
     br = Path(api.install_bridge(tmp_path / "vbs")["files"]["ls6t_bridge.vbs"]).read_text()
     mv = br[br.index("Sub VMove("):]
     assert mv.index("gBlocking = motor") < mv.index("moveId = LabSpec.MoveMotor(motor, posVal, posName, mc)\n")
+
+
+def test_spectrometer_range_from_labspec(tmp_path):
+    """LabSpec's SpMax per grating is nm on the XploRA (600 1138, 1200 1112, 1800 935, 2400 690): discovery records
+    it, studies beyond it are refused, set notes it (and never refuses a pair LabSpec accepts)."""
+    S.ensure(config.active_bridge_dir())
+    r = api.instrument("discover")
+    prop = json.loads(Path(r["proposed_profile"]).read_text())
+    assert prop["gratings"]["2400"]["spectro_nm"] == [0.0, 690.0] and prop["gratings"]["600"]["spectro_nm"][1] == 1138
+    prof = P.load()
+    P.save(dict(prof, gratings=prop["gratings"]))
+    prof = P.load()
+    assert plan.grating_reach(prof, 2400, 785.04)["max_shift_cm1"] is None
+    assert plan.grating_reach(prof, 2400, 637.75)["max_shift_cm1"] == 1187
+    assert plan.grating_reach(prof, 1800, 785.04)["max_shift_cm1"] == 2043
+    assert plan.grating_reach(prof, 1200, 785.04)["basis"] == "LabSpec's SpMax for this grating"
+    st = {"kind": "spectrum", "sample": {"name": "Si"}, "setup": {"laser_nm": 785, "grating": 2400, "filter": "1%",
+          "objective": "x100"}, "acquire": {"center_cm1": 520, "exposure_s": 1}}
+    v = api.validate({"s": st})["s"]
+    assert not v["ok"] and any("SpMax" in e for e in v["errors"])
+    r = api.instrument("set", setup={"laser_nm": 785, "grating": 2400})
+    assert r["ok"] and "reaches no Raman shift" in r["note"]

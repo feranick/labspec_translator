@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.20.36)
+## Architecture (version 2026.11.20.37)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -471,6 +471,17 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   / grating_reach (2e6/G, or gratings.<G>.max_nm when set from a measured limit / LabSpec's SpMax once its unit is
   known); format refuses ranges beyond it; set refuses a grating that cannot reach the laser line and reports reach
   + a note below 3200 cm-1. 118 tests.
+- 2026-11-20, 2026.11.20.37: .36 at the instrument: the blocking grating move returned in 0.02-0.04 s (move_id 0,
+  no wait) like NO_WAIT; the laser's status wait works (1.7-1.9 s). LabSpec changes the grating at once in
+  software; whether the turret moves then or at the next acquisition needs someone at the instrument (T3.16 now has
+  the observation and a first-vs-second acquisition timing). blocking_motors back to [] (the option stays). SpMax
+  per grating reads as nm (600 1138, 1200 1112, 1800 935, 2400 690): DiscoverTo step 'spectro_range' (OperVar
+  ACT_INSTRUMENT[SpMin|SpMax][i], read only, crash-skippable); import_discovery keeps it as gratings.<G>.spectro_nm
+  when plausible (200 < SpMax <= 1.05 x 2e6/G); plan.grating_limit_nm takes the lowest of 2e6/G, max_nm, SpMax;
+  grating_min_nm (SpMin); format refuses ranges outside; set no longer refuses a grating for a laser (LabSpec
+  accepts 785 + 2400), notes the reach and that the turret's motion is not visible. T3.16 sequence fixed: laser and
+  grating together from a different grating. First set after a bridge start: 0.21 s when idle first (inventory
+  explanation holds). Sim discovery reports the same SpMin/SpMax. 120 tests.
 
 ## To do next
 

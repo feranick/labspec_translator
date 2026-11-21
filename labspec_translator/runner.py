@@ -1,5 +1,5 @@
 """runner.py — runs a request's studies on the instrument, one command at a time, and checks every result.
-Version: 2026.11.20.36
+Version: 2026.11.20.37
 
 A request runs in its own process (`ls6t run-request FOLDER`, started detached by api.start), so it outlives the
 MCP call that started it. One request at a time holds the instrument (a lock file under LS6T_HOME); others wait
@@ -1721,7 +1721,7 @@ def _snapshot(ctx: Ctx, name: str, sd: Path, tag: str, with_laser: bool, warning
 def move_extra(prof: dict, motor: str) -> dict:
     """{'blocking': 1} for the motors moved the blocking way (profile blocking_motors, by role; the grating by
     default: with NO_WAIT it reported idle at once and once stopped part way, 2026-11-20)."""
-    roles = prof.get("blocking_motors", ["grating"]) or []
+    roles = prof.get("blocking_motors", []) or []
     names = {prof["motors"].get(r) for r in roles if prof["motors"].get(r)}
     return {"blocking": 1} if motor in names else {}
 

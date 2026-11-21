@@ -1,5 +1,5 @@
 """format.py — the study format and its static checks (no instrument needed).
-Version: 2026.11.20.36
+Version: 2026.11.20.37
 """
 from __future__ import annotations
 
@@ -595,6 +595,10 @@ def validate_study(name: str, study: dict, prof: dict) -> dict:
                           f"{laser:g} nm laser: beyond {reach['limit_nm']:g} nm ({reach['basis']})"
                           + (f", i.e. above {top:g} cm-1" if top is not None else ", the laser line itself")
                           + ": a coarser grating, or a shorter range")
+        lo_nm = plan.grating_min_nm(prof, (study.get("setup") or {}).get("grating"))
+        if lo_nm and float(rng.get("from_nm") or 1e9) < lo_nm:
+            errors.append(f"grating {(study.get('setup') or {}).get('grating')} starts at {lo_nm:g} nm (LabSpec's "
+                          f"SpMin): the range from {float(rng['from_nm']):.0f} nm is below it")
         if rng.get("from_cm1") is not None and rng["from_cm1"] < 0 and kind != "cutoff":
             warnings.append("acquire range starts below 0 cm-1 (anti-Stokes or the laser line): check the edge "
                             "filter allows it")

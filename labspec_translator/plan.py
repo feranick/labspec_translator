@@ -1,5 +1,5 @@
 """plan.py — a study as bridge commands: the setup moves, the points, the acquisitions; and the time estimate.
-Version: 2026.11.20.36
+Version: 2026.11.20.37
 
 Everything here is computed from the study and the profile alone: wavelengths from Raman shifts, the number of
 detector windows, the stage positions (always offsets from where the operator left the stage, Z from the
@@ -127,8 +127,21 @@ def grating_limit_nm(prof: dict, grating) -> float | None:
     if g <= 0:
         return None
     lim = 2e6 / g
-    mx = (prof.get("gratings", {}).get(f"{g:g}") or {}).get("max_nm")
-    return min(lim, float(mx)) if mx else lim
+    gp = prof.get("gratings", {}).get(f"{g:g}") or {}
+    for mx in (gp.get("max_nm"), (gp.get("spectro_nm") or [None, None])[1]):
+        if mx:
+            lim = min(lim, float(mx))
+    return lim
+
+
+def grating_min_nm(prof: dict, grating) -> float | None:
+    """The shortest wavelength the spectrometer reaches with a grating (LabSpec's SpMin), when known."""
+    try:
+        gp = prof.get("gratings", {}).get(f"{float(grating):g}") or {}
+    except (TypeError, ValueError):
+        return None
+    lo = (gp.get("spectro_nm") or [None])[0]
+    return float(lo) if lo else None
 
 
 def grating_reach(prof: dict, grating, laser_nm) -> dict | None:
@@ -137,8 +150,11 @@ def grating_reach(prof: dict, grating, laser_nm) -> dict | None:
     if lim is None or not laser_nm:
         return None
     laser_nm = float(laser_nm)
-    out = {"grating": f"{float(grating):g}", "laser_nm": laser_nm, "limit_nm": round(lim, 1),
-           "basis": "profile max_nm" if lim < 2e6 / float(grating) - 1e-6 else "first-order limit (2 / G)"}
+    gp = prof.get("gratings", {}).get(f"{float(grating):g}") or {}
+    sp = (gp.get("spectro_nm") or [None, None])[1]
+    basis = ("LabSpec's SpMax for this grating" if sp and abs(lim - float(sp)) < 1e-6 else
+             "profile max_nm" if lim < 2e6 / float(grating) - 1e-6 else "first-order limit (2 / G)")
+    out = {"grating": f"{float(grating):g}", "laser_nm": laser_nm, "limit_nm": round(lim, 1), "basis": basis}
     out["max_shift_cm1"] = round(1e7 / laser_nm - 1e7 / lim, 0) if laser_nm < lim else None
     return out
 

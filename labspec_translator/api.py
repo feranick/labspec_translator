@@ -1,5 +1,5 @@
 """api.py — the functions behind the command line and the MCP server (JSON in, JSON out).
-Version: 2026.11.20.36
+Version: 2026.11.20.37
 """
 from __future__ import annotations
 
@@ -689,9 +689,8 @@ def set_instrument(setup: dict) -> dict:
         # what the grating can reach with the laser (first-order limit, or the profile's max_nm per grating)
         las_t = float(prof["lasers"][lk]["nm"]) if lk else _fnum(before.get("laser_nm"))
         reach = plan.grating_reach(prof, s.get("grating", before.get("grating")), las_t)
-        if reach and reach["max_shift_cm1"] is None:
-            return {"ok": False, "error": f"grating {reach['grating']} cannot reach the {las_t:g} nm laser line: beyond "
-                                          f"{reach['limit_nm']:g} nm ({reach['basis']})" + nothing, "reach": reach}
+        # LabSpec accepts any grating with any laser (785 nm with 2400 gr/mm, 2026-11-20): the limit applies to
+        # what a study acquires (format refuses it there); set only says so
         t_checks = time.time() - t_all - t_before
         done = []
         for what, motor, mode, value in moves:
@@ -721,12 +720,21 @@ def set_instrument(setup: dict) -> dict:
                "after": {k: after.get(k) for k in SET_KEYS if after.get(k) is not None}}
         if done_obj:
             out["objective"] = done_obj
+        notes = []
         if reach:
             out["reach"] = reach
-            if reach["max_shift_cm1"] is not None and reach["max_shift_cm1"] < 3200:
-                out["note"] = (f"with grating {reach['grating']} and the {las_t:g} nm laser, Raman shifts end near "
-                               f"{reach['max_shift_cm1']:g} cm-1 ({reach['limit_nm']:g} nm, {reach['basis']}; the "
-                               "spectrometer's own limit is lower)")
+            if reach["max_shift_cm1"] is None:
+                notes.append(f"grating {reach['grating']} reaches no Raman shift with the {las_t:g} nm laser: it ends "
+                             f"at {reach['limit_nm']:g} nm ({reach['basis']}), below the laser line; studies with "
+                             "this pair are refused")
+            elif reach["max_shift_cm1"] < 3200:
+                notes.append(f"with grating {reach['grating']} and the {las_t:g} nm laser, Raman shifts end near "
+                             f"{reach['max_shift_cm1']:g} cm-1 ({reach['limit_nm']:g} nm, {reach['basis']})")
+        if any(d["set"] == "grating" for d in done):
+            notes.append("LabSpec reports a new grating at once; whether the turret has turned is not visible to ls6t "
+                         "(TESTING T3.16)")
+        if notes:
+            out["note"] = "; ".join(notes)
         out["timing"] = {"total_s": round(time.time() - t_all, 2), "status_before_s": round(t_before, 2),
                          "checks_s": round(t_checks, 2), "moves_s": round(sum(float(d.get("seconds") or 0)
                                                                               for d in done), 2),
