@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.20.32)
+## Architecture (version 2026.11.20.33)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -438,6 +438,10 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   right (every move reported accurately, first read-back), objective source and the refusal message as intended;
   settle_s was measured by the bridge but dropped by set_instrument and the runner: api._move_timing passes seconds,
   settle_s, settle_stable, settle_timeout. 116 tests.
+- 2026-11-20, 2026.11.20.33: Nicola: the 0.5 absolute tolerance must not apply to filters (0.1 % vs 0.01 % differ by
+  0.09; the filter is the setting tied to laser power). same_position: a value in % matches only within 0.1 %
+  relative (0.10 % = 0.1 %); positions keep 0.5 absolute. Filters move and read back by label (plan.setup_steps,
+  set_instrument), compared exactly by the bridge (NormLabel). 116 tests.
 
 ## To do next
 

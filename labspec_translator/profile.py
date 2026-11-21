@@ -1,5 +1,5 @@
 """profile.py — the machine profile: what the instrument has (from the discovery script) and the limits a person sets.
-Version: 2026.11.20.32
+Version: 2026.11.20.33
 
 The profile is a JSON file (LS6T_PROFILE, default ~/ls6t/profile.json). Studies never change it: an LLM can only
 ask for what the profile allows. Without a file, the built-in XploRA defaults below apply and every result says so
@@ -535,19 +535,25 @@ def summary(prof: dict) -> dict:
 
 
 def same_position(got, asked, tol: float = 0.5) -> bool:
-    """Whether a read-back position is the one asked, whatever the formatting: numbers within tol (637.8 and
-    637.75; '300' and 300.0), labels without spaces and case ('10 %' and '10%', 'X100_VIS' and 'x100_vis'), and a
-    label and a number that say the same ('10%' and 10)."""
+    """Whether a read-back position is the one asked, whatever the formatting: labels without spaces and case
+    ('10 %' and '10%', 'X100_VIS' and 'x100_vis'); numbers within tol for positions (637.8 and 637.75; '300' and
+    300.0). Filters (anything in %) are a discrete set tied to the laser power: they match only as the same number
+    (relative 0.1 %: '0.10%' = '0.1%', but never 0.1 % = 0.01 %), never within an absolute tolerance."""
     if got is None or asked is None:
         return False
     a, b = str(got).strip(), str(asked).strip()
     if a.replace(" ", "").casefold() == b.replace(" ", "").casefold():
         return True
+
     def num(s):
         m = re.fullmatch(r"\s*([-+]?\d+(?:[.,]\d+)?)\s*(%|nm|µm|um|gr/mm)?\s*", s)
-        return float(m.group(1).replace(",", ".")) if m else None
-    x, y = num(a), num(b)
-    return x is not None and y is not None and abs(x - y) <= tol
+        return (float(m.group(1).replace(",", ".")), m.group(2)) if m else (None, None)
+    (x, ux), (y, uy) = num(a), num(b)
+    if x is None or y is None:
+        return False
+    if "%" in (ux, uy):
+        return abs(x - y) <= 1e-3 * max(abs(x), abs(y)) + 1e-12
+    return abs(x - y) <= tol
 
 
 def match_label(value, labels) -> tuple:

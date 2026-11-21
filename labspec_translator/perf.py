@@ -1,5 +1,5 @@
 """perf.py — the instrument's measured performance, remembered between sessions.
-Version: 2026.11.20.32
+Version: 2026.11.20.33
 
 Four kinds of measurement, each kept per key with its history (the first record is the baseline):
 
