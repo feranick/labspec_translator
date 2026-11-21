@@ -1,5 +1,5 @@
 """plan.py — a study as bridge commands: the setup moves, the points, the acquisitions; and the time estimate.
-Version: 2026.11.20.44
+Version: 2026.11.20.45
 
 Everything here is computed from the study and the profile alone: wavelengths from Raman shifts, the number of
 detector windows, the stage positions (always offsets from where the operator left the stage, Z from the

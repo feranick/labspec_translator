@@ -1,5 +1,5 @@
 """sim.py — a simulated LabSpec + XploRA behind the same bridge protocol as ls6t_bridge.vbs.
-Version: 2026.11.20.44
+Version: 2026.11.20.45
 
 It answers every verb of the bridge with the same keys, so the runner, the checks and the MCP server are tested
 without the instrument (LS6T_MODE=sim, and the tests). The simulated sample is a silicon wafer with a graphene
@@ -722,8 +722,10 @@ class SimLabSpec:
         return {"shutter": "closed"}
 
     def v_resume(self, p):
+        if not self.halted:
+            return {"halted": 0}
         self.halted = False
-        return {"halted": 0}
+        return {"answer": "yes", "prompt_shown_after_s": 0.0, "answer_after_s": 0.0}
 
     def v_quit(self, p):
         threading.Thread(target=self.stop, daemon=True).start()

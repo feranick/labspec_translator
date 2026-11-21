@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.20.44)
+## Architecture (version 2026.11.20.45)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -532,7 +532,13 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   '#title#button' suffix on the non-blocking messages ('ls6t: in control' / Halt, 'ls6t: HALTED' / End bridge);
   StopRequested and the warm-up open the HALTED window at once; WarmUp polls OperatorStop (Halt or the stop button
   ends it) and allows 120 s per motor; OpenMainPopup(resumed) says RESUMED; Bridge.call extends its deadline while
-  the heartbeat says inventory/warmup (STARTUP_MAX_S 600; waited_for_bridge_start_s). 125 tests.
+  the heartbeat says inventory/warmup (STARTUP_MAX_S 600; waited_for_bridge_start_s).
+- 2026-11-21, 2026.11.20.45: Nicola: the slow resumes were
+  not the warm-up (it had finished; status answered quickly while halted, so the halted loop takes commands): the
+  time is inside VResume, i.e. the Yes/No prompt (shown late, hidden behind the HALTED window, or slow to answer over
+  RDP). VResume now closes the HALTED window first (reopens it on No) and reports prompt_shown_after_s /
+  answer_after_s (gCmdT0 set when HandleFile takes a command); api adds picked_up_after_s. Bridge.heartbeat retries a
+  read that catches the file mid-rewrite (empty / no state), which also made a test flaky. 126 tests.
 
 ## To do next
 

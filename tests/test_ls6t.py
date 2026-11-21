@@ -946,7 +946,7 @@ def test_native_map_export_and_discovery_probes(tmp_path):
     assert st["studies"]["m"]["reliable"]
     S.ensure(config.active_bridge_dir())
     r = bridge.Bridge().call("discover", timeout_s=10, out=str(tmp_path / "dump.txt"))
-    # discovery no longer probes these (2026.11.20.44): dumps from older bridges still carry them
+    # discovery no longer probes these (2026.11.20.45): dumps from older bridges still carry them
     old = (tmp_path / "dump.txt").read_text() + "\n".join([
         "selftest.get_value_ex=0", "selftest.get_value_simple_part=1", "selftest.get_value_simple_part_size=8",
         "selftest.get_value_simple_part_values=4,5,6,7,8,9,10,11", "selftest.get_config_param=1",
@@ -1947,3 +1947,20 @@ def test_windows_titles_resume_text_and_startup_wait(tmp_path):
     threading.Thread(target=answer, daemon=True).start()
     r = b.call("status", timeout_s=0.5)
     assert r["ok"] and r["waited_for_bridge_start_s"] > 0
+
+
+def test_resume_reports_where_the_time_went(tmp_path):
+    """.42/.43: resume took 58.8 and 99.6 s while the bridge was idle and halted."""
+    br = Path(api.install_bridge(tmp_path / "vbs")["files"]["ls6t_bridge.vbs"]).read_text()
+    rs = br[br.index("Sub VResume("):]
+    rs = rs[:rs.index("End Sub")]
+    assert rs.index("ClosePopup") < rs.index('res("prompt_shown_after_s")') < rs.index("LS_MB_YESNO") \
+        < rs.index('res("answer_after_s")')
+    assert "OpenHaltedPopup" in rs                     # on No, the HALTED window comes back
+    S.ensure(config.active_bridge_dir())
+    (config.active_bridge_dir() / "sim_operator_stop").write_text("1")
+    st = run_inline({"s": {"kind": "spectrum", "sample": {"name": "Si"},
+                           "setup": {"laser_nm": 532, "grating": 1800, "filter": "1%", "objective": "x100"},
+                           "acquire": {"center_cm1": 520, "exposure_s": 5}}})
+    r = api.instrument("resume")
+    assert r["answer"] == "yes" and {"prompt_shown_after_s", "answer_after_s", "picked_up_after_s"} <= set(r)

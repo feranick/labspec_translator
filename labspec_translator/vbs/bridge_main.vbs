@@ -16,6 +16,7 @@
 Const POLL_MS = 100
 Dim gNoId                 ' Empty: GetMotorStatus by the motor's name (HORIBA's scripts pass an unset MoveID)
 Dim gHaltPopup            ' the window open is the halted one (closing it ends the bridge)
+Dim gCmdT0                ' when the bridge took up the current command (Timer)
 gHaltPopup = False
 Dim gBlocking             ' the motor while a blocking MoveMotor runs (written in the heartbeat beforehand)
 Dim gMoveN                ' MoveMotor calls since this bridge started (1: its first; TESTING T3.16, a slow first move)
@@ -2051,22 +2052,31 @@ Sub VSafe(cmd, res)
     res("shutter_mode") = LSValue(0, "ShutterMode")
 End Sub
 
+' The operator's Yes to go on. Timed: prompt_shown_after_s (from the command's arrival to the question being put to
+' LabSpec) and answer_after_s (the question on screen until answered). On .42/.43 a resume took 58.8 and 99.6 s with
+' the bridge idle and halted; the HALTED window was still open over it: it is now closed while the question is
+' asked (and opened again on No), so the two do not overlap.
 Sub VResume(cmd, res)
-    Dim b
+    Dim b, t0, t1
+    t0 = gCmdT0
     If Not gHalted Then
         res("halted") = 0
         Exit Sub
     End If
+    ClosePopup                              ' the HALTED window: not over the question
     On Error Resume Next
+    t1 = Timer
+    res("prompt_shown_after_s") = Fmt(Elapsed(t0))
     b = LabSpec.Message("ls6t asks to control the instrument again. Allow it?", LS_MB_YESNO + LS_MB_ICONQUESTION)
+    res("answer_after_s") = Fmt(Elapsed(t1))
     Err.Clear
     On Error GoTo 0
     If b = LS_IDYES Then
         gHalted = False
-        ClosePopup                          ' the halted window
         OpenMainPopup True                  ' says it resumed: not a new request
         res("answer") = "yes"
     Else
+        OpenHaltedPopup
         res("answer") = "no"
     End If
 End Sub
@@ -2106,6 +2116,7 @@ Sub HandleFile(path)
     gVerb = verb
     gSeq = GetP(cmd, "seq", "0")
     gLastSeq = gSeq
+    gCmdT0 = Timer
     Set res = CreateObject("Scripting.Dictionary")
     res("seq") = gSeq
     res("ok") = 1

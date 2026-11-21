@@ -1,5 +1,5 @@
 """labspec_ini.py — what LabSpec's own hardware configuration file (OLConfig.ini) says about the instrument.
-Version: 2026.11.20.44
+Version: 2026.11.20.45
 
 LabSpec 6 keeps its hardware set-up in Parameters\\ACQUISITION\\OLConfig.ini and its software set-up in
 Parameters\\COMMON\\OLSetup.ini, under its installation folder (e.g. C:\\HORIBA\\LabSpec_6_8_1).

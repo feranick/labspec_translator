@@ -1,5 +1,5 @@
 """bridge.py — the Python side of the LabSpec bridge: commands as files in a folder the bridge script watches.
-Version: 2026.11.20.44
+Version: 2026.11.20.45
 
 Protocol 1 (the same for ls6t_bridge.vbs inside LabSpec and for sim.py):
 
@@ -173,12 +173,19 @@ class Bridge:
 
     # ------------------------------------------------------------------ state
     def heartbeat(self) -> dict | None:
+        """The bridge's heartbeat with its age. The bridge rewrites the file in place about once a second: a read
+        that catches it empty or half written is tried again (up to 5 times, 20 ms apart)."""
         hb = self.dir / "heartbeat.txt"
-        try:
-            st = hb.stat()
-            d = decode(read_text(hb))
-        except OSError:
-            return None
+        d, st = {}, None
+        for _ in range(5):
+            try:
+                st = hb.stat()
+                d = decode(read_text(hb))
+            except OSError:
+                return None
+            if d.get("state"):
+                break
+            time.sleep(0.02)
         d["age_s"] = round(max(0.0, time.time() - st.st_mtime), 2)
         return d
 
@@ -243,7 +250,11 @@ class Bridge:
                 self._withdraw(cmd)
                 raise BridgeTimeout(f"{verb}: no answer 30 s after the stop request")
             if now - t0 > timeout_s + startup_wait:
-                hb = self.heartbeat() or {}
+                hb = self.heartbeat()
+                if hb is None and self.alive():
+                    time.sleep(poll_s)              # the heartbeat being rewritten this instant: look again
+                    continue
+                hb = hb or {}
                 if hb.get("state") == "busy" and hb.get("verb") in STARTUP_VERBS and startup_wait < STARTUP_MAX_S:
                     # the bridge is still starting (inventory, motor warm-up): the command waits its turn, its own
                     # time counts from when the bridge is free (2026-11-20: status timed out during a 51 s warm-up)
