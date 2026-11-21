@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.20.38)
+## Architecture (version 2026.11.20.39)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -489,6 +489,12 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   laser_off operator passes the review gate (no laser) and now reports seconds.acquire and setup_moves seconds.
   TESTING: .37's T3.16 rewrite had gone to the wrong row (the first '| T3.16 |' is Q45's test column); rewritten
   now with the fixed sequence and the dark timing. 121 tests.
+- 2026-11-20, 2026.11.20.39: Nicola asked whether anything keeps the laser off in a background with laser_off
+  operator: no. The bridge's acquire closes the laser shutter only with laser_off=1 and a shutter motor (the
+  'shutter' mode); 'operator' is a plain acquisition, LabSpec's shutter opening as usual. runner.BLOCK_BY_HAND in
+  the background and cutoff notices (OK only at the instrument with the beam physically blocked; not from a remote
+  session); format._blocked_by_hand: a warning always, and with an unreviewed profile (labspec mode) the filter
+  must be the strongest attenuation. TESTING T3.16's dark timing: someone in the room, filter 0.1 %. 121 tests.
 
 ## To do next
 

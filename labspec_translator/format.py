@@ -1,5 +1,5 @@
 """format.py — the study format and its static checks (no instrument needed).
-Version: 2026.11.20.38
+Version: 2026.11.20.39
 """
 from __future__ import annotations
 
@@ -190,6 +190,21 @@ def _axis(spec, where: str, errors: list) -> bool:
     return True
 
 
+def _blocked_by_hand(study: dict, prof: dict, errors: list, warnings: list, what: str) -> None:
+    """A white-light study with laser_off 'operator': LabSpec opens the laser shutter as for any acquisition, and
+    only a physical block (or the laser off at its source) keeps the beam off. Said in the warnings; and with a
+    profile nobody has reviewed (no confirmed caps or power), the filter must be the strongest attenuation."""
+    warnings.append(f"{what}: the laser is kept off only by the operator's physical block: run it with someone at "
+                    "the instrument (LabSpec's prompt says so)")
+    if config.mode() == "labspec" and review_gate(prof):
+        fl = prof.get("filters") or {}
+        lowest = min(fl, key=lambda k: float(fl[k])) if fl else None
+        asked = (study.get("setup") or {}).get("filter")
+        if lowest is None or asked is None or not match_label(str(asked), [lowest])[0]:
+            errors.append(f"{what} with the laser blocked by hand and a profile not reviewed: setup.filter must be "
+                          f"the strongest attenuation ({lowest!r}), in case the block is not in place")
+
+
 def validate_study(name: str, study: dict, prof: dict) -> dict:
     errors: list[str] = []
     warnings: list[str] = []
@@ -265,6 +280,8 @@ def validate_study(name: str, study: dict, prof: dict) -> dict:
             errors.append("cutoff.laser_off 'shutter': no laser shutter motor in the profile; use 'operator'")
         if lo not in ("shutter", "operator"):
             errors.append("cutoff.laser_off: shutter or operator")
+        elif cp.get("light", "white") == "white" and lo == "operator":
+            _blocked_by_hand(study, prof, errors, warnings, "cutoff")
     if kind == "background":
         bgk = study.get("background")
         if not isinstance(bgk, dict):
@@ -280,6 +297,8 @@ def validate_study(name: str, study: dict, prof: dict) -> dict:
         elif lo == "shutter" and not prof["motors"].get("laser_shutter"):
             errors.append("background.laser_off 'shutter': no laser shutter motor in the profile; use 'operator' "
                           "(the operator blocks the laser)")
+        if lo == "operator":
+            _blocked_by_hand(study, prof, errors, warnings, "background")
         for k in ("points", "map", "series", "process", "video", "focus"):
             if study.get(k) is not None:
                 errors.append(f"{k}: not with kind 'background'")

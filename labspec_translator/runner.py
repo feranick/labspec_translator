@@ -1,5 +1,5 @@
 """runner.py — runs a request's studies on the instrument, one command at a time, and checks every result.
-Version: 2026.11.20.38
+Version: 2026.11.20.39
 
 A request runs in its own process (`ls6t run-request FOLDER`, started detached by api.start), so it outlives the
 MCP call that started it. One request at a time holds the instrument (a lock file under LS6T_HOME); others wait
@@ -1277,9 +1277,8 @@ def run_cutoff(name: str, study: dict, ctx: Ctx) -> dict:
     laser, rng = su["laser"], su["rng"]
     if white:
         txt = ("ls6t: the edge filter's cut-off, with the white light.\n\nTurn the white light on"
-               + (", and block the laser (LabSpec: Laser Off, or close its shutter by hand)"
-                  if cp["laser_off"] == "operator" else " (ls6t keeps the laser shutter closed)")
-               + ".\n\nPress OK when ready, or Cancel.")
+               + (".\n\n" + BLOCK_BY_HAND if cp["laser_off"] == "operator" else " (ls6t keeps the laser shutter closed)")
+               + "\n\nPress OK when ready, or Cancel.")
         if ctx.call("notice", timeout_s=3600, text=txt).get("answer") != "ok":
             raise Stop("the operator cancelled", "study")
     acq = plan.acquire_step(study, prof, rng)
@@ -1369,9 +1368,8 @@ def run_background(name: str, study: dict, ctx: Ctx) -> dict:
     su = _setup(name, study, ctx, warnings, unreliable, checks, 1, confirm=False)
     laser, rng = su["laser"], su["rng"]
     txt = (f"ls6t: white-light background '{bname}'.\n\nTurn the white light on, as it will be during the "
-           "measurements" + (", and block the laser (LabSpec: Laser Off, or close its shutter by hand)"
-                             if off == "operator" else " (ls6t keeps the laser shutter closed)")
-           + ".\n\nPress OK when ready, or Cancel.")
+           "measurements" + (".\n\n" + BLOCK_BY_HAND if off == "operator" else " (ls6t keeps the laser shutter closed)")
+           + "\n\nPress OK when ready, or Cancel.")
     if ctx.call("notice", timeout_s=3600, text=txt).get("answer") != "ok":
         raise Stop("the operator cancelled the background", "study")
     acq = plan.acquire_step(study, prof, rng)
@@ -1721,6 +1719,12 @@ def _snapshot(ctx: Ctx, name: str, sd: Path, tag: str, with_laser: bool, warning
     for w in snap.get("warnings", []):
         warnings.append(f"video ({tag}): {w}")
     return snap
+
+
+BLOCK_BY_HAND = ("THE LASER IS NOT TURNED OFF BY ls6t: without a confirmed laser shutter motor, LabSpec opens its shutter "
+                 "for this acquisition as for any other. Press OK ONLY IF YOU ARE AT THE INSTRUMENT and the beam is "
+                 "PHYSICALLY BLOCKED (a beam block in the laser path, or the laser switched off at its key or "
+                 "source). Do not confirm from a remote session: nobody there can see the beam.")
 
 
 def move_extra(prof: dict, motor: str) -> dict:

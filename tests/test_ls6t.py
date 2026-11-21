@@ -946,7 +946,7 @@ def test_native_map_export_and_discovery_probes(tmp_path):
     assert st["studies"]["m"]["reliable"]
     S.ensure(config.active_bridge_dir())
     r = bridge.Bridge().call("discover", timeout_s=10, out=str(tmp_path / "dump.txt"))
-    # discovery no longer probes these (2026.11.20.38): dumps from older bridges still carry them
+    # discovery no longer probes these (2026.11.20.39): dumps from older bridges still carry them
     old = (tmp_path / "dump.txt").read_text() + "\n".join([
         "selftest.get_value_ex=0", "selftest.get_value_simple_part=1", "selftest.get_value_simple_part_size=8",
         "selftest.get_value_simple_part_values=4,5,6,7,8,9,10,11", "selftest.get_config_param=1",
@@ -1860,8 +1860,13 @@ def test_inventory_facts_reach_a_persons_profile_and_dark_timing(tmp_path, monke
     monkeypatch.setenv("LS6T_MODE", "labspec")
     bg = {"kind": "background", "sample": {"name": "dark"}, "setup": {"laser_nm": 532, "grating": 1800},
           "acquire": {"center_cm1": 520, "exposure_s": 1}, "background": {"name": "dark_t316", "laser_off": "operator"}}
+    v = api.validate({"b": bg})["b"]          # blocked only by hand, profile not reviewed: strongest attenuation
+    assert not v["ok"] and any("strongest attenuation" in e for e in v["errors"])
+    bg["setup"]["filter"] = "0.1%"
     v = api.validate({"b": bg})["b"]
     assert v["ok"], v["errors"]
+    assert any("someone at the instrument" in w for w in v["warnings"])
+    assert "PHYSICALLY BLOCKED" in runner.BLOCK_BY_HAND and "remote session" in runner.BLOCK_BY_HAND
     spec = dict(bg, kind="spectrum")
     spec.pop("background")
     assert any("reviewed" in e for e in api.validate({"s": spec})["s"]["errors"])

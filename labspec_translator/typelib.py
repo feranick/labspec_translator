@@ -1,5 +1,5 @@
 """typelib.py — read LabSpec's ActiveX type library and print every command it offers (read-only).
-Version: 2026.11.20.38
+Version: 2026.11.20.39
 
 LabSpec 6's ActiveX control (NFActiveX.ocx; NGSActiveX.ocx for LabSpec 5) carries a type library: the list of
 every method and property of the installed version, with parameter names and types. Reading it loads no control,

@@ -1,5 +1,5 @@
 """sim.py — a simulated LabSpec + XploRA behind the same bridge protocol as ls6t_bridge.vbs.
-Version: 2026.11.20.38
+Version: 2026.11.20.39
 
 It answers every verb of the bridge with the same keys, so the runner, the checks and the MCP server are tested
 without the instrument (LS6T_MODE=sim, and the tests). The simulated sample is a silicon wafer with a graphene
@@ -561,7 +561,7 @@ class SimLabSpec:
         t_ = str(p.get("text", "")).lower()
         if "unblock the laser" in t_:
             self.laser_blocked = False
-        elif "block the laser" in t_:                     # the operator blocks the laser by hand
+        elif "block the laser" in t_ or "physically blocked" in t_:     # the operator blocks the laser by hand
             self.laser_blocked = True
         if "instrument calibration" in str(p.get("text", "")).lower():    # the operator fixes LabSpec's zero
             try:
