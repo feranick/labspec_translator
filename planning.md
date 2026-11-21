@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.20.31)
+## Architecture (version 2026.11.20.32)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -429,6 +429,15 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   set-up and kind move; the laser go-ahead asks whether LabSpec's lens is the one on the turret; checks.objective /
   set's objective / snapshot objective_source say confirmed-by-operator or LabSpec's unchecked setting; move.to_um
   warns when unchecked. 115 tests.
+- 2026-11-20, 2026.11.20.32: Nicola's review of .31: read-back matching must not depend on formats (a mismatch
+  would now cost 30 s and a false failure). profile.same_position (numbers within 0.5 with units %, nm, µm, gr/mm
+  stripped; labels without spaces/case) used by runner._matches, set_instrument and kind move; the bridge's
+  SettleReadback compares numbers numerically (it already did) and labels with NormLabel, and ends as soon as the
+  reading is unchanged for 1.5 s (settle_stable). move.to_um on a manual turret now asks the operator to confirm the
+  objective (the snapshot's µm scale comes from it; confirmations off: a warning). .31 at the instrument: set waits
+  right (every move reported accurately, first read-back), objective source and the refusal message as intended;
+  settle_s was measured by the bridge but dropped by set_instrument and the runner: api._move_timing passes seconds,
+  settle_s, settle_stable, settle_timeout. 116 tests.
 
 ## To do next
 

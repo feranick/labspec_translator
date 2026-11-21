@@ -1,5 +1,5 @@
 """runner.py — runs a request's studies on the instrument, one command at a time, and checks every result.
-Version: 2026.11.20.31
+Version: 2026.11.20.32
 
 A request runs in its own process (`ls6t run-request FOLDER`, started detached by api.start), so it outlives the
 MCP call that started it. One request at a time holds the instrument (a lock file under LS6T_HOME); others wait
@@ -315,8 +315,9 @@ def _setup(name: str, study: dict, ctx: Ctx, warnings: list, unreliable: list, c
         long_move = p["motor"] in (prof["motors"]["laser"], prof["motors"]["grating"], prof["motors"]["objective"])
         r = ctx.call("move", timeout_s=600 if long_move else 120, **p)
         ok, got = _matches(step, r)
+        from .api import _move_timing
         readback.append({"motor": step["motor"], "asked": step["value"], "got": r.get("label") or r.get("value"),
-                         "ok": bool(r["ok"] and ok), "error": r.get("error") or None})
+                         "ok": bool(r["ok"] and ok), "error": r.get("error") or None, **_move_timing(r)})
         if not r["ok"] or not ok:
             unreliable.append(f"{step['why']}: asked {step['value']}, " +
                               (f"LabSpec said: {r.get('error')}" if not r["ok"] else f"got {got}"))
@@ -788,7 +789,7 @@ def run_move(name: str, study: dict, ctx: Ctx) -> dict:
                 raise Stop("the operator declined to change the objective", "operator")
             ctx.objective_by_operator = str(obj)
         r = ctx.call("move", timeout_s=600, motor=prof["motors"]["objective"], mode="label", value=str(obj))
-        if not r["ok"] or r.get("label") != str(obj):
+        if not r["ok"] or not P.same_position(r.get("label"), obj):
             raise Stop(f"objective {obj}: {r.get('error') or 'got ' + str(r.get('label'))}", "study")
     hx, hy = ctx.home_xy
     if None in (hx, hy):
@@ -796,8 +797,19 @@ def run_move(name: str, study: dict, ctx: Ctx) -> dict:
     beam = None
     cur_obj = str(obj) if obj is not None else before.get("objective")
     if m.get("to_um") is not None and prof.get("manual_objective", True) and ctx.objective_by_operator != cur_obj:
-        warnings.append(f"objective {cur_obj}: LabSpec's setting, not checked by the operator (manual turret): the "
-                        "beam offset used is this objective's; if another lens is in place, the beam lands elsewhere")
+        # a point picked on a snapshot: its µm scale and the beam offset come from the objective LabSpec records; with
+        # another lens on the (manual) turret the stage would go to the wrong place: the operator confirms the lens
+        if config.confirm_policy() != "never":
+            ans = ctx.call("confirm", timeout_s=3600,
+                           text=f"ls6t will move the stage to a point picked on a video snapshot, scaled for objective "
+                                f"{cur_obj} (LabSpec's setting). Is {cur_obj} the lens on the turret now? (Cancel: no "
+                                f"move)")
+            if ans.get("answer") != "yes":
+                raise Stop(f"the operator did not confirm objective {cur_obj}: no move", "operator")
+            ctx.objective_by_operator = cur_obj
+        else:
+            warnings.append(f"objective {cur_obj}: LabSpec's setting, not checked (manual turret, confirmations "
+                            "off): if another lens is in place, the stage goes to the wrong place")
     if m.get("to_um") is not None:
         # put the beam (not LabSpec's marker) on a point picked in a snapshot: stage = point - the beam's offset
         objective = obj if obj is not None else before.get("objective")
@@ -1711,9 +1723,9 @@ def _matches(step: dict, r: dict) -> tuple[bool, str]:
         return False, ""
     if step["mode"] == "label":
         got = r.get("label", "")
-        return got == str(step["value"]), got
+        return P.same_position(got, step["value"]), got
     got = _f(r.get("value"))
-    return got is not None and abs(got - float(step["value"])) <= 0.5, str(got)
+    return got is not None and P.same_position(got, step["value"]), str(got)
 
 
 def _acq_timeout(study: dict, prof: dict, rng: dict) -> float:

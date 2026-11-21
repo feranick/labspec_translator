@@ -1,5 +1,5 @@
 """profile.py — the machine profile: what the instrument has (from the discovery script) and the limits a person sets.
-Version: 2026.11.20.31
+Version: 2026.11.20.32
 
 The profile is a JSON file (LS6T_PROFILE, default ~/ls6t/profile.json). Studies never change it: an LLM can only
 ask for what the profile allows. Without a file, the built-in XploRA defaults below apply and every result says so
@@ -532,6 +532,22 @@ def summary(prof: dict) -> dict:
             "objectives_info": prof.get("objectives_info") or {},
             "laser_limits": {k: {"max_filter_pct": v.get("max_filter_pct", 100), "power_mw": v.get("power_mw")}
                              for k, v in prof.get("lasers", {}).items()}}
+
+
+def same_position(got, asked, tol: float = 0.5) -> bool:
+    """Whether a read-back position is the one asked, whatever the formatting: numbers within tol (637.8 and
+    637.75; '300' and 300.0), labels without spaces and case ('10 %' and '10%', 'X100_VIS' and 'x100_vis'), and a
+    label and a number that say the same ('10%' and 10)."""
+    if got is None or asked is None:
+        return False
+    a, b = str(got).strip(), str(asked).strip()
+    if a.replace(" ", "").casefold() == b.replace(" ", "").casefold():
+        return True
+    def num(s):
+        m = re.fullmatch(r"\s*([-+]?\d+(?:[.,]\d+)?)\s*(%|nm|µm|um|gr/mm)?\s*", s)
+        return float(m.group(1).replace(",", ".")) if m else None
+    x, y = num(a), num(b)
+    return x is not None and y is not None and abs(x - y) <= tol
 
 
 def match_label(value, labels) -> tuple:

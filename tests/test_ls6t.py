@@ -946,7 +946,7 @@ def test_native_map_export_and_discovery_probes(tmp_path):
     assert st["studies"]["m"]["reliable"]
     S.ensure(config.active_bridge_dir())
     r = bridge.Bridge().call("discover", timeout_s=10, out=str(tmp_path / "dump.txt"))
-    # discovery no longer probes these (2026.11.20.31): dumps from older bridges still carry them
+    # discovery no longer probes these (2026.11.20.32): dumps from older bridges still carry them
     old = (tmp_path / "dump.txt").read_text() + "\n".join([
         "selftest.get_value_ex=0", "selftest.get_value_simple_part=1", "selftest.get_value_simple_part_size=8",
         "selftest.get_value_simple_part_values=4,5,6,7,8,9,10,11", "selftest.get_config_param=1",
@@ -1718,6 +1718,28 @@ def test_set_waits_for_motors_and_manual_objective(tmp_path):
     assert r["ok"] and r["objective"]["source"].startswith("changed by hand")
     r = api.instrument("set", setup={"grating": 1200})
     assert r["objective"]["source"].startswith("LabSpec's setting")
+    assert r["moves"][0]["settle_s"] == 0.0 and r["moves"][0]["seconds"] is not None     # reported per move
     (config.active_bridge_dir() / "sim_confirm_no").write_text("1")
     r = api.instrument("set", setup={"objective": "x10", "grating": 600})
     assert not r["ok"] and "nothing was changed" in r["error"]
+
+
+def test_readback_matching_and_snapshot_move_confirm(tmp_path):
+    """Formatting must not turn a reached position into a 30 s wait and a false failure; a move to a snapshot
+    point on a manual turret asks the operator to confirm the objective."""
+    for got, asked in (("637.8", 637.75), ("637.75", "637.8"), ("10 %", "10%"), ("X100_VIS", "x100_vis"),
+                       ("300", 300.0), ("10%", 10), (" 100 µm", "100")):
+        assert P.same_position(got, asked), (got, asked)
+    for got, asked in (("1800", 1200), ("1%", "10%"), ("x10_VIS", "x100_VIS"), ("", 5), (None, 1)):
+        assert not P.same_position(got, asked), (got, asked)
+    br = Path(api.install_bridge(tmp_path / "vbs")["files"]["ls6t_bridge.vbs"]).read_text()
+    sr = br[br.index("Sub SettleReadback("):]
+    sr = sr[:sr.index("End Sub")]
+    assert "NormLabel(got) = NormLabel(v)" in sr and 'res("settle_stable") = 1' in sr and "Elapsed(tSame) >= 1.5" in sr
+    S.ensure(config.active_bridge_dir())
+    st = run_inline({"m": {"kind": "move", "move": {"to_um": [1234.5 + 3, -567.8]}}})   # the operator says Yes
+    assert st["state"] not in ("failed", "cancelled"), st["state"]
+    assert "did not confirm objective" not in json.dumps(st)
+    (config.active_bridge_dir() / "sim_confirm_no").write_text("1")
+    st = run_inline({"m2": {"kind": "move", "move": {"to_um": [1234.5 + 3, -567.8]}}})
+    assert "did not confirm objective" in json.dumps(st)

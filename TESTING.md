@@ -12,7 +12,7 @@ stops and cancel on the simulator, and `ls6t bench` gives known answers. What re
 LabSpec and hardware. The plan goes from no laser and no motion to an LLM app driving a full map, in stages. Each
 stage starts only when the previous one passed.
 
-Version under test: 2026.11.20.31 (bridge protocol 1).
+Version under test: 2026.11.20.32 (bridge protocol 1).
 
 **Already known** (2026-11-20, from the instrument's discovery dump, its `NFActiveX.ocx`, `OLConfig.ini`,
 `OLSetup.ini` and LabSpec 6.7.1's service scripts): the motors and their positions (lasers 532, 637.75, 785.04 nm;
@@ -313,7 +313,7 @@ the single command underneath.
 | T3.12 | Stopping the video HORIBA's way (**Q44**; optional; maintainer ready to restart LabSpec; save work first). HORIBA's own service scripts (`SERVICE\StandardMapping XploRA.vbs`, `SWIFTMapping XploRA.vbs`) stop the video with `Video STOP_VIDEO`, then poll `GetMotorStatus("Video", id)` until 0, with no other video call in between; ls6t's earlier stop called `Video(GET_VIDEO_ID)` right after, and hung. With the video started by ls6t (`camera-on`): `ls6t profile set video.stop_from_script true`, then `ls6t instrument camera-off` once | It returns within 15 s with `live` 0 and `video_stop_status` 0, LabSpec's video is stopped, and the bridge answers `ls6t instrument status`. Record `video_stop_s`. If it hangs: restart LabSpec, set `video.stop_from_script` back to false, and record it (then no script way to stop the video is known) |
 | T3.13 | After the bridge's own stop (**Q44**; maintainer ready to restart LabSpec; save work first). **Done 2026-11-20 on .26:** the stop returned (`video_stop_s` 3.38) but the next `status` hung inside LabSpec. From .27 the bridge, after its own stop, no longer asks LabSpec anything about the video (it knows it is off and which camera was selected) until it starts the video itself, and it waits at least 5 s after the stop before starting it. With `video.stop_from_script` true: `camera-on`, `camera-off`, then `ls6t instrument status` twice, then `camera-on` again | `status` answers at once with `live_video` 0 and `video_known_off` 1; the second `camera-on` starts the video after the 5 s wait, and `status` then shows `live_video` 1 with `video_known_off` 0. A stop by hand takes about 3–4 s to take effect (Nicola, 2026-11-20), like `video_stop_s` 3.38: the 5 s wait counts from when the stop is reported done |
 | T3.14 | Switching cameras by a video restart (**Q44**; maintainer ready to restart LabSpec; save work first). **Passed before (2026-11-20, .28):** T3.12 (HORIBA's stop, 3.38 s) and T3.13 (no video query after the stop; stop then start, 3.09 s). With the live video on the internal camera (1): `ls6t profile set video.switch_camera true`, then `ls6t instrument camera-on --camera top` (camera 0 first: it was ignored before, even with the video stopped and after a LabSpec restart). Then `--camera internal`, then `--camera top` once more | Each switch: the video stops (`camera_restart` 1, `video_stop_s`), about 5 s pass, the video starts again, and the answer is `ok` with `camera_after` the one asked **and the live view shows that camera** (look). If camera 0 is ignored again, the answer says "LabSpec ignored the switch" with `camera_set_returned`: record it, and that camera stays a manual step (`video.switch_camera` back to false). No hang at any point; `status` answers between switches |
-| T3.15 | Motors and read-back (2026-11-20, .29: every move reached its target, but `set` read back before the motors finished and reported `ok: false`; mid-move readings such as the pinhole at 100 µm between 500 and 300). With .31: `ls6t instrument set --laser-nm 785 --grating 600 --filter 1% --hole 500 --slit 200`, then back | `ok: true`; each move's `got` is the value asked (no intermediate value); `settle_s` per move (the slit slowest). A request with a filter above the cap is refused as a whole and says nothing was changed |
+| T3.15 | Motors and read-back (2026-11-20, .29: every move reached its target, but `set` read back before the motors finished and reported `ok: false`; mid-move readings such as the pinhole at 100 µm between 500 and 300). With .32: `ls6t instrument set --laser-nm 785 --grating 600 --filter 1% --hole 500 --slit 200`, then back | `ok: true`; each move's `got` is the value asked (no intermediate value); `seconds` (the whole move) and `settle_s` (read-back after the motor reported idle) per move: record the slit's, the slowest. A request with a filter above the cap is refused as a whole and says nothing was changed |
 
 Also record the times of T3.3, T3.4 and T3.6. They replace the defaults in the profile's `timing` (`grating_s`,
 `laser_s`, `xy_um_per_s`, `xy_settle_s`), which feed the time estimates.
@@ -574,8 +574,9 @@ Pass:
 - the scan image shows a clear dip (or peak);
 - `spot.offset_um` agrees with T5e.1 / T5b.3 within about 0.5 µm at x100.
 
-Then aim: `{"m": {"kind": "move", "move": {"to_um": [x, y]}}}` and a 1 s spectrum. Pass: the Si signal is lowest
-there (the beam on the dust). Repeat at x10.
+Then aim: `{"m": {"kind": "move", "move": {"to_um": [x, y]}}}` and a 1 s spectrum. LabSpec first asks whether
+the objective it records is the lens on the turret (the snapshot's µm scale comes from it): answer Yes; once, answer
+Cancel and check nothing moves. Pass: the Si signal is lowest there (the beam on the dust). Repeat at x10.
 
 **T5e.3 Per objective and drift (Q16, Q25).** Repeat T5e.1 (or T5e.2):
 - at x10 and x5 (each objective keeps its own offset);

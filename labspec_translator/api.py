@@ -1,5 +1,5 @@
 """api.py — the functions behind the command line and the MCP server (JSON in, JSON out).
-Version: 2026.11.20.31
+Version: 2026.11.20.32
 """
 from __future__ import annotations
 
@@ -554,6 +554,16 @@ def _labels(b: Bridge, motor: str) -> tuple:
     return [r.get(f"label.{i}", "") for i in range(n)], [r.get(f"value.{i}") for i in range(n)]
 
 
+def _move_timing(r: dict) -> dict:
+    """How long a move took (seconds: the whole bridge call) and how long the read-back took to show the position
+    asked after the motor reported idle (settle_s); settle_stable / settle_timeout when it never did."""
+    out = {"seconds": r.get("seconds")}
+    for k in ("settle_s", "settle_stable", "settle_timeout"):
+        if r.get(k) not in (None, ""):
+            out[k] = float(r[k]) if k == "settle_s" else True
+    return out
+
+
 def objective_question(prof: dict, now, want) -> str:
     """The operator's question before LabSpec's objective changes. On a manual turret (profile manual_objective, as
     on this XploRA) the operator changes the lens by hand: LabSpec only records which one is in place, and every
@@ -650,9 +660,9 @@ def set_instrument(setup: dict) -> dict:
             r = b.call("move", timeout_s=600 if what in ("laser", "grating", "objective") else 120, motor=motor,
                        mode=mode, value=value)
             got = r.get("label") if mode == "label" else r.get("value")
-            ok = bool(r.get("ok")) and (str(got) == str(value) if mode == "label" else
-                                       abs(float(got or "nan") - float(value)) <= 0.5)
-            done.append({"set": what, "asked": value, "got": got, "ok": ok, "error": r.get("error") or None})
+            ok = bool(r.get("ok")) and P.same_position(got, value)
+            done.append({"set": what, "asked": value, "got": got, "ok": ok, "error": r.get("error") or None,
+                         **_move_timing(r)})
             if not r.get("ok"):
                 if r.get("stopped_by"):
                     done[-1]["error"] = f"stopped by the {r.get('stopped_by')}"

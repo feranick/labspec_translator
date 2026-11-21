@@ -623,21 +623,40 @@ Sub VMove(cmd, res)
     res("label") = MotorLabel(motor)
 End Sub
 
-' Reads the motor until it shows the position asked (value within 0.5, or the label), at most 30 s (or tmo)
+' A label as compared: no spaces, lower case ("10 %" = "10%", "X100_VIS" = "x100_vis")
+Function NormLabel(x)
+    NormLabel = LCase(Replace(Replace(Trim(CStr(x)), " ", ""), vbTab, ""))
+End Function
+
+' Reads the motor until it shows the position asked: a value within 0.5 (637.8 = 637.75; numbers, not their text),
+' or the same label as NormLabel compares them, or a label whose number matches. It stops waiting at most 30 s (or
+' tmo) after the motor reported idle, or as soon as the reading has not changed for 1.5 s (settle_stable): a
+' position written differently is then reported at once, and Python decides whether it matches.
 Sub SettleReadback(motor, mode, v, tmo, res)
-    Dim t0, got, lim, who
+    Dim t0, got, lim, who, last, tSame, hit
     t0 = Timer
     lim = 30
     If tmo < lim Then lim = tmo
+    last = Chr(0)
+    tSame = Timer
     Do
+        hit = False
         If mode = "label" Then
             got = MotorLabel(motor)
-            If CStr(got) = CStr(v) Then Exit Do
+            If NormLabel(got) = NormLabel(v) Then hit = True
         Else
             got = MotorValue(motor)
             If CStr(got) <> "" Then
-                If Abs(ParseNum(got) - ParseNum(v)) <= 0.5 Then Exit Do
+                If Abs(ParseNum(got) - ParseNum(v)) <= 0.5 Then hit = True
             End If
+        End If
+        If hit Then Exit Do
+        If CStr(got) <> CStr(last) Then
+            last = got
+            tSame = Timer
+        ElseIf Elapsed(tSame) >= 1.5 Then
+            res("settle_stable") = 1        ' not the position asked, but no longer moving
+            Exit Do
         End If
         who = StopRequested()
         If who <> "" Then
