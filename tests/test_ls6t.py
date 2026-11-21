@@ -946,7 +946,7 @@ def test_native_map_export_and_discovery_probes(tmp_path):
     assert st["studies"]["m"]["reliable"]
     S.ensure(config.active_bridge_dir())
     r = bridge.Bridge().call("discover", timeout_s=10, out=str(tmp_path / "dump.txt"))
-    # discovery no longer probes these (2026.11.20.27): dumps from older bridges still carry them
+    # discovery no longer probes these (2026.11.20.28): dumps from older bridges still carry them
     old = (tmp_path / "dump.txt").read_text() + "\n".join([
         "selftest.get_value_ex=0", "selftest.get_value_simple_part=1", "selftest.get_value_simple_part_size=8",
         "selftest.get_value_simple_part_values=4,5,6,7,8,9,10,11", "selftest.get_config_param=1",
@@ -1611,3 +1611,39 @@ def test_after_the_bridges_own_video_stop_status_does_not_touch_the_video(tmp_pa
     assert "stuck inside LabSpec in 'status'" in msg and "drop it" in msg
     (b.dir / "heartbeat.txt").write_text("state=busy\nverb=map_native\n", encoding="utf-8")
     assert "still works" in b._timeout_text("map_native", 15)
+
+
+def test_every_video_call_respects_the_bridges_own_stop(tmp_path):
+    """After the bridge's own stop, no command may ask LabSpec about the video before the bridge starts it again
+    (T3.12: status hung on that), and a new bridge starts without that state (it is not saved anywhere)."""
+    import re as _re
+    br = Path(api.install_bridge(tmp_path / "vbs")["files"]["ls6t_bridge.vbs"]).read_text()
+    # each LabSpec.Video call, by the procedure it is in
+    where, cur = {}, None
+    for line in br.splitlines():
+        m = _re.match(r"\s*(?:Function|Sub)\s+(\w+)", line)
+        if m:
+            cur = m.group(1)
+        if "LabSpec.Video" in line and not line.strip().startswith("'"):
+            where.setdefault(cur, []).append(line.strip())
+    allowed = {"VidId", "VidCam",          # gated by gVidOff
+               "SetCamera",                # opt-in switching, after VidSettle
+               "StopVideoHoriba",          # only with the video running (not gVidOff)
+               "VCamera", "VVideo",        # START after VidSettle; GET_VIDEO_ID after the start (gVidOff cleared)
+               "GrabFrame"}                # only once the video runs
+    assert set(where) <= allowed, set(where) - allowed
+    for proc in ("VCamera", "VVideo"):
+        body = br[br.index(f"Sub {proc}("):]
+        body = body[:body.index("End Sub")]
+        assert body.count("VidSettle") >= 1 and "gVidOff = False" in body
+        assert "LabSpec.Video(LS_GET_ACTIVE_CAMERA)" not in body
+    ext = br[br.index("r = LabSpec.Video(LS_START_EXTENDED_VIDEO)") - 400:]
+    assert "If gVidOff Then" in ext[:400]
+    af = br[br.index("Sub VAutofocus("):]
+    assert 'how = "video" And gVidOff' in af[:af.index("End Sub")]
+    sc = br[br.index("Function SetCamera("):]
+    sc = sc[:sc.index("End Function")]
+    assert sc.index("VidSettle") < sc.index("LabSpec.Video(LS_SET_ACTIVE_CAMERA")
+    # a fresh bridge: the state starts off, and is never written to a file
+    assert "gVidOff = False\n" in br[:br.index("Function VidId()")]
+    assert not _re.search(r"(WriteKV|WriteLine)[^\n]*gVidOff", br)

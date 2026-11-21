@@ -361,8 +361,9 @@ Const LS6T_VIDEO_BY_HAND = "end the bridge from ls6t first (instrument end_bridg
 Function SetCamera(want, res)
     Dim before, after, r, t0
     SetCamera = False
+    VidSettle                               ' after the bridge's own stop: the 5 s first (TESTING Q44: camera 0)
     On Error Resume Next
-    before = LabSpec.Video(LS_GET_ACTIVE_CAMERA)
+    before = VidCam()
     Err.Clear
     res("camera_before") = before
     If CStr(before) = CStr(want) Then
@@ -382,6 +383,7 @@ Function SetCamera(want, res)
     Loop
     res("camera_after") = after
     res("camera_set_s") = Fmt(Elapsed(t0))
+    If gVidOff Then gVidCam = after         ' the selection, for status while the video stays off
     On Error GoTo 0
     SetCamera = (CStr(after) = CStr(want))
 End Function
@@ -619,6 +621,10 @@ Sub VAutofocus(cmd, res)
     mc = LS_LASER_AUTOFOCUS
     If how = "raman" Then mc = LS_RAMAN_AUTOFOCUS
     If how = "video" Then mc = LS_VIDEO_AUTOFOCUS
+    If how = "video" And gVidOff Then
+        Fail res, "the bridge stopped the live video: start it first (instrument camera_on), then autofocus on video"
+        Exit Sub
+    End If
     On Error Resume Next
     LabSpec.Autofocus mc
     If Err.Number <> 0 Then
@@ -1194,6 +1200,10 @@ Sub VVideo(cmd, res)
         ' (SetExtendedVideo, which would set them, is in the manual but not in this build). The stage moves.
         If laserS > 0 Or acqS > 0 Then
             Fail res, "extended video takes no laser (laser_s, during_acq_s)"
+            Exit Sub
+        End If
+        If gVidOff Then
+            Fail res, "the bridge stopped the live video: start it first (instrument camera_on), then the extended video"
             Exit Sub
         End If
         tA = Timer

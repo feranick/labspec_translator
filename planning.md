@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.20.27)
+## Architecture (version 2026.11.20.28)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -390,6 +390,15 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   video_known_off. Bridge._timeout_text: stuck in <verb> (busy, heartbeat > 5 s old) with labspec_hint, or still
   working; says ls6t asked the bridge to drop the command. Popup: Cancel acts when LabSpec's current call ends.
   112 tests.
+- 2026-11-20, 2026.11.20.28: Nicola's review of .27: every command must honour the bridge's own stop, not only
+  status; a new bridge must not inherit it; camera 0 is a separate problem (ignored with the video stopped, even
+  after a LabSpec restart): when switching returns, first check Video(10+0) after a clean stop + 5 s. Audit of every
+  LabSpec.Video call: VidId/VidCam gated; SetCamera now VidSettle + VidCam first, and keeps gVidCam; StopVideoHoriba
+  only when live; VCamera/VVideo START after VidSettle, then gVidOff cleared; GrabFrame only once the video runs;
+  VAutofocus 'video' and the extended video refused while gVidOff; GetMotorStatus (moves, safe) is what HORIBA polls
+  right after STOP, so left. test_every_video_call_respects_the_bridges_own_stop pins the call sites. gVidOff starts
+  False in each script run and is never written to a file. CI (Windows, .27 tag): bench graphene_map failed; passes
+  5/5 here (7.1 s): the job's printed check list is needed. 113 tests.
 
 ## To do next
 
