@@ -1,5 +1,5 @@
 """runner.py — runs a request's studies on the instrument, one command at a time, and checks every result.
-Version: 2026.11.20.37
+Version: 2026.11.20.38
 
 A request runs in its own process (`ls6t run-request FOLDER`, started detached by api.start), so it outlives the
 MCP call that started it. One request at a time holds the instrument (a lock file under LS6T_HOME); others wait
@@ -1416,7 +1416,12 @@ def run_background(name: str, study: dict, ctx: Ctx) -> dict:
               "background": {**stored, "max_cps": round(float(np.max(cps)), 3), "mean_cps": round(float(np.mean(cps)), 3)},
               "spectra": [{"file": str(out), "exposure_s": ex, "max_counts": sat["max_counts"]}],
               "instrument": {"laser_nm": laser, "grating": meta["grating"], "objective": meta["objective"]},
-              "seconds": {"total": round(time.time() - t_start, 2)}}
+              "seconds": {"total": round(time.time() - t_start, 2),
+                          # the acquisition alone (the bridge's call): two backgrounds in a row after a grating
+                          # change show whether the turret moves only then (TESTING T3.16)
+                          "acquire": r.get("seconds"),
+                          "setup_moves": [{"motor": m["motor"], "seconds": m.get("seconds")}
+                                          for m in su.get("readback", [])]}}
     return _finish(sd, name, result)
 
 

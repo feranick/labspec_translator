@@ -210,7 +210,7 @@ snapshots with the laser. Every laser is also capped at a 10 % filter and the la
 `ls6t status` and `study_format` say when the profile is automatic. Once a person runs `ls6t profile import` or
 `ls6t profile set`, the profile is theirs: it is never replaced again, and `ls6t status` reports any difference
 with a newer inventory (a new objective, say). The laser fires once the profile is **reviewed** (steps below), with
-every laser's `nm`, `max_filter_pct` and `power_mw` filled in. `ls6t status` shows `profile.reviewed`.
+every laser's `nm`, `max_filter_pct` and `power_mw` filled in. `ls6t status` shows `profile.reviewed`. Facts LabSpec reports that only restrict ls6t (the spectrometer's range per grating, SpMin / SpMax) reach a person's profile from the bridge's inventory at each start, reviewed or not (`facts_from_inventory` in `ls6t profile show`).
 
 **Reviewing it** (TESTING.md T1.2), with the maintainer:
 

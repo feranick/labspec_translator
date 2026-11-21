@@ -946,7 +946,7 @@ def test_native_map_export_and_discovery_probes(tmp_path):
     assert st["studies"]["m"]["reliable"]
     S.ensure(config.active_bridge_dir())
     r = bridge.Bridge().call("discover", timeout_s=10, out=str(tmp_path / "dump.txt"))
-    # discovery no longer probes these (2026.11.20.37): dumps from older bridges still carry them
+    # discovery no longer probes these (2026.11.20.38): dumps from older bridges still carry them
     old = (tmp_path / "dump.txt").read_text() + "\n".join([
         "selftest.get_value_ex=0", "selftest.get_value_simple_part=1", "selftest.get_value_simple_part_size=8",
         "selftest.get_value_simple_part_values=4,5,6,7,8,9,10,11", "selftest.get_config_param=1",
@@ -1840,3 +1840,32 @@ def test_spectrometer_range_from_labspec(tmp_path):
     assert not v["ok"] and any("SpMax" in e for e in v["errors"])
     r = api.instrument("set", setup={"laser_nm": 785, "grating": 2400})
     assert r["ok"] and "reaches no Raman shift" in r["note"]
+
+
+def test_inventory_facts_reach_a_persons_profile_and_dark_timing(tmp_path, monkeypatch):
+    """A person's (not reviewed) profile gets LabSpec's spectrometer ranges from the inventory without a review; a
+    background with the laser blocked by the operator runs without a reviewed profile and times the acquisition."""
+    S.ensure(config.active_bridge_dir())
+    assert api.instrument("discover")["ok"]
+    dump = sorted(config.home().glob("discovery_2*.txt"))[-1]
+    (config.home() / "discovery_latest.txt").write_text(dump.read_text())
+    prof = P.load()
+    for g in prof["gratings"].values():
+        g.pop("spectro_nm", None)
+    prof.pop("auto", None)
+    P.save(dict(prof, video=dict(prof["video"], stop_from_script=True)))      # a person's, not reviewed
+    prof = P.load()
+    assert not prof.get("reviewed") and prof["gratings"]["2400"]["spectro_nm"] == [0.0, 690.0]
+    assert prof["facts_from_inventory"]["spectro_nm"]
+    monkeypatch.setenv("LS6T_MODE", "labspec")
+    bg = {"kind": "background", "sample": {"name": "dark"}, "setup": {"laser_nm": 532, "grating": 1800},
+          "acquire": {"center_cm1": 520, "exposure_s": 1}, "background": {"name": "dark_t316", "laser_off": "operator"}}
+    v = api.validate({"b": bg})["b"]
+    assert v["ok"], v["errors"]
+    spec = dict(bg, kind="spectrum")
+    spec.pop("background")
+    assert any("reviewed" in e for e in api.validate({"s": spec})["s"]["errors"])
+    monkeypatch.setenv("LS6T_MODE", "sim")
+    st = run_inline({"b1": bg, "b2": dict(bg, background={"name": "dark_t316b", "laser_off": "operator"})})
+    for k in ("b1", "b2"):
+        assert st["studies"][k]["seconds"]["acquire"] is not None

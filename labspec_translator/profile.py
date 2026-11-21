@@ -1,5 +1,5 @@
 """profile.py — the machine profile: what the instrument has (from the discovery script) and the limits a person sets.
-Version: 2026.11.20.37
+Version: 2026.11.20.38
 
 The profile is a JSON file (LS6T_PROFILE, default ~/ls6t/profile.json). Studies never change it: an LLM can only
 ask for what the profile allows. Without a file, the built-in XploRA defaults below apply and every result says so
@@ -179,6 +179,40 @@ def drift(prof: dict) -> list[str]:
     return out
 
 
+def spectro_ranges(d: dict, grating_motor: str = "Grating") -> dict:
+    """{'<G>': [SpMin, SpMax]} from a discovery dump: LabSpec's spectrometer range per grating, kept only when it is
+    plausible as nm (200 < SpMax <= 1.05 x 2e6 / G; on the XploRA 2400: 690, 1800: 935, 1200: 1112, 600: 1138)."""
+    out = {}
+    gr = _motor(d, grating_motor)
+    for i, v in enumerate((gr or {}).get("values") or []):
+        g = _num(v)
+        lo, hi = _num(d.get(f"grating.{i}.SpMin")), _num(d.get(f"grating.{i}.SpMax"))
+        if g and g > 0 and hi is not None and 200 < hi <= 2e6 / g * 1.05 and (lo is None or 0 <= lo < hi):
+            out[f"{g:g}"] = [lo if lo is not None else 0.0, hi]
+    return out
+
+
+def _inventory_facts(prof: dict) -> None:
+    """Facts LabSpec reports that only restrict what ls6t does (the spectrometer's range per grating) go into a
+    person's profile from the bridge's latest inventory, without a review: they never widen a limit. Marked in
+    prof['facts_from_inventory']."""
+    dump = latest_dump()
+    if dump is None or prof.get("auto"):
+        return
+    try:
+        ranges = spectro_ranges(parse_kv(read_text(dump)), prof["motors"].get("grating", "Grating"))
+    except (OSError, ValueError, KeyError):
+        return
+    added = []
+    for key, sp in ranges.items():
+        g = prof.get("gratings", {}).get(key)
+        if isinstance(g, dict) and g.get("spectro_nm") != sp:
+            g["spectro_nm"] = sp
+            added.append(key)
+    if added:
+        prof["facts_from_inventory"] = {"spectro_nm": added, "from": str(dump)}
+
+
 def load(path: Path | None = None) -> dict:
     """The profile in use: the file merged over the defaults ('measured': false when there is no file). With no
     file but an inventory from the bridge, a profile is made from it automatically (auto_profile); an automatic
@@ -200,6 +234,8 @@ def load(path: Path | None = None) -> dict:
         prof = _merge(DEFAULT_PROFILE, data)
         prof["measured"] = True
         prof["path"] = str(p)
+        if path is None:
+            _inventory_facts(prof)
     else:
         prof = copy.deepcopy(DEFAULT_PROFILE)
         prof["measured"] = False
@@ -414,12 +450,10 @@ def import_discovery(text: str, base: dict | None = None) -> tuple[dict, list[st
                 old = prof.get("gratings", {}).get(key, {})
                 gratings[key] = {k: v_ for k, v_ in old.items() if k in ("window_nm", "max_nm")}
                 gratings[key].setdefault("window_nm", round(46800.0 / g, 2))
-                # the spectrometer's range for this grating, from LabSpec's calibration (SpMin / SpMax): nm on the
-                # XploRA (TESTING Q45: 600 1138, 1200 1112, 1800 935, 2400 690); kept only when plausible as nm
-                lo, hi = _num(d.get(f"grating.{i}.SpMin")), _num(d.get(f"grating.{i}.SpMax"))
-                if hi is not None and 200 < hi <= 2e6 / g * 1.05 and (lo is None or 0 <= lo < hi):
-                    gratings[key]["spectro_nm"] = [lo if lo is not None else 0.0, hi]
-                    spans.append(f"{key} up to {hi:g} nm")
+                sp = spectro_ranges(d, prof["motors"]["grating"]).get(key)
+                if sp:
+                    gratings[key]["spectro_nm"] = sp
+                    spans.append(f"{key} up to {sp[1]:g} nm")
         if gratings:
             prof["gratings"] = gratings
             notes.append("gratings: " + ", ".join(gratings) + " gr/mm (window_nm estimated: measure it)")

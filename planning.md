@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.20.37)
+## Architecture (version 2026.11.20.38)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -482,6 +482,13 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   accepts 785 + 2400), notes the reach and that the turret's motion is not visible. T3.16 sequence fixed: laser and
   grating together from a different grating. First set after a bridge start: 0.21 s when idle first (inventory
   explanation holds). Sim discovery reports the same SpMin/SpMax. 120 tests.
+- 2026-11-20, 2026.11.20.38: Nicola: this account's profile is a person's (stop_from_script set) but not reviewed,
+  so the SpMax limits would wait for the review (import needs power_mw); and the two-spectra timing needs the laser.
+  profile.spectro_ranges (shared with import_discovery) and _inventory_facts: load() puts the inventory's
+  spectro_nm into a person's profile (only restricts; facts_from_inventory). Dark timing: kind background with
+  laser_off operator passes the review gate (no laser) and now reports seconds.acquire and setup_moves seconds.
+  TESTING: .37's T3.16 rewrite had gone to the wrong row (the first '| T3.16 |' is Q45's test column); rewritten
+  now with the fixed sequence and the dark timing. 121 tests.
 
 ## To do next
 
