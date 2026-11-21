@@ -1,5 +1,5 @@
 """video.py — video snapshots: decoding the bridge's frame file and drawing it with the laser position marked.
-Version: 2026.11.20.28
+Version: 2026.11.20.29
 
 The bridge writes a cloned video frame as '# key=value' header lines (axis types, sizes, units, values) and the
 pixel values in LabSpec's order. LabSpec's video axes are taken to be stage coordinates in µm ('mkm'), so the laser
@@ -42,14 +42,20 @@ def decode(path, packing: str = "colorref", order: str = "x_fastest") -> dict:
     nz = [i for i, s in enumerate(sizes) if s > 0]
     ix = idx.get("X", nz[0] if nz else None)
     iy = idx.get("Y", nz[1] if len(nz) > 1 else None)
-    if len(dims) == 2:
+    if len(dims) == 3 and dims.count(3) + dims.count(4) >= 1:      # e.g. 888, 606, 3: a colour channel axis
+        ch = dims.index(3) if 3 in dims else dims.index(4)
+        W, H = [d for i, d in enumerate(dims) if i != ch][:2]
+    elif len(dims) == 2:
         W, H = dims
     elif ix is not None and iy is not None:
         W, H = sizes[ix], sizes[iy]
     else:
         raise ValueError(f"{path}: cannot tell the image's width and height")
-    if data.size != W * H:
-        raise ValueError(f"{path}: {data.size} pixel values for a {W} x {H} image")
+    # one value per pixel (gray, or a packed colour), or 3 / 4 per pixel (colour channels; the XploRA's top camera
+    # gave 888 x 606 x 3 values, 2026-11-20)
+    if data.size % (W * H) or data.size // (W * H) not in (1, 3, 4):
+        raise ValueError(f"{path}: {data.size} pixel values for a {W} x {H} image (expected 1, 3 or 4 per pixel)")
+    nch = data.size // (W * H)
     # axis values: merged in axis order, each axis its own size
     offs, pos = {}, 0
     for i, s in enumerate(sizes):
@@ -59,6 +65,10 @@ def decode(path, packing: str = "colorref", order: str = "x_fastest") -> dict:
     ys = axis[offs[iy][0]:offs[iy][1]] if iy is not None and axis.size >= pos else np.arange(H, dtype=float)
     um = all(i is not None and i < len(units) and units[i].lower() in UM_UNITS for i in (ix, iy)) \
         and xs.size == W and ys.size == H
+    if nch > 1:
+        img = _channels(data, W, H, nch, packing, order)
+        return {"img": img, "xs": xs, "ys": ys, "um": bool(um), "meta": meta, "width": W, "height": H,
+                "channels": nch}
     grid = data.reshape(H, W) if order == "x_fastest" else data.reshape(W, H).T
     if packing in ("colorref", "rgb") and grid.max() > 255.5:
         v = grid.astype(np.int64)
@@ -68,6 +78,29 @@ def decode(path, packing: str = "colorref", order: str = "x_fastest") -> dict:
     else:
         img = grid
     return {"img": img, "xs": xs, "ys": ys, "um": bool(um), "meta": meta, "width": W, "height": H}
+
+
+def _channels(data, W: int, H: int, nch: int, packing: str, order: str) -> np.ndarray:
+    """(H, W, 3) uint8 from 3 or 4 values per pixel. The values may come pixel by pixel (r,g,b,r,g,b...) or plane by
+    plane (all of one channel, then the next): the layout that gives the smoother image is taken (a camera image
+    varies little from one pixel to the next). Channel order as the packing's bytes: colorref (0x00BBGGRR) R, G, B;
+    rgb (0x00RRGGBB) B, G, R (TESTING T5b.2: red and blue swapped -> the other packing)."""
+    def grid(a):                 # (n) -> (H, W)
+        return a.reshape(H, W) if order == "x_fastest" else a.reshape(W, H).T
+    inter = [grid(data[c::nch]) for c in range(nch)]
+    plane = [grid(data[c * W * H:(c + 1) * W * H]) for c in range(nch)]
+
+    def rough(chs):
+        g = np.mean(chs[:3], axis=0)
+        return float(np.mean(np.abs(np.diff(g, axis=1)))) + float(np.mean(np.abs(np.diff(g, axis=0))))
+    chs = inter if rough(inter) <= rough(plane) else plane
+    chs = chs[:3]
+    if packing == "rgb":
+        chs = chs[::-1]
+    img = np.stack(chs, axis=-1)
+    if img.max() > 255.5:        # 16-bit or so: scaled into 8 bits
+        img = img * (255.0 / img.max())
+    return np.clip(img, 0, 255).astype(np.uint8)
 
 
 def _lum(img) -> np.ndarray:
@@ -240,7 +273,12 @@ def snapshot(res: dict, prof: dict, base: Path, title: str, laser_nm=None) -> di
         dec = decode(res["out"], v.get("packing", "colorref"), v.get("order", "x_fastest"))
     except (ValueError, OSError) as exc:
         out["warnings"].append(f"the frame could not be decoded: {exc}")
+        nat = next((out["native"][f] for f in ("png", "jpg", "bmp", "tif") if f in out["native"]), None)
+        if nat:
+            out["view"] = nat
+            out["warnings"].append(f"LabSpec's own image (no laser marker): get_image {nat}")
         return out
+    out["channels"] = dec.get("channels", 1)
     off, src = SP.offset_for(prof, res.get("objective"), laser_nm)
     out["offset_used_um"], out["offset_source"] = off, src
     marker, note = None, ""

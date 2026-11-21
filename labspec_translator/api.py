@@ -1,5 +1,5 @@
 """api.py — the functions behind the command line and the MCP server (JSON in, JSON out).
-Version: 2026.11.20.28
+Version: 2026.11.20.29
 """
 from __future__ import annotations
 
@@ -1014,12 +1014,55 @@ def read_file(path: str, max_mb: float = 20) -> dict:
     return {"path": str(p), "bytes": size, "base64": base64.b64encode(p.read_bytes()).decode("ascii")}
 
 
+IMAGE_TYPES = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff")
+MAX_IMAGE_BYTES = 900_000           # tool results carry at most about 1 MB: larger images go as a reduced copy
+
+
 def image_path(path: str) -> Path:
     p = Path(path).expanduser().resolve()
     base = config.out_dir().resolve()       # requests and snapshots
-    if base not in p.parents or p.suffix.lower() != ".png" or not p.is_file():
-        raise ValueError(f"{path}: not a PNG written by a study (under {base})")
+    if base not in p.parents or p.suffix.lower() not in IMAGE_TYPES or not p.is_file():
+        raise ValueError(f"{path}: not an image written by a study or a snapshot (under {base})")
     return p
+
+
+def image_for_view(path: str) -> tuple[bytes, str, dict]:
+    """An image to show (bytes, 'png' or 'jpeg', info): a PNG under MAX_IMAGE_BYTES as it is; anything larger or in
+    another format (LabSpec's own snapshot formats) as a reduced copy, written next to it (<name>.view.png/.jpg)."""
+    p = image_path(path)
+    size = p.stat().st_size
+    if p.suffix.lower() == ".png" and size <= MAX_IMAGE_BYTES:
+        return p.read_bytes(), "png", {"file": str(p), "reduced": False}
+    try:
+        from PIL import Image as PILImage
+    except ImportError as exc:
+        raise ValueError(f"{p}: {size / 1e6:.1f} MB or not a PNG, and Pillow is missing to reduce it") from exc
+    import io
+    with PILImage.open(p) as im:
+        im = im.convert("RGB")
+        w0, h0 = im.size
+        side = 1600
+        while True:
+            k = min(1.0, side / max(im.size))
+            small = im.resize((max(1, round(im.size[0] * k)), max(1, round(im.size[1] * k)))) if k < 1 else im
+            buf = io.BytesIO()
+            small.save(buf, "PNG", optimize=True)
+            fmt = "png"
+            if buf.tell() > MAX_IMAGE_BYTES:
+                buf = io.BytesIO()
+                small.save(buf, "JPEG", quality=85)
+                fmt = "jpeg"
+            if buf.tell() <= MAX_IMAGE_BYTES or side <= 400:
+                break
+            side = int(side * 0.75)
+    data = buf.getvalue()
+    out = p.with_name(p.stem + (".view.png" if fmt == "png" else ".view.jpg"))
+    try:
+        out.write_bytes(data)
+    except OSError:
+        pass
+    return data, fmt, {"file": str(p), "reduced": True, "view": str(out), "pixels": [w0, h0],
+                       "shown": list(small.size), "bytes": len(data)}
 
 
 # --------------------------------------------------------------------------------------------- benchmarks

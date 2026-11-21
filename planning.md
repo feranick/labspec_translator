@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.20.28)
+## Architecture (version 2026.11.20.29)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -399,6 +399,17 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   right after STOP, so left. test_every_video_call_respects_the_bridges_own_stop pins the call sites. gVidOff starts
   False in each script run and is never written to a file. CI (Windows, .27 tag): bench graphene_map failed; passes
   5/5 here (7.1 s): the job's printed check list is needed. 113 tests.
+- 2026-11-20, 2026.11.20.29: T3.13 passed on .28 (stop 3.09 s, restart honoured the settle, no hang).
+  stop_from_script default true. Camera switching rebuilt for T3.14 (switch_camera still false): CameraFor(cam,
+  live, allowSwitch, canStop) stops a running video with StopVideoHoriba (camera_restart), SelectCamera (VidSettle,
+  Video(10+id), no read-back while off: the T3.12 lesson), the caller starts the video (GET_VIDEO_ID polled, as
+  HORIBA) and CameraCheck reads the camera while it runs ('LabSpec ignored the switch' otherwise). VVideo keeps a
+  video it restarted for a switch running (keepOn). SetCamera (read-back polling while off) removed. Sim mirrors.
+  Snapshot on the instrument: the top camera's raw frame had 888 x 606 x 3 values: video.decode now takes 1, 3 or 4
+  values per pixel (_channels: interleaved or planar, whichever gives the smoother image; channel order from
+  video.packing: colorref R,G,B, rgb B,G,R; data_dims with a channel axis); api.image_for_view: PNG <= 900 kB as is,
+  anything else (size, JPEG/BMP/TIFF) reduced with Pillow (PNG, else JPEG, down to <= 900 kB) and saved as
+  <name>.view.*; get_image uses it; an undecodable frame points to LabSpec's own image ('view'). 114 tests.
 
 ## To do next
 

@@ -946,7 +946,7 @@ def test_native_map_export_and_discovery_probes(tmp_path):
     assert st["studies"]["m"]["reliable"]
     S.ensure(config.active_bridge_dir())
     r = bridge.Bridge().call("discover", timeout_s=10, out=str(tmp_path / "dump.txt"))
-    # discovery no longer probes these (2026.11.20.28): dumps from older bridges still carry them
+    # discovery no longer probes these (2026.11.20.29): dumps from older bridges still carry them
     old = (tmp_path / "dump.txt").read_text() + "\n".join([
         "selftest.get_value_ex=0", "selftest.get_value_simple_part=1", "selftest.get_value_simple_part_size=8",
         "selftest.get_value_simple_part_values=4,5,6,7,8,9,10,11", "selftest.get_config_param=1",
@@ -1181,7 +1181,11 @@ def test_camera_on_off_and_roles(monkeypatch):
     assert api.instrument("status")["status"]["live_video"] == "0"
     r = api.instrument("camera_on")
     assert r["ok"] and r["live"] == "1" and api.instrument("status")["status"]["live_video"] == "1"
-    r = api.instrument("camera_off")                  # not from a script by default: it hung the bridge
+    r = api.instrument("camera_off")                  # HORIBA's stop, on by default since T3.13 passed
+    assert r["ok"] and r["live"] == "0"
+    P.save(dict(P.load(), video=dict(P.load()["video"], stop_from_script=False)))
+    api.instrument("camera_on")
+    r = api.instrument("camera_off")                  # a person can turn it off: refused then
     assert not r["ok"] and r["live"] == "1"
     monkeypatch.setenv("LS6T_TEST_MODE", "1")
     assert T.hardware_test("call", verb="camera", params={"action": "on"})["live"] == "1"
@@ -1528,39 +1532,41 @@ def test_profile_propose_is_the_one_review_route(tmp_path):
 
 
 def test_camera_switch_is_checked_and_video_stop_is_not_from_script(tmp_path):
-    """2026-11-20 on the XploRA: a switch to camera 0 was ignored, to camera 1 it showed only from the next video
-    start, a script's Video(STOP_VIDEO) hung the bridge (twice), and the UI's video buttons end the bridge. ls6t never
-    stops the video and does not switch cameras unless the profile allows it (video.switch_camera)."""
+    """2026-11-20 on the XploRA: camera 0 was ignored, camera 1 showed only from the next video start, ls6t's first
+    stop hung the bridge, HORIBA's stop works (T3.12-13). Switching (opt-in, video.switch_camera) restarts the video:
+    stop HORIBA's way, select, start, and check the camera only once the video runs."""
     br = Path(api.install_bridge(tmp_path / "vbs")["files"]["ls6t_bridge.vbs"]).read_text()
     assert br.count("LabSpec.Video LS_STOP_VIDEO") == 1 and "Video(LS_STOP_VIDEO)" not in br   # StopVideoHoriba only
     cf = br[br.index("Function CameraFor("):]
     cf = cf[:cf.index("End Function")]
-    assert cf.index("If Not allowSwitch Then") < cf.index("If live Then") < cf.index("SetCamera(")
+    assert cf.index("If Not allowSwitch Then") < cf.index("If live Then") < cf.index("StopVideoHoriba(res)") \
+        < cf.index("SelectCamera ")
+    sel = br[br.index("Sub SelectCamera("):]
+    sel = sel[:sel.index("End Sub")]
+    assert sel.index("VidSettle") < sel.index("LS_SET_ACTIVE_CAMERA") and "GET_ACTIVE_CAMERA" not in sel
+    cam = br[br.index("Sub VCamera("):]
+    cam = cam[:cam.index("End Sub")]
+    assert cam.index("LabSpec.Video LS_START_VIDEO") < cam.index("CameraCheck(res)")
     vid = br[br.index("Sub VVideo("):]
-    assert 'CameraFor(cam, wasOn, GetP(cmd, "switch_camera", "0") = "1", res)' in vid[:vid.index("End Sub")]
-    assert P.load()["video"]["switch_camera"] is False
+    vid = vid[:vid.index("End Sub")]
+    assert vid.index("LabSpec.Video LS_START_VIDEO") < vid.index("CameraCheck(res)") and "keepOn" in vid
+    prof = P.load()
+    assert prof["video"]["switch_camera"] is False and prof["video"]["stop_from_script"] is True
     S.ensure(config.active_bridge_dir())
-    P.save(dict(P.load(), video=dict(P.load()["video"], cameras={"top": 0, "internal": 1})))
+    P.save(dict(prof, video=dict(prof["video"], cameras={"top": 0, "internal": 1})))
     r = api.instrument("camera_on", camera="top")              # sim starts on camera 0: the active one is fine
     assert r["ok"] and r["camera_name"] == "top" and r["video_started"] == "1"
-    r = api.instrument("camera_on", camera="internal")         # another camera: refused, with what to do
-    assert not r["ok"] and "does not switch cameras" in r["error"] and "end_bridge" in r["error"]
-    r = api.instrument("camera_off")
-    assert not r["ok"] and "end_bridge" in r["error"]
-    sv = br[br.index("Function StopVideoHoriba("):]
-    sv = sv[:sv.index("End Function")]
-    assert 'GetMotorStatus("Video", mid)' in sv and "GET_VIDEO_ID" not in sv     # HORIBA's own way, opt-in
-    P.save(dict(P.load(), video=dict(P.load()["video"], stop_from_script=True)))
-    r = api.instrument("camera_off")
-    assert r["ok"] and r["live"] == "0"
-    assert api.instrument("camera_on")["video_started"] == "1"
-    # another instrument where a person allowed switching: only with the video stopped
+    r = api.instrument("camera_on", camera="internal")         # switching off: refused, with what to do
+    assert not r["ok"] and "video.switch_camera" in r["error"] and "end_bridge" in r["error"]
     P.save(dict(P.load(), video=dict(P.load()["video"], switch_camera=True)))
-    r = api.instrument("camera_on", camera="internal")
-    assert not r["ok"] and "switches cameras only when the video starts" in r["error"]
-    S.ensure(config.active_bridge_dir())
+    r = api.instrument("camera_on", camera="internal")         # running: stopped HORIBA's way, selected, restarted
+    assert r["ok"] and r["camera_name"] == "internal" and r["camera_restart"] == "1" and r["live"] == "1"
     (config.active_bridge_dir() / "sim_camera_locked").write_text("1")
-    assert "camera" in bridge.labspec_hint("camera")
+    r = api.instrument("camera_on", camera="top")              # LabSpec ignores it (camera 0, Q44): said so
+    assert not r["ok"] and "ignored the switch" in r["error"] and r["camera_after"] == "1"
+    P.save(dict(P.load(), video=dict(P.load()["video"], stop_from_script=False)))
+    r = api.instrument("camera_on", camera="top")
+    assert not r["ok"] and "may not stop it" in r["error"]
 
 
 def test_bridge_diagnosis_is_one_story_and_end_bridge(tmp_path):
@@ -1627,7 +1633,7 @@ def test_every_video_call_respects_the_bridges_own_stop(tmp_path):
         if "LabSpec.Video" in line and not line.strip().startswith("'"):
             where.setdefault(cur, []).append(line.strip())
     allowed = {"VidId", "VidCam",          # gated by gVidOff
-               "SetCamera",                # opt-in switching, after VidSettle
+               "SelectCamera",             # opt-in switching: VidSettle, then SET only (no read-back while off)
                "StopVideoHoriba",          # only with the video running (not gVidOff)
                "VCamera", "VVideo",        # START after VidSettle; GET_VIDEO_ID after the start (gVidOff cleared)
                "GrabFrame"}                # only once the video runs
@@ -1641,9 +1647,48 @@ def test_every_video_call_respects_the_bridges_own_stop(tmp_path):
     assert "If gVidOff Then" in ext[:400]
     af = br[br.index("Sub VAutofocus("):]
     assert 'how = "video" And gVidOff' in af[:af.index("End Sub")]
-    sc = br[br.index("Function SetCamera("):]
-    sc = sc[:sc.index("End Function")]
+    sc = br[br.index("Sub SelectCamera("):]
+    sc = sc[:sc.index("End Sub")]
     assert sc.index("VidSettle") < sc.index("LabSpec.Video(LS_SET_ACTIVE_CAMERA")
     # a fresh bridge: the state starts off, and is never written to a file
     assert "gVidOff = False\n" in br[:br.index("Function VidId()")]
     assert not _re.search(r"(WriteKV|WriteLine)[^\n]*gVidOff", br)
+
+
+def test_colour_frames_and_large_images(tmp_path, monkeypatch):
+    """2026-11-20: the top camera's frame had 3 values per pixel (888 x 606 x 3) and was refused as grayscale; LabSpec's
+    own PNG was over the ~1 MB a tool result carries, and get_image took only PNGs."""
+    from labspec_translator import video as V
+    W, H = 40, 30
+    yy, xx = np.mgrid[0:H, 0:W]
+    r, g, b = (xx * 6), (yy * 8), np.full((H, W), 50)
+    for layout, arr in (("pixels", np.stack([r, g, b], -1).reshape(-1)),
+                        ("planes", np.concatenate([r.reshape(-1), g.reshape(-1), b.reshape(-1)]))):
+        f = tmp_path / f"{layout}.video.txt"
+        f.write_text(f"# data_dims={W},{H},3\n" + "\n".join(",".join(map(str, arr[i:i + 40]))
+                                                           for i in range(0, arr.size, 40)) + "\n")
+        d = V.decode(f)
+        assert d["channels"] == 3 and d["img"].shape == (H, W, 3)
+        assert (d["img"][..., 0] == r).all() and (d["img"][..., 1] == g).all() and (d["img"][..., 2] == b).all()
+        assert (V.decode(f, packing="rgb")["img"][..., 0] == b).all()        # red and blue swapped on request
+    with pytest.raises(ValueError, match="1, 3 or 4 per pixel"):
+        f = tmp_path / "bad.video.txt"
+        f.write_text(f"# data_dims={W},{H}\n" + ",".join(["1"] * (W * H * 2)) + "\n")
+        V.decode(f)
+    # a large LabSpec PNG: a reduced copy under the limit, saved next to it; a JPEG too
+    from PIL import Image as PILImage
+    snap = config.out_dir() / "snapshots" / "s1"
+    snap.mkdir(parents=True)
+    rng = np.random.default_rng(0)
+    big = PILImage.fromarray(rng.integers(0, 255, (1200, 1600, 3), dtype=np.uint8))
+    big.save(snap / "frame.png")
+    big.save(snap / "frame.jpg", quality=95)
+    assert (snap / "frame.png").stat().st_size > api.MAX_IMAGE_BYTES
+    for name in ("frame.png", "frame.jpg"):
+        data, fmt, info = api.image_for_view(str(snap / name))
+        assert len(data) <= api.MAX_IMAGE_BYTES and info["reduced"] and Path(info["view"]).is_file()
+    small = snap / "small.png"
+    PILImage.fromarray(np.zeros((50, 60, 3), np.uint8)).save(small)
+    assert api.image_for_view(str(small))[2]["reduced"] is False
+    with pytest.raises(ValueError):
+        api.image_for_view(str(tmp_path / "elsewhere.png"))

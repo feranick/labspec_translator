@@ -1,5 +1,5 @@
 """sim.py — a simulated LabSpec + XploRA behind the same bridge protocol as ls6t_bridge.vbs.
-Version: 2026.11.20.28
+Version: 2026.11.20.29
 
 It answers every verb of the bridge with the same keys, so the runner, the checks and the MCP server are tested
 without the instrument (LS6T_MODE=sim, and the tests). The simulated sample is a silicon wafer with a graphene
@@ -283,45 +283,57 @@ class SimLabSpec:
         return out
 
     def v_camera(self, p):
+        """As the bridge: the video stopped only HORIBA's way when allowed (stop_video); cameras switched only when
+        allowed (switch_camera), by a restart (stop, select, start) checked once the video runs; sim_camera_locked:
+        LabSpec ignores the selection (camera 0 on the XploRA, TESTING Q44)."""
         action = p.get("action", "status")
         if action not in ("on", "off", "status"):
             return {"ok": 0, "error": "camera action: on, off or status"}
-        # as on the instrument (2026-11-20): ls6t never stops the live video (Video(STOP) hung) and switches cameras
-        # only where the profile allows it (video.switch_camera), with the video stopped
         by_hand = ("end the bridge from ls6t first (instrument end_bridge: LabSpec ends a running script when its "
                    "video is stopped or started in its interface), then in LabSpec stop the video, choose the camera "
                    "and start the video, then start ls6t_bridge.vbs again")
-        if action == "off" and self.live and str(p.get("stop_video", "0")) == "1":
+        can_stop = str(p.get("stop_video", "0")) == "1"
+        if action == "off" and self.live:
+            if not can_stop:
+                return {"ok": 0, "live": 1, "camera": self.camera,
+                        "error": "ls6t does not stop LabSpec's live video (a script's Video(STOP_VIDEO) hung the "
+                                 "bridge on this instrument): end the bridge from ls6t first (instrument end_bridge), "
+                                 "then stop the video in LabSpec"}
             self.live = False
             return {"live": 0, "video_id": 0, "camera": self.camera, "video_stop_status": 0, "video_started": 0}
-        if action == "off" and self.live:
-            return {"ok": 0, "live": 1, "camera": self.camera,
-                    "error": "ls6t does not stop LabSpec's live video (a script's Video(STOP_VIDEO) hung the bridge on "
-                             "this instrument): end the bridge from ls6t first (instrument end_bridge), then stop the "
-                             "video in LabSpec"}
-        if p.get("camera") not in (None, "") and action != "off":
+        out = {}
+        if p.get("camera") not in (None, "") and action == "on":
             want = int(float(p["camera"]))
             if want != self.camera:
+                out["camera_before"] = self.camera
                 if str(p.get("switch_camera", "0")) != "1":
-                    return {"ok": 0, "live": int(self.live), "camera_before": self.camera, "camera": self.camera,
+                    return {"ok": 0, "live": int(self.live), **out, "camera": self.camera,
                             "error": f"LabSpec's camera is {self.camera}, not {want}, and ls6t does not switch cameras "
-                                     f"on this instrument (unreliable: tested 2026-11-20). To use camera {want}: "
-                                     + by_hand}
+                                     f"on this instrument unless the profile allows it (video.switch_camera). To use "
+                                     f"camera {want}: " + by_hand}
                 if self.live:
-                    return {"ok": 0, "live": 1, "camera_before": self.camera, "camera": self.camera,
-                            "error": f"the live video runs on camera {self.camera}: LabSpec switches cameras only "
-                                     f"when the video starts, and ls6t cannot stop it. To use camera {want}: " + by_hand}
-                if (self.dir / "sim_camera_locked").exists():
-                    return {"ok": 0, "live": 0, "camera_before": self.camera, "camera_after": self.camera,
-                            "camera_set_returned": 0,
-                            "error": f"LabSpec stayed on camera {self.camera} (asked {want}). To use camera {want}: "
-                                     + by_hand}
-                self.camera = want
+                    if not can_stop:
+                        return {"ok": 0, "live": 1, **out, "camera": self.camera,
+                                "error": f"the live video runs on camera {self.camera}: LabSpec switches cameras only "
+                                         f"when the video starts, and ls6t may not stop it (video.stop_from_script). "
+                                         f"To use camera {want}: " + by_hand}
+                    self.live = False
+                    out.update(camera_restart=1, video_stop_status=0)
+                out.update(camera_asked=want, camera_set_returned=0)
+                if not (self.dir / "sim_camera_locked").exists():
+                    self.camera = want
+                self.live = True
+                out["camera_after"] = self.camera
+                if self.camera != want:
+                    return {"ok": 0, "live": 1, **out, "camera": self.camera,
+                            "error": f"LabSpec ignored the switch: asked camera {want}, the video restarted on camera "
+                                     f"{self.camera}. To use camera {want}: " + by_hand}
+                return {"live": 1, "video_id": 900, "camera": self.camera, "video_started": 1, **out}
         started = action == "on" and not self.live
-        if action != "status":
-            self.live = action == "on"
+        if action == "on":
+            self.live = True
         return {"live": int(self.live), "video_id": 900 if self.live else 0, "camera": self.camera,
-                "video_started": int(started)}
+                "video_started": int(started), **out}
 
     def v_last_error(self, p):
         return {"info": self.last_error}
