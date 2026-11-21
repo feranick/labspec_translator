@@ -15,6 +15,8 @@
 
 Const POLL_MS = 100
 Dim gNoId                 ' Empty: GetMotorStatus by the motor's name (HORIBA's scripts pass an unset MoveID)
+Dim gBlocking             ' the motor while a blocking MoveMotor runs (written in the heartbeat beforehand)
+gBlocking = ""
 
 Dim gInbox, gOutbox, gHb, gStopFlag, gHalted, gQuit, gLastBeat, gLastPopup, gPopupOpen, gViews, gStoppedBy
 Dim gVerb, gSeq, gLastSeq, gChunk
@@ -47,6 +49,7 @@ Sub Beat(state, force)
     Set ts = fso.CreateTextFile(gHb, True, True)
     ts.WriteLine "state=" & state
     ts.WriteLine "verb=" & gVerb
+    ts.WriteLine "blocking=" & gBlocking        ' the motor of a blocking LabSpec move in progress: no beats meanwhile
     ts.WriteLine "seq=" & gSeq
     ts.WriteLine "protocol=" & LS6T_PROTOCOL
     ts.WriteLine "version=" & LS6T_VERSION
@@ -605,7 +608,11 @@ Sub VMove(cmd, res)
     ' MOTOR_VALUE), then GetMotorStatus with the id it returns): with NO_WAIT the XploRA's grating reported idle at
     ' once, and once stopped at 1800 on its way from 1200 to 2400 (2026-11-20). No stop request while it runs.
     If GetP(cmd, "blocking", "0") = "1" Then
+        gBlocking = motor
+        Beat "busy", True                   ' says so before LabSpec holds the script: ls6t waits longer, not 'stuck'
         moveId = LabSpec.MoveMotor(motor, posVal, posName, mc)
+        gBlocking = ""
+        Beat "busy", True
         res("blocking") = 1
     Else
         moveId = LabSpec.MoveMotor(motor, posVal, posName, mc + LS_MOTOR_NO_WAIT)

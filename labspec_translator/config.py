@@ -1,5 +1,5 @@
 """config.py — settings (environment variables only) and the folders ls6t writes to.
-Version: 2026.11.20.35
+Version: 2026.11.20.36
 
 | Variable | Meaning | Default |
 |---|---|---|
@@ -54,6 +54,15 @@ def confirm_policy() -> str:
     if c not in CONFIRM:
         raise ValueError(f"LS6T_CONFIRM={c!r}: use one of {', '.join(CONFIRM)}")
     return c
+
+
+def blocking_move_s() -> float:
+    """How long a blocking LabSpec move (the grating, moved HORIBA's way) may hold the bridge without a heartbeat
+    before ls6t calls it stuck: LS6T_BLOCKING_MOVE_S, default 180 s."""
+    try:
+        return max(heartbeat_s(), float(os.environ.get("LS6T_BLOCKING_MOVE_S", "180")))
+    except ValueError:
+        return 180.0
 
 
 def heartbeat_s() -> float:

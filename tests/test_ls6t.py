@@ -946,7 +946,7 @@ def test_native_map_export_and_discovery_probes(tmp_path):
     assert st["studies"]["m"]["reliable"]
     S.ensure(config.active_bridge_dir())
     r = bridge.Bridge().call("discover", timeout_s=10, out=str(tmp_path / "dump.txt"))
-    # discovery no longer probes these (2026.11.20.35): dumps from older bridges still carry them
+    # discovery no longer probes these (2026.11.20.36): dumps from older bridges still carry them
     old = (tmp_path / "dump.txt").read_text() + "\n".join([
         "selftest.get_value_ex=0", "selftest.get_value_simple_part=1", "selftest.get_value_simple_part_size=8",
         "selftest.get_value_simple_part_values=4,5,6,7,8,9,10,11", "selftest.get_config_param=1",
@@ -1779,3 +1779,38 @@ def test_grating_blocking_short_stop_timing_and_keepalive(tmp_path):
             seen.append(p)
     out = asyncio.run(M._keepalive(Ctx(), lambda: (time.sleep(0.35), "done")[1], every_s=0.1))
     assert out == "done" and len(seen) >= 2
+
+
+def test_grating_reach_and_blocking_heartbeat(tmp_path, monkeypatch):
+    """No grating diffracts beyond 2 / G in first order (2400 gr/mm: 833 nm); a blocking move holds the bridge
+    without a heartbeat and must not be called stuck for that."""
+    prof = P.load()
+    r = plan.grating_reach(prof, 2400, 785)
+    assert r["limit_nm"] == 833.3 and r["max_shift_cm1"] == 739
+    assert plan.grating_reach(prof, 2400, 637.75)["max_shift_cm1"] == 3680
+    assert plan.grating_reach(prof, 2400, 900)["max_shift_cm1"] is None
+    st = {"kind": "spectrum", "sample": {"name": "Si"}, "setup": {"laser_nm": 785, "grating": 2400, "filter": "1%",
+          "objective": "x100"}, "acquire": {"center_cm1": 1580, "exposure_s": 1}}
+    v = api.validate({"s": st})["s"]
+    assert not v["ok"] and any("cannot reach" in e for e in v["errors"])
+    st["acquire"]["center_cm1"] = 520
+    assert api.validate({"s": st})["s"]["ok"]
+    P.save(dict(prof, gratings=dict(prof["gratings"], **{"2400": dict(prof["gratings"]["2400"], max_nm=760)})))
+    assert plan.grating_reach(P.load(), 2400, 637.75)["limit_nm"] == 760
+    assert any("the laser line itself" in e for e in api.validate({"s": st})["s"]["errors"])
+    P.save(prof)
+    S.ensure(config.active_bridge_dir())
+    r = api.instrument("set", setup={"laser_nm": 785, "grating": 2400})
+    assert r["reach"]["max_shift_cm1"] == 739 and "Raman shifts end near 739" in r["note"]
+    # a blocking move: busy with 'blocking' and no beat for 60 s is alive; past the limit, said so
+    b = bridge.Bridge(tmp_path / "br")
+    (b.dir / "heartbeat.txt").write_text("state=busy\nverb=move\nblocking=Grating\n", encoding="utf-8")
+    old = time.time() - 60
+    os.utime(b.dir / "heartbeat.txt", (old, old))
+    assert b.alive()
+    monkeypatch.setenv("LS6T_BLOCKING_MOVE_S", "30")
+    assert not b.alive()
+    assert "blocking move of the Grating" in bridge.diagnose(b.heartbeat(), b.dir)
+    br = Path(api.install_bridge(tmp_path / "vbs")["files"]["ls6t_bridge.vbs"]).read_text()
+    mv = br[br.index("Sub VMove("):]
+    assert mv.index("gBlocking = motor") < mv.index("moveId = LabSpec.MoveMotor(motor, posVal, posName, mc)\n")

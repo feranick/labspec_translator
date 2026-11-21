@@ -1,5 +1,5 @@
 """bench.py — benchmarks with known answers, run on the simulator (the instrument is never touched).
-Version: 2026.11.20.35
+Version: 2026.11.20.36
 
 They check the chain end to end: the commands, wavelength <-> Raman shift, the extended range, fits, map assembly,
 the saturation check and an operator stop. On the instrument itself, the 'calibration' study on a silicon wafer is

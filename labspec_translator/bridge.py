@@ -1,5 +1,5 @@
 """bridge.py — the Python side of the LabSpec bridge: commands as files in a folder the bridge script watches.
-Version: 2026.11.20.35
+Version: 2026.11.20.36
 
 Protocol 1 (the same for ls6t_bridge.vbs inside LabSpec and for sim.py):
 
@@ -110,6 +110,10 @@ def diagnose(hb: dict | None, folder=None) -> str:
     state, verb = hb.get("state"), hb.get("verb") or None
     if state == "stopped":
         return f"the LabSpec bridge was stopped ({age}): start ls6t_bridge.vbs in LabSpec (Processing > Scripts)"
+    if state == "busy" and hb.get("blocking"):
+        return (f"LabSpec's blocking move of the {hb['blocking']} has not returned for {age[:-4]} (longer than "
+                f"{config.blocking_move_s():.0f} s; such a move usually takes seconds). "
+                + labspec_hint(f"move {hb['blocking']}"))
     if state == "busy":
         return (f"the LabSpec bridge stopped answering {age}, busy in {verb or 'its start-up inventory'}. "
                 + labspec_hint(verb or "its start-up inventory"))
@@ -180,6 +184,8 @@ class Bridge:
             return False
         if hb.get("state") == "busy" and hb.get("verb") in ("confirm", "resume", "notice", "guide", "run_vbs"):
             return True             # a modal question in LabSpec, or LabSpec's own script running: no beats
+        if hb.get("state") == "busy" and hb.get("blocking"):
+            return hb["age_s"] <= config.blocking_move_s()     # a blocking move (the grating): no beats until it returns
         return hb["age_s"] <= config.heartbeat_s()
 
     def request_stop(self, seq: str = ""):
@@ -244,6 +250,9 @@ class Bridge:
         hb = self.heartbeat() or {}
         dropped = ("ls6t asked the bridge to drop it (a stop request, which the bridge sees only between LabSpec "
                    "calls)")
+        if hb.get("state") == "busy" and hb.get("blocking"):
+            return (f"{verb}: no result within {timeout_s:g} s; {dropped}. LabSpec is still in a blocking move of "
+                    f"the {hb['blocking']} ({hb.get('age_s', 0):.0f} s): the bridge answers when LabSpec returns")
         if hb.get("state") == "busy" and hb.get("verb") == verb and hb.get("age_s", 0) > 5:
             return (f"{verb}: no result within {timeout_s:g} s; {dropped}. The bridge is stuck inside LabSpec in "
                     f"'{verb}' (no heartbeat for {hb['age_s']:.0f} s). " + labspec_hint(verb))

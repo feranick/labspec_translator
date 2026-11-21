@@ -1,5 +1,5 @@
 """plan.py — a study as bridge commands: the setup moves, the points, the acquisitions; and the time estimate.
-Version: 2026.11.20.35
+Version: 2026.11.20.36
 
 Everything here is computed from the study and the profile alone: wavelengths from Raman shifts, the number of
 detector windows, the stage positions (always offsets from where the operator left the stage, Z from the
@@ -112,6 +112,34 @@ def acq_range(study: dict, prof: dict, laser: float | None) -> dict:
             half = win_nm / 2
             out.update(from_cm1=round(1e7 / laser - 1e7 / (nm - half), 2),
                        to_cm1=round(1e7 / laser - 1e7 / (nm + half), 2))
+    return out
+
+
+def grating_limit_nm(prof: dict, grating) -> float | None:
+    """The longest wavelength a grating can send to the detector, in nm: in first order no grating diffracts beyond
+    twice its groove spacing (2e6 / G nm: 2400 gr/mm -> 833 nm, 1800 -> 1111, 1200 -> 1667, 600 -> 3333), and the
+    spectrometer's geometry stops it earlier; a lower practical limit for this instrument can be given per grating
+    (profile gratings.<G>.max_nm, e.g. from LabSpec's SpMax once its unit is known: TESTING Q45)."""
+    try:
+        g = float(grating)
+    except (TypeError, ValueError):
+        return None
+    if g <= 0:
+        return None
+    lim = 2e6 / g
+    mx = (prof.get("gratings", {}).get(f"{g:g}") or {}).get("max_nm")
+    return min(lim, float(mx)) if mx else lim
+
+
+def grating_reach(prof: dict, grating, laser_nm) -> dict | None:
+    """What a grating can reach with a laser: the limit in nm and the largest Raman shift (cm-1) below it."""
+    lim = grating_limit_nm(prof, grating)
+    if lim is None or not laser_nm:
+        return None
+    laser_nm = float(laser_nm)
+    out = {"grating": f"{float(grating):g}", "laser_nm": laser_nm, "limit_nm": round(lim, 1),
+           "basis": "profile max_nm" if lim < 2e6 / float(grating) - 1e-6 else "first-order limit (2 / G)"}
+    out["max_shift_cm1"] = round(1e7 / laser_nm - 1e7 / lim, 0) if laser_nm < lim else None
     return out
 
 

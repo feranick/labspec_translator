@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.20.35)
+## Architecture (version 2026.11.20.36)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -463,6 +463,14 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   ['grating'] (runner.move_extra, used by set and the runner's set-up). OLConfig names gratings with ranges but has
   no laser pairing: no up-front refusal; a short stop reports laser and SpMin / SpMax (_grating_short). TESTING
   T3.16, Q45. Sim: sim_grating_stuck. 117 tests.
+- 2026-11-20, 2026.11.20.36: Nicola's review of .35: (1) a blocking MoveMotor holds the single VBS thread, so no
+  beats: Beat writes blocking=<motor> before and clears it after; Bridge.alive allows busy+blocking up to
+  config.blocking_move_s (LS6T_BLOCKING_MOVE_S, 180 s); diagnose / _timeout_text say 'blocking move of the
+  <motor>'. (2) the 2400 gr/mm grating vs 785 nm is physics: first order reaches at most 2/G (833 nm; Raman up to
+  ~739 cm-1 at 785 nm, ~3680 cm-1 at 637.75 nm), less with the spectrometer's deviation angle. plan.grating_limit_nm
+  / grating_reach (2e6/G, or gratings.<G>.max_nm when set from a measured limit / LabSpec's SpMax once its unit is
+  known); format refuses ranges beyond it; set refuses a grating that cannot reach the laser line and reports reach
+  + a note below 3200 cm-1. 118 tests.
 
 ## To do next
 

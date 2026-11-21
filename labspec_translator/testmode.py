@@ -1,5 +1,5 @@
 """testmode.py — the instrument tests of TESTING.md from the chat: the MCP tool `hardware_test`, and `ls6t test`.
-Version: 2026.11.20.35
+Version: 2026.11.20.36
 
 Off unless a person turns it on for an app (LS6T_TEST_MODE=1 in its MCP entry: `ls6t connect APP --test`). Then the
 LLM walks the maintainer through TESTING.md: it reads a test's instructions and pass criteria (`step`), asks the

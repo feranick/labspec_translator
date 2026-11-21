@@ -1,5 +1,5 @@
 """api.py — the functions behind the command line and the MCP server (JSON in, JSON out).
-Version: 2026.11.20.35
+Version: 2026.11.20.36
 """
 from __future__ import annotations
 
@@ -554,6 +554,13 @@ def _labels(b: Bridge, motor: str) -> tuple:
     return [r.get(f"label.{i}", "") for i in range(n)], [r.get(f"value.{i}") for i in range(n)]
 
 
+def _fnum(v):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
 def _grating_short(b: Bridge, prof: dict, asked, got, r: dict) -> str:
     """Why a grating move ended elsewhere, with what LabSpec says about it: LabSpec reported no error, the laser in
     use, LabSpec's spectrometer range for the grating asked (OperVar SpMin / SpMax). On 2026-11-20 1200 -> 2400
@@ -679,6 +686,12 @@ def set_instrument(setup: dict) -> dict:
         for key, role in (("hole_um", "hole"), ("slit_um", "slit")):
             if key in s:
                 moves.append((key, mot[role], "value", float(s[key])))
+        # what the grating can reach with the laser (first-order limit, or the profile's max_nm per grating)
+        las_t = float(prof["lasers"][lk]["nm"]) if lk else _fnum(before.get("laser_nm"))
+        reach = plan.grating_reach(prof, s.get("grating", before.get("grating")), las_t)
+        if reach and reach["max_shift_cm1"] is None:
+            return {"ok": False, "error": f"grating {reach['grating']} cannot reach the {las_t:g} nm laser line: beyond "
+                                          f"{reach['limit_nm']:g} nm ({reach['basis']})" + nothing, "reach": reach}
         t_checks = time.time() - t_all - t_before
         done = []
         for what, motor, mode, value in moves:
@@ -708,6 +721,12 @@ def set_instrument(setup: dict) -> dict:
                "after": {k: after.get(k) for k in SET_KEYS if after.get(k) is not None}}
         if done_obj:
             out["objective"] = done_obj
+        if reach:
+            out["reach"] = reach
+            if reach["max_shift_cm1"] is not None and reach["max_shift_cm1"] < 3200:
+                out["note"] = (f"with grating {reach['grating']} and the {las_t:g} nm laser, Raman shifts end near "
+                               f"{reach['max_shift_cm1']:g} cm-1 ({reach['limit_nm']:g} nm, {reach['basis']}; the "
+                               "spectrometer's own limit is lower)")
         out["timing"] = {"total_s": round(time.time() - t_all, 2), "status_before_s": round(t_before, 2),
                          "checks_s": round(t_checks, 2), "moves_s": round(sum(float(d.get("seconds") or 0)
                                                                               for d in done), 2),
