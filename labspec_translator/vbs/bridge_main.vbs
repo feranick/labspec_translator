@@ -72,27 +72,41 @@ Sub BeatNow()
     End If
 End Sub
 
+' The ls6t windows (LabSpec's non-blocking message). Text, then "#<title>#<button>", as HORIBA's own scripts
+' title theirs ("...#Standard Mapping: ...#OK"): LabSpec's generic title was "Non blocking" (2026-11-20). No "#"
+' in the text itself.
 Sub OpenPopup()
+    OpenMainPopup False
+End Sub
+
+Sub OpenMainPopup(resumed)
+    Dim head
+    head = "ls6t (labspec-translator) is controlling the instrument."
+    If resumed Then head = "ls6t RESUMED: you allowed it, it controls the instrument again (nothing else to answer)."
     On Error Resume Next
-    LabSpec.Message "ls6t (labspec-translator) is controlling the instrument." & vbCrLf & vbCrLf & _
-                    "Cancel = HALT: the acquisition or move in progress stops and the bridge waits (it keeps " & _
-                    "running; ls6t asks you before going on). It takes effect when LabSpec's current call ends " & _
-                    "(usually a second or two). A second window then lets you END the bridge." & vbCrLf & vbCrLf & _
+    LabSpec.Message head & vbCrLf & vbCrLf & _
+                    "Halt = the acquisition or move in progress stops and the bridge waits (it keeps running; " & _
+                    "ls6t asks you before going on). It takes effect when LabSpec's current call ends (usually " & _
+                    "a second or two); a HALTED window then lets you end the bridge." & vbCrLf & vbCrLf & _
                     "Before using LabSpec's live video buttons, end the bridge (ls6t instrument end-bridge): " & _
-                    "LabSpec ends a running script when its video is started or stopped.", LS_MB_NON_BLOCKING
+                    "LabSpec ends a running script when its video is started or stopped." & _
+                    "#ls6t: in control#Halt", LS_MB_NON_BLOCKING
     gPopupOpen = (Err.Number = 0)
     gHaltPopup = False
     Err.Clear
     On Error GoTo 0
 End Sub
 
-' While halted: a window that ends the bridge when closed (2026-11-20: Cancel halted the bridge, its window went
-' away, and starting ls6t_bridge.vbs again did nothing, because the halted bridge still ran)
+' Halted (or halting): a window that ends the bridge when closed (2026-11-20: Cancel halted the bridge, its window
+' went away, and starting ls6t_bridge.vbs again did nothing: LabSpec runs one script at a time). Opened as soon as
+' the closed main window is seen, also during a command, so the operator sees at once that Halt was taken.
 Sub OpenHaltedPopup()
     On Error Resume Next
-    LabSpec.Message "ls6t is HALTED: nothing moves and nothing is measured. The bridge still runs." & vbCrLf & _
-                    vbCrLf & "Cancel = END the bridge (then start ls6t_bridge.vbs again when you want ls6t back)." & _
-                    vbCrLf & "To go on instead: ls6t instrument resume (LabSpec then asks you).", LS_MB_NON_BLOCKING
+    LabSpec.Message "ls6t is HALTED (or halting: a move or acquisition in progress stops when LabSpec's current " & _
+                    "call ends). Nothing new moves or is measured. The bridge still runs." & vbCrLf & vbCrLf & _
+                    "End bridge = ends it (then start ls6t_bridge.vbs again when you want ls6t back)." & vbCrLf & _
+                    "To go on instead: ls6t instrument resume (LabSpec then asks you)." & _
+                    "#ls6t: HALTED#End bridge", LS_MB_NON_BLOCKING
     gPopupOpen = (Err.Number = 0)
     gHaltPopup = gPopupOpen
     Err.Clear
@@ -161,6 +175,7 @@ Function StopRequested()
         gHalted = True
         If o = "quit" Then gQuit = True
         LabSpec.Message "ls6t halted by the operator", LS_MB_STATUS_BAR
+        If o = "operator" And Not gPopupOpen Then OpenHaltedPopup     ' at once: Halt was taken
         StopRequested = "operator"
     End If
 End Function
@@ -2049,7 +2064,7 @@ Sub VResume(cmd, res)
     If b = LS_IDYES Then
         gHalted = False
         ClosePopup                          ' the halted window
-        OpenPopup
+        OpenMainPopup True                  ' says it resumed: not a new request
         res("answer") = "yes"
     Else
         res("answer") = "no"
@@ -2175,12 +2190,12 @@ End Sub
 
 ' The first motor command after a start was slow three times (2026-11-20: 36.6 s filter, 24.1 s and 31.7 s grating),
 ' the time spent in GetMotorStatus, not in MoveMotor. At start the bridge asks each motor's status once (nothing
-' moves), waiting while LabSpec says busy (at most 60 s each), so any first-call delay is spent here rather than
+' moves), waiting while LabSpec says busy (at most 120 s each: the grating took 36.0 and 50.9 s), so any first-call delay is spent here rather than
 ' in the first request. The times go to ping (warmup) and LS6T_HOME\warmup.txt. TESTING T3.16.
 Dim gWarm
 gWarm = ""
 Sub WarmUp()
-    Dim names, i, t0, st, nm
+    Dim names, i, t0, st, nm, o
     gVerb = "warmup"
     Beat "busy", True
     names = Array("Grating", "Filter", "Laser", "Hole", "Slit", "Spectro")
@@ -2195,11 +2210,19 @@ Sub WarmUp()
                     Err.Clear
                     Exit Do
                 End If
-                If st = 0 Or Elapsed(t0) > 60 Then Exit Do
+                If st = 0 Or Elapsed(t0) > 120 Then Exit Do
                 BeatNow
+                o = OperatorStop()          ' Halt or the stop button: the warm-up ends there
+                If o <> "" Then
+                    gHalted = True
+                    If o = "quit" Then gQuit = True
+                    If o = "operator" Then OpenHaltedPopup
+                    Exit Do
+                End If
                 LabSpec.Pause 100
             Loop
             gWarm = gWarm & nm & "=" & Fmt(Elapsed(t0)) & ";"
+            If gHalted Or gQuit Then Exit For
         End If
     Next
     Err.Clear
@@ -2267,6 +2290,7 @@ Sub BridgeMain()
         If o = "operator" Then
             gHalted = True
             LabSpec.Message "ls6t halted by the operator: it waits for a resume", LS_MB_STATUS_BAR
+            OpenHaltedPopup
         End If
         If gLaserOpen Then
             If gHalted Or gQuit Then

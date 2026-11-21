@@ -946,7 +946,7 @@ def test_native_map_export_and_discovery_probes(tmp_path):
     assert st["studies"]["m"]["reliable"]
     S.ensure(config.active_bridge_dir())
     r = bridge.Bridge().call("discover", timeout_s=10, out=str(tmp_path / "dump.txt"))
-    # discovery no longer probes these (2026.11.20.43): dumps from older bridges still carry them
+    # discovery no longer probes these (2026.11.20.44): dumps from older bridges still carry them
     old = (tmp_path / "dump.txt").read_text() + "\n".join([
         "selftest.get_value_ex=0", "selftest.get_value_simple_part=1", "selftest.get_value_simple_part_size=8",
         "selftest.get_value_simple_part_values=4,5,6,7,8,9,10,11", "selftest.get_config_param=1",
@@ -1903,7 +1903,7 @@ def test_spmin_not_applied_and_warmup(tmp_path):
 def test_halt_window_ends_the_bridge_and_second_start(tmp_path):
     """2026-11-20: Cancel halted the bridge, its window went away, and a second start seemed to do nothing."""
     br = Path(api.install_bridge(tmp_path / "vbs")["files"]["ls6t_bridge.vbs"]).read_text()
-    assert "Cancel = HALT" in br and "Cancel = END the bridge" in br
+    assert "Halt = the acquisition" in br and "End bridge = ends it" in br
     op = br[br.index("Function OperatorStop()"):]
     op = op[:op.index("End Function")]
     assert op.index("If gHaltPopup Then") < op.index('OperatorStop = "quit"           \' the halted window closed')
@@ -1912,4 +1912,38 @@ def test_halt_window_ends_the_bridge_and_second_start(tmp_path):
     assert "If gHalted And Not gPopupOpen Then OpenHaltedPopup" in main
     rs = br[br.index("Sub VResume("):]
     rs = rs[:rs.index("End Sub")]
-    assert rs.index("ClosePopup") < rs.index("OpenPopup")
+    assert rs.index("ClosePopup") < rs.index("OpenMainPopup True")
+
+
+def test_windows_titles_resume_text_and_startup_wait(tmp_path):
+    """T2.3 on .43: the windows were titled 'Non blocking', the reopened window after resume looked like a new
+    request, Cancel seemed not to work until LabSpec's call ended, and status timed out during a 51 s warm-up."""
+    br = Path(api.install_bridge(tmp_path / "vbs")["files"]["ls6t_bridge.vbs"]).read_text()
+    assert '"#ls6t: in control#Halt"' in br and '"#ls6t: HALTED#End bridge"' in br
+    assert "ls6t RESUMED" in br and "OpenMainPopup True" in br
+    sr = br[br.index("Function StopRequested()"):]
+    sr = sr[:sr.index("End Function")]
+    assert "OpenHaltedPopup" in sr                     # at once, during a command
+    wu = br[br.index("Sub WarmUp("):]
+    wu = wu[:wu.index("End Sub")]
+    assert "Elapsed(t0) > 120" in wu and "OperatorStop()" in wu
+    # a command sent while the bridge warms up waits for it instead of timing out
+    b = bridge.Bridge(tmp_path / "br")
+    hb = b.dir / "heartbeat.txt"
+    hb.write_text("state=busy\nverb=warmup\n", encoding="utf-8")
+    import threading
+
+    def answer():
+        time.sleep(1.5)
+        cmd = sorted(b.inbox.glob("*.cmd"))[0]
+        seq = cmd.stem
+        (b.outbox / f"{seq}.res").write_text(f"seq={seq}\nok=1\nerror=\n", encoding="utf-8")
+
+    def beat():
+        for _ in range(20):
+            hb.write_text("state=busy\nverb=warmup\n", encoding="utf-8")
+            time.sleep(0.1)
+    threading.Thread(target=beat, daemon=True).start()
+    threading.Thread(target=answer, daemon=True).start()
+    r = b.call("status", timeout_s=0.5)
+    assert r["ok"] and r["waited_for_bridge_start_s"] > 0

@@ -1,5 +1,5 @@
 """bridge.py — the Python side of the LabSpec bridge: commands as files in a folder the bridge script watches.
-Version: 2026.11.20.43
+Version: 2026.11.20.44
 
 Protocol 1 (the same for ls6t_bridge.vbs inside LabSpec and for sim.py):
 
@@ -122,6 +122,10 @@ def diagnose(hb: dict | None, folder=None) -> str:
             "(Processing > Scripts); if it then does not answer, start LabSpec again first.")
 
 
+STARTUP_VERBS = ("inventory", "warmup")      # what the bridge does after it starts, before taking commands
+STARTUP_MAX_S = 600.0                          # the longest a command waits for that (on top of its own time)
+
+
 class BridgeError(RuntimeError):
     pass
 
@@ -212,6 +216,7 @@ class Bridge:
         _write_atomic(cmd, encode({"verb": verb, "seq": seq, "timeout_s": round(0.95 * timeout_s, 1), **params}))
         t0 = time.monotonic()
         stop_sent = None
+        startup_wait = 0.0
         while True:
             if res.exists():
                 try:
@@ -225,6 +230,8 @@ class Bridge:
                     pass
                 d["ok"] = d.get("ok") == "1"
                 d["seconds"] = round(time.monotonic() - t0, 3)
+                if startup_wait:
+                    d["waited_for_bridge_start_s"] = round(startup_wait, 1)
                 return d
             now = time.monotonic()
             if on_wait:
@@ -235,7 +242,14 @@ class Bridge:
             if stop_sent is not None and now - stop_sent > 30:
                 self._withdraw(cmd)
                 raise BridgeTimeout(f"{verb}: no answer 30 s after the stop request")
-            if now - t0 > timeout_s:
+            if now - t0 > timeout_s + startup_wait:
+                hb = self.heartbeat() or {}
+                if hb.get("state") == "busy" and hb.get("verb") in STARTUP_VERBS and startup_wait < STARTUP_MAX_S:
+                    # the bridge is still starting (inventory, motor warm-up): the command waits its turn, its own
+                    # time counts from when the bridge is free (2026-11-20: status timed out during a 51 s warm-up)
+                    startup_wait = (now - t0) - timeout_s + 1.0        # the deadline moves on while it starts
+                    time.sleep(poll_s)
+                    continue
                 self.request_stop(seq)
                 self._withdraw(cmd)
                 raise BridgeTimeout(self._timeout_text(verb, timeout_s))

@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.20.43)
+## Architecture (version 2026.11.20.44)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -524,6 +524,15 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   closing ends the bridge (OperatorStop -> quit via gHaltPopup); VResume closes it; BridgeMain starts with
   OtherBridge (heartbeat <= 5 s old, not stopped): a message box with what to do, and exits. TESTING T2.3, rule 5.
   124 tests.
+- 2026-11-21, 2026.11.20.44: T2.3 on .43 (RDP): the HALTED window works; a second bridge start does nothing (LabSpec
+  runs one script at a time: OtherBridge kept, harmless, but its message never shows here); the main window
+  'reappeared' after Cancel until LabSpec's call ended; the window reopened after resume looked like a new request;
+  resume took 58.8 / 99.6 s (very likely queued behind the warm-up, 50.9 s this time, plus the operator's answer);
+  both windows titled 'Non blocking'; two status calls timed out at 15 s during the warm-up. Now: HORIBA's
+  '#title#button' suffix on the non-blocking messages ('ls6t: in control' / Halt, 'ls6t: HALTED' / End bridge);
+  StopRequested and the warm-up open the HALTED window at once; WarmUp polls OperatorStop (Halt or the stop button
+  ends it) and allows 120 s per motor; OpenMainPopup(resumed) says RESUMED; Bridge.call extends its deadline while
+  the heartbeat says inventory/warmup (STARTUP_MAX_S 600; waited_for_bridge_start_s). 125 tests.
 
 ## To do next
 
