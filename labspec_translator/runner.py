@@ -1,5 +1,5 @@
 """runner.py — runs a request's studies on the instrument, one command at a time, and checks every result.
-Version: 2026.11.20.30
+Version: 2026.11.20.31
 
 A request runs in its own process (`ls6t run-request FOLDER`, started detached by api.start), so it outlives the
 MCP call that started it. One request at a time holds the instrument (a lock file under LS6T_HOME); others wait
@@ -95,6 +95,7 @@ class Ctx:
         self.z_focus = None                 # the focus: the operator's, or the last autofocus / focus scan
         self.saved_config = None            # LabSpec's configuration saved at the start (session.restore_config)
         self.confirmed = False
+        self.objective_by_operator = None      # the objective the operator confirmed in this request
         self.last_beat = 0.0
         self.bridge_version = None
 
@@ -301,6 +302,15 @@ def _setup(name: str, study: dict, ctx: Ctx, warnings: list, unreliable: list, c
                 lab, err = P.match_label(step["value"], labs)
                 if lab:
                     step = dict(step, value=lab)
+        if step["motor"] == prof["motors"]["objective"] and prof.get("manual_objective", True) \
+                and str(step["value"]) != str(before.get("objective")) and config.confirm_policy() != "never":
+            # a manual turret: the operator changes the lens by hand; LabSpec only records it (then moved below)
+            from .api import objective_question
+            ans = ctx.call("confirm", timeout_s=3600, text=objective_question(prof, before.get("objective"),
+                                                                              step["value"]))
+            if ans.get("answer") != "yes":
+                raise Stop("the operator declined to change the objective", "operator")
+            ctx.objective_by_operator = step["value"]
         p = {k: v for k, v in step.items() if k not in ("verb", "why")}
         long_move = p["motor"] in (prof["motors"]["laser"], prof["motors"]["grating"], prof["motors"]["objective"])
         r = ctx.call("move", timeout_s=600 if long_move else 120, **p)
@@ -329,13 +339,24 @@ def _setup(name: str, study: dict, ctx: Ctx, warnings: list, unreliable: list, c
     # ---- the operator's go-ahead
     policy = config.confirm_policy()
     if confirm and (policy == "study" or (policy == "request" and not ctx.confirmed)):
+        obj_q = (f" Objective {after.get('objective')} as LabSpec has it: is that lens on the turret?"
+                 if prof.get("manual_objective", True) else f" Objective {after.get('objective')}.")
         what = (f"ls6t is about to expose '{study.get('sample', {}).get('name', name)}' ({kind}, {n_points} "
-                f"point(s)) with laser {laser:g} nm, filter {after.get('filter')}, objective {after.get('objective')}."
-                f" Continue?")
+                f"point(s)) with laser {laser:g} nm, filter {after.get('filter')}.{obj_q} Continue?")
         r = ctx.call("confirm", timeout_s=3600, text=what)
         if r.get("answer") != "yes":
             raise Stop("the operator declined in LabSpec", "operator")
         ctx.confirmed = True
+        ctx.objective_by_operator = after.get("objective")
+    # the objective is LabSpec's record: on a manual turret only the operator can tell which lens is in place
+    if prof.get("manual_objective", True):
+        by_op = getattr(ctx, "objective_by_operator", None) == after.get("objective")
+        checks["objective"] = {"value": after.get("objective"),
+                               "source": "confirmed by the operator in this request" if by_op else
+                                         "LabSpec's setting, not checked (manual turret)"}
+        if not by_op and kind in ("move", "spot", "focus", "map", "depth") :
+            warnings.append(f"objective {after.get('objective')}: LabSpec's setting, not checked by the operator "
+                            "(manual turret): if another lens is in place, µm scales and the beam offset are wrong")
     return {"before": before, "after": after, "laser": laser, "temp": temp, "readback": readback, "rng": rng}
 
 
@@ -759,6 +780,13 @@ def run_move(name: str, study: dict, ctx: Ctx) -> dict:
     before = ctx.call("status", timeout_s=15, **motor_args(prof))
     obj = (study.get("setup") or {}).get("objective")
     if obj is not None:
+        if prof.get("manual_objective", True) and str(obj) != str(before.get("objective")) \
+                and config.confirm_policy() != "never":
+            from .api import objective_question
+            ans = ctx.call("confirm", timeout_s=3600, text=objective_question(prof, before.get("objective"), obj))
+            if ans.get("answer") != "yes":
+                raise Stop("the operator declined to change the objective", "operator")
+            ctx.objective_by_operator = str(obj)
         r = ctx.call("move", timeout_s=600, motor=prof["motors"]["objective"], mode="label", value=str(obj))
         if not r["ok"] or r.get("label") != str(obj):
             raise Stop(f"objective {obj}: {r.get('error') or 'got ' + str(r.get('label'))}", "study")
@@ -766,6 +794,10 @@ def run_move(name: str, study: dict, ctx: Ctx) -> dict:
     if None in (hx, hy):
         raise Stop("the stage position could not be read: moves are refused", "study")
     beam = None
+    cur_obj = str(obj) if obj is not None else before.get("objective")
+    if m.get("to_um") is not None and prof.get("manual_objective", True) and ctx.objective_by_operator != cur_obj:
+        warnings.append(f"objective {cur_obj}: LabSpec's setting, not checked by the operator (manual turret): the "
+                        "beam offset used is this objective's; if another lens is in place, the beam lands elsewhere")
     if m.get("to_um") is not None:
         # put the beam (not LabSpec's marker) on a point picked in a snapshot: stage = point - the beam's offset
         objective = obj if obj is not None else before.get("objective")

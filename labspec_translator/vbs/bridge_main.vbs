@@ -14,6 +14,7 @@
 ' ---------------------------------------------------------------------------------------------------------------
 
 Const POLL_MS = 100
+Dim gNoId                 ' Empty: GetMotorStatus by the motor's name (HORIBA's scripts pass an unset MoveID)
 
 Dim gInbox, gOutbox, gHb, gStopFlag, gHalted, gQuit, gLastBeat, gLastPopup, gPopupOpen, gViews, gStoppedBy
 Dim gVerb, gSeq, gLastSeq, gChunk
@@ -573,7 +574,7 @@ Sub VConfig(cmd, res)
 End Sub
 
 Sub VMove(cmd, res)
-    Dim motor, mode, v, posVal, posName, mc, moveId, tmo
+    Dim motor, mode, v, posVal, posName, mc, moveId, tmo, waited
     motor = GetP(cmd, "motor", "")
     mode = GetP(cmd, "mode", "value")
     v = GetP(cmd, "value", "")
@@ -606,10 +607,51 @@ Sub VMove(cmd, res)
         Fail res, "LabSpec refused to move " & motor & " to " & v
         Exit Sub
     End If
-    If moveId > 0 Then WaitMotor motor, moveId, tmo, res
+    res("move_id") = moveId
+    ' wait for the motor whatever MoveMotor returned: on the XploRA it gave no move id, so the read-back came before
+    ' the motor had moved (2026-11-20). Without an id, GetMotorStatus by the motor's name, as HORIBA's scripts do.
+    If moveId > 0 Then
+        waited = WaitMotor(motor, moveId, tmo, res)
+    Else
+        waited = WaitMotor(motor, gNoId, tmo, res)
+    End If
+    ' then the position, read until it is the one asked: a motor passing through other positions (the pinhole read
+    ' 100 on its way from 500 to 300) or reporting idle early (the slit is the slowest) is not taken as arrived
+    If waited And mode <> "index" Then SettleReadback motor, mode, v, tmo, res
     res("motor") = motor
     res("value") = MotorValue(motor)
     res("label") = MotorLabel(motor)
+End Sub
+
+' Reads the motor until it shows the position asked (value within 0.5, or the label), at most 30 s (or tmo)
+Sub SettleReadback(motor, mode, v, tmo, res)
+    Dim t0, got, lim, who
+    t0 = Timer
+    lim = 30
+    If tmo < lim Then lim = tmo
+    Do
+        If mode = "label" Then
+            got = MotorLabel(motor)
+            If CStr(got) = CStr(v) Then Exit Do
+        Else
+            got = MotorValue(motor)
+            If CStr(got) <> "" Then
+                If Abs(ParseNum(got) - ParseNum(v)) <= 0.5 Then Exit Do
+            End If
+        End If
+        who = StopRequested()
+        If who <> "" Then
+            gStoppedBy = who
+            Exit Do
+        End If
+        If Elapsed(t0) > lim Then
+            res("settle_timeout") = 1
+            Exit Do
+        End If
+        BeatNow
+        LabSpec.Pause 200
+    Loop
+    res("settle_s") = Fmt(Elapsed(t0))
 End Sub
 
 Sub VMoveXY(cmd, res)

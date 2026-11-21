@@ -12,7 +12,7 @@ stops and cancel on the simulator, and `ls6t bench` gives known answers. What re
 LabSpec and hardware. The plan goes from no laser and no motion to an LLM app driving a full map, in stages. Each
 stage starts only when the previous one passed.
 
-Version under test: 2026.11.20.30 (bridge protocol 1).
+Version under test: 2026.11.20.31 (bridge protocol 1).
 
 **Already known** (2026-11-20, from the instrument's discovery dump, its `NFActiveX.ocx`, `OLConfig.ini`,
 `OLSetup.ini` and LabSpec 6.7.1's service scripts): the motors and their positions (lasers 532, 637.75, 785.04 nm;
@@ -80,7 +80,7 @@ files already showed.
 | Q2 | Does the non-blocking window (`Message(..., 8)`) open, report -1 while open and 0 once closed? Does `MessageEx("", 14)` see a stop button for scripts, where LabSpec has one (this XploRA's has none)? (The bridge's discovery gave `selftest.stop_button` empty, not 0: check what it returns when pressed.) | T1.1, T2.3, T2.4 |
 | Q3 | Does LabSpec stay usable (live video, menus) while the bridge loops? | T2.2 |
 | Q4 | Do `MoveMotor(..., +10)` and `GetMotorStatus` behave as assumed? Does `MoveXY` return at once or block until the move ends? | T3 |
-| Q5 | What are the motor names and position labels of the filter wheel and the objective turret? Is the turret manual (LabSpec prompts the operator)? **Known: names and labels** (Filter 100 %–0.1 %; Objective x100_VIS, x10_VIS, x5_VIS); motorised or manual is still to see. | T3.2 |
+| Q5 | What are the motor names and position labels of the filter wheel and the objective turret? Is the turret manual? **Answered (2026-11-20): names and labels** (Filter 100 %–0.1 %; Objective x100_VIS, x10_VIS, x5_VIS), and **the turret is manual**: LabSpec's objective is a record of what someone selected, not a reading; discovery and OLConfig.ini list the configured objectives, not the mounted ones. | T3.2 |
 | Q6 | In which unit does `GetValue(id, "XYData")` give x (nm or cm⁻¹)? How is `AcqInfo` laid out (a header row)? Where is the exposure that auto-exposure chose? | T4.1, T4.3 |
 | Q7 | Does `GetAcqID` report -2 after a cancel, and does that state persist into the next acquisition? | T4.5 |
 | Q8 | Does autofocus leave a spectrum behind (a data ID), and does it keep the new focus or restore the old one? | T5 |
@@ -231,7 +231,7 @@ With the maintainer, go through:
 - **limits, decided by the maintainer**: `sensitive_max_filter_pct`, `max_xy_um` (start with 500), `max_dz_um`
   (start with 20), `max_laser_on_s`, `max_exposure_s`, `max_accumulations`, `max_points`, `max_minutes`,
   `stage.x_um` / `stage.y_um` if wanted, `detector.max_temp_c`;
-- `manual_objective`: true if LabSpec asks the operator to turn the turret;
+- `manual_objective`: true on this XploRA (manual turret, the default): ls6t then asks the operator to change the lens by hand and confirm, and records the objective as operator-confirmed or as LabSpec's unchecked setting; `objectives`: keep only the lenses really mounted (discovery lists what LabSpec is configured for);
 - `motors.laser_shutter` (**Q15**): only once the maintainer has confirmed that `LaserShutter` is the **laser**
   shutter, set it to `"LaserShutter"`. Until then snapshots with the laser and `laser_on` are refused.
 
@@ -300,7 +300,7 @@ the single command underneath.
 | Step | Command | Pass |
 |---|---|---|
 | T3.1 | `ls6t instrument set --filter 1%`, then each other filter up to the caps; `--filter 50%` with the 10 % cap | the wheel moves; `after.filter` equals the label asked; above the cap: refused, nothing moves |
-| T3.2 | `ls6t instrument set --objective x5` (**Q5**), then back (maintainer checks clearance) | LabSpec asks first (turret); motorised: it turns and reads back `x5_VIS`; manual: LabSpec asks the operator. Record which. |
+| T3.2 | `ls6t instrument set --objective x5` (**Q5**), then back | LabSpec shows ls6t's question: change the objective BY HAND to x5, check the clearance, OK. After OK, LabSpec's objective reads `x5_VIS` and the answer's `objective.source` says it was changed by hand and confirmed. Cancel once: nothing changes. |
 | T3.3 | `ls6t instrument set --grating 600`, then back | the grating moves; read back; note `seconds` |
 | T3.4 | `ls6t instrument set --laser-nm 532` (and 638, 785) | the laser line changes in LabSpec (no emission); read back; note the time |
 | T3.5 | `ls6t instrument set --hole 300 --slit 100` | read back (or the error, if not motorised) |
@@ -313,6 +313,7 @@ the single command underneath.
 | T3.12 | Stopping the video HORIBA's way (**Q44**; optional; maintainer ready to restart LabSpec; save work first). HORIBA's own service scripts (`SERVICE\StandardMapping XploRA.vbs`, `SWIFTMapping XploRA.vbs`) stop the video with `Video STOP_VIDEO`, then poll `GetMotorStatus("Video", id)` until 0, with no other video call in between; ls6t's earlier stop called `Video(GET_VIDEO_ID)` right after, and hung. With the video started by ls6t (`camera-on`): `ls6t profile set video.stop_from_script true`, then `ls6t instrument camera-off` once | It returns within 15 s with `live` 0 and `video_stop_status` 0, LabSpec's video is stopped, and the bridge answers `ls6t instrument status`. Record `video_stop_s`. If it hangs: restart LabSpec, set `video.stop_from_script` back to false, and record it (then no script way to stop the video is known) |
 | T3.13 | After the bridge's own stop (**Q44**; maintainer ready to restart LabSpec; save work first). **Done 2026-11-20 on .26:** the stop returned (`video_stop_s` 3.38) but the next `status` hung inside LabSpec. From .27 the bridge, after its own stop, no longer asks LabSpec anything about the video (it knows it is off and which camera was selected) until it starts the video itself, and it waits at least 5 s after the stop before starting it. With `video.stop_from_script` true: `camera-on`, `camera-off`, then `ls6t instrument status` twice, then `camera-on` again | `status` answers at once with `live_video` 0 and `video_known_off` 1; the second `camera-on` starts the video after the 5 s wait, and `status` then shows `live_video` 1 with `video_known_off` 0. A stop by hand takes about 3–4 s to take effect (Nicola, 2026-11-20), like `video_stop_s` 3.38: the 5 s wait counts from when the stop is reported done |
 | T3.14 | Switching cameras by a video restart (**Q44**; maintainer ready to restart LabSpec; save work first). **Passed before (2026-11-20, .28):** T3.12 (HORIBA's stop, 3.38 s) and T3.13 (no video query after the stop; stop then start, 3.09 s). With the live video on the internal camera (1): `ls6t profile set video.switch_camera true`, then `ls6t instrument camera-on --camera top` (camera 0 first: it was ignored before, even with the video stopped and after a LabSpec restart). Then `--camera internal`, then `--camera top` once more | Each switch: the video stops (`camera_restart` 1, `video_stop_s`), about 5 s pass, the video starts again, and the answer is `ok` with `camera_after` the one asked **and the live view shows that camera** (look). If camera 0 is ignored again, the answer says "LabSpec ignored the switch" with `camera_set_returned`: record it, and that camera stays a manual step (`video.switch_camera` back to false). No hang at any point; `status` answers between switches |
+| T3.15 | Motors and read-back (2026-11-20, .29: every move reached its target, but `set` read back before the motors finished and reported `ok: false`; mid-move readings such as the pinhole at 100 µm between 500 and 300). With .31: `ls6t instrument set --laser-nm 785 --grating 600 --filter 1% --hole 500 --slit 200`, then back | `ok: true`; each move's `got` is the value asked (no intermediate value); `settle_s` per move (the slit slowest). A request with a filter above the cap is refused as a whole and says nothing was changed |
 
 Also record the times of T3.3, T3.4 and T3.6. They replace the defaults in the profile's `timing` (`grating_s`,
 `laser_s`, `xy_um_per_s`, `xy_settle_s`), which feed the time estimates.
@@ -708,7 +709,7 @@ With the LLM app connected (test mode off), in a new chat:
 | T2.3 | | | | | |
 | T2.4 | | | | Q2: | |
 | T2.5 | | | | | |
-| T3.1–T3.14 | | | | Q4: Q5 (turret motorised?): times (grating, laser, XY): Q44 (bridge after end-bridge + video by hand; HORIBA-style stop: passed T3.12–13; T3.14 camera 0 / 1 by restart: shown?): | |
+| T3.1–T3.15 | | | | Q4: Q5 (turret motorised?): times (grating, laser, XY): Q44 (bridge after end-bridge + video by hand; HORIBA-style stop: passed T3.12–13; T3.14 camera 0 / 1 by restart: shown?): | |
 | T4.1 | | | | Q6 (x unit, AcqInfo): | |
 | T4.2 | | | | Si = ; FWHM = ; Q9: | |
 | T4.3 | | | | Q6 (exposure line): | |

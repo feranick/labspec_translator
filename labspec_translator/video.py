@@ -1,5 +1,5 @@
 """video.py — video snapshots: decoding the bridge's frame file and drawing it with the laser position marked.
-Version: 2026.11.20.30
+Version: 2026.11.20.31
 
 The bridge writes a cloned video frame as '# key=value' header lines (axis types, sizes, units, values) and the
 pixel values in LabSpec's order. LabSpec's video axes are taken to be stage coordinates in µm ('mkm'), so the laser
@@ -260,6 +260,9 @@ def snapshot(res: dict, prof: dict, base: Path, title: str, laser_nm=None) -> di
     v = prof.get("video", {})
     out: dict = {"raw": res.get("out"), "native": {}, "warnings": [], "laser_s": _f(res.get("laser_s")),
                  "objective": res.get("objective")}
+    if prof.get("manual_objective", True) and res.get("objective"):
+        out["objective_source"] = ("LabSpec's setting, not checked (manual turret): the µm scale and the laser marker "
+                                   "assume this lens is in place")
     for k, val in res.items():
         if k.startswith("saved_") and str(val) == "1":
             fmt = k[len("saved_"):]

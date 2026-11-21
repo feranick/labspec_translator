@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.20.30)
+## Architecture (version 2026.11.20.31)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -417,6 +417,18 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   sensor (OLConfig names IDS uEye USB3 cameras: the top one's family is 3088 x 2076, the internal one's 1920 x 1200,
   from public datasheets; models only, no serials here): likely LabSpec's video buffer (binning or the window);
   check the internal camera's frame size and LabSpec's camera settings (TESTING T5b.1).
+- 2026-11-20, 2026.11.20.31: from the instrument (.29/.30): all motorised settings reach every value asked
+  (laser 532/785.04/637.75, gratings 1800/600/2400/1200, filters 10/1/0.1 %, pinhole 100/500/300, slit 50/200/100),
+  but set reported ok false with the old values: VMove waited only `If moveId > 0`, and MoveMotor (+NO_WAIT) gave no
+  id here. Now WaitMotor always (gNoId, an Empty MoveID, as HORIBA's scripts' unset MoveID), then SettleReadback
+  (value within 0.5 or the label, 200 ms polls, at most 30 s; settle_s, settle_timeout): mid-move positions (grating
+  1800 between 2400 and 1200, pinhole 100 between 500 and 300) are not taken as arrived. The filter cap refused a
+  whole request (right): errors now say nothing was changed. Objectives: the turret is manual; LabSpec's objective
+  is a record, not a reading, and discovery/OLConfig list configured lenses, not mounted ones (hence the earlier
+  x50). api.objective_question (manual_objective, default true): change by hand, confirm; used by set, the runner's
+  set-up and kind move; the laser go-ahead asks whether LabSpec's lens is the one on the turret; checks.objective /
+  set's objective / snapshot objective_source say confirmed-by-operator or LabSpec's unchecked setting; move.to_um
+  warns when unchecked. 115 tests.
 
 ## To do next
 

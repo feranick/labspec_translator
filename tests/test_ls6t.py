@@ -946,7 +946,7 @@ def test_native_map_export_and_discovery_probes(tmp_path):
     assert st["studies"]["m"]["reliable"]
     S.ensure(config.active_bridge_dir())
     r = bridge.Bridge().call("discover", timeout_s=10, out=str(tmp_path / "dump.txt"))
-    # discovery no longer probes these (2026.11.20.30): dumps from older bridges still carry them
+    # discovery no longer probes these (2026.11.20.31): dumps from older bridges still carry them
     old = (tmp_path / "dump.txt").read_text() + "\n".join([
         "selftest.get_value_ex=0", "selftest.get_value_simple_part=1", "selftest.get_value_simple_part_size=8",
         "selftest.get_value_simple_part_values=4,5,6,7,8,9,10,11", "selftest.get_config_param=1",
@@ -1692,3 +1692,32 @@ def test_colour_frames_and_large_images(tmp_path, monkeypatch):
     assert api.image_for_view(str(small))[2]["reduced"] is False
     with pytest.raises(ValueError):
         api.image_for_view(str(tmp_path / "elsewhere.png"))
+
+
+def test_set_waits_for_motors_and_manual_objective(tmp_path):
+    """2026-11-20 at the instrument: every set came back with the old value (MoveMotor gave no move id, so the bridge
+    did not wait), mid-move readings looked like positions, the turret is manual, and a refused request did not say
+    that nothing changed."""
+    br = Path(api.install_bridge(tmp_path / "vbs")["files"]["ls6t_bridge.vbs"]).read_text()
+    mv = br[br.index("Sub VMove("):]
+    mv = mv[:mv.index("End Sub")]
+    assert "waited = WaitMotor(motor, gNoId, tmo, res)" in mv and "SettleReadback motor, mode, v, tmo, res" in mv
+    assert "If moveId > 0 Then WaitMotor" not in mv
+    sr = br[br.index("Sub SettleReadback("):]
+    assert "Abs(ParseNum(got) - ParseNum(v)) <= 0.5" in sr[:sr.index("End Sub")]
+    S.ensure(config.active_bridge_dir())
+    prof = P.load()
+    assert prof["manual_objective"] is True
+    q = api.objective_question(prof, "x10", "x100")
+    assert "BY HAND" in q and "x100" in q
+    P.save(dict(prof, limits=dict(prof["limits"], max_filter_pct=10)))
+    r = api.instrument("set", setup={"filter": "25%", "grating": 600})
+    assert not r["ok"] and "nothing was changed" in r["error"]
+    assert api.instrument("status")["status"]["grating"] != "600"
+    r = api.instrument("set", setup={"objective": "x50"})
+    assert r["ok"] and r["objective"]["source"].startswith("changed by hand")
+    r = api.instrument("set", setup={"grating": 1200})
+    assert r["objective"]["source"].startswith("LabSpec's setting")
+    (config.active_bridge_dir() / "sim_confirm_no").write_text("1")
+    r = api.instrument("set", setup={"objective": "x10", "grating": 600})
+    assert not r["ok"] and "nothing was changed" in r["error"]

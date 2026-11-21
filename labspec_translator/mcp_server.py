@@ -1,5 +1,5 @@
 """mcp_server.py — MCP server: lets LLM-based tools run Raman measurements on a HORIBA instrument through LabSpec 6.
-Version: 2026.11.20.30
+Version: 2026.11.20.31
 
 Tools (all JSON):
   study_format      the study format, the profile's choices and limits, the bridge's state. Read it first.
@@ -153,8 +153,10 @@ def instrument(action: str = "status", camera: str | int | None = None, setup: d
     """status: the bridge's version and the instrument's state now (laser, grating, filter, objective, stage,
     detector temperature, live_video, the active camera, laser_open). set: change the set-up now without
     measuring, setup {laser_nm, grating, filter, objective, hole_um, slit_um} (any of them, named as people say
-    them: objective "x100", filter "10%"); the filter stays within the caps; turning the objective asks the
-    operator in LabSpec; nothing fires the laser; returns what LabSpec read back. laser_on (seconds, up to the
+    them: objective "x100", filter "10%"); the filter stays within the caps; the objective turret is manual on
+    this instrument: LabSpec asks the operator to change the lens by hand and confirm (LabSpec's objective is a
+    record, not a reading: say so when it matters); a refused request changes nothing; each move waits for its motor;
+    nothing fires the laser; returns what LabSpec read back. laser_on (seconds, up to the
     profile's limit; default 30): the laser shutter open so the beam shows on the camera, after the operator's Yes
     in LabSpec; the bridge closes it when the time is up, at laser_off, at a halt, or before any other command.
     laser_off. camera_on / camera_off (camera: a number, or a name in study_format's profile.cameras such as

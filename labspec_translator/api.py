@@ -1,5 +1,5 @@
 """api.py — the functions behind the command line and the MCP server (JSON in, JSON out).
-Version: 2026.11.20.30
+Version: 2026.11.20.31
 """
 from __future__ import annotations
 
@@ -554,13 +554,28 @@ def _labels(b: Bridge, motor: str) -> tuple:
     return [r.get(f"label.{i}", "") for i in range(n)], [r.get(f"value.{i}") for i in range(n)]
 
 
+def objective_question(prof: dict, now, want) -> str:
+    """The operator's question before LabSpec's objective changes. On a manual turret (profile manual_objective, as
+    on this XploRA) the operator changes the lens by hand: LabSpec only records which one is in place, and every
+    objective-dependent scale (video µm, beam offset, spot) follows that record."""
+    if prof.get("manual_objective", True):
+        return (f"Change the objective BY HAND to {want} (LabSpec has {now}): check the clearance between the objective "
+                f"and the sample, turn the turret to {want}, then press OK. ls6t then sets LabSpec's objective to "
+                f"{want}. Cancel: nothing changes.")
+    return (f"ls6t asks to turn the objective turret from {now} to {want}. Is there clearance between the objective "
+            "and the sample? Continue?")
+
+
 def set_instrument(setup: dict) -> dict:
     """Changes the set-up now, without measuring: filter, laser_nm, grating, objective, hole_um, slit_um (any of
     them). Positions are matched to LabSpec's own names ('x100' finds 'x100_VIS'); the filter must be within the
-    caps of the laser that will be in use; turning the objective turret asks the operator in LabSpec first (the
-    objective's working distance changes). Nothing fires the laser. Refused while a request holds the instrument.
-    Returns each move with what LabSpec read back, and the instrument before and after."""
+    caps of the laser that will be in use; a new objective is asked of the operator in LabSpec first (on a manual
+    turret, the operator changes the lens by hand and confirms). Nothing fires the laser. Refused while a request
+    holds the instrument, and refused as a whole if any part is (nothing changes). Each move waits for its motor and
+    for the read-back to show the position asked; returns each move with what LabSpec read back, and the instrument
+    before and after."""
     from .profile import filter_pct, laser_key, match_label
+    nothing = ": nothing was changed (a request is refused as a whole)"
     s = {k: v for k, v in (setup or {}).items() if v not in (None, "")}
     bad = [k for k in s if k not in SET_KEYS]
     if bad or not s:
@@ -589,19 +604,19 @@ def set_instrument(setup: dict) -> dict:
         lk = laser_key(prof, s["laser_nm"] if "laser_nm" in s else before.get("laser_nm"))
         if "laser_nm" in s and not laser_key(prof, s["laser_nm"]):
             have = ", ".join("%g" % v["nm"] for v in prof["lasers"].values())
-            return {"ok": False, "error": f"laser {s['laser_nm']} nm: not on this instrument ({have} nm)"}
+            return {"ok": False, "error": f"laser {s['laser_nm']} nm: not on this instrument ({have} nm)" + nothing}
         if "filter" in s:
             labs, _ = _labels(b, mot["filter"])
             lab, err = match_label(s["filter"], labs or list(prof.get("filters", {})))
             if err:
-                return {"ok": False, "error": f"filter {err}"}
+                return {"ok": False, "error": f"filter {err}" + nothing}
             pct = prof.get("filters", {}).get(lab)
             pct = pct if pct is not None else filter_pct(lab)
             caps = [float(prof["limits"].get("max_filter_pct", 100))]
             if lk:
                 caps.append(float(prof["lasers"][lk].get("max_filter_pct", 100)))
             if pct is None or pct > min(caps) + 1e-9:
-                return {"ok": False, "error": f"filter {lab!r}: unknown transmission or above the cap ({min(caps):g} %)"}
+                return {"ok": False, "error": f"filter {lab!r}: unknown transmission or above the cap ({min(caps):g} %)" + nothing}
             moves.append(("filter", mot["filter"], "label", lab))
         if "laser_nm" in s:
             moves.append(("laser", mot["laser"], "value", float(prof["lasers"][laser_key(prof, s["laser_nm"])]["nm"])))
@@ -611,23 +626,21 @@ def set_instrument(setup: dict) -> dict:
             labs, _ = _labels(b, mot["objective"])
             lab, err = match_label(s["objective"], labs or prof.get("objectives", []))
             if err:
-                return {"ok": False, "error": f"objective {err}"}
+                return {"ok": False, "error": f"objective {err}" + nothing}
             if lab != before.get("objective"):
                 if config.confirm_policy() != "never":
-                    r = b.call("confirm", timeout_s=3600,
-                               text=f"ls6t asks to turn the objective turret from {before.get('objective')} to {lab}. "
-                                    "Is there clearance between the objective and the sample? Continue?")
+                    r = b.call("confirm", timeout_s=3600, text=objective_question(prof, before.get("objective"), lab))
                     if r.get("answer") != "yes":
-                        return {"ok": False, "error": "the operator declined in LabSpec"}
+                        return {"ok": False, "error": "the operator declined in LabSpec" + nothing}
                 moves.append(("objective", mot["objective"], "label", lab))
         for role in ("laser_pol", "raman_pol"):
             if role in s:
                 if not mot.get(role):
-                    return {"ok": False, "error": f"{role}: this instrument has no such polariser in the profile"}
+                    return {"ok": False, "error": f"{role}: this instrument has no such polariser in the profile" + nothing}
                 labs, _ = _labels(b, mot[role])
                 lab, err = match_label(s[role], labs or (prof.get("polarizers") or {}).get(role, []))
                 if err:
-                    return {"ok": False, "error": f"{role} {err}"}
+                    return {"ok": False, "error": f"{role} {err}" + nothing}
                 moves.append((role, mot[role], "label", lab))
         for key, role in (("hole_um", "hole"), ("slit_um", "slit")):
             if key in s:
@@ -645,9 +658,18 @@ def set_instrument(setup: dict) -> dict:
                     done[-1]["error"] = f"stopped by the {r.get('stopped_by')}"
                 break
         after = b.call("status", timeout_s=15, **runner.motor_args(prof))
+        if prof.get("manual_objective", True) and after.get("objective"):
+            asked = any(d["set"] == "objective" and d["ok"] for d in done)
+            done_obj = {"value": after.get("objective"),
+                        "source": "changed by hand and confirmed by the operator" if asked else
+                                  "LabSpec's setting: the turret is manual, ls6t cannot see which lens is in place"}
+        else:
+            done_obj = None
         out = {"ok": all(d["ok"] for d in done) and len(done) == len(moves), "moves": done,
                "before": {k: before.get(k) for k in SET_KEYS if before.get(k) is not None},
                "after": {k: after.get(k) for k in SET_KEYS if after.get(k) is not None}}
+        if done_obj:
+            out["objective"] = done_obj
         if not moves:
             out.update(ok=True, note="already set")
         return out
