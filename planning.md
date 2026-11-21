@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.20.39)
+## Architecture (version 2026.11.20.40)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -495,6 +495,13 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   the background and cutoff notices (OK only at the instrument with the beam physically blocked; not from a remote
   session); format._blocked_by_hand: a warning always, and with an unreviewed profile (labspec mode) the filter
   must be the strongest attenuation. TESTING T3.16's dark timing: someone in the room, filter 0.1 %. 121 tests.
+- 2026-11-20, 2026.11.20.40: .39 at the instrument: SpMax reached the person's profile and every set reports its
+  reach (600 1138, 1200 1112, 1800 935, 2400 690 nm; the 2400 note fires). study_format's summary lacked it:
+  profile.grating_reach_table -> summary['grating_reach']. Grating moves after the first answer in 0.06-0.09 s;
+  the laser's wait is real (1.6-2.0 s); all_wait_s 0.0 throughout (kept: harmless). The slow first move is not the
+  inventory: 24.1 s on the grating with status_before_s 0.21 s (bridge idle), 36.6 s on the filter another session:
+  the first motor command after LabSpec starts is slow, whichever motor; possibly the only real turret move (T3.16
+  now starts with it, after a LabSpec restart). The 600 s grating timeout and the MCP progress cover it. 121 tests.
 
 ## To do next
 

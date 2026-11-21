@@ -1,5 +1,5 @@
 """profile.py — the machine profile: what the instrument has (from the discovery script) and the limits a person sets.
-Version: 2026.11.20.39
+Version: 2026.11.20.40
 
 The profile is a JSON file (LS6T_PROFILE, default ~/ls6t/profile.json). Studies never change it: an LLM can only
 ask for what the profile allows. Without a file, the built-in XploRA defaults below apply and every result says so
@@ -578,7 +578,26 @@ def summary(prof: dict) -> dict:
             "polarizers": prof.get("polarizers") or {},
             "objectives_info": prof.get("objectives_info") or {},
             "laser_limits": {k: {"max_filter_pct": v.get("max_filter_pct", 100), "power_mw": v.get("power_mw")}
-                             for k, v in prof.get("lasers", {}).items()}}
+                             for k, v in prof.get("lasers", {}).items()},
+            "grating_reach": grating_reach_table(prof)}
+
+
+def grating_reach_table(prof: dict) -> dict:
+    """Per grating: the spectrometer's range (nm) and the largest Raman shift (cm-1) each laser reaches with it,
+    None when the laser line itself lies beyond (LabSpec's SpMax, a measured max_nm, or 2 / G)."""
+    from . import plan
+    out = {}
+    for g, gp in (prof.get("gratings") or {}).items():
+        sp = (gp or {}).get("spectro_nm")
+        row = {"limit_nm": round(plan.grating_limit_nm(prof, g) or 0, 1),
+               "from": "LabSpec SpMin/SpMax" if sp else ("max_nm" if (gp or {}).get("max_nm") else "2 / G")}
+        if sp and sp[0]:
+            row["min_nm"] = sp[0]
+        for v in (prof.get("lasers") or {}).values():
+            r = plan.grating_reach(prof, g, v["nm"])
+            row[f"max_cm1_at_{float(v['nm']):g}"] = r["max_shift_cm1"] if r else None
+        out[g] = row
+    return out
 
 
 def same_position(got, asked, tol: float = 0.5) -> bool:

@@ -946,7 +946,7 @@ def test_native_map_export_and_discovery_probes(tmp_path):
     assert st["studies"]["m"]["reliable"]
     S.ensure(config.active_bridge_dir())
     r = bridge.Bridge().call("discover", timeout_s=10, out=str(tmp_path / "dump.txt"))
-    # discovery no longer probes these (2026.11.20.39): dumps from older bridges still carry them
+    # discovery no longer probes these (2026.11.20.40): dumps from older bridges still carry them
     old = (tmp_path / "dump.txt").read_text() + "\n".join([
         "selftest.get_value_ex=0", "selftest.get_value_simple_part=1", "selftest.get_value_simple_part_size=8",
         "selftest.get_value_simple_part_values=4,5,6,7,8,9,10,11", "selftest.get_config_param=1",
@@ -1834,6 +1834,9 @@ def test_spectrometer_range_from_labspec(tmp_path):
     assert plan.grating_reach(prof, 2400, 637.75)["max_shift_cm1"] == 1187
     assert plan.grating_reach(prof, 1800, 785.04)["max_shift_cm1"] == 2043
     assert plan.grating_reach(prof, 1200, 785.04)["basis"] == "LabSpec's SpMax for this grating"
+    gr = P.summary(prof)["grating_reach"]                  # what study_format shows
+    assert gr["2400"]["limit_nm"] == 690 and gr["2400"]["from"] == "LabSpec SpMin/SpMax"
+    assert gr["2400"]["max_cm1_at_785"] is None and gr["1800"]["max_cm1_at_785"] == 2044    # sim laser 785.0
     st = {"kind": "spectrum", "sample": {"name": "Si"}, "setup": {"laser_nm": 785, "grating": 2400, "filter": "1%",
           "objective": "x100"}, "acquire": {"center_cm1": 520, "exposure_s": 1}}
     v = api.validate({"s": st})["s"]
