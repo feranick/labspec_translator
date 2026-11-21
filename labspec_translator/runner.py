@@ -1,5 +1,5 @@
 """runner.py — runs a request's studies on the instrument, one command at a time, and checks every result.
-Version: 2026.11.20.34
+Version: 2026.11.20.35
 
 A request runs in its own process (`ls6t run-request FOLDER`, started detached by api.start), so it outlives the
 MCP call that started it. One request at a time holds the instrument (a lock file under LS6T_HOME); others wait
@@ -313,7 +313,7 @@ def _setup(name: str, study: dict, ctx: Ctx, warnings: list, unreliable: list, c
             ctx.objective_by_operator = step["value"]
         p = {k: v for k, v in step.items() if k not in ("verb", "why")}
         long_move = p["motor"] in (prof["motors"]["laser"], prof["motors"]["grating"], prof["motors"]["objective"])
-        r = ctx.call("move", timeout_s=600 if long_move else 120, **p)
+        r = ctx.call("move", timeout_s=600 if long_move else 120, **p, **move_extra(prof, p["motor"]))
         ok, got = _matches(step, r)
         from .api import _move_timing
         readback.append({"motor": step["motor"], "asked": step["value"], "got": r.get("label") or r.get("value"),
@@ -1716,6 +1716,14 @@ def _snapshot(ctx: Ctx, name: str, sd: Path, tag: str, with_laser: bool, warning
     for w in snap.get("warnings", []):
         warnings.append(f"video ({tag}): {w}")
     return snap
+
+
+def move_extra(prof: dict, motor: str) -> dict:
+    """{'blocking': 1} for the motors moved the blocking way (profile blocking_motors, by role; the grating by
+    default: with NO_WAIT it reported idle at once and once stopped part way, 2026-11-20)."""
+    roles = prof.get("blocking_motors", ["grating"]) or []
+    names = {prof["motors"].get(r) for r in roles if prof["motors"].get(r)}
+    return {"blocking": 1} if motor in names else {}
 
 
 def _matches(step: dict, r: dict) -> tuple[bool, str]:

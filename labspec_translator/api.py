@@ -1,5 +1,5 @@
 """api.py — the functions behind the command line and the MCP server (JSON in, JSON out).
-Version: 2026.11.20.34
+Version: 2026.11.20.35
 """
 from __future__ import annotations
 
@@ -554,14 +554,34 @@ def _labels(b: Bridge, motor: str) -> tuple:
     return [r.get(f"label.{i}", "") for i in range(n)], [r.get(f"value.{i}") for i in range(n)]
 
 
+def _grating_short(b: Bridge, prof: dict, asked, got, r: dict) -> str:
+    """Why a grating move ended elsewhere, with what LabSpec says about it: LabSpec reported no error, the laser in
+    use, LabSpec's spectrometer range for the grating asked (OperVar SpMin / SpMax). On 2026-11-20 1200 -> 2400
+    stopped at 1800 with the 637.75 nm laser, while 1800 -> 2400 together with a switch to 785 nm worked."""
+    msg = f"the grating stopped at {got} (asked {asked:g}); LabSpec reported no error"
+    try:
+        st = b.call("status", timeout_s=15, **runner.motor_args(prof))
+        msg += f"; laser {st.get('laser_nm')} nm"
+        cal = labspec_calibration(b)
+        for lab, vals in (cal.get("gratings") or {}).items():
+            if P.same_position(str(lab).split()[0], asked):
+                msg += f"; LabSpec's range for grating {lab}: SpMin {vals.get('SpMin')}, SpMax {vals.get('SpMax')}"
+    except BridgeError:
+        pass
+    return (msg + ". LabSpec may not allow this grating with this laser (or at the spectrometer's current position): "
+            "set the laser and the grating together, or ask the maintainer (TESTING T3.16)")
+
+
 def _move_timing(r: dict) -> dict:
     """How long a move took: seconds (the whole bridge call), move_call_s (MoveMotor itself), wait_s (until the motor
     reported idle), all_wait_s (until every motor did), settle_s (until the read-back showed the position asked);
     settle_stable / settle_timeout when it never did."""
     out = {"seconds": r.get("seconds")}
-    for k in ("move_call_s", "wait_s", "all_wait_s", "settle_s", "settle_stable", "settle_timeout"):
+    for k in ("move_call_s", "wait_s", "all_wait_s", "settle_s", "settle_stable", "settle_timeout", "blocking"):
         if r.get(k) not in (None, ""):
             out[k] = float(r[k]) if k.endswith("_s") else True
+    if r.get("move_id") not in (None, ""):
+        out["move_id"] = r["move_id"]
     return out
 
 
@@ -607,8 +627,11 @@ def set_instrument(setup: dict) -> dict:
         from . import sim as S
         S.ensure(b.dir)
     moves, out = [], {"ok": False}
+    t_all = time.time()
+    hb0 = b.heartbeat() or {}
     try:
-        before = b.call("status", timeout_s=15, **runner.motor_args(prof))
+        before = b.call("status", timeout_s=120, **runner.motor_args(prof))
+        t_before = time.time() - t_all
         if not before.get("ok"):
             return {"ok": False, "error": f"status: {before.get('error')}"}
         # the target laser (for the filter caps)
@@ -656,18 +679,22 @@ def set_instrument(setup: dict) -> dict:
         for key, role in (("hole_um", "hole"), ("slit_um", "slit")):
             if key in s:
                 moves.append((key, mot[role], "value", float(s[key])))
+        t_checks = time.time() - t_all - t_before
         done = []
         for what, motor, mode, value in moves:
             r = b.call("move", timeout_s=600 if what in ("laser", "grating", "objective") else 120, motor=motor,
-                       mode=mode, value=value)
+                       mode=mode, value=value, **runner.move_extra(prof, motor))
             got = r.get("label") if mode == "label" else r.get("value")
             ok = bool(r.get("ok")) and P.same_position(got, value)
             done.append({"set": what, "asked": value, "got": got, "ok": ok, "error": r.get("error") or None,
                          **_move_timing(r)})
+            if r.get("ok") and not ok and what == "grating":
+                done[-1]["error"] = _grating_short(b, prof, value, got, r)
             if not r.get("ok"):
                 if r.get("stopped_by"):
                     done[-1]["error"] = f"stopped by the {r.get('stopped_by')}"
                 break
+        t_after0 = time.time()
         after = b.call("status", timeout_s=15, **runner.motor_args(prof))
         if prof.get("manual_objective", True) and after.get("objective"):
             asked = any(d["set"] == "objective" and d["ok"] for d in done)
@@ -681,6 +708,13 @@ def set_instrument(setup: dict) -> dict:
                "after": {k: after.get(k) for k in SET_KEYS if after.get(k) is not None}}
         if done_obj:
             out["objective"] = done_obj
+        out["timing"] = {"total_s": round(time.time() - t_all, 2), "status_before_s": round(t_before, 2),
+                         "checks_s": round(t_checks, 2), "moves_s": round(sum(float(d.get("seconds") or 0)
+                                                                              for d in done), 2),
+                         "status_after_s": round(time.time() - t_after0, 2)}
+        if hb0.get("state") == "busy" and hb0.get("verb") == "inventory":
+            out["timing"]["note"] = ("the bridge was still taking its start-up inventory: the set waited for it "
+                                     "(status_before_s)")
         if not moves:
             out.update(ok=True, note="already set")
         return out

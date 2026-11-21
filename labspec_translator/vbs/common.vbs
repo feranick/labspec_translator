@@ -373,6 +373,10 @@ Function DStep(name)
         DiscAppend gDiscProg, "begin " & name
         DStep = True
     End If
+    On Error Resume Next
+    Execute "BeatNow"                   ' in the bridge (its start-up inventory): the heartbeat goes on; elsewhere none
+    Err.Clear
+    On Error GoTo 0
 End Function
 
 Sub DEnd(name)

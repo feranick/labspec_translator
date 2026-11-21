@@ -1,5 +1,5 @@
 """profile.py — the machine profile: what the instrument has (from the discovery script) and the limits a person sets.
-Version: 2026.11.20.34
+Version: 2026.11.20.35
 
 The profile is a JSON file (LS6T_PROFILE, default ~/ls6t/profile.json). Studies never change it: an LLM can only
 ask for what the profile allows. Without a file, the built-in XploRA defaults below apply and every result says so
@@ -41,6 +41,8 @@ DEFAULT_PROFILE: dict = {
     "filters": {"100%": 100.0, "50%": 50.0, "25%": 25.0, "10%": 10.0, "1%": 1.0, "0.1%": 0.1},
     "objectives": ["x10", "x50", "x100"],
     "manual_objective": True,      # LabSpec asks the operator to turn the turret
+    # motors moved the blocking way (MoveMotor without NO_WAIT), as HORIBA's scripts move them: by role
+    "blocking_motors": ["grating"],
     "holes_um": None,              # null: any value LabSpec accepts
     "slits_um": None,
     "detector": {"full_scale": 65535, "max_temp_c": -50.0, "pixels": 1024},

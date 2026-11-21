@@ -1,5 +1,5 @@
 """sim.py — a simulated LabSpec + XploRA behind the same bridge protocol as ls6t_bridge.vbs.
-Version: 2026.11.20.34
+Version: 2026.11.20.35
 
 It answers every verb of the bridge with the same keys, so the runner, the checks and the MCP server are tested
 without the instrument (LS6T_MODE=sim, and the tests). The simulated sample is a silicon wafer with a graphene
@@ -437,6 +437,11 @@ class SimLabSpec:
                 i = int(np.argmin(diffs))
                 if diffs[i] > 0.5:
                     return {"ok": 0, "error": f"{name}: no position at {val}"}
+            stuck = self.dir / "sim_grating_stuck"      # "2400:1800": a move to 2400 ends at 1800, no error
+            if name == "Grating" and stuck.exists():
+                to, at = stuck.read_text().strip().split(":")
+                if abs(m["values"][i] - float(to)) < 0.5:
+                    i = int(np.argmin([abs(v - float(at)) for v in m["values"]]))
             m["i"] = i
         else:
             m["value"] = float(val)
@@ -446,7 +451,7 @@ class SimLabSpec:
         self.moves += 1
         v, lab = self._cur(name)
         return {"motor": name, "value": v, "label": lab, "move_call_s": 0.0, "wait_s": 0.0, "all_wait_s": 0.0,
-                "settle_s": 0.0}                    # the bridge's timings (it waits for all motors, then reads back)
+                "settle_s": 0.0, **({"blocking": 1} if str(p.get("blocking", "0")) == "1" else {})}                    # the bridge's timings (it waits for all motors, then reads back)
 
     def v_move_xy(self, p):
         x, y = float(p["x_um"]), float(p["y_um"])

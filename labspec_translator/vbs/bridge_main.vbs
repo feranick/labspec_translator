@@ -601,7 +601,15 @@ Sub VMove(cmd, res)
     End If
     On Error Resume Next
     t0 = Timer
-    moveId = LabSpec.MoveMotor(motor, posVal, posName, mc + LS_MOTOR_NO_WAIT)
+    ' blocking=1: MoveMotor without NO_WAIT, as HORIBA's scripts move the grating (MoveMotor("Grating", g, "",
+    ' MOTOR_VALUE), then GetMotorStatus with the id it returns): with NO_WAIT the XploRA's grating reported idle at
+    ' once, and once stopped at 1800 on its way from 1200 to 2400 (2026-11-20). No stop request while it runs.
+    If GetP(cmd, "blocking", "0") = "1" Then
+        moveId = LabSpec.MoveMotor(motor, posVal, posName, mc)
+        res("blocking") = 1
+    Else
+        moveId = LabSpec.MoveMotor(motor, posVal, posName, mc + LS_MOTOR_NO_WAIT)
+    End If
     res("move_call_s") = Fmt(Elapsed(t0))           ' how long MoveMotor itself took to return
     If Err.Number <> 0 Then
         Fail res, ErrText("MoveMotor " & motor)

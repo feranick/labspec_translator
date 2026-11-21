@@ -1,5 +1,5 @@
 """mcp_server.py — MCP server: lets LLM-based tools run Raman measurements on a HORIBA instrument through LabSpec 6.
-Version: 2026.11.20.34
+Version: 2026.11.20.35
 
 Tools (all JSON):
   study_format      the study format, the profile's choices and limits, the bridge's state. Read it first.
@@ -26,18 +26,20 @@ Needs the MCP Python SDK: pip install "mcp>=1.2".
 from __future__ import annotations
 
 import argparse
+import asyncio
 import functools
+import inspect
 
 from . import api, testmode
 
 try:  # MCP Python SDK 2.x
-    from mcp.server.mcpserver import Image
+    from mcp.server.mcpserver import Context, Image
     from mcp.server.mcpserver import MCPServer as _Server
     from mcp.server.mcpserver.exceptions import ToolError
     _V2 = True
 except ImportError:  # 1.x
     from mcp.server.fastmcp import FastMCP as _Server
-    from mcp.server.fastmcp import Image
+    from mcp.server.fastmcp import Context, Image
     from mcp.server.fastmcp.exceptions import ToolError
     _V2 = False
 
@@ -80,6 +82,17 @@ server = _Server("labspec-translator", instructions=INSTRUCTIONS)
 
 def _errors_said(fn):
     """A tool's failure with its text (SDK 2.x otherwise answers 'Error executing tool X' only)."""
+    if inspect.iscoroutinefunction(fn):
+        @functools.wraps(fn)
+        async def awrapper(*a, **k):
+            try:
+                return await fn(*a, **k)
+            except ToolError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                raise ToolError(f"{fn.__name__} failed: {type(exc).__name__}: {exc}"[:2000]) from exc
+        return awrapper
+
     @functools.wraps(fn)
     def wrapper(*a, **k):
         try:
@@ -89,6 +102,23 @@ def _errors_said(fn):
         except Exception as exc:  # noqa: BLE001
             raise ToolError(f"{fn.__name__} failed: {type(exc).__name__}: {exc}"[:2000]) from exc
     return wrapper
+
+
+async def _keepalive(ctx, fn, *a, every_s: float = 5.0):
+    """Runs a blocking call in a thread and reports progress every few seconds meanwhile, so the app does not give
+    up on a call that waits for LabSpec (2026-11-20: a 30.9 s set completed on the instrument, but the app had
+    dropped it: 'No client-side handler found')."""
+    task = asyncio.ensure_future(asyncio.to_thread(fn, *a))
+    waited = 0.0
+    while True:
+        done, _ = await asyncio.wait({task}, timeout=every_s)
+        if done:
+            return task.result()
+        waited += every_s
+        try:
+            await ctx.report_progress(waited, None, f"waiting for LabSpec ({waited:.0f} s)")
+        except Exception:  # noqa: BLE001 - no progress token, an older client: the wait goes on
+            pass
 
 
 _tool = server.tool
@@ -148,8 +178,8 @@ def jobs(limit: int = 20, active: bool = False) -> dict:
 
 
 @server.tool()
-def instrument(action: str = "status", camera: str | int | None = None, setup: dict | None = None,
-               seconds: float | None = None) -> dict:
+async def instrument(ctx: Context, action: str = "status", camera: str | int | None = None,
+                     setup: dict | None = None, seconds: float | None = None) -> dict:
     """status: the bridge's version and the instrument's state now (laser, grating, filter, objective, stage,
     detector temperature, live_video, the active camera, laser_open). set: change the set-up now without
     measuring, setup {laser_nm, grating, filter, objective, hole_um, slit_um} (any of them, named as people say
@@ -168,7 +198,7 @@ def instrument(action: str = "status", camera: str | int | None = None, setup: d
     and proposes a machine profile (a person applies it). resume: asks the operator to lift a halt. last_error:
     LabSpec's last error. calibration: LabSpec's spectrometer calibration per grating (read only). autocal_info:
     LabSpec's AutoCalibration script(s) here and whether they can run unattended (nothing runs)."""
-    return api.instrument(action, camera, setup, seconds)
+    return await _keepalive(ctx, api.instrument, action, camera, setup, seconds)
 
 
 @server.tool()

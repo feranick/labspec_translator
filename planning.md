@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.20.34)
+## Architecture (version 2026.11.20.35)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -451,6 +451,18 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   motors, then reads back; move_call_s / wait_s / all_wait_s / settle_s reported (api._move_timing). Also from the
   manual: MOTOR_NO_MESSAGE (100) stops LabSpec's own prompt for a manual motor: T3.2 records whether LabSpec asks
   as well as ls6t. 116 tests.
+- 2026-11-20, 2026.11.20.35: .34 at the instrument: round trip ok, breakdown works. First set after each bridge
+  start 30.9-45.4 s (.31, .32, .34; later sets 9-12 s): most likely the start-up inventory (the bridge takes
+  commands only after it); DStep now runs BeatNow (Execute, ignored in the discovery script) and set_instrument
+  reports timing {total_s, status_before_s, checks_s, moves_s, status_after_s, note when the heartbeat said
+  'inventory'}. The 30.9 s call was dropped by the app ('No client-side handler found') though done: the
+  instrument tool is async and reports progress every 5 s (_keepalive: asyncio.to_thread + ctx.report_progress; the
+  error wrapper handles coroutines). Grating: move_call_s 0, wait_s 0.05-0.09 s, even 2400 -> 1200; with 637.75 nm
+  1200 -> 2400 stopped at 1800 silently (settle_stable caught it). HORIBA's scripts move the grating blocking
+  (MoveMotor without NO_WAIT, then GetMotorStatus with its id): VMove blocking=1, profile blocking_motors
+  ['grating'] (runner.move_extra, used by set and the runner's set-up). OLConfig names gratings with ranges but has
+  no laser pairing: no up-front refusal; a short stop reports laser and SpMin / SpMax (_grating_short). TESTING
+  T3.16, Q45. Sim: sim_grating_stuck. 117 tests.
 
 ## To do next
 

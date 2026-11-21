@@ -946,7 +946,7 @@ def test_native_map_export_and_discovery_probes(tmp_path):
     assert st["studies"]["m"]["reliable"]
     S.ensure(config.active_bridge_dir())
     r = bridge.Bridge().call("discover", timeout_s=10, out=str(tmp_path / "dump.txt"))
-    # discovery no longer probes these (2026.11.20.34): dumps from older bridges still carry them
+    # discovery no longer probes these (2026.11.20.35): dumps from older bridges still carry them
     old = (tmp_path / "dump.txt").read_text() + "\n".join([
         "selftest.get_value_ex=0", "selftest.get_value_simple_part=1", "selftest.get_value_simple_part_size=8",
         "selftest.get_value_simple_part_values=4,5,6,7,8,9,10,11", "selftest.get_config_param=1",
@@ -1749,3 +1749,33 @@ def test_readback_matching_and_snapshot_move_confirm(tmp_path):
     (config.active_bridge_dir() / "sim_confirm_no").write_text("1")
     st = run_inline({"m2": {"kind": "move", "move": {"to_um": [1234.5 + 3, -567.8]}}})
     assert "did not confirm objective" in json.dumps(st)
+
+
+def test_grating_blocking_short_stop_timing_and_keepalive(tmp_path):
+    """2026-11-20 (.34): the grating's status wait did not track it (wait_s 0.05 s), a grating move 1200 -> 2400
+    stopped at 1800 without an error, the first set after a bridge start took 30-45 s, and a 30.9 s call was dropped
+    by the app."""
+    br = Path(api.install_bridge(tmp_path / "vbs")["files"]["ls6t_bridge.vbs"]).read_text()
+    mv = br[br.index("Sub VMove("):]
+    mv = mv[:mv.index("End Sub")]
+    assert 'GetP(cmd, "blocking", "0") = "1"' in mv and "moveId = LabSpec.MoveMotor(motor, posVal, posName, mc)\n" in mv
+    assert 'Execute "BeatNow"' in br                    # the start-up inventory keeps the heartbeat going
+    prof = P.load()
+    assert runner.move_extra(prof, prof["motors"]["grating"]) == {"blocking": 1}
+    assert runner.move_extra(prof, prof["motors"]["filter"]) == {}
+    S.ensure(config.active_bridge_dir())
+    r = api.instrument("set", setup={"grating": 600})
+    assert r["ok"] and r["moves"][0]["blocking"] is True and {"total_s", "status_before_s", "moves_s"} <= set(r["timing"])
+    (config.active_bridge_dir() / "sim_grating_stuck").write_text("2400:1800")
+    r = api.instrument("set", setup={"grating": 2400})
+    assert not r["ok"] and "stopped at" in r["moves"][0]["error"] and "SpMax" in r["moves"][0]["error"]
+    # long calls keep the app's request alive
+    from labspec_translator import mcp_server as M
+    import asyncio
+    seen = []
+
+    class Ctx:
+        async def report_progress(self, p, total=None, message=None):
+            seen.append(p)
+    out = asyncio.run(M._keepalive(Ctx(), lambda: (time.sleep(0.35), "done")[1], every_s=0.1))
+    assert out == "done" and len(seen) >= 2
