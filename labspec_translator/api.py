@@ -1,5 +1,5 @@
 """api.py — the functions behind the command line and the MCP server (JSON in, JSON out).
-Version: 2026.11.20.45
+Version: 2026.11.20.46
 """
 from __future__ import annotations
 
@@ -342,7 +342,25 @@ def _instrument(action, camera, setup, seconds) -> dict:
                 out["notes"].append("skipped (they stopped LabSpec before): " + ", ".join(prog["skip"]))
             return {**out, "dump": str(dump)}
         if action == "resume":
-            r = b.call("resume", timeout_s=600)
+            # on Windows, also when LabSpec's question window exists (a dialog of LabSpec's other than ls6t's own):
+            # the bridge's timings cannot tell a question put on screen late from a slow answer
+            from .bridge import labspec_windows
+            seen: dict = {}
+            t_call = time.monotonic()
+            last = [0.0]
+
+            def watch():
+                now = time.monotonic()
+                if "t" in seen or now - last[0] < 0.5:
+                    return
+                last[0] = now
+                w = labspec_windows()
+                others = [d for d in (w or {}).get("dialogs", []) if not d.startswith("ls6t:")]
+                if others:
+                    seen.update(t=round(now - t_call, 1), title=others[0])
+            r = b.call("resume", timeout_s=600, on_wait=watch)
+            if seen:
+                r["dialog_appeared_after_s"], r["dialog_title"] = seen["t"], seen["title"]
             # where the time went: before the bridge took the command up, before the question was on screen, and
             # until the operator answered (.42/.43: 58.8 s and 99.6 s with the bridge idle and halted)
             try:

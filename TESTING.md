@@ -12,7 +12,7 @@ stops and cancel on the simulator, and `ls6t bench` gives known answers. What re
 LabSpec and hardware. The plan goes from no laser and no motion to an LLM app driving a full map, in stages. Each
 stage starts only when the previous one passed.
 
-Version under test: 2026.11.20.45 (bridge protocol 1).
+Version under test: 2026.11.20.46 (bridge protocol 1).
 
 **Already known** (2026-11-20, from the instrument's discovery dump, its `NFActiveX.ocx`, `OLConfig.ini`,
 `OLSetup.ini` and LabSpec 6.7.1's service scripts): the motors and their positions (lasers 532, 637.75, 785.04 nm;
@@ -292,7 +292,11 @@ before .44 its button was Cancel and its title LabSpec's "Non blocking").
   reappears, saying ls6t RESUMED (nothing more to answer); the state is `idle`. Record the answer's
   `picked_up_after_s` (until the bridge took the command up), `prompt_shown_after_s` (until the question was put on
   screen) and `answer_after_s` (on screen until answered): on .42/.43 a resume took 58.8 and 99.6 s with the bridge
-  idle and halted. From .45 the HALTED window is closed while the question is asked.
+  idle and halted. From .45 the HALTED window is closed while the question is asked. `prompt_shown_after_s` is when
+  the bridge *asked*; if LabSpec shows the question late, or behind another window over RDP, that time counts as
+  `answer_after_s`. So whoever answers also notes roughly how many seconds after the request the question became
+  **visible**; from .46 the answer also gives `dialog_appeared_after_s` (when Windows first listed LabSpec's
+  question window, Windows only; it cannot see whether another window covers it).
 - Halt again, then close the HALTED window: the bridge ends (`stopped`). Start `ls6t_bridge.vbs` again.
 - **Known (2026-11-20):** with a bridge running or halted, LabSpec does not start `ls6t_bridge.vbs` a second time (it
   runs one script at a time): end the bridge first (End bridge, or `ls6t instrument end-bridge`).

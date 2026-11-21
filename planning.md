@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.20.45)
+## Architecture (version 2026.11.20.46)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -539,6 +539,10 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   RDP). VResume now closes the HALTED window first (reopens it on No) and reports prompt_shown_after_s /
   answer_after_s (gCmdT0 set when HandleFile takes a command); api adds picked_up_after_s. Bridge.heartbeat retries a
   read that catches the file mid-rewrite (empty / no state), which also made a test flaky. 126 tests.
+- 2026-11-21, 2026.11.20.46: Nicola: prompt_shown_after_s is when the bridge asked; a question LabSpec shows late
+  (or behind a window over RDP) counts as answer_after_s. api resume watches labspec_windows() every 0.5 s during
+  the call (Bridge.call on_wait) and reports dialog_appeared_after_s / dialog_title (first LabSpec dialog not titled
+  'ls6t:'); z-order is not visible, so TESTING T2.3 asks the person to note when it became visible. 126 tests.
 
 ## To do next
 
