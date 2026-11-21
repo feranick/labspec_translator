@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.20.33)
+## Architecture (version 2026.11.20.34)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -442,6 +442,15 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   0.09; the filter is the setting tied to laser power). same_position: a value in % matches only within 0.1 %
   relative (0.10 % = 0.1 %); positions keep 0.5 absolute. Filters move and read back by label (plan.setup_steps,
   set_instrument), compared exactly by the bridge (NormLabel). 116 tests.
+- 2026-11-20, 2026.11.20.34: T3.15 passed on .32/.33: all moves ok, settle_s 0.0; whole-call times: filter ~1 s
+  (36.6 s for the first move after the bridge started: watch), laser 1.9-2.8 s, pinhole 2.1-5.7 s (slowest; the
+  'slow slit' of .29 was only last in line), slit 1.7-2.9 s, grating 0.2-0.3 s although it moves for seconds (.29).
+  So GetMotorStatus("Grating", no id) said idle and the value read was the target at once: the grating was not
+  waited on. HORIBA's scripts do MoveMotor("Grating", g, "", MOTOR_VALUE) (blocking, an id) then GetMotorStatus with
+  that id; the manual documents WaitForAllMotors = GetMotorStatus("", 0). VMove now waits on the motor, then on all
+  motors, then reads back; move_call_s / wait_s / all_wait_s / settle_s reported (api._move_timing). Also from the
+  manual: MOTOR_NO_MESSAGE (100) stops LabSpec's own prompt for a manual motor: T3.2 records whether LabSpec asks
+  as well as ls6t. 116 tests.
 
 ## To do next
 

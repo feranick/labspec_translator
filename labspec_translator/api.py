@@ -1,5 +1,5 @@
 """api.py — the functions behind the command line and the MCP server (JSON in, JSON out).
-Version: 2026.11.20.33
+Version: 2026.11.20.34
 """
 from __future__ import annotations
 
@@ -555,12 +555,13 @@ def _labels(b: Bridge, motor: str) -> tuple:
 
 
 def _move_timing(r: dict) -> dict:
-    """How long a move took (seconds: the whole bridge call) and how long the read-back took to show the position
-    asked after the motor reported idle (settle_s); settle_stable / settle_timeout when it never did."""
+    """How long a move took: seconds (the whole bridge call), move_call_s (MoveMotor itself), wait_s (until the motor
+    reported idle), all_wait_s (until every motor did), settle_s (until the read-back showed the position asked);
+    settle_stable / settle_timeout when it never did."""
     out = {"seconds": r.get("seconds")}
-    for k in ("settle_s", "settle_stable", "settle_timeout"):
+    for k in ("move_call_s", "wait_s", "all_wait_s", "settle_s", "settle_stable", "settle_timeout"):
         if r.get(k) not in (None, ""):
-            out[k] = float(r[k]) if k == "settle_s" else True
+            out[k] = float(r[k]) if k.endswith("_s") else True
     return out
 
 

@@ -207,7 +207,11 @@ Function WaitMotor(motor, moveId, tmo, res)
         End If
         If Elapsed(t0) > tmo Then
             If motor <> "" Then LabSpec.MoveMotor motor, 0, "", LS_MOTOR_STOP
-            Fail res, "motor " & motor & ": not there after " & tmo & " s"
+            If motor = "" Then
+                Fail res, "the motors were still moving after " & tmo & " s"
+            Else
+                Fail res, "motor " & motor & ": not there after " & tmo & " s"
+            End If
             WaitMotor = False
             Exit Do
         End If
@@ -574,7 +578,7 @@ Sub VConfig(cmd, res)
 End Sub
 
 Sub VMove(cmd, res)
-    Dim motor, mode, v, posVal, posName, mc, moveId, tmo, waited
+    Dim motor, mode, v, posVal, posName, mc, moveId, tmo, waited, t0, t1
     motor = GetP(cmd, "motor", "")
     mode = GetP(cmd, "mode", "value")
     v = GetP(cmd, "value", "")
@@ -596,7 +600,9 @@ Sub VMove(cmd, res)
         Exit Sub
     End If
     On Error Resume Next
+    t0 = Timer
     moveId = LabSpec.MoveMotor(motor, posVal, posName, mc + LS_MOTOR_NO_WAIT)
+    res("move_call_s") = Fmt(Elapsed(t0))           ' how long MoveMotor itself took to return
     If Err.Number <> 0 Then
         Fail res, ErrText("MoveMotor " & motor)
         Err.Clear
@@ -610,10 +616,20 @@ Sub VMove(cmd, res)
     res("move_id") = moveId
     ' wait for the motor whatever MoveMotor returned: on the XploRA it gave no move id, so the read-back came before
     ' the motor had moved (2026-11-20). Without an id, GetMotorStatus by the motor's name, as HORIBA's scripts do.
+    t1 = Timer
     If moveId > 0 Then
         waited = WaitMotor(motor, moveId, tmo, res)
     Else
         waited = WaitMotor(motor, gNoId, tmo, res)
+    End If
+    res("wait_s") = Fmt(Elapsed(t1))
+    ' and every motor (the manual's WaitForAllMotors: GetMotorStatus("", 0)): a grating change also moves the turret
+    ' and the spectrometer; on the XploRA the grating reported idle and its new value 0.2 s after the command while it
+    ' was still visibly moving (2026-11-20, T3.15)
+    If waited Then
+        t1 = Timer
+        waited = WaitMotor("", 0, tmo, res)
+        res("all_wait_s") = Fmt(Elapsed(t1))
     End If
     ' then the position, read until it is the one asked: a motor passing through other positions (the pinhole read
     ' 100 on its way from 500 to 300) or reporting idle early (the slit is the slowest) is not taken as arrived

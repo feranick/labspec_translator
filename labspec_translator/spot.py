@@ -1,5 +1,5 @@
 """spot.py — where the laser beam really is: the measured offsets, remembered per objective and laser.
-Version: 2026.11.20.33
+Version: 2026.11.20.34
 
 LabSpec marks the laser at the stage position (the image centre); the beam drifts away from it. Each 'spot' study
 (or snapshot with the laser) that finds the beam reliably records the offset (beam - LabSpec's position, µm) for
