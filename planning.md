@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.20.41)
+## Architecture (version 2026.11.20.42)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -506,6 +506,16 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   has (a) bridge-only restart (remote, no watcher), (b) LabSpec + bridge restart with a watcher. VMove counts its
   MoveMotor calls (gMoveN -> bridge_move_n in each move's answer). If (a) is slow: a deliberate warm-up at bridge
   start (to design then: which harmless command warms it). 121 tests.
+- 2026-11-20, 2026.11.20.42: remote check of .40: grating_reach right (2400: 1187 cm-1 at 637.75, 4304 at 532,
+  none at 785.04). SpMin = 100 for every grating: not plausible: grating_min_nm uses only a person's
+  gratings.<G>.min_nm; the table shows labspec_spmin. Third slow first move: 31.7 s (grating 1200 -> 600, all in
+  wait_s, move_call_s 0, bridge idle). WarmUp at bridge start (after the inventory): GetMotorStatus by name for
+  Grating, Filter, Laser, Hole, Slit, Spectro, polled while busy (<= 60 s each, beats), times in ping 'warmup' and
+  LS6T_HOME/warmup.txt; nothing moves. Remote Desktop (Nicola's earlier suggestion, unanswered until now):
+  config.remote_session (SM_REMOTESESSION or SESSIONNAME RDP-*; LS6T_REMOTE_SESSION for tests): hand-blocked
+  backgrounds / cut-offs refused in labspec mode unless LS6T_HAND_BLOCK_REMOTE_OK=1; TESTING ground rule 7. Not
+  detected: TeamViewer, Quick Assist. Still open, people's: the turret watch (T3.16), cameras with light and a
+  sample (T3.14), the profile review and the laser shutter confirmation (the most useful step). 123 tests.
 
 ## To do next
 

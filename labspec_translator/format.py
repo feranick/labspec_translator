@@ -1,9 +1,10 @@
 """format.py — the study format and its static checks (no instrument needed).
-Version: 2026.11.20.41
+Version: 2026.11.20.42
 """
 from __future__ import annotations
 
 import math
+import os
 
 from . import config, plan
 from .profile import filter_pct, laser_key, match_label, review_gate
@@ -196,6 +197,11 @@ def _blocked_by_hand(study: dict, prof: dict, errors: list, warnings: list, what
     profile nobody has reviewed (no confirmed caps or power), the filter must be the strongest attenuation."""
     warnings.append(f"{what}: the laser is kept off only by the operator's physical block: run it with someone at "
                     "the instrument (LabSpec's prompt says so)")
+    if config.mode() == "labspec" and config.remote_session() and os.environ.get("LS6T_HAND_BLOCK_REMOTE_OK") != "1":
+        errors.append(f"{what} with the laser blocked by hand, from a Remote Desktop session: the person answering "
+                      "LabSpec's prompt may not be at the instrument. Run it from the instrument's own screen (or, "
+                      "with someone at the instrument blocking the beam, set LS6T_HAND_BLOCK_REMOTE_OK=1 for that "
+                      "session), or use laser_off 'shutter' once the laser shutter motor is confirmed")
     if config.mode() == "labspec" and review_gate(prof):
         fl = prof.get("filters") or {}
         lowest = min(fl, key=lambda k: float(fl[k])) if fl else None
@@ -616,8 +622,8 @@ def validate_study(name: str, study: dict, prof: dict) -> dict:
                           + ": a coarser grating, or a shorter range")
         lo_nm = plan.grating_min_nm(prof, (study.get("setup") or {}).get("grating"))
         if lo_nm and float(rng.get("from_nm") or 1e9) < lo_nm:
-            errors.append(f"grating {(study.get('setup') or {}).get('grating')} starts at {lo_nm:g} nm (LabSpec's "
-                          f"SpMin): the range from {float(rng['from_nm']):.0f} nm is below it")
+            errors.append(f"grating {(study.get('setup') or {}).get('grating')} starts at {lo_nm:g} nm (profile "
+                          f"min_nm): the range from {float(rng['from_nm']):.0f} nm is below it")
         if rng.get("from_cm1") is not None and rng["from_cm1"] < 0 and kind != "cutoff":
             warnings.append("acquire range starts below 0 cm-1 (anti-Stokes or the laser line): check the edge "
                             "filter allows it")

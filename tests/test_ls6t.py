@@ -946,7 +946,7 @@ def test_native_map_export_and_discovery_probes(tmp_path):
     assert st["studies"]["m"]["reliable"]
     S.ensure(config.active_bridge_dir())
     r = bridge.Bridge().call("discover", timeout_s=10, out=str(tmp_path / "dump.txt"))
-    # discovery no longer probes these (2026.11.20.41): dumps from older bridges still carry them
+    # discovery no longer probes these (2026.11.20.42): dumps from older bridges still carry them
     old = (tmp_path / "dump.txt").read_text() + "\n".join([
         "selftest.get_value_ex=0", "selftest.get_value_simple_part=1", "selftest.get_value_simple_part_size=8",
         "selftest.get_value_simple_part_values=4,5,6,7,8,9,10,11", "selftest.get_config_param=1",
@@ -1836,7 +1836,7 @@ def test_spectrometer_range_from_labspec(tmp_path):
     assert plan.grating_reach(prof, 1800, 785.04)["max_shift_cm1"] == 2043
     assert plan.grating_reach(prof, 1200, 785.04)["basis"] == "LabSpec's SpMax for this grating"
     gr = P.summary(prof)["grating_reach"]                  # what study_format shows
-    assert gr["2400"]["limit_nm"] == 690 and gr["2400"]["from"] == "LabSpec SpMin/SpMax"
+    assert gr["2400"]["limit_nm"] == 690 and gr["2400"]["from"] == "LabSpec SpMax" and "min_nm" not in gr["2400"]
     assert gr["2400"]["max_cm1_at_785"] is None and gr["1800"]["max_cm1_at_785"] == 2044    # sim laser 785.0
     st = {"kind": "spectrum", "sample": {"name": "Si"}, "setup": {"laser_nm": 785, "grating": 2400, "filter": "1%",
           "objective": "x100"}, "acquire": {"center_cm1": 520, "exposure_s": 1}}
@@ -1871,6 +1871,13 @@ def test_inventory_facts_reach_a_persons_profile_and_dark_timing(tmp_path, monke
     assert v["ok"], v["errors"]
     assert any("someone at the instrument" in w for w in v["warnings"])
     assert "PHYSICALLY BLOCKED" in runner.BLOCK_BY_HAND and "remote session" in runner.BLOCK_BY_HAND
+    monkeypatch.setenv("LS6T_REMOTE_SESSION", "1")             # a Remote Desktop session: refused
+    v = api.validate({"b": bg})["b"]
+    assert not v["ok"] and any("Remote Desktop" in e for e in v["errors"])
+    monkeypatch.setenv("LS6T_HAND_BLOCK_REMOTE_OK", "1")
+    assert api.validate({"b": bg})["b"]["ok"]
+    monkeypatch.delenv("LS6T_HAND_BLOCK_REMOTE_OK")
+    monkeypatch.setenv("LS6T_REMOTE_SESSION", "0")
     spec = dict(bg, kind="spectrum")
     spec.pop("background")
     assert any("reviewed" in e for e in api.validate({"s": spec})["s"]["errors"])
@@ -1878,3 +1885,16 @@ def test_inventory_facts_reach_a_persons_profile_and_dark_timing(tmp_path, monke
     st = run_inline({"b1": bg, "b2": dict(bg, background={"name": "dark_t316b", "laser_off": "operator"})})
     for k in ("b1", "b2"):
         assert st["studies"][k]["seconds"]["acquire"] is not None
+
+
+def test_spmin_not_applied_and_warmup(tmp_path):
+    prof = P.load()
+    P.save(dict(prof, gratings={k: dict(v, spectro_nm=[100.0, 935.0]) for k, v in prof["gratings"].items()}))
+    assert plan.grating_min_nm(P.load(), 1800) is None                      # SpMin 100: shown, not applied
+    assert P.summary(P.load())["grating_reach"]["1800"]["labspec_spmin"] == 100.0
+    br = Path(api.install_bridge(tmp_path / "vbs")["files"]["ls6t_bridge.vbs"]).read_text()
+    main = br[br.index("Sub BridgeMain("):]
+    assert main.index("DiscoverTo LS6T_HOME_DIR") < main.index("WarmUp") < main.index('Beat "idle", True')
+    wu = br[br.index("Sub WarmUp("):]
+    wu = wu[:wu.index("End Sub")]
+    assert "GetMotorStatus(nm, gNoId)" in wu and "MoveMotor" not in wu and 'res("warmup") = gWarm' in br

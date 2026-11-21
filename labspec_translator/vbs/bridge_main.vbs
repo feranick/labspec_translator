@@ -231,6 +231,7 @@ End Function
 Sub VPing(cmd, res)
     res("protocol") = LS6T_PROTOCOL
     res("version") = LS6T_VERSION
+    res("warmup") = gWarm                     ' each motor's first status at start (s): TESTING T3.16
     res("system") = LSValue(0, "SystemName")
 End Sub
 
@@ -2149,6 +2150,40 @@ Sub HandleFile(path)
     BeatNow
 End Sub
 
+' The first motor command after a start was slow three times (2026-11-20: 36.6 s filter, 24.1 s and 31.7 s grating),
+' the time spent in GetMotorStatus, not in MoveMotor. At start the bridge asks each motor's status once (nothing
+' moves), waiting while LabSpec says busy (at most 60 s each), so any first-call delay is spent here rather than
+' in the first request. The times go to ping (warmup) and LS6T_HOME\warmup.txt. TESTING T3.16.
+Dim gWarm
+gWarm = ""
+Sub WarmUp()
+    Dim names, i, t0, st, nm
+    gVerb = "warmup"
+    Beat "busy", True
+    names = Array("Grating", "Filter", "Laser", "Hole", "Slit", "Spectro")
+    On Error Resume Next
+    For i = 0 To UBound(names)
+        nm = names(i)
+        If MotorSize(nm) <> -1 Then
+            t0 = Timer
+            Do
+                st = LabSpec.GetMotorStatus(nm, gNoId)
+                If Err.Number <> 0 Then
+                    Err.Clear
+                    Exit Do
+                End If
+                If st = 0 Or Elapsed(t0) > 60 Then Exit Do
+                BeatNow
+                LabSpec.Pause 100
+            Loop
+            gWarm = gWarm & nm & "=" & Fmt(Elapsed(t0)) & ";"
+        End If
+    Next
+    Err.Clear
+    DiscAppend LS6T_HOME_DIR & "\warmup.txt", Now & " " & LS6T_VERSION & " " & gWarm
+    On Error GoTo 0
+End Sub
+
 ' ---------------------------------------------------------------- main loop
 Sub BridgeMain()
     Dim p, o
@@ -2166,6 +2201,7 @@ Sub BridgeMain()
     DiscoverTo LS6T_HOME_DIR & "\discovery_latest.txt", False
     Err.Clear
     On Error GoTo 0
+    WarmUp
     gVerb = ""
     Beat "idle", True
     Do While Not gQuit

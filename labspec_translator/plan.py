@@ -1,5 +1,5 @@
 """plan.py — a study as bridge commands: the setup moves, the points, the acquisitions; and the time estimate.
-Version: 2026.11.20.41
+Version: 2026.11.20.42
 
 Everything here is computed from the study and the profile alone: wavelengths from Raman shifts, the number of
 detector windows, the stage positions (always offsets from where the operator left the stage, Z from the
@@ -135,12 +135,14 @@ def grating_limit_nm(prof: dict, grating) -> float | None:
 
 
 def grating_min_nm(prof: dict, grating) -> float | None:
-    """The shortest wavelength the spectrometer reaches with a grating (LabSpec's SpMin), when known."""
+    """The shortest wavelength the spectrometer reaches with a grating: not known. LabSpec's SpMin reads 100 for
+    every grating on the XploRA (2026-11-20), not a plausible limit (a placeholder or another unit), so it is shown
+    but not applied; a measured lower limit can be given as gratings.<G>.min_nm."""
     try:
         gp = prof.get("gratings", {}).get(f"{float(grating):g}") or {}
     except (TypeError, ValueError):
         return None
-    lo = (gp.get("spectro_nm") or [None])[0]
+    lo = gp.get("min_nm")
     return float(lo) if lo else None
 
 

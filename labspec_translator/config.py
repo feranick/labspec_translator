@@ -1,5 +1,5 @@
 """config.py — settings (environment variables only) and the folders ls6t writes to.
-Version: 2026.11.20.41
+Version: 2026.11.20.42
 
 | Variable | Meaning | Default |
 |---|---|---|
@@ -54,6 +54,24 @@ def confirm_policy() -> str:
     if c not in CONFIRM:
         raise ValueError(f"LS6T_CONFIRM={c!r}: use one of {', '.join(CONFIRM)}")
     return c
+
+
+def remote_session() -> bool:
+    """True when this Windows session is a Remote Desktop session (GetSystemMetrics SM_REMOTESESSION, or
+    SESSIONNAME RDP-...): LabSpec's prompts are then answered by someone who may not be at the instrument. Other
+    remote tools (TeamViewer, Quick Assist) are not detected. LS6T_REMOTE_SESSION=1/0 overrides (tests)."""
+    v = os.environ.get("LS6T_REMOTE_SESSION")
+    if v in ("0", "1"):
+        return v == "1"
+    if os.environ.get("SESSIONNAME", "").upper().startswith("RDP"):
+        return True
+    if os.name == "nt":
+        try:
+            import ctypes
+            return bool(ctypes.windll.user32.GetSystemMetrics(0x1000))
+        except Exception:  # noqa: BLE001
+            return False
+    return False
 
 
 def blocking_move_s() -> float:
