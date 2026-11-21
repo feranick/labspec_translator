@@ -1,5 +1,5 @@
 """bridge.py — the Python side of the LabSpec bridge: commands as files in a folder the bridge script watches.
-Version: 2026.11.20.26
+Version: 2026.11.20.27
 
 Protocol 1 (the same for ls6t_bridge.vbs inside LabSpec and for sim.py):
 
@@ -232,11 +232,23 @@ class Bridge:
             if now - t0 > timeout_s:
                 self.request_stop(seq)
                 self._withdraw(cmd)
-                raise BridgeTimeout(f"{verb}: no result within {timeout_s:g} s (stop requested)")
+                raise BridgeTimeout(self._timeout_text(verb, timeout_s))
             if not self.alive():
                 self._withdraw(cmd)
                 raise BridgeGone(f"{verb}: " + diagnose(self.heartbeat(), self.dir))
             time.sleep(poll_s)
+
+    def _timeout_text(self, verb: str, timeout_s: float) -> str:
+        """Why a command gave no result in time, in the same words as diagnose(): stuck inside LabSpec (the heartbeat
+        stopped while busy in it) or still working; and what ls6t did (asked the bridge to drop the command)."""
+        hb = self.heartbeat() or {}
+        dropped = ("ls6t asked the bridge to drop it (a stop request, which the bridge sees only between LabSpec "
+                   "calls)")
+        if hb.get("state") == "busy" and hb.get("verb") == verb and hb.get("age_s", 0) > 5:
+            return (f"{verb}: no result within {timeout_s:g} s; {dropped}. The bridge is stuck inside LabSpec in "
+                    f"'{verb}' (no heartbeat for {hb['age_s']:.0f} s). " + labspec_hint(verb))
+        return (f"{verb}: no result within {timeout_s:g} s; {dropped}. The bridge still works (heartbeat "
+                f"{hb.get('age_s', 0):.0f} s ago, {hb.get('state')} in {hb.get('verb') or '-'}): ask again later")
 
     def _withdraw(self, cmd: Path):
         try:

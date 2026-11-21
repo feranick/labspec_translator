@@ -262,6 +262,47 @@ Function DetectorTemp()
     DetectorTemp = t
 End Function
 
+' The live video's id and LabSpec's camera, without touching LabSpec's video once the bridge has stopped the video
+' itself: on the XploRA (2026-11-20, TESTING T3.12) the stop done HORIBA's way returned, but the next status (which
+' asked Video(GET_VIDEO_ID) and Video(GET_ACTIVE_CAMERA)) hung inside LabSpec. After such a stop the bridge knows the
+' video is off and which camera was selected; it asks LabSpec again only after it has started the video itself
+' (the operator starting it by hand ends the bridge anyway).
+Dim gVidOff, gVidCam, gVidStopT
+gVidOff = False
+gVidCam = ""
+gVidStopT = 0
+Const LS6T_VIDEO_SETTLE_S = 5           ' after the bridge's own stop, before it starts the video again
+
+' Before the bridge starts the video after its own stop: at least LS6T_VIDEO_SETTLE_S since that stop
+Sub VidSettle()
+    Dim left
+    If Not gVidOff Then Exit Sub
+    left = LS6T_VIDEO_SETTLE_S - Elapsed(gVidStopT)
+    If left > 0 Then LabSpec.Pause CLng(left * 1000)
+End Sub
+
+Function VidId()
+    VidId = 0
+    If gVidOff Then Exit Function
+    On Error Resume Next
+    VidId = LabSpec.Video(LS_GET_VIDEO_ID)
+    If Err.Number <> 0 Then VidId = 0
+    Err.Clear
+    On Error GoTo 0
+End Function
+
+Function VidCam()
+    If gVidOff Then
+        VidCam = gVidCam
+        Exit Function
+    End If
+    On Error Resume Next
+    VidCam = LabSpec.Video(LS_GET_ACTIVE_CAMERA)
+    If Err.Number <> 0 Then VidCam = ""
+    Err.Clear
+    On Error GoTo 0
+End Function
+
 Function Bit(b)
     If b Then
         Bit = 1
@@ -436,8 +477,8 @@ Function DiscoverTo(outPath, withPopup)
         DEnd "selftest.stop_button"
     End If
     If DStep("video") Then
-        d("video.active_camera") = LabSpec.Video(LS_GET_ACTIVE_CAMERA)
-        d("video.id_now") = LabSpec.Video(LS_GET_VIDEO_ID)          ' > 0 when the live video runs
+        d("video.active_camera") = VidCam()
+        d("video.id_now") = VidId()                                ' > 0 when the live video runs
         d("video.error") = Err.Description
         Err.Clear
         DEnd "video"

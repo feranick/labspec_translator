@@ -12,7 +12,7 @@ stops and cancel on the simulator, and `ls6t bench` gives known answers. What re
 LabSpec and hardware. The plan goes from no laser and no motion to an LLM app driving a full map, in stages. Each
 stage starts only when the previous one passed.
 
-Version under test: 2026.11.20.26 (bridge protocol 1).
+Version under test: 2026.11.20.27 (bridge protocol 1).
 
 **Already known** (2026-11-20, from the instrument's discovery dump, its `NFActiveX.ocx`, `OLConfig.ini`,
 `OLSetup.ini` and LabSpec 6.7.1's service scripts): the motors and their positions (lasers 532, 637.75, 785.04 nm;
@@ -119,7 +119,7 @@ files already showed.
 | Q41 | `OLConfig.ini` (`Parameters\ACQUISITION`): ls6t reads the camera names, the objectives' NA and their field of view (inferred) from it. Is the field of view right (a snapshot's `field_um`)? **Known:** cameras Top = 0 and Internal = 1, confirmed by switching in LabSpec. | T5b.1 |
 | Q42 | LabSpec's AutoCalibration (`OLSetup.ini` names `...\AutoCalibration\UniversalAutoCalibrationv3.vbs`, an older install's path): is the script on this PC, and can the bridge run it (`instrument autocal_info`)? | T4.9 |
 | Q43 | LabSpec 6.7's constants read a motor's positions with 100+i (value) and 200+i (name); the 2018 manual's 10+i / 20+i worked here for motors of up to ten positions. ls6t uses 100+/200+ beyond ten: check such a motor's labels, if any. | T1.1 |
-| Q44 | Cameras. **Answered (2026-11-20): ls6t cannot switch cameras reliably on this XploRA.** `Video(10 + 0)` was ignored; `Video(10 + 1)` changed LabSpec's selection (what `GET_ACTIVE_CAMERA` reports) but the view only from the next video start; a script's `Video(STOP_VIDEO)` hung the bridge (twice, no dialog, LabSpec running); stopping or starting the video in LabSpec's interface ends the bridge script, and a bridge started right after got stuck in `ping`; after Cancel in the ls6t window LabSpec froze. So ls6t never stops the video and does not switch cameras (`video.switch_camera` false); the operator changes cameras in LabSpec with the bridge ended. Open: does a bridge started after a clean `end-bridge` and a video change by hand answer normally? Does HORIBA's own stop sequence (STOP, then `GetMotorStatus("Video")` until 0) return where ls6t's did not? | T3.11, T3.12 |
+| Q44 | Cameras. **Answered (2026-11-20): ls6t cannot switch cameras reliably on this XploRA.** `Video(10 + 0)` was ignored; `Video(10 + 1)` changed LabSpec's selection (what `GET_ACTIVE_CAMERA` reports) but the view only from the next video start; a script's `Video(STOP_VIDEO)` hung the bridge (twice, no dialog, LabSpec running); stopping or starting the video in LabSpec's interface ends the bridge script, and a bridge started right after got stuck in `ping`; after Cancel in the ls6t window LabSpec froze. So ls6t never stops the video and does not switch cameras (`video.switch_camera` false); the operator changes cameras in LabSpec with the bridge ended. Open: does a bridge started after a clean `end-bridge` and a video change by hand answer normally? HORIBA's own stop sequence (STOP, then `GetMotorStatus("Video")` until 0) **returned** (3.38 s, T3.12), but the next video query (`status`) hung: does avoiding every video query after the bridge's own stop, and waiting 5 s before a new start, keep the bridge answering? | T3.11, T3.12, T3.13 |
 
 ---
 
@@ -311,6 +311,7 @@ the single command underneath.
 | T3.10 | Polarisers: `instrument set` with `laser_pol` Vertical and `raman_pol` None (from the chat, or `ls6t bridge call move motor=LaserPol mode=label value=Vertical`), then back | each moves and reads back; `ls6t instrument status` shows `laser_pol` / `raman_pol` |
 | T3.11 | Cameras (**Q44**: concluded 2026-11-20, ls6t does not switch cameras on this instrument). With the video stopped and the camera chosen in LabSpec: `ls6t instrument camera-on`. Then `camera-on --camera <the other one>`, and `camera-off` | The first starts the live video on LabSpec's camera (`video_started` 1). The other two are refused, nothing changes, the bridge keeps running, and the answers say what to do (`end-bridge`, change the video and camera in LabSpec, start the bridge). Then do that once: after `end-bridge` and the change by hand, the restarted bridge answers `ls6t instrument status` (if not: record it, restart LabSpec) |
 | T3.12 | Stopping the video HORIBA's way (**Q44**; optional; maintainer ready to restart LabSpec; save work first). HORIBA's own service scripts (`SERVICE\StandardMapping XploRA.vbs`, `SWIFTMapping XploRA.vbs`) stop the video with `Video STOP_VIDEO`, then poll `GetMotorStatus("Video", id)` until 0, with no other video call in between; ls6t's earlier stop called `Video(GET_VIDEO_ID)` right after, and hung. With the video started by ls6t (`camera-on`): `ls6t profile set video.stop_from_script true`, then `ls6t instrument camera-off` once | It returns within 15 s with `live` 0 and `video_stop_status` 0, LabSpec's video is stopped, and the bridge answers `ls6t instrument status`. Record `video_stop_s`. If it hangs: restart LabSpec, set `video.stop_from_script` back to false, and record it (then no script way to stop the video is known) |
+| T3.13 | After the bridge's own stop (**Q44**; maintainer ready to restart LabSpec; save work first). **Done 2026-11-20 on .26:** the stop returned (`video_stop_s` 3.38) but the next `status` hung inside LabSpec. From .27 the bridge, after its own stop, no longer asks LabSpec anything about the video (it knows it is off and which camera was selected) until it starts the video itself, and it waits at least 5 s after the stop before starting it. With `video.stop_from_script` true: `camera-on`, `camera-off`, then `ls6t instrument status` twice, then `camera-on` again | `status` answers at once with `live_video` 0 and `video_known_off` 1; the second `camera-on` starts the video after the 5 s wait, and `status` then shows `live_video` 1 with `video_known_off` 0. A stop by hand takes about 3–4 s to take effect (Nicola, 2026-11-20), like `video_stop_s` 3.38: the 5 s wait counts from when the stop is reported done |
 
 Also record the times of T3.3, T3.4 and T3.6. They replace the defaults in the profile's `timing` (`grating_s`,
 `laser_s`, `xy_um_per_s`, `xy_settle_s`), which feed the time estimates.
@@ -706,7 +707,7 @@ With the LLM app connected (test mode off), in a new chat:
 | T2.3 | | | | | |
 | T2.4 | | | | Q2: | |
 | T2.5 | | | | | |
-| T3.1–T3.12 | | | | Q4: Q5 (turret motorised?): times (grating, laser, XY): Q44 (bridge after end-bridge + video by hand; HORIBA-style stop returns?): | |
+| T3.1–T3.13 | | | | Q4: Q5 (turret motorised?): times (grating, laser, XY): Q44 (bridge after end-bridge + video by hand; HORIBA-style stop: returned in 3.38 s; status after it; manual stop time): | |
 | T4.1 | | | | Q6 (x unit, AcqInfo): | |
 | T4.2 | | | | Si = ; FWHM = ; Q9: | |
 | T4.3 | | | | Q6 (exposure line): | |

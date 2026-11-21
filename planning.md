@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.20.26)
+## Architecture (version 2026.11.20.27)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -381,6 +381,15 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   Video(GET_VIDEO_ID) 200 ms after STOP: a call into the video while it stops is the likely place of the hang (not
   proven). StopVideoHoriba reproduces HORIBA's sequence (15 s limit, heartbeat kept), opt-in via
   video.stop_from_script for TESTING T3.12. 111 tests.
+- 2026-11-20, 2026.11.20.27: T3.12 result: StopVideoHoriba returned (live 0, status 0, 3.38 s); the next status
+  timed out (15 s, 'no result ... (stop requested)'), then was reported stuck in status: its Video(GET_VIDEO_ID) /
+  Video(GET_ACTIVE_CAMERA) right after the stop (the overlap HORIBA's scripts never make). Fix: common.vbs VidId /
+  VidCam (no LabSpec video call while gVidOff, set by the bridge's own successful stop, with the camera read just
+  before STOP); cleared when the bridge starts the video (then GET_VIDEO_ID polled, as HORIBA); VidSettle waits
+  LS6T_VIDEO_SETTLE_S = 5 s after the stop before a START (to size from a hand-timed stop: T3.13). Status reports
+  video_known_off. Bridge._timeout_text: stuck in <verb> (busy, heartbeat > 5 s old) with labspec_hint, or still
+  working; says ls6t asked the bridge to drop the command. Popup: Cancel acts when LabSpec's current call ends.
+  112 tests.
 
 ## To do next
 

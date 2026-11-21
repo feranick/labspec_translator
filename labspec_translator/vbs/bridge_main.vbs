@@ -68,7 +68,7 @@ Sub OpenPopup()
     On Error Resume Next
     LabSpec.Message "ls6t (labspec-translator) is controlling the instrument." & vbCrLf & vbCrLf & _
                     "Close this window (Cancel) to STOP: the acquisition or move in progress stops and ls6t " & _
-                    "waits." & vbCrLf & "Before using LabSpec's live video buttons, end the bridge from ls6t " & _
+                    "waits. It takes effect when LabSpec's current call ends (usually a second or two)." & vbCrLf & "Before using LabSpec's live video buttons, end the bridge from ls6t " & _
                     "(instrument end_bridge): LabSpec ends a running script when its video is started or stopped.", _
                     LS_MB_NON_BLOCKING
     gPopupOpen = (Err.Number = 0)
@@ -246,10 +246,10 @@ Sub VStatus(cmd, res)
     res("laser_open") = Bit(gLaserOpen)
     If gLaserOpen Then res("laser_left_s") = Fmt(gLaserS - Elapsed(gLaserT0))
     On Error Resume Next
-    v = LabSpec.Video(LS_GET_VIDEO_ID)
-    res("live_video") = Bit(Err.Number = 0 And v > 0)
-    Err.Clear
-    res("camera") = LabSpec.Video(LS_GET_ACTIVE_CAMERA)
+    v = VidId()
+    res("live_video") = Bit(v > 0)
+    res("camera") = VidCam()
+    res("video_known_off") = Bit(gVidOff)       ' after the bridge's own stop: not asked of LabSpec
     Err.Clear
     On Error GoTo 0
 End Sub
@@ -392,7 +392,7 @@ Function CameraFor(cam, live, allowSwitch, res)
     CameraFor = ""
     If cam = "" Then Exit Function
     On Error Resume Next
-    cur = LabSpec.Video(LS_GET_ACTIVE_CAMERA)
+    cur = VidCam()
     Err.Clear
     On Error GoTo 0
     res("camera_before") = cur
@@ -422,6 +422,8 @@ Function StopVideoHoriba(res)
     Dim st, mid, t0
     StopVideoHoriba = False
     On Error Resume Next
+    gVidCam = LabSpec.Video(LS_GET_ACTIVE_CAMERA)      ' while it runs (as status always did); not asked again after
+    Err.Clear
     LabSpec.Video LS_STOP_VIDEO
     If Err.Number <> 0 Then
         res("video_stop_error") = Err.Description
@@ -443,6 +445,10 @@ Function StopVideoHoriba(res)
     res("video_stop_s") = Fmt(Elapsed(t0))
     On Error GoTo 0
     StopVideoHoriba = (CStr(st) = "0")
+    If StopVideoHoriba Then
+        gVidOff = True
+        gVidStopT = Timer
+    End If
 End Function
 
 Sub VCamera(cmd, res)
@@ -454,9 +460,7 @@ Sub VCamera(cmd, res)
         Exit Sub
     End If
     On Error Resume Next
-    vid = LabSpec.Video(LS_GET_VIDEO_ID)
-    If Err.Number <> 0 Then vid = 0
-    Err.Clear
+    vid = VidId()
     live0 = (vid > 0)
     res("live") = Bit(live0)
     If action = "off" And live0 Then
@@ -470,7 +474,7 @@ Sub VCamera(cmd, res)
             End If
             Exit Sub
         End If
-        res("camera") = LabSpec.Video(LS_GET_ACTIVE_CAMERA)
+        res("camera") = VidCam()
         Err.Clear
         Fail res, "ls6t does not stop LabSpec's live video (a script's Video(STOP_VIDEO) hung the bridge on this " & _
                   "instrument): end the bridge from ls6t first (instrument end_bridge), then stop the video in LabSpec"
@@ -479,19 +483,21 @@ Sub VCamera(cmd, res)
     If action <> "off" Then
         e = CameraFor(cam, live0, GetP(cmd, "switch_camera", "0") = "1", res)
         If e <> "" Then
-            res("camera") = LabSpec.Video(LS_GET_ACTIVE_CAMERA)
+            res("camera") = VidCam()
             Err.Clear
             Fail res, e
             Exit Sub
         End If
     End If
     If action = "on" And Not live0 Then
+        VidSettle
         LabSpec.Video LS_START_VIDEO
         If Err.Number <> 0 Then
             Fail res, ErrText("Video start")
             Err.Clear
             Exit Sub
         End If
+        gVidOff = False                 ' started by the bridge: LabSpec is asked again (GET_VIDEO_ID, as HORIBA)
         t0 = Timer
         Do
             LabSpec.Pause 100
@@ -505,7 +511,7 @@ Sub VCamera(cmd, res)
     End If
     res("live") = Bit(vid > 0)
     res("video_id") = vid
-    res("camera") = LabSpec.Video(LS_GET_ACTIVE_CAMERA)     ' the selection; the view follows it from a video start
+    res("camera") = VidCam()     ' the selection; the view follows it from a video start
     res("video_started") = Bit(action = "on" And Not live0)
     Err.Clear
     On Error GoTo 0
@@ -1174,8 +1180,8 @@ Sub VVideo(cmd, res)
     ok = True
     On Error Resume Next
     wasOn = False
-    vid = LabSpec.Video(LS_GET_VIDEO_ID)
-    If Err.Number = 0 And vid > 0 Then wasOn = True
+    vid = VidId()
+    If vid > 0 Then wasOn = True
     Err.Clear
     r = CameraFor(cam, wasOn, GetP(cmd, "switch_camera", "0") = "1", res)   ' no frame from another camera
     If r <> "" Then
@@ -1208,12 +1214,14 @@ Sub VVideo(cmd, res)
         End If
         wasOn = True
     ElseIf Not wasOn Then
+        VidSettle
         LabSpec.Video LS_START_VIDEO
         If Err.Number <> 0 Then
             Fail res, ErrText("Video start")
             Err.Clear
             Exit Sub
         End If
+        gVidOff = False
     End If
     ' let the camera settle (exposure, live image)
     ok = WaitStoppable(settle)

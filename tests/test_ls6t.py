@@ -946,7 +946,7 @@ def test_native_map_export_and_discovery_probes(tmp_path):
     assert st["studies"]["m"]["reliable"]
     S.ensure(config.active_bridge_dir())
     r = bridge.Bridge().call("discover", timeout_s=10, out=str(tmp_path / "dump.txt"))
-    # discovery no longer probes these (2026.11.20.26): dumps from older bridges still carry them
+    # discovery no longer probes these (2026.11.20.27): dumps from older bridges still carry them
     old = (tmp_path / "dump.txt").read_text() + "\n".join([
         "selftest.get_value_ex=0", "selftest.get_value_simple_part=1", "selftest.get_value_simple_part_size=8",
         "selftest.get_value_simple_part_values=4,5,6,7,8,9,10,11", "selftest.get_config_param=1",
@@ -1585,3 +1585,29 @@ def test_bridge_diagnosis_is_one_story_and_end_bridge(tmp_path):
     assert r["ok"] and "start ls6t_bridge.vbs" in r["next"].lower().replace("start ls6t", "start ls6t")
     br = Path(api.install_bridge(tmp_path / "vbs")["files"]["ls6t_bridge.vbs"]).read_text()
     assert "script stop button" not in br and 'gVerb = "inventory"' in br
+
+
+def test_after_the_bridges_own_video_stop_status_does_not_touch_the_video(tmp_path):
+    """T3.12 (2026-11-20): HORIBA's stop returned (3.4 s), then status hung inside LabSpec on its video queries; the
+    timeout message did not say what was stopped or by whom."""
+    br = Path(api.install_bridge(tmp_path / "vbs")["files"]["ls6t_bridge.vbs"]).read_text()
+    st = br[br.index("Sub VStatus("):]
+    st = st[:st.index("End Sub")]
+    assert "LabSpec.Video" not in st and "VidId()" in st and "VidCam()" in st
+    vid_id = br[br.index("Function VidId()"):]
+    assert vid_id.index("If gVidOff Then Exit Function") < vid_id.index("LabSpec.Video(LS_GET_VIDEO_ID)")
+    sv = br[br.index("Function StopVideoHoriba("):]
+    sv = sv[:sv.index("End Function")]
+    assert sv.index("If StopVideoHoriba Then") < sv.index("gVidOff = True") < sv.index("gVidStopT = Timer")
+    assert br.count("        VidSettle\n        LabSpec.Video LS_START_VIDEO") == 2      # 5 s after a stop, then start
+    cam = br[br.index("Sub VCamera("):]
+    cam = cam[:cam.index("End Sub")]
+    assert "LabSpec.Video(LS_GET_ACTIVE_CAMERA)" not in cam and "gVidOff = False" in cam
+    b = bridge.Bridge(tmp_path / "br")
+    (b.dir / "heartbeat.txt").write_text("state=busy\nverb=status\n", encoding="utf-8")
+    old = time.time() - 12
+    os.utime(b.dir / "heartbeat.txt", (old, old))
+    msg = b._timeout_text("status", 15)
+    assert "stuck inside LabSpec in 'status'" in msg and "drop it" in msg
+    (b.dir / "heartbeat.txt").write_text("state=busy\nverb=map_native\n", encoding="utf-8")
+    assert "still works" in b._timeout_text("map_native", 15)
