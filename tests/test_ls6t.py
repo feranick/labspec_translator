@@ -946,7 +946,7 @@ def test_native_map_export_and_discovery_probes(tmp_path):
     assert st["studies"]["m"]["reliable"]
     S.ensure(config.active_bridge_dir())
     r = bridge.Bridge().call("discover", timeout_s=10, out=str(tmp_path / "dump.txt"))
-    # discovery no longer probes these (2026.11.20.42): dumps from older bridges still carry them
+    # discovery no longer probes these (2026.11.20.43): dumps from older bridges still carry them
     old = (tmp_path / "dump.txt").read_text() + "\n".join([
         "selftest.get_value_ex=0", "selftest.get_value_simple_part=1", "selftest.get_value_simple_part_size=8",
         "selftest.get_value_simple_part_values=4,5,6,7,8,9,10,11", "selftest.get_config_param=1",
@@ -1898,3 +1898,18 @@ def test_spmin_not_applied_and_warmup(tmp_path):
     wu = br[br.index("Sub WarmUp("):]
     wu = wu[:wu.index("End Sub")]
     assert "GetMotorStatus(nm, gNoId)" in wu and "MoveMotor" not in wu and 'res("warmup") = gWarm' in br
+
+
+def test_halt_window_ends_the_bridge_and_second_start(tmp_path):
+    """2026-11-20: Cancel halted the bridge, its window went away, and a second start seemed to do nothing."""
+    br = Path(api.install_bridge(tmp_path / "vbs")["files"]["ls6t_bridge.vbs"]).read_text()
+    assert "Cancel = HALT" in br and "Cancel = END the bridge" in br
+    op = br[br.index("Function OperatorStop()"):]
+    op = op[:op.index("End Function")]
+    assert op.index("If gHaltPopup Then") < op.index('OperatorStop = "quit"           \' the halted window closed')
+    main = br[br.index("Sub BridgeMain()"):]
+    assert main.index("other = OtherBridge()") < main.index("EnsureFolder LS6T_BRIDGE_DIR")
+    assert "If gHalted And Not gPopupOpen Then OpenHaltedPopup" in main
+    rs = br[br.index("Sub VResume("):]
+    rs = rs[:rs.index("End Sub")]
+    assert rs.index("ClosePopup") < rs.index("OpenPopup")

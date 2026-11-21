@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.20.42)
+## Architecture (version 2026.11.20.43)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -516,6 +516,14 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   backgrounds / cut-offs refused in labspec mode unless LS6T_HAND_BLOCK_REMOTE_OK=1; TESTING ground rule 7. Not
   detected: TeamViewer, Quick Assist. Still open, people's: the turret watch (T3.16), cameras with light and a
   sample (T3.14), the profile review and the laser shutter confirmation (the most useful step). 123 tests.
+- 2026-11-21, 2026.11.20.43: .42 at the instrument (RDP): warm-up works: Grating 36.0 s, the other motors 0, the
+  first grating move then 0.10 s (bridge_move_n 1): a one-time cost of the grating's first status query after a
+  bridge start, LabSpec already running. The Remote Desktop refusal works. Cancel halted the bridge, its window
+  went away, a second ls6t_bridge.vbs start did nothing (the halted bridge ran on; LabSpec may run one script at a
+  time), resume fixed it. Now: OpenPopup says Cancel = HALT; when halted the main loop opens OpenHaltedPopup, whose
+  closing ends the bridge (OperatorStop -> quit via gHaltPopup); VResume closes it; BridgeMain starts with
+  OtherBridge (heartbeat <= 5 s old, not stopped): a message box with what to do, and exits. TESTING T2.3, rule 5.
+  124 tests.
 
 ## To do next
 

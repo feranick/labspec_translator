@@ -15,6 +15,8 @@
 
 Const POLL_MS = 100
 Dim gNoId                 ' Empty: GetMotorStatus by the motor's name (HORIBA's scripts pass an unset MoveID)
+Dim gHaltPopup            ' the window open is the halted one (closing it ends the bridge)
+gHaltPopup = False
 Dim gBlocking             ' the motor while a blocking MoveMotor runs (written in the heartbeat beforehand)
 Dim gMoveN                ' MoveMotor calls since this bridge started (1: its first; TESTING T3.16, a slow first move)
 gMoveN = 0
@@ -73,11 +75,26 @@ End Sub
 Sub OpenPopup()
     On Error Resume Next
     LabSpec.Message "ls6t (labspec-translator) is controlling the instrument." & vbCrLf & vbCrLf & _
-                    "Close this window (Cancel) to STOP: the acquisition or move in progress stops and ls6t " & _
-                    "waits. It takes effect when LabSpec's current call ends (usually a second or two)." & vbCrLf & "Before using LabSpec's live video buttons, end the bridge from ls6t " & _
-                    "(instrument end_bridge): LabSpec ends a running script when its video is started or stopped.", _
-                    LS_MB_NON_BLOCKING
+                    "Cancel = HALT: the acquisition or move in progress stops and the bridge waits (it keeps " & _
+                    "running; ls6t asks you before going on). It takes effect when LabSpec's current call ends " & _
+                    "(usually a second or two). A second window then lets you END the bridge." & vbCrLf & vbCrLf & _
+                    "Before using LabSpec's live video buttons, end the bridge (ls6t instrument end-bridge): " & _
+                    "LabSpec ends a running script when its video is started or stopped.", LS_MB_NON_BLOCKING
     gPopupOpen = (Err.Number = 0)
+    gHaltPopup = False
+    Err.Clear
+    On Error GoTo 0
+End Sub
+
+' While halted: a window that ends the bridge when closed (2026-11-20: Cancel halted the bridge, its window went
+' away, and starting ls6t_bridge.vbs again did nothing, because the halted bridge still ran)
+Sub OpenHaltedPopup()
+    On Error Resume Next
+    LabSpec.Message "ls6t is HALTED: nothing moves and nothing is measured. The bridge still runs." & vbCrLf & _
+                    vbCrLf & "Cancel = END the bridge (then start ls6t_bridge.vbs again when you want ls6t back)." & _
+                    vbCrLf & "To go on instead: ls6t instrument resume (LabSpec then asks you).", LS_MB_NON_BLOCKING
+    gPopupOpen = (Err.Number = 0)
+    gHaltPopup = gPopupOpen
     Err.Clear
     On Error GoTo 0
 End Sub
@@ -110,7 +127,12 @@ Function OperatorStop()
         If Err.Number = 0 Then
             If r = 0 Then
                 gPopupOpen = False
-                OperatorStop = "operator"
+                If gHaltPopup Then
+                    gHaltPopup = False
+                    OperatorStop = "quit"           ' the halted window closed: end the bridge
+                Else
+                    OperatorStop = "operator"
+                End If
             End If
         End If
     End If
@@ -2026,6 +2048,7 @@ Sub VResume(cmd, res)
     On Error GoTo 0
     If b = LS_IDYES Then
         gHalted = False
+        ClosePopup                          ' the halted window
         OpenPopup
         res("answer") = "yes"
     Else
@@ -2185,8 +2208,39 @@ Sub WarmUp()
 End Sub
 
 ' ---------------------------------------------------------------- main loop
+Function IIfHalted(st)
+    If st = "halted" Then
+        IIfHalted = "It is HALTED: to go on, ls6t instrument resume; to end it, close its 'HALTED' window (Cancel) " & _
+                    "or run ls6t instrument end-bridge, then start ls6t_bridge.vbs again." & vbCrLf & vbCrLf
+    Else
+        IIfHalted = "To restart it: ls6t instrument end-bridge, then start ls6t_bridge.vbs again." & vbCrLf & vbCrLf
+    End If
+End Function
+
+' Another bridge already running in this LabSpec (its heartbeat fresh, not stopped): this one says so and ends
+Function OtherBridge()
+    Dim f, st, age, d
+    OtherBridge = ""
+    On Error Resume Next
+    If fso.FileExists(gHb) Then
+        Set f = fso.GetFile(gHb)
+        age = DateDiff("s", f.DateLastModified, Now)
+        Set d = ReadKV(gHb)
+        st = d("state")
+        If Err.Number = 0 And age <= 5 And st <> "stopped" And st <> "" Then OtherBridge = st
+    End If
+    Err.Clear
+    On Error GoTo 0
+End Function
+
 Sub BridgeMain()
-    Dim p, o
+    Dim p, o, other
+    other = OtherBridge()
+    If other <> "" Then
+        LabSpec.Message "An ls6t bridge is already running in LabSpec (" & other & ")." & vbCrLf & vbCrLf & _
+                        IIfHalted(other) & "This second start does nothing.", LS_MB_OK
+        Exit Sub
+    End If
     EnsureFolder LS6T_BRIDGE_DIR
     EnsureFolder gInbox
     EnsureFolder gOutbox
@@ -2207,7 +2261,8 @@ Sub BridgeMain()
     Do While Not gQuit
         BeatNow
         If fso.FileExists(gStopFlag) Then StopRequested       ' between commands a stop.flag is stale: drop it
-        o = OperatorStop()      ' between commands: the popup closed (halt) or LabSpec's stop button (quit)
+        If gHalted And Not gPopupOpen Then OpenHaltedPopup
+        o = OperatorStop()      ' between commands: the window closed (halt; when halted: end) or LabSpec's stop button
         If o = "quit" Then gQuit = True
         If o = "operator" Then
             gHalted = True

@@ -12,7 +12,7 @@ stops and cancel on the simulator, and `ls6t bench` gives known answers. What re
 LabSpec and hardware. The plan goes from no laser and no motion to an LLM app driving a full map, in stages. Each
 stage starts only when the previous one passed.
 
-Version under test: 2026.11.20.42 (bridge protocol 1).
+Version under test: 2026.11.20.43 (bridge protocol 1).
 
 **Already known** (2026-11-20, from the instrument's discovery dump, its `NFActiveX.ocx`, `OLConfig.ini`,
 `OLSetup.ini` and LabSpec 6.7.1's service scripts): the motors and their positions (lasers 532, 637.75, 785.04 nm;
@@ -36,7 +36,8 @@ manual, and where LabSpec keeps its calibration. The open questions below say wh
 5. **How to stop**, in order of preference:
    - close the ls6t window in LabSpec (stops the current command, halts the bridge, closes the laser shutter);
    - cancel the acquisition in LabSpec;
-   - `ls6t instrument end-bridge` (ends the bridge cleanly; this XploRA's LabSpec has no stop button for scripts);
+   - `ls6t instrument end-bridge` (ends the bridge cleanly; this XploRA's LabSpec has no stop button for scripts),
+     or, once halted, Cancel in the ls6t HALTED window;
    - the instrument's own stop or emergency controls.
 
    The maintainer should try each of them during the plan (T2, T3, T4). **Do not use LabSpec's live video buttons
@@ -280,12 +281,17 @@ a LabSpec update: `ls6t-typelib --format markdown --out labspec_commands.md`, an
 the spectrum window, moving the stage with the joystick or software. Pass: LabSpec responds normally, and
 `ls6t status` still shows a fresh heartbeat afterwards. Note any sluggishness.
 
-**T2.3 Halt and resume (Q2).** The maintainer closes the ls6t window.
+**T2.3 Halt and resume (Q2).** The maintainer closes the ls6t window (Cancel = halt).
 
-- `ls6t status`: `heartbeat.state` becomes `halted` within 2 s.
+- `ls6t status`: `heartbeat.state` becomes `halted` within 2 s, and a second window says ls6t is HALTED (its Cancel
+  would END the bridge).
 - `ls6t instrument set --grating <current grating>` is refused ("halted by the operator").
 - `ls6t instrument resume`: LabSpec asks whether ls6t may control the instrument again. The maintainer answers
-  **No**: the bridge stays halted. Repeat and answer **Yes**: the window reappears and the state is `idle`.
+  **No**: the bridge stays halted. Repeat and answer **Yes**: the HALTED window closes, the first one reappears and
+  the state is `idle`.
+- Halt again, then close the HALTED window: the bridge ends (`stopped`). Start `ls6t_bridge.vbs` again.
+- With a bridge running (or halted), start `ls6t_bridge.vbs` a second time: either LabSpec does not start it (it
+  runs one script at a time: record which), or it says a bridge is already running and what to do, and ends.
 
 **T2.4 Ending the bridge (Q2).** `ls6t instrument end-bridge`. Pass: the ls6t window closes, `heartbeat.state` is
 `stopped`, and `ls6t status` says the bridge was stopped (not "ended without stopping"). Start the bridge again. If
