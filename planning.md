@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.22.5)
+## Architecture (version 2026.11.22.6)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -645,6 +645,14 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   z_seen_um, stopped_at_bound. Sim: sim_af_range (+-20 µm by default) and the bound. Overshoot after the bound is
   passed: one poll (100 ms) of Z travel plus the stop. Also: set_instrument lists the objective already in place
   (already list, already_set) and adds the grating note only when a grating move was sent. 138 tests.
+- 2026-11-22, 2026.11.22.6: Nicola: measure Z speed and the stop latency, trip earlier by the worst-case overshoot,
+  refuse when no room; x10/x5 first. VAutofocus measures z_speed_um_s (max |dz|/dt between polls), poll_s (max
+  interval), and on a trip stop_s (until two equal Z readings 50 ms apart) and overshoot_um. plan.af_motion (largest
+  measured from autofocus_motion.json, else profile autofocus.*, else AF_ASSUMED 200 µm/s, 0.5 s, 0.15 s;
+  margin = 1.25 x speed x (poll + stop)) and record_af_motion (after every guarded autofocus). runner._af_bound
+  (studies) and _video_focus_after_travel trip at bound - margin and refuse (Stop / skipped 'no safe room') when that
+  is <= 0. TESTING T6.8 (x10/x5 first; one deliberate trip to measure the stop), T5 note. Sim reports a speed and,
+  on a trip, a 2 µm coast. 138 tests.
 
 ## To do next
 

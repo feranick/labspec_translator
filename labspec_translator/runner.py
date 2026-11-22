@@ -1,5 +1,5 @@
 """runner.py — runs a request's studies on the instrument, one command at a time, and checks every result.
-Version: 2026.11.22.5
+Version: 2026.11.22.6
 
 A request runs in its own process (`ls6t run-request FOLDER`, started detached by api.start), so it outlives the
 MCP call that started it. One request at a time holds the instrument (a lock file under LS6T_HOME); others wait
@@ -476,6 +476,7 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
                         _focus_here(ctx)
                 else:
                     r = ctx.call("autofocus", timeout_s=240, how=af, **_af_bound(ctx), **motor_args(prof))
+                    plan.record_af_motion(r)
                     if r["ok"] and _f(r.get("z_um")) is not None:
                         zref = zcur = ctx.z_focus = _f(r.get("z_um"))
                         _focus_here(ctx)
@@ -534,6 +535,7 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
                                         "previous focus")
                 else:
                     r = ctx.call("autofocus", timeout_s=240, how=af, **_af_bound(ctx), **motor_args(prof))
+                    plan.record_af_motion(r)
                     if r["ok"] and _f(r.get("z_um")) is not None:
                         zref = zcur = _f(r.get("z_um"))
                         ctx.z_focus = zref
@@ -771,7 +773,15 @@ def _af_bound(ctx: Ctx) -> dict:
     zl = plan.z_limits(ctx.prof, ctx.objective)
     if zl["toward_sign"] is None or ctx.z_focus is None:
         return {}
-    return {"z_bound": round(ctx.z_focus + zl["toward_sign"] * zl["toward_um"], 3), "z_sign": zl["toward_sign"]}
+    mo = plan.af_motion(ctx.prof)
+    trip = zl["toward_um"] - mo["margin_um"]
+    if trip <= 0:
+        raise Stop(f"LabSpec's autofocus is refused with {ctx.objective or 'this objective'}: its overshoot margin "
+                   f"({mo['margin_um']:g} µm: Z speed {mo['z_speed_um_s']:g} µm/s {mo['z_speed_um_s_from']}, stop "
+                   f"{mo['stop_s']:g} s {mo['stop_s_from']}) leaves nothing of the {zl['toward_um']:g} µm allowed "
+                   "toward the sample; measure it with a longer working distance objective first (TESTING T6.8)",
+                   "study")
+    return {"z_bound": round(ctx.z_focus + zl["toward_sign"] * trip, 3), "z_sign": zl["toward_sign"]}
 
 
 def _video_focus_after_travel(ctx: Ctx, travel: dict, what: str, warnings: list) -> float:
@@ -787,17 +797,27 @@ def _video_focus_after_travel(ctx: Ctx, travel: dict, what: str, warnings: list)
     # unevenness plus the ordinary toward limit
     wd = zl["working_distance_um"] or 0.0
     bound = min(un + zl["toward_um"], wd - un - 0.1 * wd) if wd else un + zl["toward_um"]
-    if bound <= 0:
-        warnings.append(f"no video autofocus: the unevenness ({un:g} µm) leaves no safe approach with "
-                        f"{ctx.objective or 'this objective'} (working distance ~{wd:g} µm)")
-        travel["video_autofocus"] = {"ok": False, "skipped": "unsafe"}
+    mo = plan.af_motion(ctx.prof)
+    trip = bound - mo["margin_um"]          # the stage stops at the bound, not starts to stop there
+    if trip <= 0:
+        warnings.append(f"no video autofocus with {ctx.objective or 'this objective'}: the safe approach "
+                        f"({bound:g} µm, unevenness {un:g} µm, working distance ~{wd:g} µm) minus the overshoot "
+                        f"margin ({mo['margin_um']:g} µm: Z speed {mo['z_speed_um_s']:g} µm/s "
+                        f"{mo['z_speed_um_s_from']}, stop {mo['stop_s']:g} s {mo['stop_s_from']}) leaves nothing; "
+                        "measure the margin with a longer working distance objective first (TESTING T6.8)")
+        travel["video_autofocus"] = {"ok": False, "skipped": "no safe room", "bound_um": round(bound, 1),
+                                     "margin_um": mo["margin_um"]}
         return z_down
-    z_bound = round(zf + s * bound, 3)
+    z_bound = round(zf + s * trip, 3)
     r = ctx.call("autofocus", timeout_s=240, how="video", z_bound=z_bound, z_sign=s, **motor_args(ctx.prof))
+    plan.record_af_motion(r)
     znew = _f(r.get("z_um")) if r.get("ok") else None
     travel["video_autofocus"] = {"ok": bool(r.get("ok")), "z_um": znew, "error": r.get("error") or None,
                                  "z_bound_um": z_bound, "z_seen_um": [_f(r.get("z_seen_min")), _f(r.get("z_seen_max"))],
-                                 "stopped_at_bound": r.get("z_bound_hit") not in (None, "")}
+                                 "stopped_at_bound": r.get("z_bound_hit") not in (None, ""),
+                                 "safe_limit_um": round(zf + s * bound, 3), "margin": mo,
+                                 "measured": {k: _f(r.get(k)) for k in ("z_speed_um_s", "poll_s", "stop_s",
+                                                                        "overshoot_um")}}
     if znew is None or abs(znew - zf) > bound:
         z = _z_direct(ctx, z_down, f"{what}: back down after the video autofocus")
         why = (f"was stopped at the safe bound ({z_bound:g} µm): its search range reaches farther toward the sample "

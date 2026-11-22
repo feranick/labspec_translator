@@ -1,5 +1,5 @@
 """plan.py — a study as bridge commands: the setup moves, the points, the acquisitions; and the time estimate.
-Version: 2026.11.22.5
+Version: 2026.11.22.6
 
 Everything here is computed from the study and the profile alone: wavelengths from Raman shifts, the number of
 detector windows, the stage positions (always offsets from where the operator left the stage, Z from the
@@ -347,6 +347,64 @@ def coarse_focus_step_um(prof: dict, objective) -> float:
         pass
     mag = objective_mag(objective) if objective is not None else 100
     return {100: 2.0, 50: 4.0, 20: 10.0, 10: 25.0, 5: 50.0}.get(mag or 100, 2.0)
+
+
+AF_ASSUMED = {"z_speed_um_s": 200.0, "stop_s": 0.5, "poll_s": 0.15}   # until measured on the instrument (T6.8)
+
+
+def af_motion(prof: dict) -> dict:
+    """Z's speed during LabSpec's autofocus, the bridge's poll interval and how long a stop takes: the largest
+    measured (LS6T_HOME/autofocus_motion.json, from every guarded autofocus), else profile autofocus.* , else
+    AF_ASSUMED (cautious); and the overshoot margin speed x (poll + stop) x 1.25 by which the trip point is set
+    earlier, so the stage stops at the limit rather than starting to stop there."""
+    import json
+    from . import config
+    meas = {}
+    try:
+        meas = json.loads((config.home() / "autofocus_motion.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        pass
+    cfg = prof.get("autofocus") or {}
+    out = {}
+    for k in ("z_speed_um_s", "stop_s", "poll_s"):
+        if meas.get(k):
+            out[k], out[k + "_from"] = float(meas[k]), "measured"
+        elif cfg.get(k):
+            out[k], out[k + "_from"] = float(cfg[k]), "profile"
+        else:
+            out[k], out[k + "_from"] = AF_ASSUMED[k], "assumed"
+    out["margin_um"] = round(1.25 * out["z_speed_um_s"] * (out["poll_s"] + out["stop_s"]), 1)
+    out["runs_measured"] = int(meas.get("runs", 0))
+    return out
+
+
+def record_af_motion(r: dict) -> None:
+    """Keeps the largest Z speed, poll interval and stop time seen in a guarded autofocus (af_motion)."""
+    import json
+    from . import config
+
+    def f(v):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+    new = {k: f(r.get(k)) for k in ("z_speed_um_s", "stop_s", "poll_s")}
+    if not any(v for v in new.values()):
+        return
+    p = config.home() / "autofocus_motion.json"
+    try:
+        cur = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        cur = {}
+    for k, v in new.items():
+        if v:
+            cur[k] = max(float(cur.get(k) or 0.0), v)
+    cur["runs"] = int(cur.get("runs", 0)) + 1
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(cur, indent=1), encoding="utf-8")
+    except OSError:
+        pass
 
 
 def retract_um(prof: dict) -> float:

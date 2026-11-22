@@ -777,7 +777,7 @@ End Sub
 ' poll and stops the autofocus (STOP_AUTOFOCUS restores the previous settings) and the Z motor as soon as Z passes
 ' the bound toward the sample; z_seen_min / z_seen_max record how far the search went (LabSpec's range, measured).
 Sub VAutofocus(cmd, res)
-    Dim how, mc, t0, st, who, tmo, zb, zs, zm, z, zmin, zmax
+    Dim how, mc, t0, st, who, tmo, zb, zs, zm, z, zmin, zmax, zPrev, tPrev, vmax, dtmax, tTrip, zTrip, zA, zB2
     how = GetP(cmd, "how", "laser")
     tmo = ParseNum(GetP(cmd, "timeout_s", "180"))
     mc = LS_LASER_AUTOFOCUS
@@ -806,6 +806,9 @@ Sub VAutofocus(cmd, res)
     zs = CLng(ParseNum(GetP(cmd, "z_sign", "0")))
     zmin = ""
     zmax = ""
+    zPrev = ""
+    vmax = 0
+    dtmax = 0
     Do
         st = LabSpec.Autofocus(LS_GET_AUTOFOCUS_STATUS)
         If Err.Number <> 0 Then
@@ -815,6 +818,15 @@ Sub VAutofocus(cmd, res)
         End If
         z = MotorValue(zm)
         If CStr(z) <> "" Then
+            ' Z's speed and the poll interval, measured (TESTING T6.8: the trip point is set earlier by them)
+            If CStr(zPrev) <> "" Then
+                If Elapsed(tPrev) > 0 Then
+                    If Abs(ParseNum(z) - ParseNum(zPrev)) / Elapsed(tPrev) > vmax Then vmax = Abs(ParseNum(z) - ParseNum(zPrev)) / Elapsed(tPrev)
+                    If Elapsed(tPrev) > dtmax Then dtmax = Elapsed(tPrev)
+                End If
+            End If
+            zPrev = z
+            tPrev = Timer
             If CStr(zmin) = "" Then
                 zmin = z
                 zmax = z
@@ -823,9 +835,22 @@ Sub VAutofocus(cmd, res)
             If ParseNum(z) > ParseNum(zmax) Then zmax = z
             If zb <> "" And zs <> 0 Then
                 If (ParseNum(z) - ParseNum(zb)) * zs > 0 Then
+                    tTrip = Timer
+                    zTrip = z
                     LabSpec.Autofocus 2               ' STOP_AUTOFOCUS
                     LabSpec.MoveMotor zm, 0, "", LS_MOTOR_STOP
                     Err.Clear
+                    ' how long until Z is still, and how far it went past the trip point
+                    zA = MotorValue(zm)
+                    Do
+                        LabSpec.Pause 50
+                        zB2 = MotorValue(zm)
+                        If CStr(zB2) = CStr(zA) Or Elapsed(tTrip) > 5 Then Exit Do
+                        zA = zB2
+                    Loop
+                    res("stop_s") = Secs(Elapsed(tTrip))
+                    res("z_stopped_at") = zB2
+                    res("overshoot_um") = Secs(Abs(ParseNum(zB2) - ParseNum(zTrip)))
                     res("z_bound_hit") = Fmt(z)
                     Fail res, "autofocus stopped: Z " & Fmt(z) & " passed the safe bound " & zb & " toward the sample"
                     Exit Do
@@ -853,6 +878,8 @@ Sub VAutofocus(cmd, res)
     res("z_um") = MotorValue(zm)
     res("z_seen_min") = zmin
     res("z_seen_max") = zmax
+    res("z_speed_um_s") = Secs(vmax)
+    res("poll_s") = Secs(dtmax)
 End Sub
 
 ' Writes spectrum `id` as '# key=value' lines and x<TAB>y rows; fills points, max_counts, x_unit, y_unit

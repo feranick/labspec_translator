@@ -12,7 +12,7 @@ stops and cancel on the simulator, and `ls6t bench` gives known answers. What re
 LabSpec and hardware. The plan goes from no laser and no motion to an LLM app driving a full map, in stages. Each
 stage starts only when the previous one passed.
 
-Version under test: 2026.11.22.5 (bridge protocol 1).
+Version under test: 2026.11.22.6 (bridge protocol 1).
 
 **Already known** (2026-11-20, from the instrument's discovery dump, its `NFActiveX.ocx`, `OLConfig.ini`,
 `OLSetup.ini` and LabSpec 6.7.1's service scripts): the motors and their positions (lasers 532, 637.75, 785.04 nm;
@@ -463,6 +463,8 @@ with `range_cm1` starting below it is warned at validation.
 
 ## T5. Autofocus (LASER, Q8)
 
+Once `stage.z_into_sample` is set, LabSpec's autofocus inside studies is also guarded (stopped at the focus plus the objective's toward limit, minus the overshoot margin of T6.8): with the x100 it is refused until that margin is measured and leaves room. Run this with the x10 first.
+
 On silicon, defocus by about 10 µm by hand. Run a calibration study with `"focus": {"autofocus": "laser"}`. Repeat
 with `video` and `raman` if the instrument has them.
 
@@ -697,8 +699,16 @@ LabSpec stays responsive. Record the time per point (`seconds.total / points_mea
    and the time to write it out; with SWIFT (`"swift": true`) if available. Put the time per point beyond the
    exposure in `mapping.native_point_s`.
 
-**T6.8 Retract-travel-return on an uneven sample (after T3.17; maintainer watching the gap).** With x10 first,
-then x100 if the maintainer agrees. **First without the laser** (possible before the profile review): white light on,
+**T6.8 Retract-travel-return on an uneven sample (after T3.17; maintainer watching the gap).** **Only with the x10
+or x5 at first** (their working distances leave room for an overshoot); the x100 only once the overshoot margin
+below has been measured with them and leaves room (ls6t refuses it otherwise). The bridge measures, at every guarded
+autofocus, Z's speed during the search (`measured.z_speed_um_s`), its own poll interval (`poll_s`) and, when it trips,
+how long LabSpec's stop takes to halt Z (`stop_s`) and how far Z went past the trip point (`overshoot_um`); the
+largest values seen are kept (`%USERPROFILE%\ls6t\autofocus_motion.json`) and the trip point is set earlier by
+speed x (poll + stop) x 1.25 (`margin`), so the stage stops at the limit rather than starting to stop there. Until
+measured, cautious values are assumed (200 µm/s, 0.5 s, 0.15 s: a 162 µm margin, which rules out the x100). To
+measure the stop, make one run trip on purpose with the x10: a small `sample.unevenness_um` (so the bound is close)
+and the sample a little below the old focus; record `stop_s` and `overshoot_um`. **First without the laser** (possible before the profile review): white light on,
 live video running, `"move": {..., "focus": "video"}`: after the descent LabSpec's video autofocus finishes the
 approach. LabSpec's own autofocus search range applies (its script interface neither sets nor reports it): the
 bridge reads Z at every poll and stops the autofocus (and Z) the moment it passes the safe bound toward the sample

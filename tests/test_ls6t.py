@@ -946,7 +946,7 @@ def test_native_map_export_and_discovery_probes(tmp_path):
     assert st["studies"]["m"]["reliable"]
     S.ensure(config.active_bridge_dir())
     r = bridge.Bridge().call("discover", timeout_s=10, out=str(tmp_path / "dump.txt"))
-    # discovery no longer probes these (2026.11.22.5): dumps from older bridges still carry them
+    # discovery no longer probes these (2026.11.22.6): dumps from older bridges still carry them
     old = (tmp_path / "dump.txt").read_text() + "\n".join([
         "selftest.get_value_ex=0", "selftest.get_value_simple_part=1", "selftest.get_value_simple_part_size=8",
         "selftest.get_value_simple_part_values=4,5,6,7,8,9,10,11", "selftest.get_config_param=1",
@@ -2204,9 +2204,22 @@ def test_retract_travel_return_with_video_autofocus_no_laser():
     assert any("only with a retract-travel-return" in e for e in api.validate({"m": bad})["m"]["errors"])
     S.ensure(config.active_bridge_dir())
     z0 = float(api.instrument("status")["status"]["z_um"])
+    # with the assumed (cautious) Z speed and stop time, x100 leaves no room for the overshoot: refused
+    assert plan.af_motion(P.load())["z_speed_um_s_from"] == "assumed"
     r = run_inline({"m": st})
     tr = r["studies"]["m"]["move"]["travel"]
-    assert tr["video_autofocus"]["accepted"] and abs(tr["video_autofocus"]["z_um"] - z0) < 1.5
+    assert tr["video_autofocus"]["skipped"] == "no safe room"
+    assert any("overshoot margin" in w for w in r["studies"]["m"]["warnings"])
+    # measured (T6.8 with a long working distance): a small margin, the trip point set earlier by it
+    (config.home() / "autofocus_motion.json").write_text(json.dumps({"z_speed_um_s": 50, "stop_s": 0.2,
+                                                                     "poll_s": 0.12, "runs": 1}))
+    mo = plan.af_motion(P.load())
+    assert mo["z_speed_um_s_from"] == "measured" and mo["margin_um"] == 20.0
+    r = run_inline({"m": dict(st, move=dict(st["move"], x_um=0, y_um=1000))})
+    tr = r["studies"]["m"]["move"]["travel"]
+    va = tr["video_autofocus"]
+    assert va["accepted"] and abs(va["z_um"] - z0) < 1.5
+    assert abs((va["safe_limit_um"] - va["z_bound_um"]) - 20.0) < 1e-6         # tripped 20 µm before the limit
     assert tr["video_autofocus"]["z_seen_um"][0] is not None and not tr["video_autofocus"]["stopped_at_bound"]
     (config.active_bridge_dir() / "sim_af_range").write_text("300")     # LabSpec's search reaches too far
     r = run_inline({"m": dict(st, move=dict(st["move"], x_um=-1000))})
