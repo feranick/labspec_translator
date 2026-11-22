@@ -12,7 +12,7 @@ stops and cancel on the simulator, and `ls6t bench` gives known answers. What re
 LabSpec and hardware. The plan goes from no laser and no motion to an LLM app driving a full map, in stages. Each
 stage starts only when the previous one passed.
 
-Version under test: 2026.11.22.3 (bridge protocol 1).
+Version under test: 2026.11.22.4 (bridge protocol 1).
 
 **Already known** (2026-11-20, from the instrument's discovery dump, its `NFActiveX.ocx`, `OLConfig.ini`,
 `OLSetup.ini` and LabSpec 6.7.1's service scripts): the motors and their positions (lasers 532, 637.75, 785.04 nm;
@@ -364,6 +364,13 @@ Pass:
 - the file has `# x_unit=` (**Q6**: record nm or 1/cm), the `# acq.*` lines (**Q6**: is the first a header?), and
   rows of numbers.
 
+**T4.0 Dry run (no laser; possible before the profile review).** `get_inputs` (or `ls6t inputs`) on the Si
+calibration study, with the instrument already on some of its settings. **Seen on 2026.11.22.3:** steps, `review_note`,
+`center_nm` / `window_nm` and the per-motor estimate right; settings already in place were still listed and charged
+(the objective 20 s). Pass from 2026.11.22.4: `state_read` true; the steps already in place carry `already_set` and
+cost 0 in `setup_parts`; at run time they are not sent (`checks.setup.moves[].already_set`), and the operator is never
+asked to change to the lens already mounted.
+
 **T4.2 The calibration study, through the runner.**
 
 ```powershell
@@ -381,6 +388,7 @@ Pass:
   compare with the instrument's specification if the maintainer has it: `ls6t profile set
   performance.resolution_cm1 '{"1800": <cm-1>}'`);
 - the `.l6s` file in `spectra\` opens in LabSpec (**Q9**).
+- with `sample.notes` given, LabSpec's Remark of that file reads `ls6t <seq>: <notes>` (the dry run cannot show it).
 
 **T4.3 Auto-exposure (Q6).** A spectrum study with `"exposure_s": "auto"` and
 `"auto_exposure": {"target_counts": 30000, "min_s": 0.1, "max_s": 5}`. Pass: `max_counts` near the target; the
@@ -689,8 +697,12 @@ LabSpec stays responsive. Record the time per point (`seconds.total / points_mea
    and the time to write it out; with SWIFT (`"swift": true`) if available. Put the time per point beyond the
    exposure in `mapping.native_point_s`.
 
-**T6.8 Retract-travel-return on an uneven sample (LASER; after T3.17; maintainer watching the gap).** With x10 first,
-then x100 if the maintainer agrees. Focus by hand on the sample, then a request with
+**T6.8 Retract-travel-return on an uneven sample (after T3.17; maintainer watching the gap).** With x10 first,
+then x100 if the maintainer agrees. **First without the laser** (possible before the profile review): white light on,
+live video running, `"move": {..., "focus": "video"}`: after the descent LabSpec's video autofocus finishes the
+approach; pass: `move.travel.video_autofocus.accepted` true and the spot in focus on the video, or, if LabSpec's
+autofocus ends farther than the unevenness plus the toward limit from the old focus, Z goes back down and the answer
+says so (record LabSpec's autofocus range setting). **Then with the laser (LASER)**, as below. Focus by hand on the sample, then a request with
 `{"m": {"kind": "move", "sample": {"name": "...", "unevenness_um": <a generous estimate>}, "move": {"x_um": 1000,
 "y_um": 0, "snapshot": false}}, "f": {"kind": "focus", "sample": {"name": "..."}, "setup": {...}, "focus": {"scan":
 {"from_below": true}}}}`. Pass:
@@ -752,6 +764,7 @@ With the LLM app connected (test mode off), in a new chat:
 | T2.4 | | | | Q2: | |
 | T2.5 | | | | | |
 | T3.1–T3.17 | | | | Q4: Q5 (turret motorised?): times (grating, laser, XY): Q44 (bridge after end-bridge + video by hand; HORIBA-style stop: passed T3.12–13; T3.14 camera 0 / 1 by restart: shown?): Q45 (grating with each laser; blocking move): first set after start: | |
+| T4.0 | | | | already_set marked, setup estimate: | |
 | T4.1 | | | | Q6 (x unit, AcqInfo): | |
 | T4.2 | | | | Si = ; FWHM = ; Q9: | |
 | T4.3 | | | | Q6 (exposure line): | |

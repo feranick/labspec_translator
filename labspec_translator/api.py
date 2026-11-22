@@ -1,5 +1,5 @@
 """api.py — the functions behind the command line and the MCP server (JSON in, JSON out).
-Version: 2026.11.22.3
+Version: 2026.11.22.4
 """
 from __future__ import annotations
 
@@ -91,7 +91,22 @@ def inputs(study: dict, name: str = "study") -> dict:
     errors = [e for e in v["errors"] if not (gate and e == gate)]
     if errors:
         return {"ok": False, "errors": errors}
-    out = {"ok": True, **plan.inputs(study, prof)}
+    current = None
+    try:                                    # the instrument's state now: settings already in place are not sent
+        b = Bridge()
+        if config.mode() == "sim":
+            from . import sim as S
+            S.ensure(b.dir)
+        if b.alive():
+            st = b.call("status", timeout_s=15, **runner.motor_args(prof))
+            current = st if st.get("ok") else None
+    except BridgeError:
+        current = None
+    out = {"ok": True, **plan.inputs(study, prof, current=current)}
+    out["state_read"] = current is not None
+    if current is None:
+        out["state_note"] = ("the bridge is not running: steps already in place could not be marked (the runner "
+                             "skips them at run time)")
     if gate and gate in v["errors"]:
         out["review_note"] = "run_studies refuses this study until the profile is reviewed: " + gate
     return out
@@ -812,6 +827,11 @@ def set_instrument(setup: dict) -> dict:
         t_checks = time.time() - t_all - t_before
         done = []
         for what, motor, mode, value in moves:
+            cur = before.get({"laser": "laser_nm"}.get(what, what))
+            if cur not in (None, "") and P.same_position(cur, value):
+                done.append({"set": what, "asked": value, "got": cur, "ok": True, "already_set": True,
+                             "error": None})
+                continue
             r = b.call("move", timeout_s=600 if what in ("laser", "grating", "objective") else 120, motor=motor,
                        mode=mode, value=value, **runner.move_extra(prof, motor))
             got = r.get("label") if mode == "label" else r.get("value")

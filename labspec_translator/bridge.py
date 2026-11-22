@@ -1,5 +1,5 @@
 """bridge.py — the Python side of the LabSpec bridge: commands as files in a folder the bridge script watches.
-Version: 2026.11.22.3
+Version: 2026.11.22.4
 
 Protocol 1 (the same for ls6t_bridge.vbs inside LabSpec and for sim.py):
 
@@ -221,15 +221,25 @@ class Bridge:
         that catches it empty or half written is tried again (up to 5 times, 20 ms apart)."""
         hb = self.dir / "heartbeat.txt"
         d, st = {}, None
-        for _ in range(5):
+        missing = 0
+        for _ in range(10):
             try:
                 st = hb.stat()
                 d = decode(read_text(hb))
+            except FileNotFoundError:
+                missing += 1
+                if missing >= 3:                # really absent (a rename is over within milliseconds)
+                    return None
+                d = {}
             except OSError:
-                return None
-            if d.get("state"):
+                # Windows: the bridge is replacing the file this instant (PermissionError): a moment's lock, not a
+                # missing bridge (the CI's graphene_map 'ended without stopping, last heartbeat idle 0 s ago')
+                d = {}
+            if d.get("state") and st is not None:
                 break
             time.sleep(0.02)
+        if st is None or not d.get("state"):
+            return None
         d["age_s"] = round(max(0.0, time.time() - st.st_mtime), 2)
         return d
 
@@ -259,7 +269,9 @@ class Bridge:
         bridge is not running (before or during the call) and BridgeTimeout after timeout_s; should_stop() true
         asks the bridge to stop the command (its result then says so)."""
         if not self.alive():
-            raise BridgeGone(f"{verb}: " + diagnose(self.heartbeat(), self.dir))
+            time.sleep(0.3)                     # one more look before calling it gone (a file being rewritten)
+            if not self.alive():
+                raise BridgeGone(f"{verb}: " + diagnose(self.heartbeat(), self.dir))
         seq = f"{time.time_ns():020d}"
         cmd = self.inbox / f"{seq}.cmd"
         res = self.outbox / f"{seq}.res"
@@ -309,8 +321,10 @@ class Bridge:
                 self._withdraw(cmd)
                 raise BridgeTimeout(self._timeout_text(verb, timeout_s))
             if not self.alive():
-                self._withdraw(cmd)
-                raise BridgeGone(f"{verb}: " + diagnose(self.heartbeat(), self.dir))
+                time.sleep(0.3)                 # one more look before calling it gone (a file being rewritten)
+                if not self.alive() and not res.exists():
+                    self._withdraw(cmd)
+                    raise BridgeGone(f"{verb}: " + diagnose(self.heartbeat(), self.dir))
             time.sleep(poll_s)
 
     def _timeout_text(self, verb: str, timeout_s: float) -> str:

@@ -1,5 +1,5 @@
 """plan.py — a study as bridge commands: the setup moves, the points, the acquisitions; and the time estimate.
-Version: 2026.11.22.3
+Version: 2026.11.22.4
 
 Everything here is computed from the study and the profile alone: wavelengths from Raman shifts, the number of
 detector windows, the stage positions (always offsets from where the operator left the stage, Z from the
@@ -185,30 +185,31 @@ def setup_steps(study: dict, prof: dict) -> list[dict]:
     steps = []
     if s.get("filter") is not None:
         steps.append({"verb": "move", "motor": mot["filter"], "mode": "label", "value": str(s["filter"]),
-                      "why": "filter (laser power at the sample)"})
+                      "why": "filter (laser power at the sample)", "role": "filter"})
     if s.get("laser_nm") is not None:
         k = laser_key(prof, s["laser_nm"])
         steps.append({"verb": "move", "motor": mot["laser"], "mode": "value",
-                      "value": float(prof["lasers"][k]["nm"]) if k else float(s["laser_nm"]), "why": "laser"})
+                      "value": float(prof["lasers"][k]["nm"]) if k else float(s["laser_nm"]), "why": "laser",
+                      "role": "laser_nm"})
     if s.get("grating") is not None:
         steps.append({"verb": "move", "motor": mot["grating"], "mode": "value", "value": float(s["grating"]),
-                      "why": "grating"})
+                      "why": "grating", "role": "grating"})
     if s.get("objective") is not None:
         obj = match_label(s["objective"], prof.get("objectives", []))[0] or str(s["objective"])
         steps.append({"verb": "move", "motor": mot["objective"], "mode": "label", "value": obj,
                       "why": "objective" + (" (manual turret: LabSpec asks the operator)"
-                                            if prof.get("manual_objective") else "")})
+                                            if prof.get("manual_objective") else ""), "role": "objective"})
     for role in ("laser_pol", "raman_pol"):
         if s.get(role) is not None and mot.get(role):
             lab = match_label(s[role], (prof.get("polarizers") or {}).get(role, []))[0] or str(s[role])
             steps.append({"verb": "move", "motor": mot[role], "mode": "label", "value": lab,
-                          "why": role.replace("_", " ") + "ariser"})
+                          "why": role.replace("_", " ") + "ariser", "role": role})
     if s.get("hole_um") is not None:
         steps.append({"verb": "move", "motor": mot["hole"], "mode": "value", "value": float(s["hole_um"]),
-                      "why": "confocal hole"})
+                      "why": "confocal hole", "role": "hole_um"})
     if s.get("slit_um") is not None:
         steps.append({"verb": "move", "motor": mot["slit"], "mode": "value", "value": float(s["slit_um"]),
-                      "why": "slit"})
+                      "why": "slit", "role": "slit_um"})
     return steps
 
 
@@ -555,27 +556,48 @@ def cutoff_params(study: dict, prof: dict) -> dict:
             "plateau_cm1": list(cp.get("plateau_cm1", [200.0, 380.0]))}
 
 
-def setup_parts(study: dict, prof: dict) -> dict:
+def already_set(step: dict, current: dict | None) -> bool:
+    """Whether a set-up step's position is what LabSpec reports now (current: the bridge's status): then it is not
+    sent (the runner skips it, the dry run marks it), and above all a manual objective is not asked for again."""
+    if not current or not step.get("role"):
+        return False
+    from .profile import match_label, same_position
+    cur = current.get(step["role"])
+    if cur in (None, ""):
+        return False
+    if step["role"] == "objective":
+        return same_position(cur, step["value"]) or match_label(str(step["value"]), [str(cur)])[0] is not None
+    return same_position(cur, step["value"])
+
+
+def marked_setup_steps(study: dict, prof: dict, current: dict | None) -> list[dict]:
+    """setup_steps, each already in place (current) marked {already_set: true, note}: not sent at run time."""
+    out = []
+    for st in setup_steps(study, prof):
+        if already_set(st, current):
+            st = dict(st, already_set=True, note=f"already set ({current.get(st['role'])}): skipped, not sent")
+        out.append(st)
+    return out
+
+
+def setup_parts(study: dict, prof: dict, current: dict | None = None) -> dict:
     """The set-up time by part (s), from the profile's timing: each motor the study sets (an upper value: LabSpec
     skips one already in place), the objective (on a manual turret, the operator's time to turn it), and the
     commands around them. Measured on the XploRA (2026-11-21): laser 1.6-2.8 s, grating 0.1-0.3 s once LabSpec has
     run a minute, filter ~1 s, pinhole 2-6 s, slit 2-3 s: set timing.* to them (ls6t profile set)."""
     t = prof["timing"]
-    s = study.get("setup", {}) or {}
     out = {"commands": round(t["command_s"] * 2, 2)}
-    if s.get("laser_nm") is not None:
-        out["laser"] = t["laser_s"]
-    if s.get("grating") is not None:
-        out["grating"] = t["grating_s"]
-    if s.get("objective") is not None:
-        out["objective"] = t["objective_s"]
-    for k in ("filter", "hole_um", "slit_um"):
-        if s.get(k) is not None:
-            out[k.replace("_um", "")] = t["move_s"]
+    cost = {"laser_nm": ("laser", t["laser_s"]), "grating": ("grating", t["grating_s"]),
+            "objective": ("objective", t["objective_s"]), "filter": ("filter", t["move_s"]),
+            "hole_um": ("hole", t["move_s"]), "slit_um": ("slit", t["move_s"]),
+            "laser_pol": ("laser_pol", t["move_s"]), "raman_pol": ("raman_pol", t["move_s"])}
+    for st in setup_steps(study, prof):
+        name, sec = cost.get(st.get("role"), (st.get("role"), t["move_s"]))
+        out[name] = 0.0 if already_set(st, current) else sec
     return out
 
 
-def estimate(study: dict, prof: dict) -> dict:
+def estimate(study: dict, prof: dict, current: dict | None = None) -> dict:
     """{minutes, points, windows, seconds: {setup, per_point, total}}: an upper-end estimate from the profile's
     timing (measured values replace the defaults once the instrument has run)."""
     t = prof["timing"]
@@ -588,9 +610,9 @@ def estimate(study: dict, prof: dict) -> dict:
         return {"minutes": round(total / 60.0, 2), "points": 0, "windows": 0,
                 "seconds": {"setup": 0.0, "per_acquisition": 0.0, "total": round(total, 1)}}
     if study.get("kind") == "depth":
-        return estimate(depth_as_map(study, prof), prof)
+        return estimate(depth_as_map(study, prof), prof, current)
     if study.get("kind") == "filters":
-        base = estimate(dict(study, kind="spectrum", filters=None), prof)
+        base = estimate(dict(study, kind="spectrum", filters=None), prof, current)
         steps = [s for s in filters_steps(study, prof, laser_nm(study, prof)) if s.get("exposure_s")]
         total = base["seconds"]["setup"] + sum(s["exposure_s"] + t["move_s"] + t["readout_s"] + 2 * t["command_s"]
                                                for s in steps)
@@ -598,7 +620,7 @@ def estimate(study: dict, prof: dict) -> dict:
                 "seconds": {"setup": base["seconds"]["setup"], "setup_parts": base["seconds"].get("setup_parts"), "per_acquisition": 0.0, "total": round(total, 1)}}
     if study.get("kind") == "spot":
         sp = spot_params(study, prof)
-        base = estimate(spot_spectrum_study(study, prof), prof)
+        base = estimate(spot_spectrum_study(study, prof), prof, current)
         total = base["seconds"]["setup"] + 15.0 + float(sp["acq_exposure_s"])
         n = 0
         if sp["method"] == "raman" or sp.get("feature_um") is not None:
@@ -608,14 +630,14 @@ def estimate(study: dict, prof: dict) -> dict:
                 "seconds": {"setup": base["seconds"]["setup"], "setup_parts": base["seconds"].get("setup_parts"), "per_acquisition": base["seconds"]["per_acquisition"],
                             "total": round(total, 1)}}
     if study.get("kind") == "focus":
-        base = estimate(focus_spectrum_study(study, prof), prof)
+        base = estimate(focus_spectrum_study(study, prof), prof, current)
         total = base["seconds"]["setup"] + scan_seconds(study, prof)
         return {"minutes": round(total / 60.0, 2), "points": len(scan_offsets(scan_params(study, prof))),
                 "windows": 1, "seconds": {"setup": base["seconds"]["setup"], "setup_parts": base["seconds"].get("setup_parts"),
                                           "per_acquisition": base["seconds"]["per_acquisition"],
                                           "total": round(total, 1)}}
     if study.get("kind") == "alignment":
-        base = estimate(alignment_check_study(study, prof), prof)
+        base = estimate(alignment_check_study(study, prof), prof, current)
         a = study.get("alignment", {})
         n = 1 + (int(prof["alignment"].get("max_retries", 1)) if a.get("guided", True) else 0)
         total = base["seconds"]["total"] * n + (guide_params({"guide": {}}, prof)["max_s"]
@@ -625,7 +647,7 @@ def estimate(study: dict, prof: dict) -> dict:
                             "total": round(total, 1)}, "note": "with one AutoAlignment retry, if needed; the "
                                                                "operator's time for AutoAlignment is not included"}
     if study.get("kind") == "guide":
-        base = estimate(guide_spectrum_study(study, prof), prof)
+        base = estimate(guide_spectrum_study(study, prof), prof, current)
         total = base["seconds"]["setup"] + float(guide_params(study, prof)["max_s"])
         return {"minutes": round(total / 60.0, 2), "points": 1, "windows": 1,
                 "seconds": {"setup": base["seconds"]["setup"], "setup_parts": base["seconds"].get("setup_parts"), "per_acquisition": base["seconds"]["per_acquisition"],
@@ -634,7 +656,7 @@ def estimate(study: dict, prof: dict) -> dict:
     rng = acq_range(study, prof, laser)
     pts = positions(study)
     s = study.get("setup", {})
-    parts = setup_parts(study, prof)
+    parts = setup_parts(study, prof, current)
     setup = sum(parts.values())
     focus = study.get("focus", {})
     af = focus.get("autofocus")
@@ -677,10 +699,12 @@ def estimate(study: dict, prof: dict) -> dict:
                             "objective by hand)"}
 
 
-def inputs(study: dict, prof: dict, max_steps: int = 40) -> dict:
-    """The bridge commands of one study, without running: setup, then the first points' commands."""
+def inputs(study: dict, prof: dict, max_steps: int = 40, current: dict | None = None) -> dict:
+    """The bridge commands of one study, without running: setup, then the first points' commands. With current (the
+    instrument's state now), set-up steps already in place are marked already_set (the runner skips them) and left
+    out of the estimate."""
     if study.get("kind") == "depth":
-        inner = inputs(depth_as_map(study, prof), prof, max_steps)
+        inner = inputs(depth_as_map(study, prof), prof, max_steps, current)
         inner["note"] = "a depth profile: Z offsets from the focus (stage.z_into_sample gives the direction)"
         return inner
     if study.get("kind") == "move":
@@ -695,18 +719,18 @@ def inputs(study: dict, prof: dict, max_steps: int = 40) -> dict:
         if m.get("snapshot", True):
             steps.append({"verb": "video", "laser_s": 0})
         return {"laser_nm": None, "range": None, "points": 0, "steps": steps, "steps_shown": len(steps),
-                "estimate": estimate(study, prof), "note": "no laser"}
+                "estimate": estimate(study, prof, current), "note": "no laser"}
     if study.get("kind") == "focus":
         sc = scan_params(study, prof)
         laser = laser_nm(study, prof)
-        steps = [{"verb": "status"}] + setup_steps(study, prof) + [{"verb": "status"}, {"verb": "confirm"}]
+        steps = [{"verb": "status"}] + marked_setup_steps(study, prof, current) + [{"verb": "status"}, {"verb": "confirm"}]
         for dz in scan_offsets(sc)[:max_steps]:
             steps += [{"verb": "move", "motor": prof["motors"]["z"], "value": f"focus{dz:+g}"},
                       {"verb": "acquire", "exposure_s": sc["exposure_s"], "center_cm1": sc["line_cm1"]}]
         steps.append({"verb": "move", "motor": prof["motors"]["z"], "value": "the best Z (parabola through the top)"})
         return {"laser_nm": laser, "range": acq_range(focus_spectrum_study(study, prof), prof, laser),
                 "points": len(scan_offsets(sc)), "steps": steps, "steps_shown": len(steps),
-                "estimate": estimate(study, prof)}
+                "estimate": estimate(study, prof, current)}
     if study.get("kind") == "alignment":
         chk = alignment_check_study(study, prof)
         inner = inputs(chk, prof, max_steps)
@@ -719,23 +743,23 @@ def inputs(study: dict, prof: dict, max_steps: int = 40) -> dict:
             inner["steps"].insert(1, {"verb": "guide", "mode": "maximize", "why": "the operator focuses on the Si "
                                                                                   "until ls6t says STOP"})
         inner["check_study"] = chk
-        inner["estimate"] = estimate(study, prof)
+        inner["estimate"] = estimate(study, prof, current)
         return inner
     if study.get("kind") == "guide":
         g = guide_params(study, prof)
         laser = laser_nm(study, prof)
         rng = acq_range(guide_spectrum_study(study, prof), prof, laser)
-        steps = [{"verb": "status"}] + setup_steps(study, prof) + [
+        steps = [{"verb": "status"}] + marked_setup_steps(study, prof, current) + [
             {"verb": "status"}, {"verb": "confirm"},
             {"verb": "guide", "text": g.get("instruction"), "mode": g["mode"], "target": g.get("target"),
              "line_cm1": g["line_cm1"], "exposure_s": g["exposure_s"], "max_s": g["max_s"],
              "why": "short acquisitions in LabSpec; the panel shows the signal and STOP when the goal is met"}]
         return {"laser_nm": laser, "range": rng, "points": 1, "steps": steps, "steps_shown": len(steps),
-                "estimate": estimate(study, prof)}
+                "estimate": estimate(study, prof, current)}
     laser = laser_nm(study, prof)
     rng = acq_range(study, prof, laser)
     steps = [{"verb": "status", "why": "record the instrument state before"}]
-    steps += setup_steps(study, prof)
+    steps += marked_setup_steps(study, prof, current)
     steps.append({"verb": "status", "why": "read back the setup"})
     focus = study.get("focus", {})
     acq = acquire_step(study, prof, rng)
@@ -752,4 +776,4 @@ def inputs(study: dict, prof: dict, max_steps: int = 40) -> dict:
             steps.append({"verb": "autofocus", "how": focus["autofocus"]})
         steps.append(dict(acq, point=p["i"]))
     return {"laser_nm": laser, "range": rng, "points": len(pts), "steps": steps[:max_steps],
-            "steps_shown": min(len(steps), max_steps), "estimate": estimate(study, prof)}
+            "steps_shown": min(len(steps), max_steps), "estimate": estimate(study, prof, current)}

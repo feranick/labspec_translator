@@ -1,5 +1,5 @@
 """format.py — the study format and its static checks (no instrument needed).
-Version: 2026.11.22.3
+Version: 2026.11.22.4
 """
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ CUTOFF_KEYS = {"from_cm1", "to_cm1", "light", "laser_off", "plateau_cm1"}
 CAL_KEYS = {"reference", "lines_cm1", "tol_cm1", "adjust"}
 BG_KEYS = {"name", "laser_off"}
 DEPTH_KEYS = {"from_um", "to_um", "step_um", "refractive_index", "engine", "swift"}
-MOVE_KEYS = {"x_um", "y_um", "to_um", "dz_um", "stay", "snapshot", "travel"}
+MOVE_KEYS = {"x_um", "y_um", "to_um", "dz_um", "stay", "snapshot", "travel", "focus"}
 SPOT_KEYS = {"method", "feature_um", "refine", "range_um", "step_um", "line_cm1", "window_cm1", "exposure_s",
              "acq_exposure_s", "remember"}
 SPOT_METHODS = ("auto", "shutter", "acquisition", "raman")
@@ -900,6 +900,12 @@ def _validate_move(name, study, prof, errors, warnings) -> dict:
                           "distance from the home spot, not per axis)")
         if abs(m.get("dz_um", 0) or 0) > lim["max_dz_um"]:
             errors.append(f"move.dz_um: |dz| <= limits.max_dz_um = {lim['max_dz_um']:g} µm")
+        if m.get("focus") not in (None, "video"):
+            errors.append("move.focus: 'video' (LabSpec's video autofocus after a retract-travel-return; no laser)")
+        elif m.get("focus") == "video" and plan.travel_mode(prof, study, d, (study.get("setup") or {}).get("objective")) \
+                != "retract":
+            errors.append("move.focus 'video': only with a retract-travel-return (move.travel 'retract', or "
+                          "sample.unevenness_um with a large move)")
         if m.get("travel") not in (None, "retract", "direct"):
             errors.append("move.travel: 'retract' (Z away by limits.retract_um, travel, back to the old focus minus "
                           "sample.unevenness_um) or 'direct'")
@@ -914,9 +920,16 @@ def _validate_move(name, study, prof, errors, warnings) -> dict:
                               f"({plan.retract_um(prof):g})")
             elif m.get("dz_um"):
                 errors.append("move.dz_um: not with a retract-travel-return (it ends short of the focus; focus first)")
-            warnings.append(f"retract-travel-return: Z goes {plan.retract_um(prof):g} µm away, the stage travels, Z "
-                            f"comes back to the old focus minus {un:g} µm (away from the sample): focus there (a "
-                            "'focus' study with focus.scan.from_below) before measuring")
+            if m.get("focus") == "video":
+                warnings.append(f"retract-travel-return: Z goes {plan.retract_um(prof):g} µm away, the stage travels, "
+                                f"Z comes back to the old focus minus {un:g} µm, then LabSpec's video autofocus (no "
+                                "laser; white light on, live video running; LabSpec's own autofocus range applies: ls6t "
+                                "checks where it ends and goes back if it is out of bounds)")
+            else:
+                warnings.append(f"retract-travel-return: Z goes {plan.retract_um(prof):g} µm away, the stage travels, "
+                                f"Z comes back to the old focus minus {un:g} µm (away from the sample): focus there "
+                                "(move.focus 'video' without the laser, or a 'focus' study with focus.scan.from_below) "
+                                "before measuring")
     s = study.get("setup") or {}
     if set(s) - {"objective"}:
         errors.append("setup: only the objective with kind 'move' (no laser is used)")

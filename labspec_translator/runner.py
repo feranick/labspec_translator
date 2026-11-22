@@ -1,5 +1,5 @@
 """runner.py — runs a request's studies on the instrument, one command at a time, and checks every result.
-Version: 2026.11.22.3
+Version: 2026.11.22.4
 
 A request runs in its own process (`ls6t run-request FOLDER`, started detached by api.start), so it outlives the
 MCP call that started it. One request at a time holds the instrument (a lock file under LS6T_HOME); others wait
@@ -318,6 +318,11 @@ def _setup(name: str, study: dict, ctx: Ctx, warnings: list, unreliable: list, c
                 lab, err = P.match_label(step["value"], labs)
                 if lab:
                     step = dict(step, value=lab)
+        if plan.already_set(step, before):
+            # already in place: not sent (and a manual objective is not asked for again)
+            readback.append({"motor": step["motor"], "asked": step["value"], "got": before.get(step["role"]),
+                             "ok": True, "already_set": True, "error": None})
+            continue
         if step["motor"] == prof["motors"]["objective"] and prof.get("manual_objective", True) \
                 and str(step["value"]) != str(before.get("objective")) and config.confirm_policy() != "never":
             # a manual turret: the operator changes the lens by hand; LabSpec only records it (then moved below)
@@ -759,6 +764,29 @@ def travel_xy(ctx: Ctx, tx: float, ty: float, unevenness_um: float, what: str) -
             "xy_um": [_f(r.get("x_um")), _f(r.get("y_um"))]}
 
 
+def _video_focus_after_travel(ctx: Ctx, travel: dict, what: str, warnings: list) -> float:
+    """The last step of a retract-travel-return without the laser: LabSpec's video autofocus (white light on, the
+    live video running). LabSpec's own autofocus range applies while it runs; ls6t checks where it ended: within the
+    sample's unevenness plus the objective's toward limit of the old focus it becomes the focus here, otherwise Z goes
+    back to the descended height and the study says so."""
+    zl = plan.z_limits(ctx.prof, ctx.objective)
+    r = ctx.call("autofocus", timeout_s=240, how="video", **motor_args(ctx.prof))
+    zf, z_down = travel["old_focus_um"], travel["descended_to_um"]
+    znew = _f(r.get("z_um")) if r.get("ok") else None
+    travel["video_autofocus"] = {"ok": bool(r.get("ok")), "z_um": znew, "error": r.get("error") or None}
+    bound = travel["unevenness_um"] + zl["toward_um"]
+    if znew is None or abs(znew - zf) > bound:
+        z = _z_direct(ctx, z_down, f"{what}: back down after the video autofocus")
+        warnings.append(f"LabSpec's video autofocus {'failed' if znew is None else f'ended {znew - zf:+.1f} µm from the old focus, beyond {bound:g} µm'}: Z is back "
+                        f"{travel['unevenness_um']:g} µm short of the old focus; focus by hand or with a focus study")
+        travel["video_autofocus"]["accepted"] = False
+        return z
+    ctx.z_focus = znew
+    _focus_here(ctx)
+    travel["video_autofocus"]["accepted"] = True
+    return znew
+
+
 def _retract_before_xy(ctx: Ctx, ax, ay, zcur, zref, what: str):
     """Before an XY move beyond where the focus stays valid (short working distances), Z goes back to the focus if
     it is offset toward the sample: the stage never travels sideways with the sample closer than at focus."""
@@ -1091,8 +1119,12 @@ def run_move(name: str, study: dict, ctx: Ctx) -> dict:
     if plan.travel_mode(prof, study, dist, cur_obj) == "retract":
         travel = travel_xy(ctx, tx, ty, float((study.get("sample") or {}).get("unevenness_um") or 0), name)
         xy, z = travel["xy_um"], travel["descended_to_um"]
-        warnings.append(f"retract-travel-return: Z is {travel['unevenness_um']:g} µm short of the old focus, away "
-                        "from the sample: focus here (a 'focus' study with focus.scan.from_below) before measuring")
+        if m.get("focus") == "video":
+            z = _video_focus_after_travel(ctx, travel, name, warnings)
+        else:
+            warnings.append(f"retract-travel-return: Z is {travel['unevenness_um']:g} µm short of the old focus, away "
+                            "from the sample: focus here (move.focus 'video', or a 'focus' study with "
+                            "focus.scan.from_below) before measuring")
     else:
         r = ctx.call("move_xy", timeout_s=300, x_um=round(tx, 3), y_um=round(ty, 3), **motor_args(prof))
         if not r["ok"]:

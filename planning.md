@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.22.3)
+## Architecture (version 2026.11.22.4)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -620,6 +620,21 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   command files, the sim's results / heartbeat / spectra, profile and spectra saves; the sim's loop no longer dies
   on a write error and retries a locked command file's removal. Not reproducible on Linux; the next tag's CI runs
   will tell. 134 tests.
+- 2026-11-22, 2026.11.22.4: CI log (graphene_map, Windows): state cancelled 2.4 s in, 'move_xy: the bridge ended
+  without stopping (last heartbeat idle 0 s ago)': Bridge.heartbeat returned None on an OSError (PermissionError while
+  the simulated bridge replaced heartbeat.txt), alive() then False, while the next read (diagnose) saw it fresh. Now
+  heartbeat() retries locked / half-written reads (10 x 20 ms; None only if the file is really absent: 3 misses) and
+  call() looks a second time (0.3 s) before raising BridgeGone, before and during a call. Nicola: the focus search
+  from below needs the laser (and a reviewed profile); move.focus 'video' ends a retract-travel-return with LabSpec's
+  video autofocus (bridge autofocus how=video; no laser; the live video must run: the bridge refuses it after its
+  own video stop), accepted only within unevenness + toward limit of the old focus (_video_focus_after_travel), else
+  back to the descended height with a warning. TESTING T6.8 starts without the laser. Then (2026.11.22.3 at the
+  instrument): dry run, window_nm, per-motor estimate and halt wording confirmed; settings already in place were still
+  sent and charged (the objective: 20 s, and the operator would have been asked for the lens already mounted).
+  plan.setup_steps carry a role; plan.already_set (same_position, or match_label for the objective) against a status;
+  marked_setup_steps / setup_parts / estimate / inputs take current; api.inputs reads the status when the bridge runs
+  (state_read); runner._setup and api.set_instrument skip steps already in place (already_set in the read-back).
+  TESTING T4.0 (dry run), T4.2 (sample.notes in LabSpec's Remark). 137 tests.
 
 ## To do next
 

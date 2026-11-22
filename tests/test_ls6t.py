@@ -946,7 +946,7 @@ def test_native_map_export_and_discovery_probes(tmp_path):
     assert st["studies"]["m"]["reliable"]
     S.ensure(config.active_bridge_dir())
     r = bridge.Bridge().call("discover", timeout_s=10, out=str(tmp_path / "dump.txt"))
-    # discovery no longer probes these (2026.11.22.3): dumps from older bridges still carry them
+    # discovery no longer probes these (2026.11.22.4): dumps from older bridges still carry them
     old = (tmp_path / "dump.txt").read_text() + "\n".join([
         "selftest.get_value_ex=0", "selftest.get_value_simple_part=1", "selftest.get_value_simple_part_size=8",
         "selftest.get_value_simple_part_values=4,5,6,7,8,9,10,11", "selftest.get_config_param=1",
@@ -2172,3 +2172,63 @@ def test_retract_travel_return_and_focus_from_below():
     zb = float(api.instrument("status")["status"]["z_um"])
     r = api.instrument("set", setup={"objective": "x10"})
     assert r["ok"] and abs(float(api.instrument("status")["status"]["z_um"]) - (zb - 2000)) < 1e-6
+
+
+def test_a_heartbeat_locked_for_a_moment_is_not_a_gone_bridge(tmp_path, monkeypatch):
+    """CI (Windows): 'the bridge ended without stopping (last heartbeat idle 0 s ago)': a read of the heartbeat that
+    failed while the file was being replaced was taken for a missing bridge."""
+    b = bridge.Bridge(tmp_path / "br")
+    (b.dir / "heartbeat.txt").write_text("state=idle\nverb=\n", encoding="utf-8")
+    real = bridge.read_text
+    fails = {"n": 2}
+
+    def flaky(path, *a, **k):
+        if str(path).endswith("heartbeat.txt") and fails["n"] > 0:
+            fails["n"] -= 1
+            raise PermissionError("locked")
+        return real(path, *a, **k)
+    monkeypatch.setattr(bridge, "read_text", flaky)
+    hb = b.heartbeat()
+    assert hb and hb["state"] == "idle" and b.alive()
+
+
+def test_retract_travel_return_with_video_autofocus_no_laser():
+    """Nicola: finish the approach with LabSpec's video autofocus (no laser), so the sequence runs before the profile
+    is reviewed; ls6t checks where LabSpec's autofocus ended."""
+    prof = P.load()
+    P.save(dict(prof, stage=dict(prof["stage"], z_into_sample="+")))
+    st = {"kind": "move", "sample": {"name": "rough", "unevenness_um": 30},
+          "move": {"x_um": 1000, "y_um": 0, "snapshot": False, "focus": "video"}}
+    assert api.validate({"m": st})["m"]["ok"]
+    bad = dict(st, sample={"name": "flat"})
+    assert any("only with a retract-travel-return" in e for e in api.validate({"m": bad})["m"]["errors"])
+    S.ensure(config.active_bridge_dir())
+    z0 = float(api.instrument("status")["status"]["z_um"])
+    r = run_inline({"m": st})
+    tr = r["studies"]["m"]["move"]["travel"]
+    assert tr["video_autofocus"]["accepted"] and abs(tr["video_autofocus"]["z_um"] - z0) < 1.5
+    (config.active_bridge_dir() / "sim_defocus").write_text("200")      # LabSpec's AF ends far away: refused
+    r = run_inline({"m": dict(st, move=dict(st["move"], x_um=-1000))})
+    tr = r["studies"]["m"]["move"]["travel"]
+    assert tr["video_autofocus"]["accepted"] is False
+    assert any("video autofocus ended" in w for w in r["studies"]["m"]["warnings"])
+
+
+def test_settings_already_in_place_are_not_sent_nor_charged():
+    """2026-11-22: a dry run listed (and charged 20 s for) the objective already mounted; at run time a manual
+    objective already in place must never be asked for again."""
+    S.ensure(config.active_bridge_dir())
+    cur = api.instrument("status")["status"]
+    st = {"kind": "calibration", "sample": {"name": "Si"},
+          "setup": {"laser_nm": float(cur["laser_nm"]), "grating": 600, "filter": cur["filter"],
+                    "objective": cur["objective"]}}
+    r = api.inputs(st, "c")
+    assert r["state_read"]
+    marks = {s.get("role"): s.get("already_set", False) for s in r["steps"] if s.get("role")}
+    assert marks == {"filter": True, "laser_nm": True, "grating": False, "objective": True}
+    parts = r["estimate"]["seconds"]["setup_parts"]
+    assert parts["objective"] == 0 and parts["laser"] == 0 and parts["filter"] == 0 and parts["grating"] > 0
+    run = run_inline({"c": st})
+    moves = run["studies"]["c"]["checks"]["setup"]["moves"]
+    assert {m["motor"] for m in moves if m.get("already_set")} >= {"Objective", "Laser", "Filter"}
+    assert not any(m.get("already_set") for m in moves if m["motor"] == "Grating")
