@@ -1,5 +1,5 @@
 """api.py — the functions behind the command line and the MCP server (JSON in, JSON out).
-Version: 2026.11.22.6
+Version: 2026.11.22.7
 """
 from __future__ import annotations
 
@@ -851,7 +851,8 @@ def set_instrument(setup: dict) -> dict:
         t_after0 = time.time()
         after = b.call("status", timeout_s=15, **runner.motor_args(prof))
         if prof.get("manual_objective", True) and after.get("objective"):
-            asked = any(d["set"] == "objective" and d["ok"] for d in done)
+            # changed by hand only when a change was asked and made (an objective already in place was not)
+            asked = any(d["set"] == "objective" and d["ok"] and not d.get("already_set") for d in done)
             done_obj = {"value": after.get("objective"),
                         "source": "changed by hand and confirmed by the operator" if asked else
                                   "LabSpec's setting: the turret is manual, ls6t cannot see which lens is in place"}

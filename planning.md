@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.22.6)
+## Architecture (version 2026.11.22.7)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -653,6 +653,9 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   (studies) and _video_focus_after_travel trip at bound - margin and refuse (Stop / skipped 'no safe room') when that
   is <= 0. TESTING T6.8 (x10/x5 first; one deliberate trip to measure the stop), T5 note. Sim reports a speed and,
   on a trip, a 2 µm coast. 138 tests.
+- 2026-11-22, 2026.11.22.7: Nicola (on .22.6): set with the objective already in place reported objective.source
+  'changed by hand and confirmed by the operator'; the 'asked' test counted the already_set entry; now it needs a
+  change actually made. 138 tests.
 
 ## To do next
 

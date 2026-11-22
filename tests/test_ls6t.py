@@ -946,7 +946,7 @@ def test_native_map_export_and_discovery_probes(tmp_path):
     assert st["studies"]["m"]["reliable"]
     S.ensure(config.active_bridge_dir())
     r = bridge.Bridge().call("discover", timeout_s=10, out=str(tmp_path / "dump.txt"))
-    # discovery no longer probes these (2026.11.22.6): dumps from older bridges still carry them
+    # discovery no longer probes these (2026.11.22.7): dumps from older bridges still carry them
     old = (tmp_path / "dump.txt").read_text() + "\n".join([
         "selftest.get_value_ex=0", "selftest.get_value_simple_part=1", "selftest.get_value_simple_part_size=8",
         "selftest.get_value_simple_part_values=4,5,6,7,8,9,10,11", "selftest.get_config_param=1",
@@ -2260,6 +2260,7 @@ def test_set_lists_the_objective_already_set_and_grating_note_only_on_change():
     r = api.instrument("set", setup={"objective": cur["objective"], "grating": float(cur["grating"])})
     sets = {m["set"]: m.get("already_set") for m in r["moves"]}
     assert sets == {"objective": True, "grating": True} and r["ok"]
+    assert r["objective"]["source"].startswith("LabSpec's setting")          # nothing changed, nobody asked
     assert "LabSpec reports a new grating" not in (r.get("note") or "")
     r = api.instrument("set", setup={"grating": 600 if float(cur["grating"]) != 600 else 1200})
     assert "LabSpec reports a new grating" in r["note"]
