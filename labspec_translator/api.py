@@ -1,5 +1,5 @@
 """api.py — the functions behind the command line and the MCP server (JSON in, JSON out).
-Version: 2026.11.22.4
+Version: 2026.11.22.5
 """
 from __future__ import annotations
 
@@ -760,6 +760,7 @@ def set_instrument(setup: dict) -> dict:
         from . import sim as S
         S.ensure(b.dir)
     moves, out = [], {"ok": False}
+    already: list = []                  # settings found in place before any move (the objective)
     t_all = time.time()
     hb0 = b.heartbeat() or {}
     try:
@@ -807,6 +808,9 @@ def set_instrument(setup: dict) -> dict:
                         return {"ok": False, "error": "the operator declined in LabSpec" + nothing
                                 + (" except the retract: the stage is lowered" if retracted is not None else "")}
                 moves.append(("objective", mot["objective"], "label", lab))
+            else:
+                already.append({"set": "objective", "asked": lab, "got": before.get("objective"), "ok": True,
+                                "already_set": True, "error": None})
         for role in ("laser_pol", "raman_pol"):
             if role in s:
                 if not mot.get(role):
@@ -825,7 +829,7 @@ def set_instrument(setup: dict) -> dict:
         # LabSpec accepts any grating with any laser (785 nm with 2400 gr/mm, 2026-11-20): the limit applies to
         # what a study acquires (format refuses it there); set only says so
         t_checks = time.time() - t_all - t_before
-        done = []
+        done = list(already)
         for what, motor, mode, value in moves:
             cur = before.get({"laser": "laser_nm"}.get(what, what))
             if cur not in (None, "") and P.same_position(cur, value):
@@ -853,7 +857,7 @@ def set_instrument(setup: dict) -> dict:
                                   "LabSpec's setting: the turret is manual, ls6t cannot see which lens is in place"}
         else:
             done_obj = None
-        out = {"ok": all(d["ok"] for d in done) and len(done) == len(moves), "moves": done,
+        out = {"ok": all(d["ok"] for d in done) and len(done) == len(moves) + len(already), "moves": done,
                "before": {k: before.get(k) for k in SET_KEYS if before.get(k) is not None},
                "after": {k: after.get(k) for k in SET_KEYS if after.get(k) is not None}}
         if done_obj:
@@ -868,7 +872,7 @@ def set_instrument(setup: dict) -> dict:
             elif reach["max_shift_cm1"] < 3200:
                 notes.append(f"with grating {reach['grating']} and the {las_t:g} nm laser, Raman shifts end near "
                              f"{reach['max_shift_cm1']:g} cm-1 ({reach['limit_nm']:g} nm, {reach['basis']})")
-        if any(d["set"] == "grating" for d in done):
+        if any(d["set"] == "grating" and not d.get("already_set") for d in done):
             notes.append("LabSpec reports a new grating at once; whether the turret has turned is not visible to ls6t "
                          "(TESTING T3.16)")
         if notes:
@@ -881,7 +885,7 @@ def set_instrument(setup: dict) -> dict:
             out["timing"]["note"] = ("the bridge was still taking its start-up inventory: the set waited for it "
                                      "(status_before_s)")
         if not moves:
-            out.update(ok=True, note="already set")
+            out.update(ok=True, note=(out.get("note") + "; " if out.get("note") else "") + "already set")
         return out
     except BridgeError as exc:
         return {"ok": False, "error": str(exc)}

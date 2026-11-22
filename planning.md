@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.22.4)
+## Architecture (version 2026.11.22.5)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -635,6 +635,16 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   marked_setup_steps / setup_parts / estimate / inputs take current; api.inputs reads the status when the bridge runs
   (state_read); runner._setup and api.set_instrument skip steps already in place (already_set in the read-back).
   TESTING T4.0 (dry run), T4.2 (sample.notes in LabSpec's Remark). 137 tests.
+- 2026-11-22, 2026.11.22.5: Nicola: a post-check of LabSpec's autofocus comes too late if its search passes the
+  safe limit on the way. The ActiveX manual's Autofocus has START, GET_STATUS, STOP (restores the previous
+  settings), GET_OFFSET, enable/disable and the method; no range; templates have only 'AutoFocus' on/off; HORIBA's
+  service scripts set no range either. So: VAutofocus takes z_bound / z_sign, reads Z at every 100 ms poll, stops
+  the autofocus (2) and the Z motor when Z passes the bound, fails with z_bound_hit; reports z_seen_min/max.
+  runner._af_bound for autofocus inside studies (focus + toward limit); _video_focus_after_travel: bound =
+  min(unevenness + toward, WD - unevenness - WD/10), none (skipped) when <= 0; the result records z_bound_um,
+  z_seen_um, stopped_at_bound. Sim: sim_af_range (+-20 µm by default) and the bound. Overshoot after the bound is
+  passed: one poll (100 ms) of Z travel plus the stop. Also: set_instrument lists the objective already in place
+  (already list, already_set) and adds the grating note only when a grating move was sent. 138 tests.
 
 ## To do next
 

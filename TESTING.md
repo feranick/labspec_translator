@@ -12,7 +12,7 @@ stops and cancel on the simulator, and `ls6t bench` gives known answers. What re
 LabSpec and hardware. The plan goes from no laser and no motion to an LLM app driving a full map, in stages. Each
 stage starts only when the previous one passed.
 
-Version under test: 2026.11.22.4 (bridge protocol 1).
+Version under test: 2026.11.22.5 (bridge protocol 1).
 
 **Already known** (2026-11-20, from the instrument's discovery dump, its `NFActiveX.ocx`, `OLConfig.ini`,
 `OLSetup.ini` and LabSpec 6.7.1's service scripts): the motors and their positions (lasers 532, 637.75, 785.04 nm;
@@ -700,9 +700,13 @@ LabSpec stays responsive. Record the time per point (`seconds.total / points_mea
 **T6.8 Retract-travel-return on an uneven sample (after T3.17; maintainer watching the gap).** With x10 first,
 then x100 if the maintainer agrees. **First without the laser** (possible before the profile review): white light on,
 live video running, `"move": {..., "focus": "video"}`: after the descent LabSpec's video autofocus finishes the
-approach; pass: `move.travel.video_autofocus.accepted` true and the spot in focus on the video, or, if LabSpec's
-autofocus ends farther than the unevenness plus the toward limit from the old focus, Z goes back down and the answer
-says so (record LabSpec's autofocus range setting). **Then with the laser (LASER)**, as below. Focus by hand on the sample, then a request with
+approach. LabSpec's own autofocus search range applies (its script interface neither sets nor reports it): the
+bridge reads Z at every poll and stops the autofocus (and Z) the moment it passes the safe bound toward the sample
+(`video_autofocus.z_bound_um`: the unevenness plus the toward limit, and never closer than a tenth of the working
+distance to a surface that may be `unevenness` higher). Pass: `video_autofocus.accepted` true and the spot in focus
+on the video; record `z_seen_um` (how far LabSpec's search actually went: its range, measured) and LabSpec's own
+autofocus range setting. If it reports `stopped_at_bound`, LabSpec's range is too wide for this objective: reduce
+it in LabSpec. **Then with the laser (LASER)**, as below. Focus by hand on the sample, then a request with
 `{"m": {"kind": "move", "sample": {"name": "...", "unevenness_um": <a generous estimate>}, "move": {"x_um": 1000,
 "y_um": 0, "snapshot": false}}, "f": {"kind": "focus", "sample": {"name": "..."}, "setup": {...}, "focus": {"scan":
 {"from_below": true}}}}`. Pass:

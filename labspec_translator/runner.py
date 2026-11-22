@@ -1,5 +1,5 @@
 """runner.py — runs a request's studies on the instrument, one command at a time, and checks every result.
-Version: 2026.11.22.4
+Version: 2026.11.22.5
 
 A request runs in its own process (`ls6t run-request FOLDER`, started detached by api.start), so it outlives the
 MCP call that started it. One request at a time holds the instrument (a lock file under LS6T_HOME); others wait
@@ -475,7 +475,7 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
                         zref = zcur = ctx.z_focus = fs["z_um"]
                         _focus_here(ctx)
                 else:
-                    r = ctx.call("autofocus", timeout_s=240, how=af, **motor_args(prof))
+                    r = ctx.call("autofocus", timeout_s=240, how=af, **_af_bound(ctx), **motor_args(prof))
                     if r["ok"] and _f(r.get("z_um")) is not None:
                         zref = zcur = ctx.z_focus = _f(r.get("z_um"))
                         _focus_here(ctx)
@@ -533,7 +533,7 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
                         warnings.append(f"point {k}: focus scan found no clear best ({fs.get('why')}); kept the "
                                         "previous focus")
                 else:
-                    r = ctx.call("autofocus", timeout_s=240, how=af, **motor_args(prof))
+                    r = ctx.call("autofocus", timeout_s=240, how=af, **_af_bound(ctx), **motor_args(prof))
                     if r["ok"] and _f(r.get("z_um")) is not None:
                         zref = zcur = _f(r.get("z_um"))
                         ctx.z_focus = zref
@@ -764,21 +764,48 @@ def travel_xy(ctx: Ctx, tx: float, ty: float, unevenness_um: float, what: str) -
             "xy_um": [_f(r.get("x_um")), _f(r.get("y_um"))]}
 
 
+def _af_bound(ctx: Ctx) -> dict:
+    """For LabSpec's autofocus inside a study: the bridge stops it as soon as Z passes the focus plus the objective's
+    toward limit (its own search range is neither settable nor readable from a script). Nothing without the Z
+    direction (stage.z_into_sample) or a focus."""
+    zl = plan.z_limits(ctx.prof, ctx.objective)
+    if zl["toward_sign"] is None or ctx.z_focus is None:
+        return {}
+    return {"z_bound": round(ctx.z_focus + zl["toward_sign"] * zl["toward_um"], 3), "z_sign": zl["toward_sign"]}
+
+
 def _video_focus_after_travel(ctx: Ctx, travel: dict, what: str, warnings: list) -> float:
     """The last step of a retract-travel-return without the laser: LabSpec's video autofocus (white light on, the
     live video running). LabSpec's own autofocus range applies while it runs; ls6t checks where it ended: within the
     sample's unevenness plus the objective's toward limit of the old focus it becomes the focus here, otherwise Z goes
     back to the descended height and the study says so."""
     zl = plan.z_limits(ctx.prof, ctx.objective)
-    r = ctx.call("autofocus", timeout_s=240, how="video", **motor_args(ctx.prof))
-    zf, z_down = travel["old_focus_um"], travel["descended_to_um"]
+    zf, z_down, un = travel["old_focus_um"], travel["descended_to_um"], travel["unevenness_um"]
+    s = zl["toward_sign"]
+    # the farthest LabSpec's search may go toward the sample: the new surface may be up to `un` higher (closer to
+    # the objective), so at old focus + d the gap to it is WD - un - d; keep a tenth of WD; and no deeper than the
+    # unevenness plus the ordinary toward limit
+    wd = zl["working_distance_um"] or 0.0
+    bound = min(un + zl["toward_um"], wd - un - 0.1 * wd) if wd else un + zl["toward_um"]
+    if bound <= 0:
+        warnings.append(f"no video autofocus: the unevenness ({un:g} µm) leaves no safe approach with "
+                        f"{ctx.objective or 'this objective'} (working distance ~{wd:g} µm)")
+        travel["video_autofocus"] = {"ok": False, "skipped": "unsafe"}
+        return z_down
+    z_bound = round(zf + s * bound, 3)
+    r = ctx.call("autofocus", timeout_s=240, how="video", z_bound=z_bound, z_sign=s, **motor_args(ctx.prof))
     znew = _f(r.get("z_um")) if r.get("ok") else None
-    travel["video_autofocus"] = {"ok": bool(r.get("ok")), "z_um": znew, "error": r.get("error") or None}
-    bound = travel["unevenness_um"] + zl["toward_um"]
+    travel["video_autofocus"] = {"ok": bool(r.get("ok")), "z_um": znew, "error": r.get("error") or None,
+                                 "z_bound_um": z_bound, "z_seen_um": [_f(r.get("z_seen_min")), _f(r.get("z_seen_max"))],
+                                 "stopped_at_bound": r.get("z_bound_hit") not in (None, "")}
     if znew is None or abs(znew - zf) > bound:
         z = _z_direct(ctx, z_down, f"{what}: back down after the video autofocus")
-        warnings.append(f"LabSpec's video autofocus {'failed' if znew is None else f'ended {znew - zf:+.1f} µm from the old focus, beyond {bound:g} µm'}: Z is back "
-                        f"{travel['unevenness_um']:g} µm short of the old focus; focus by hand or with a focus study")
+        why = (f"was stopped at the safe bound ({z_bound:g} µm): its search range reaches farther toward the sample "
+               "than allowed: reduce LabSpec's autofocus range" if travel["video_autofocus"]["stopped_at_bound"] else
+               f"failed ({r.get('error')})" if znew is None else
+               f"ended {znew - zf:+.1f} µm from the old focus, beyond {bound:g} µm")
+        warnings.append(f"LabSpec's video autofocus {why}: Z is back {un:g} µm short of the old focus; focus by hand or "
+                        "with a focus study")
         travel["video_autofocus"]["accepted"] = False
         return z
     ctx.z_focus = znew

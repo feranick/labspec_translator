@@ -1,6 +1,6 @@
 # labspec-translator (ls6t): what it can do
 
-This is the complete list of functions in version 2026.11.22.4. It covers:
+This is the complete list of functions in version 2026.11.22.5. It covers:
 
 - what a study can ask for;
 - the tools an LLM sees;

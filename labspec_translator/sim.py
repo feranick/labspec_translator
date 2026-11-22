@@ -1,5 +1,5 @@
 """sim.py — a simulated LabSpec + XploRA behind the same bridge protocol as ls6t_bridge.vbs.
-Version: 2026.11.22.4
+Version: 2026.11.22.5
 
 It answers every verb of the bridge with the same keys, so the runner, the checks and the MCP server are tested
 without the instrument (LS6T_MODE=sim, and the tests). The simulated sample is a silicon wafer with a graphene
@@ -487,8 +487,22 @@ class SimLabSpec:
         who = self._wait(8.0)
         if who:
             return self._stopped(who)
-        self.m["Z"]["value"] = self._zf_true() + float(self.rng.normal(0, 0.2))
-        return {"z_um": self.m["Z"]["value"], "how": p.get("how", "laser")}
+        z0 = self.m["Z"]["value"]
+        target = self._zf_true() + float(self.rng.normal(0, 0.2))
+        # LabSpec's search sweeps +-af_range around where it starts (sim_af_range, 20 µm by default)
+        f = self.dir / "sim_af_range"
+        rng_ = float(f.read_text()) if f.exists() else 20.0
+        lo, hi = min(z0 - rng_, target), max(z0 + rng_, target)
+        zb, sg = p.get("z_bound"), int(float(p.get("z_sign", 0) or 0))
+        if zb not in (None, "") and sg:
+            far = hi if sg > 0 else lo                  # the search's farthest point toward the sample
+            if (far - float(zb)) * sg > 0:
+                self.m["Z"]["value"] = float(zb)
+                return {"ok": 0, "z_bound_hit": float(zb), "z_um": float(zb), "z_seen_min": min(lo, z0),
+                        "z_seen_max": max(hi, z0) if sg < 0 else float(zb),
+                        "error": f"autofocus stopped: Z passed the safe bound {zb} toward the sample"}
+        self.m["Z"]["value"] = target
+        return {"z_um": target, "how": p.get("how", "laser"), "z_seen_min": lo, "z_seen_max": hi}
 
     def _zf_true(self) -> float:
         """The sample's real focus: the operator's (zf), unless sim_defocus says the operator missed it by N µm."""

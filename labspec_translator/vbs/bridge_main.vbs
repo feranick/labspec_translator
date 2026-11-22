@@ -772,8 +772,12 @@ Sub VMoveXY(cmd, res)
     res("y_um") = MotorValue(my)
 End Sub
 
+' LabSpec's autofocus, polled until done. LabSpec's own search range applies (its ActiveX interface neither sets nor
+' reports it), so with z_bound (and z_sign: +1 when a larger Z approaches the objective) the bridge reads Z at every
+' poll and stops the autofocus (STOP_AUTOFOCUS restores the previous settings) and the Z motor as soon as Z passes
+' the bound toward the sample; z_seen_min / z_seen_max record how far the search went (LabSpec's range, measured).
 Sub VAutofocus(cmd, res)
-    Dim how, mc, t0, st, who, tmo
+    Dim how, mc, t0, st, who, tmo, zb, zs, zm, z, zmin, zmax
     how = GetP(cmd, "how", "laser")
     tmo = ParseNum(GetP(cmd, "timeout_s", "180"))
     mc = LS_LASER_AUTOFOCUS
@@ -797,12 +801,36 @@ Sub VAutofocus(cmd, res)
         Exit Sub
     End If
     t0 = Timer
+    zm = GetP(cmd, "m_z", "Z")
+    zb = GetP(cmd, "z_bound", "")
+    zs = CLng(ParseNum(GetP(cmd, "z_sign", "0")))
+    zmin = ""
+    zmax = ""
     Do
         st = LabSpec.Autofocus(LS_GET_AUTOFOCUS_STATUS)
         If Err.Number <> 0 Then
             Fail res, ErrText("Autofocus status")
             Err.Clear
             Exit Do
+        End If
+        z = MotorValue(zm)
+        If CStr(z) <> "" Then
+            If CStr(zmin) = "" Then
+                zmin = z
+                zmax = z
+            End If
+            If ParseNum(z) < ParseNum(zmin) Then zmin = z
+            If ParseNum(z) > ParseNum(zmax) Then zmax = z
+            If zb <> "" And zs <> 0 Then
+                If (ParseNum(z) - ParseNum(zb)) * zs > 0 Then
+                    LabSpec.Autofocus 2               ' STOP_AUTOFOCUS
+                    LabSpec.MoveMotor zm, 0, "", LS_MOTOR_STOP
+                    Err.Clear
+                    res("z_bound_hit") = Fmt(z)
+                    Fail res, "autofocus stopped: Z " & Fmt(z) & " passed the safe bound " & zb & " toward the sample"
+                    Exit Do
+                End If
+            End If
         End If
         If st = 0 Then Exit Do
         who = StopRequested()
@@ -822,7 +850,9 @@ Sub VAutofocus(cmd, res)
     Err.Clear
     On Error GoTo 0
     res("how") = how
-    res("z_um") = MotorValue(GetP(cmd, "m_z", "Z"))
+    res("z_um") = MotorValue(zm)
+    res("z_seen_min") = zmin
+    res("z_seen_max") = zmax
 End Sub
 
 ' Writes spectrum `id` as '# key=value' lines and x<TAB>y rows; fills points, max_counts, x_unit, y_unit

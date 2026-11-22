@@ -946,7 +946,7 @@ def test_native_map_export_and_discovery_probes(tmp_path):
     assert st["studies"]["m"]["reliable"]
     S.ensure(config.active_bridge_dir())
     r = bridge.Bridge().call("discover", timeout_s=10, out=str(tmp_path / "dump.txt"))
-    # discovery no longer probes these (2026.11.22.4): dumps from older bridges still carry them
+    # discovery no longer probes these (2026.11.22.5): dumps from older bridges still carry them
     old = (tmp_path / "dump.txt").read_text() + "\n".join([
         "selftest.get_value_ex=0", "selftest.get_value_simple_part=1", "selftest.get_value_simple_part_size=8",
         "selftest.get_value_simple_part_values=4,5,6,7,8,9,10,11", "selftest.get_config_param=1",
@@ -2207,11 +2207,18 @@ def test_retract_travel_return_with_video_autofocus_no_laser():
     r = run_inline({"m": st})
     tr = r["studies"]["m"]["move"]["travel"]
     assert tr["video_autofocus"]["accepted"] and abs(tr["video_autofocus"]["z_um"] - z0) < 1.5
-    (config.active_bridge_dir() / "sim_defocus").write_text("200")      # LabSpec's AF ends far away: refused
+    assert tr["video_autofocus"]["z_seen_um"][0] is not None and not tr["video_autofocus"]["stopped_at_bound"]
+    (config.active_bridge_dir() / "sim_af_range").write_text("300")     # LabSpec's search reaches too far
     r = run_inline({"m": dict(st, move=dict(st["move"], x_um=-1000))})
     tr = r["studies"]["m"]["move"]["travel"]
+    assert tr["video_autofocus"]["stopped_at_bound"] and not tr["video_autofocus"]["ok"]
+    assert any("safe bound" in w for w in r["studies"]["m"]["warnings"])
+    (config.active_bridge_dir() / "sim_af_range").unlink()
+    (config.active_bridge_dir() / "sim_defocus").write_text("200")      # LabSpec's AF ends far away: refused
+    r = run_inline({"m": dict(st, move=dict(st["move"], x_um=500))})
+    tr = r["studies"]["m"]["move"]["travel"]
     assert tr["video_autofocus"]["accepted"] is False
-    assert any("video autofocus ended" in w for w in r["studies"]["m"]["warnings"])
+    assert any("safe bound" in w or "video autofocus ended" in w for w in r["studies"]["m"]["warnings"])
 
 
 def test_settings_already_in_place_are_not_sent_nor_charged():
@@ -2232,3 +2239,14 @@ def test_settings_already_in_place_are_not_sent_nor_charged():
     moves = run["studies"]["c"]["checks"]["setup"]["moves"]
     assert {m["motor"] for m in moves if m.get("already_set")} >= {"Objective", "Laser", "Filter"}
     assert not any(m.get("already_set") for m in moves if m["motor"] == "Grating")
+
+
+def test_set_lists_the_objective_already_set_and_grating_note_only_on_change():
+    S.ensure(config.active_bridge_dir())
+    cur = api.instrument("status")["status"]
+    r = api.instrument("set", setup={"objective": cur["objective"], "grating": float(cur["grating"])})
+    sets = {m["set"]: m.get("already_set") for m in r["moves"]}
+    assert sets == {"objective": True, "grating": True} and r["ok"]
+    assert "LabSpec reports a new grating" not in (r.get("note") or "")
+    r = api.instrument("set", setup={"grating": 600 if float(cur["grating"]) != 600 else 1200})
+    assert "LabSpec reports a new grating" in r["note"]
