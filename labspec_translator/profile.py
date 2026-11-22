@@ -1,5 +1,5 @@
 """profile.py — the machine profile: what the instrument has (from the discovery script) and the limits a person sets.
-Version: 2026.11.22.1
+Version: 2026.11.22.2
 
 The profile is a JSON file (LS6T_PROFILE, default ~/ls6t/profile.json). Studies never change it: an LLM can only
 ask for what the profile allows. Without a file, the built-in XploRA defaults below apply and every result says so
@@ -54,7 +54,9 @@ DEFAULT_PROFILE: dict = {
                "max_exposure_s": 600.0, "max_accumulations": 500, "max_points": 10000,
                "max_minutes": 480.0, "max_filter_pct": 100.0, "sensitive_max_filter_pct": 10.0,
                "max_laser_on_s": 60.0},     # longest the laser may be left on for viewing (instrument laser_on)
-    "timing": {"command_s": 0.3, "move_s": 2.0, "laser_s": 15.0, "grating_s": 15.0, "objective_s": 20.0,
+    # measured on the XploRA (2026-11-21): laser 1.6-2.8 s, grating 0.1-0.3 s (5 s kept: whether the turret turns
+    # then is still to see, TESTING T3.16), filter ~1 s, pinhole 2-6 s, slit 2-3 s; the objective: the operator
+    "timing": {"command_s": 0.3, "move_s": 2.0, "laser_s": 3.0, "grating_s": 5.0, "objective_s": 20.0,
                "xy_um_per_s": 2000.0, "xy_settle_s": 0.3, "autofocus_s": 10.0, "readout_s": 0.5,
                "window_move_s": 2.0},
     # video snapshots: where the beam really is relative to LabSpec's laser position (µm, measured: TESTING T5b),

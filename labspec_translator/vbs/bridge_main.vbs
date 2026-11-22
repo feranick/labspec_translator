@@ -2125,7 +2125,7 @@ Sub HandleFile(path)
     Beat "busy", True
     LaserGuard verb
     If gHalted And InStr(",ping,status,resume,quit,safe,message,", "," & verb & ",") = 0 Then
-        Fail res, "halted by the operator: resume in LabSpec"
+        Fail res, "halted by the operator: resume with ls6t instrument resume (LabSpec then asks the operator to confirm)"
     Else
         Select Case verb
             Case "laser": VLaser cmd, res

@@ -1,5 +1,5 @@
 """sim.py — a simulated LabSpec + XploRA behind the same bridge protocol as ls6t_bridge.vbs.
-Version: 2026.11.22.1
+Version: 2026.11.22.2
 
 It answers every verb of the bridge with the same keys, so the runner, the checks and the MCP server are tested
 without the instrument (LS6T_MODE=sim, and the tests). The simulated sample is a silicon wafer with a graphene
@@ -207,7 +207,7 @@ class SimLabSpec:
         if verb not in ("ping", "status", "camera", "labels", "last_error", "message", "laser"):
             self.laser_until = 0.0              # the bridge closes the shutter before any other command
         if self.halted and verb not in ("ping", "status", "resume", "quit", "safe", "message"):
-            return {"ok": 0, "error": "halted by the operator: resume in LabSpec", "halted": 1}
+            return {"ok": 0, "error": "halted by the operator: resume with `ls6t instrument resume` (LabSpec then asks the operator to confirm)", "halted": 1}
         fn = getattr(self, "v_" + str(verb), None)
         if not fn:
             return {"ok": 0, "error": f"unknown verb {verb!r}"}

@@ -1,5 +1,5 @@
 """runner.py — runs a request's studies on the instrument, one command at a time, and checks every result.
-Version: 2026.11.22.1
+Version: 2026.11.22.2
 
 A request runs in its own process (`ls6t run-request FOLDER`, started detached by api.start), so it outlives the
 MCP call that started it. One request at a time holds the instrument (a lock file under LS6T_HOME); others wait
@@ -98,6 +98,7 @@ class Ctx:
         self.objective_by_operator = None      # the objective the operator confirmed in this request
         self.objective = None               # LabSpec's objective now (its record)
         self.focus_xy = (None, None)        # where the focus was found (the operator's spot, or the last focus)
+        self.z_purpose = None               # 'depth' while a depth profile runs (its own Z limit, confirmed)
         self.last_beat = 0.0
         self.bridge_version = None
 
@@ -193,7 +194,7 @@ def run_request(folder: Path | str) -> dict:
             raise Stop(f"the bridge speaks protocol {ping.get('protocol')}, this ls6t {BRIDGE_PROTOCOL}: install the "
                        "bridge script of this version (ls6t bridge install)", "bridge")
         if ping.get("halted") == "1":
-            raise Stop("the bridge is halted by the operator: resume it in LabSpec first", "operator")
+            raise Stop("the bridge is halted by the operator: resume with `ls6t instrument resume` (LabSpec then asks the operator to confirm)", "operator")
         st = ctx.call("status", timeout_s=15, **motor_args(prof))
         ctx.start = {k: _f(st.get(k)) for k in ("x_um", "y_um", "z_um")}
         ctx.start["laser_nm"] = _f(st.get("laser_nm"))
@@ -232,8 +233,8 @@ def run_request(folder: Path | str) -> dict:
                      why=stopped.why if stopped else None, stopped_by=stopped.by if stopped else None)
         if stopped:
             # a halt or a cancel leaves the stage where it is: said, with where that is (2026-11-22)
-            state["returned"] = {"done": False, "why": f"stopped ({stopped.by}): the stage stays where it is; the "
-                                                       "return to the home spot did not happen"}
+            state["stage_at_end"] = _stage_now(ctx)
+            state["returned"] = _not_returned(stopped.by, state["stage_at_end"])
         else:
             state["returned"] = _return_home(ctx)
             if getattr(ctx, "saved_config", None):
@@ -241,16 +242,15 @@ def run_request(folder: Path | str) -> dict:
                 state["config_restored"] = bool(r["ok"])
                 if not r["ok"]:
                     state["config_restore_error"] = r.get("error")
-        state["stage_at_end"] = _stage_now(ctx)
+            state["stage_at_end"] = _stage_now(ctx)
     except Stop as exc:
         state.update(state="cancelled" if exc.by in ("cancel", "operator") else "failed", why=exc.why,
-                     stopped_by=exc.by, finished=time.time(),
-                     returned={"done": False, "why": f"stopped ({exc.by}): the stage stays where it is; the return "
-                                                     "to the home spot did not happen"})
+                     stopped_by=exc.by, finished=time.time())
         try:
             state["stage_at_end"] = _stage_now(ctx)
         except Exception:  # noqa: BLE001 - the bridge may be gone
-            pass
+            state["stage_at_end"] = {}
+        state["returned"] = _not_returned(exc.by, state["stage_at_end"])
         for name in studies:
             res = folder / name / f"{name}.json"
             if not res.exists():
@@ -397,7 +397,12 @@ def run_any(name: str, study: dict, ctx: Ctx) -> dict:
         derived = plan.depth_as_map(study, ctx.prof)
         derived["_kind"] = "depth"
         derived["_depth"] = dict(study.get("depth", {}))
-        return run_study(name, derived, ctx)
+        _confirm_depth(name, derived, ctx)
+        ctx.z_purpose = "depth"
+        try:
+            return run_study(name, derived, ctx)
+        finally:
+            ctx.z_purpose = None
     if kind == "guide":
         return run_guide(name, study, ctx)
     if kind == "alignment":
@@ -664,7 +669,7 @@ def _z_guard(ctx: Ctx, target: float, what: str, focusing: bool) -> None:
     found (short working distances), only a focus scan or an autofocus may approach (they find it again)."""
     if ctx.z_focus is None or target is None:
         return
-    zl = plan.z_limits(ctx.prof, ctx.objective)
+    zl = plan.z_limits(ctx.prof, ctx.objective, getattr(ctx, "z_purpose", None))
     dz = float(target) - float(ctx.z_focus)
     err = plan.z_check(zl, dz)
     if err:
@@ -679,6 +684,26 @@ def _z_guard(ctx: Ctx, target: float, what: str, focusing: bool) -> None:
         raise Stop(f"{what}: the focus was found {d:.0f} µm away (more than {zl['focus_valid_xy_um']:g} µm for "
                    f"{ctx.objective or 'this objective'}): Z toward the sample needs a fresh focus here first (a "
                    "focus scan or an autofocus)", "study")
+
+
+def _confirm_depth(name: str, derived: dict, ctx: Ctx) -> None:
+    """A depth profile going further toward the sample than ordinary studies may (past limits.z_toward_wd_fraction
+    of the working distance, up to depth_toward_wd_fraction): the operator confirms the gap in LabSpec first."""
+    obj = (derived.get("setup") or {}).get("objective") or ctx.objective
+    lab, _ = P.match_label(str(obj), list(ctx.prof.get("objectives", []))) if obj else (None, None)
+    obj = lab or obj
+    normal = plan.z_limits(ctx.prof, obj)
+    zs = plan.axis_values(derived["map"]["z_um"]) if (derived.get("map") or {}).get("z_um") else []
+    deepest = max([abs(z) for z in zs if plan.toward(normal, z)] or [0.0])
+    if deepest <= normal["toward_um"] or config.confirm_policy() == "never":
+        return
+    wd = normal["working_distance_um"]
+    r = ctx.call("confirm", timeout_s=3600,
+                 text=f"ls6t: depth profile '{name}' goes up to {deepest:g} µm from the focus TOWARD the sample with "
+                      f"{obj or 'this objective'} (working distance ~{wd:g} µm: about {wd - deepest:g} µm of gap left "
+                      "at the deepest point, if the surface is flat). Check the gap before going on. Continue?")
+    if r.get("answer") != "yes":
+        raise Stop("the operator did not confirm the depth profile's Z range", "operator")
 
 
 def _retract_before_xy(ctx: Ctx, ax, ay, zcur, zref, what: str):
@@ -714,6 +739,19 @@ def _objective_source(ctx: Ctx, obj) -> str | None:
             "LabSpec's setting, not checked (manual turret)")
 
 
+def _not_returned(by, stage: dict) -> dict:
+    """The return home after a stop: none is made; said according to where the stage is."""
+    fh = (stage or {}).get("from_home_um")
+    if fh is not None and math.hypot(*fh) <= 0.5:
+        return {"done": False, "needed": False, "why": f"stopped ({by}): nothing moved away; the stage is at the home "
+                                                      "spot"}
+    if fh is None:
+        return {"done": False, "why": f"stopped ({by}): the stage stays where it is (its distance from the home spot "
+                                      "could not be read); no return to the home spot was made"}
+    return {"done": False, "needed": True, "why": f"stopped ({by}): the stage stays {math.hypot(*fh):.1f} µm from "
+                                                  "the home spot; the return to it did not happen"}
+
+
 def _stage_now(ctx: Ctx) -> dict:
     """Where the stage is now (X, Y, Z in µm, read back), and how far from the home spot; {} if it cannot be read."""
     try:
@@ -723,6 +761,10 @@ def _stage_now(ctx: Ctx) -> dict:
     x, y, z = _f(st.get("x_um")), _f(st.get("y_um")), _f(st.get("z_um"))
     out = {"x_um": x, "y_um": y, "z_um": z}
     hx, hy = ctx.home_xy
+    if None in (hx, hy) and x is not None and y is not None:
+        # stopped before the request took its home spot (e.g. the bridge was halted): nothing has moved yet
+        hx, hy = x, y
+        out["home"] = "here: the request stopped before its first move"
     if None not in (x, y, hx, hy):
         out["from_home_um"] = [round(x - hx, 2), round(y - hy, 2)]
     return out

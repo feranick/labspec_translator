@@ -1,5 +1,5 @@
 """plan.py — a study as bridge commands: the setup moves, the points, the acquisitions; and the time estimate.
-Version: 2026.11.22.1
+Version: 2026.11.22.2
 
 Everything here is computed from the study and the profile alone: wavelengths from Raman shifts, the number of
 detector windows, the stage positions (always offsets from where the operator left the stage, Z from the
@@ -107,11 +107,15 @@ def acq_range(study: dict, prof: dict, laser: float | None) -> dict:
     out = {"center_cm1": c, "single": True, "windows": 1}
     if laser:
         nm = shift_to_nm(c, laser)
-        out.update(from_nm=round(nm, 4), to_nm=round(nm, 4))
+        # LabSpec's own parameters for one window: From = To = the centre (nm); the window it covers is given too
+        out.update(from_nm=round(nm, 4), to_nm=round(nm, 4), center_nm=round(nm, 4),
+                   note="one window: LabSpec takes From = To = its centre (from_nm, to_nm); window_nm is what it "
+                        "covers")
         if win_nm:
             half = win_nm / 2
             out.update(from_cm1=round(1e7 / laser - 1e7 / (nm - half), 2),
-                       to_cm1=round(1e7 / laser - 1e7 / (nm + half), 2))
+                       to_cm1=round(1e7 / laser - 1e7 / (nm + half), 2),
+                       window_nm=[round(nm - half, 2), round(nm + half, 2)])
     return out
 
 
@@ -299,7 +303,7 @@ def working_distance_um(prof: dict, objective) -> float | None:
     return min(known) if known else WD_BY_MAG_UM[100]
 
 
-def z_limits(prof: dict, objective) -> dict:
+def z_limits(prof: dict, objective, purpose: str | None = None) -> dict:
     """How far Z may go from the focus with this objective. Toward the objective (deeper into the sample): a fraction
     of the working distance (limits.z_toward_wd_fraction, 0.1: x100 ~21 µm, x50 ~35 µm), never more than
     limits.max_dz_um; away from it: limits.max_dz_um. Until stage.z_into_sample says which way is toward, both
@@ -310,12 +314,16 @@ def z_limits(prof: dict, objective) -> dict:
     max_dz = float(lim.get("max_dz_um", 100.0))
     wd = working_distance_um(prof, objective)
     frac = float(lim.get("z_toward_wd_fraction", 0.1))
+    if purpose == "depth":
+        # depth profiles into transparent samples (polymers, coatings) go further, after the operator confirms the
+        # gap in LabSpec (runner): limits.depth_toward_wd_fraction, 0.3 by default (x100: ~63 µm of ~210 µm)
+        frac = float(lim.get("depth_toward_wd_fraction", 0.3))
     toward = min(max_dz, frac * wd) if wd else min(max_dz, frac * WD_BY_MAG_UM[100])
     sign, known = into_sign(prof)
     fv = lim.get("focus_valid_xy_um") or {"100": 200.0, "50": 400.0, "20": 2000.0}
     mag = objective_mag(objective) if objective is not None else 100
     valid = fv.get(str(mag)) if mag is not None else fv.get("100")
-    return {"objective": objective, "working_distance_um": wd, "toward_um": round(toward, 1),
+    return {"objective": objective, "purpose": purpose, "working_distance_um": wd, "toward_um": round(toward, 1),
             "away_um": max_dz, "toward_sign": sign if known else None,
             "focus_valid_xy_um": float(valid) if valid is not None else None}
 
@@ -333,8 +341,9 @@ def z_check(zl: dict, dz: float) -> str | None:
                     "TESTING T3.17)")
         return None
     if dz * s > 0 and dz * s > zl["toward_um"]:
+        key = "depth_toward_wd_fraction" if zl.get("purpose") == "depth" else "z_toward_wd_fraction"
         return (f"{dz:+g} µm from the focus is toward the sample by {abs(dz):g} µm: above {zl['toward_um']:g} µm for "
-                f"{obj} (working distance ~{zl['working_distance_um']:g} µm; limits.z_toward_wd_fraction)")
+                f"{obj} (working distance ~{zl['working_distance_um']:g} µm; limits.{key})")
     if dz * s < 0 and abs(dz) > zl["away_um"]:
         return f"{dz:+g} µm from the focus, away from the sample: above limits.max_dz_um = {zl['away_um']:g} µm"
     return None
@@ -508,6 +517,26 @@ def cutoff_params(study: dict, prof: dict) -> dict:
             "plateau_cm1": list(cp.get("plateau_cm1", [200.0, 380.0]))}
 
 
+def setup_parts(study: dict, prof: dict) -> dict:
+    """The set-up time by part (s), from the profile's timing: each motor the study sets (an upper value: LabSpec
+    skips one already in place), the objective (on a manual turret, the operator's time to turn it), and the
+    commands around them. Measured on the XploRA (2026-11-21): laser 1.6-2.8 s, grating 0.1-0.3 s once LabSpec has
+    run a minute, filter ~1 s, pinhole 2-6 s, slit 2-3 s: set timing.* to them (ls6t profile set)."""
+    t = prof["timing"]
+    s = study.get("setup", {}) or {}
+    out = {"commands": round(t["command_s"] * 2, 2)}
+    if s.get("laser_nm") is not None:
+        out["laser"] = t["laser_s"]
+    if s.get("grating") is not None:
+        out["grating"] = t["grating_s"]
+    if s.get("objective") is not None:
+        out["objective"] = t["objective_s"]
+    for k in ("filter", "hole_um", "slit_um"):
+        if s.get(k) is not None:
+            out[k.replace("_um", "")] = t["move_s"]
+    return out
+
+
 def estimate(study: dict, prof: dict) -> dict:
     """{minutes, points, windows, seconds: {setup, per_point, total}}: an upper-end estimate from the profile's
     timing (measured values replace the defaults once the instrument has run)."""
@@ -528,7 +557,7 @@ def estimate(study: dict, prof: dict) -> dict:
         total = base["seconds"]["setup"] + sum(s["exposure_s"] + t["move_s"] + t["readout_s"] + 2 * t["command_s"]
                                                for s in steps)
         return {"minutes": round(total / 60.0, 2), "points": len(steps), "windows": 1,
-                "seconds": {"setup": base["seconds"]["setup"], "per_acquisition": 0.0, "total": round(total, 1)}}
+                "seconds": {"setup": base["seconds"]["setup"], "setup_parts": base["seconds"].get("setup_parts"), "per_acquisition": 0.0, "total": round(total, 1)}}
     if study.get("kind") == "spot":
         sp = spot_params(study, prof)
         base = estimate(spot_spectrum_study(study, prof), prof)
@@ -538,13 +567,13 @@ def estimate(study: dict, prof: dict) -> dict:
             n = len(axis_values([-sp["range_um"] / 2, sp["range_um"] / 2, sp["step_um"]])) ** 2
             total += n * (t["command_s"] * 2 + t["xy_settle_s"] + float(sp["exposure_s"]) + t["readout_s"]) + 10
         return {"minutes": round(total / 60.0, 2), "points": n, "windows": 1,
-                "seconds": {"setup": base["seconds"]["setup"], "per_acquisition": base["seconds"]["per_acquisition"],
+                "seconds": {"setup": base["seconds"]["setup"], "setup_parts": base["seconds"].get("setup_parts"), "per_acquisition": base["seconds"]["per_acquisition"],
                             "total": round(total, 1)}}
     if study.get("kind") == "focus":
         base = estimate(focus_spectrum_study(study, prof), prof)
         total = base["seconds"]["setup"] + scan_seconds(study, prof)
         return {"minutes": round(total / 60.0, 2), "points": len(scan_offsets(scan_params(study, prof))),
-                "windows": 1, "seconds": {"setup": base["seconds"]["setup"],
+                "windows": 1, "seconds": {"setup": base["seconds"]["setup"], "setup_parts": base["seconds"].get("setup_parts"),
                                           "per_acquisition": base["seconds"]["per_acquisition"],
                                           "total": round(total, 1)}}
     if study.get("kind") == "alignment":
@@ -554,24 +583,21 @@ def estimate(study: dict, prof: dict) -> dict:
         total = base["seconds"]["total"] * n + (guide_params({"guide": {}}, prof)["max_s"]
                                                 if a.get("focus_guide") else 0.0) + 15.0
         return {"minutes": round(total / 60.0, 2), "points": 1, "windows": 1,
-                "seconds": {"setup": base["seconds"]["setup"], "per_acquisition": base["seconds"]["per_acquisition"],
+                "seconds": {"setup": base["seconds"]["setup"], "setup_parts": base["seconds"].get("setup_parts"), "per_acquisition": base["seconds"]["per_acquisition"],
                             "total": round(total, 1)}, "note": "with one AutoAlignment retry, if needed; the "
                                                                "operator's time for AutoAlignment is not included"}
     if study.get("kind") == "guide":
         base = estimate(guide_spectrum_study(study, prof), prof)
         total = base["seconds"]["setup"] + float(guide_params(study, prof)["max_s"])
         return {"minutes": round(total / 60.0, 2), "points": 1, "windows": 1,
-                "seconds": {"setup": base["seconds"]["setup"], "per_acquisition": base["seconds"]["per_acquisition"],
+                "seconds": {"setup": base["seconds"]["setup"], "setup_parts": base["seconds"].get("setup_parts"), "per_acquisition": base["seconds"]["per_acquisition"],
                             "total": round(total, 1)}, "note": "at most; it ends as soon as the goal is met"}
     laser = laser_nm(study, prof)
     rng = acq_range(study, prof, laser)
     pts = positions(study)
     s = study.get("setup", {})
-    setup = t["command_s"] * 2
-    setup += t["laser_s"] if s.get("laser_nm") is not None else 0
-    setup += t["grating_s"] if s.get("grating") is not None else 0
-    setup += t["objective_s"] if s.get("objective") is not None else 0
-    setup += t["move_s"] * sum(1 for k in ("filter", "hole_um", "slit_um") if s.get(k) is not None)
+    parts = setup_parts(study, prof)
+    setup = sum(parts.values())
     focus = study.get("focus", {})
     af = focus.get("autofocus")
     every = int(focus.get("every", 0) or 0)
@@ -603,8 +629,14 @@ def estimate(study: dict, prof: dict) -> dict:
     if study.get("kind") == "series":
         total += max(0.0, float(study.get("series", {}).get("interval_s", 0)) * (len(pts) - 1)
                      - acq_s * (len(pts) - 1)) if len(pts) > 1 else 0.0
+    snap_s = shots * (float(v.get("settle_s", 1.5)) + 5.0 + (float(v.get("laser_s", 1.0)) if vd.get("with_laser")
+                                                              else 0.0))
     return {"minutes": round(total / 60.0, 2), "points": len(pts), "windows": rng.get("windows"),
-            "seconds": {"setup": round(setup, 1), "per_acquisition": round(acq_s, 2), "total": round(total, 1)}}
+            "seconds": {"setup": round(setup, 1), "setup_parts": parts, "per_acquisition": round(acq_s, 2),
+                        "acquisitions": round(acq_s * len(pts), 1), "video_snapshots": round(snap_s, 1),
+                        "total": round(total, 1)},
+            "not_included": "the operator's answers in LabSpec (the go-ahead before the first exposure, the "
+                            "objective by hand)"}
 
 
 def inputs(study: dict, prof: dict, max_steps: int = 40) -> dict:

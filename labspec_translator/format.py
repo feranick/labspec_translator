@@ -1,5 +1,5 @@
 """format.py — the study format and its static checks (no instrument needed).
-Version: 2026.11.22.1
+Version: 2026.11.22.2
 """
 from __future__ import annotations
 
@@ -221,7 +221,7 @@ def _z_safety(study: dict, prof: dict, errors: list, warnings: list) -> None:
     if obj is not None:
         lab, _ = match_label(str(obj), list(prof.get("objectives", [])))
         obj = lab or obj
-    zl = plan.z_limits(prof, obj)
+    zl = plan.z_limits(prof, obj, "depth" if study.get("_kind") == "depth" else None)
     kind = study.get("kind", "spectrum")
     dzs = []
     m = study.get("map") if kind == "map" else None
@@ -282,7 +282,7 @@ def validate_study(name: str, study: dict, prof: dict) -> dict:
         return {"ok": False, "errors": ["a study is an object"], "warnings": []}
     if not name or not all(c.isalnum() or c in "_-" for c in name):
         errors.append(f"study name {name!r}: use letters, digits, _ and -")
-    _unknown(study, TOP_KEYS, "study", errors)
+    _unknown({k: v for k, v in study.items() if not str(k).startswith("_")}, TOP_KEYS, "study", errors)
     kind = study.get("kind", "spectrum")
     if kind not in KINDS:
         errors.append(f"kind {kind!r}: use one of {', '.join(KINDS)}")
@@ -399,7 +399,9 @@ def validate_study(name: str, study: dict, prof: dict) -> dict:
                 errors.append(f"{k}: not with kind 'depth' (it stays at the current spot; aim first with a 'move')")
         if errors:
             return {"ok": False, "errors": errors, "warnings": warnings}
-        inner = validate_study(name, plan.depth_as_map(study, prof), prof)
+        derived = plan.depth_as_map(study, prof)
+        derived["_kind"] = "depth"            # Z limits for depth profiles (z_limits purpose 'depth')
+        inner = validate_study(name, derived, prof)
         inner["errors"] = [e.replace("map.z_um", "depth (from_um / to_um)") for e in inner["errors"]]
         if not plan.into_sign(prof)[1]:
             inner["warnings"].append("the profile does not say which Z direction goes into the sample "

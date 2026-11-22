@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.22.1)
+## Architecture (version 2026.11.22.2)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -589,6 +589,19 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   focus -> Stop unless a focus scan), _focus_here after a focus is found, _retract_before_xy in the map loop. TESTING
   T3.17 (Z direction by watching, x10, empty holder). VBS: res.Exists for camera_asked / camera_restart (reading a
   missing Dictionary key adds it, empty). 131 tests.
+- 2026-11-22, 2026.11.22.2: Nicola: dry runs: api.inputs drops the review-gate error into review_note (nothing is
+  sent); acq_range single window adds center_nm, window_nm (from_nm = to_nm = centre is LabSpec's parameter: the
+  report read it as the range, 659.66 nm vs 646.6-672.7); estimate: plan.setup_parts (commands, laser, grating,
+  objective, filter, hole, slit), acquisitions, video_snapshots, not_included (the operator's answers); default
+  timing laser 3 s, grating 5 s (measured; a saved profile keeps its own). T3.17 rewritten: a 5 µm move cannot be
+  seen against a 10 mm gap; the maintainer moves ~1 mm toward the objective in LabSpec with x10/x5 while ls6t reads
+  Z before and after (no exception to ls6t's limits), or HORIBA's documentation; unset unless unmistakable. Depth:
+  z_limits(purpose='depth') uses limits.depth_toward_wd_fraction (0.3); format marks the derived map _kind depth
+  (internal '_' keys skip the unknown-key check); runner._confirm_depth asks in LabSpec when the profile goes past
+  the ordinary toward limit; ctx.z_purpose while it runs. Then (Nicola): after a halt with nothing moved the
+  message suggested the stage was away (runner._not_returned: 'nothing moved away; at the home spot', or the
+  distance it stays); 'resume it in LabSpec' -> `ls6t instrument resume` (runner, bridge, sim); _stage_now gives
+  from_home_um also when the request stopped before taking its home spot (home = here). 134 tests.
 
 ## To do next
 

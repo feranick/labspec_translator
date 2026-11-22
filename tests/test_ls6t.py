@@ -946,7 +946,7 @@ def test_native_map_export_and_discovery_probes(tmp_path):
     assert st["studies"]["m"]["reliable"]
     S.ensure(config.active_bridge_dir())
     r = bridge.Bridge().call("discover", timeout_s=10, out=str(tmp_path / "dump.txt"))
-    # discovery no longer probes these (2026.11.22.1): dumps from older bridges still carry them
+    # discovery no longer probes these (2026.11.22.2): dumps from older bridges still carry them
     old = (tmp_path / "dump.txt").read_text() + "\n".join([
         "selftest.get_value_ex=0", "selftest.get_value_simple_part=1", "selftest.get_value_simple_part_size=8",
         "selftest.get_value_simple_part_values=4,5,6,7,8,9,10,11", "selftest.get_config_param=1",
@@ -2027,7 +2027,8 @@ def test_stopped_request_reports_where_the_stage_is(tmp_path):
                            "acquire": {"center_cm1": 520, "exposure_s": 1}},
                      "m2": {"kind": "move", "move": {"x_um": 60, "y_um": 0}}})
     if st["state"] == "cancelled":
-        assert st["returned"]["done"] is False and "stays where it is" in st["returned"]["why"]
+        assert st["returned"]["done"] is False and ("stays" in st["returned"]["why"] or
+                                                    "at the home spot" in st["returned"]["why"])
         assert "x_um" in st["stage_at_end"]
     f = config.active_bridge_dir() / "sim_operator_stop_after"
     if f.exists():
@@ -2084,3 +2085,59 @@ def test_stale_focus_stops_z_toward_the_sample_at_run_time():
                            "map": {"x_um": [0, 600, 600], "z_um": [0, 10, 10]}}})
     txt = json.dumps(st["studies"]["m"])
     assert "needs a fresh focus here first" in txt
+
+
+def test_inputs_without_review_window_nm_and_setup_breakdown(monkeypatch):
+    """get_inputs sends nothing: an unreviewed profile is a note there; a single window shows the nm it covers; the
+    setup estimate has its parts."""
+    st = {"kind": "calibration", "sample": {"name": "Si"},
+          "setup": {"laser_nm": 637.75, "grating": 1800, "filter": "1%", "objective": "x100"}}
+    prof = P.load()
+    P.save(dict(prof, lasers={"637.75": {"nm": 637.75, "label": "637.75", "power_mw": None, "max_filter_pct": 10},
+                              **prof["lasers"]}))
+    monkeypatch.setenv("LS6T_MODE", "labspec")
+    assert not api.validate({"c": st})["c"]["ok"]                     # the study itself: refused until reviewed
+    r = api.inputs(st, "c")
+    assert r["ok"] and "reviewed" in r["review_note"]
+    rng = r["range"]
+    assert rng["from_nm"] == rng["to_nm"] == rng["center_nm"]
+    lo, hi = rng["window_nm"]
+    assert 646 < lo < 647.5 and 672 < hi < 673.5
+    sec = r["estimate"]["seconds"]
+    assert set(sec["setup_parts"]) >= {"laser", "grating", "objective", "filter", "commands"}
+    assert abs(sum(sec["setup_parts"].values()) - sec["setup"]) < 0.2
+    assert "operator" in r["estimate"]["not_included"]
+
+
+def test_depth_profiles_get_their_own_confirmed_z_limit():
+    prof = P.load()
+    P.save(dict(prof, stage=dict(prof["stage"], z_into_sample="+")))
+    d = {"kind": "depth", "sample": {"name": "film"},
+         "setup": {"laser_nm": 532, "grating": 1800, "filter": "1%", "objective": "x100"},
+         "acquire": {"center_cm1": 1000, "exposure_s": 0.1},
+         "depth": {"from_um": -5, "to_um": 50, "step_um": 5}}
+    assert api.validate({"d": d})["d"]["ok"]                    # 50 µm: above 21 (ordinary), within 63 (depth)
+    d2 = dict(d, depth={"from_um": -5, "to_um": 80, "step_um": 5})
+    v = api.validate({"d": d2})["d"]
+    assert not v["ok"] and any("depth_toward_wd_fraction" in e for e in v["errors"])
+    m = {"kind": "map", "sample": {"name": "film"}, "setup": d["setup"], "acquire": d["acquire"],
+         "map": {"z_um": [0, 50, 5]}}
+    assert any("z_toward_wd_fraction" in e for e in api.validate({"m": m})["m"]["errors"])
+    S.ensure(config.active_bridge_dir())
+    st = run_inline({"d": d})
+    assert st["state"] == "done", st
+    (config.active_bridge_dir() / "sim_confirm_no").write_text("1")
+    st = run_inline({"d": d})
+    assert "did not confirm the depth profile" in json.dumps(st)
+
+
+def test_stop_messages_say_where_and_how_to_resume():
+    S.ensure(config.active_bridge_dir())
+    (config.active_bridge_dir() / "sim_operator_stop").write_text("1")
+    st = run_inline({"s": {"kind": "spectrum", "sample": {"name": "Si"},
+                           "setup": {"laser_nm": 532, "grating": 1800, "filter": "1%", "objective": "x100"},
+                           "acquire": {"center_cm1": 520, "exposure_s": 1}}})
+    assert st["returned"]["needed"] is False and "at the home spot" in st["returned"]["why"]
+    st = run_inline({"m": {"kind": "move", "move": {"x_um": 10, "y_um": 0}}})       # the bridge is halted
+    assert "ls6t instrument resume" in st["why"]
+    assert st["stage_at_end"]["from_home_um"] == [0.0, 0.0] and "nothing moved" in st["returned"]["why"]

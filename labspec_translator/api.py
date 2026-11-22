@@ -1,5 +1,5 @@
 """api.py — the functions behind the command line and the MCP server (JSON in, JSON out).
-Version: 2026.11.22.1
+Version: 2026.11.22.2
 """
 from __future__ import annotations
 
@@ -83,10 +83,18 @@ def validate(studies: dict) -> dict:
 
 
 def inputs(study: dict, name: str = "study") -> dict:
+    """What a study would send to the bridge, without running it. Nothing is sent, so a profile not yet reviewed is
+    a note here, not a refusal (the study itself is refused until the review): this is when it is most useful."""
+    prof = P.load()
     v = F.validate({name: study})[name]
-    if not v["ok"]:
-        return {"ok": False, "errors": v["errors"]}
-    return {"ok": True, **plan.inputs(study, P.load())}
+    gate = P.review_gate(prof) if prof.get("measured") else None
+    errors = [e for e in v["errors"] if not (gate and e == gate)]
+    if errors:
+        return {"ok": False, "errors": errors}
+    out = {"ok": True, **plan.inputs(study, prof)}
+    if gate and gate in v["errors"]:
+        out["review_note"] = "run_studies refuses this study until the profile is reviewed: " + gate
+    return out
 
 
 # --------------------------------------------------------------------------------------------- requests
