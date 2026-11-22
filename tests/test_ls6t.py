@@ -2264,3 +2264,63 @@ def test_set_lists_the_objective_already_set_and_grating_note_only_on_change():
     assert "LabSpec reports a new grating" not in (r.get("note") or "")
     r = api.instrument("set", setup={"grating": 600 if float(cur["grating"]) != 600 else 1200})
     assert "LabSpec reports a new grating" in r["note"]
+
+
+def test_orientation_from_labspecs_image_and_video_scale(tmp_path):
+    """2026-11-22, the XploRA's first real snapshot: ls6t's frame had its rows reversed and red/blue swapped against
+    LabSpec's own JPEG, and its µm scale was LabSpec's 1 'µm' per pixel; a known stage move measures the real one."""
+    from labspec_translator import video as V
+    from PIL import Image as PILImage
+    H, W = 60, 80
+    rng = np.random.default_rng(1)
+    shown = rng.integers(0, 255, (H, W, 3)).astype(np.uint8)             # as LabSpec shows it
+    shown[10:14, 50:54] = [250, 20, 20]                                     # a red particle near the top
+    PILImage.fromarray(shown).save(tmp_path / "frame.jpg", quality=95)
+    stored = shown[::-1, :, ::-1]                                           # rows reversed, red/blue swapped
+    dec = {"img": stored, "xs": np.arange(W, dtype=float), "ys": np.arange(H, dtype=float), "um": True,
+           "width": W, "height": H, "channels": 3, "meta": {}}
+    ori = V.detect_orientation(dec, tmp_path / "frame.jpg")
+    assert ori["flip_y"] and not ori["flip_x"] and ori["swap_rb"] and ori["score"] > 0.8
+    fixed = V.apply_orientation(dec, ori)
+    assert (fixed["img"] == shown).all() and fixed["ys"][0] == H - 1
+    # the stage scale measured with known moves (the simulator's x100: 0.4 µm per pixel)
+    S.ensure(config.active_bridge_dir())
+    r = api.instrument("video_scale", seconds=5)
+    assert r["ok"] and abs(abs(r["um_per_px_x"]) - 0.4) < 0.02 and abs(abs(r["um_per_px_y"]) - 0.4) < 0.02
+    assert r["stored"] in V.scale_store()
+    snap = api.snapshot()
+    assert snap["ok"] and snap["axes_from"].startswith("measured")
+
+
+def test_no_labspec_prompt_after_ls6t_asked_and_black_frame(tmp_path):
+    """2026-11-22, T3.2: LabSpec asked a second time during the objective move after ls6t's own question (MOTOR_NO_MESSAGE
+    now goes with it); a black x5 frame gave five 'features' of strength 1e9 (noise ~0 from the filters)."""
+    from labspec_translator import video as V
+    br = Path(api.install_bridge(tmp_path / "vbs")["files"]["ls6t_bridge.vbs"]).read_text()
+    mv = br[br.index("Sub VMove("):]
+    mv = mv[:mv.index("End Sub")]
+    assert "mc = mc + LS_MOTOR_NO_MESSAGE" in mv and 'res("no_message_refused") = 1' in mv
+    prof = P.load()
+    m = prof["motors"]
+    assert runner.move_extra(prof, m["objective"], True) == {"no_message": 1}
+    assert runner.move_extra(prof, m["objective"], False) == {}
+    assert runner.move_extra(dict(prof, suppress_labspec_prompt=False), m["objective"], True) == {}
+    S.ensure(config.active_bridge_dir())
+    r = api.instrument("set", setup={"objective": "x50"})
+    mv = [d for d in r["moves"] if d["set"] == "objective"][0]
+    assert r["ok"] and mv["labspec_prompt"].startswith("suppressed")
+    # black and flat frames: no features
+    H, W = 120, 160
+    for img in (np.zeros((H, W, 3), np.uint8), np.full((H, W, 3), 3, np.uint8)):
+        img = img.copy(); img[60, 80] = 4
+        dec = {"img": img, "xs": np.linspace(0, 1700, W), "ys": np.linspace(0, 1170, H), "um": True,
+               "width": W, "height": H, "channels": 3, "meta": {}}
+        assert V.frame_too_dark(V._lum(img)) and V.features(dec) == []
+    # a real speck on a lit, nearly uniform frame keeps a sane strength
+    rng = np.random.default_rng(0)
+    img = (120 + rng.normal(0, 2.0, (H, W))).clip(0, 255)        # a lit frame with camera noise
+    img[58:62, 78:82] = 200
+    dec = {"img": img, "xs": np.linspace(0, 160, W), "ys": np.linspace(0, 120, H), "um": True,
+           "width": W, "height": H, "channels": 1, "meta": {}}
+    f = V.features(dec)
+    assert f and f[0]["strength"] < 1e5 and abs(f[0]["x_um"] - 80) < 3

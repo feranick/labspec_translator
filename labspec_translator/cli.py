@@ -1,5 +1,5 @@
 """cli.py — the command line. Every command prints JSON; '-' reads the studies from stdin.
-Version: 2026.11.22.7
+Version: 2026.11.22.8
 
   ls6t status [REQUEST] [--wait S]   versions, the bridge, the profile; or a request's studies
   ls6t format                        the study format
@@ -91,8 +91,9 @@ def main(argv=None) -> int:
     s = sub.add_parser("instrument")
     s.add_argument("action", choices=["status", "set", "discover", "resume", "last-error", "snapshot", "config",
                                       "camera-on", "camera-off", "laser-on", "laser-off", "calibration",
-                                      "autocal-info", "autocal-run", "end-bridge"])
-    s.add_argument("--seconds", type=float, help="laser-on: how long (at most limits.max_laser_on_s)")
+                                      "autocal-info", "autocal-run", "end-bridge", "video-scale"])
+    s.add_argument("--seconds", type=float, help="laser-on: how long (at most limits.max_laser_on_s); video-scale: the "
+                                                 "stage step in µm (default 50)")
     s.add_argument("--camera", help="camera-on/off: a number or a name from the profile's video.cameras")
     s.add_argument("what", nargs="?", help="config: list, save or load")
     s.add_argument("name", nargs="?", help="config save/load: the configuration's name")

@@ -436,6 +436,11 @@ Function CameraCheck(res)
                       (LS_SET_ACTIVE_CAMERA + CLng(res("camera_asked"))) & ") returned " & res("camera_set_returned") & _
                       "), the video restarted on camera " & now & ". To use camera " & res("camera_asked") & ": " & _
                       LS6T_VIDEO_BY_HAND
+    Else
+        ' GET_ACTIVE_CAMERA is LabSpec's selection, not the view: on the XploRA the view stayed on camera 0 after a
+        ' clean stop, Video(11) returning 0 and a restart (2026-11-22, T3.14)
+        res("camera_note") = "camera_after is LabSpec's selection (GET_ACTIVE_CAMERA), not a check of the view: " & _
+                             "look at LabSpec's live video (on the XploRA the view did not follow, TESTING T3.14)"
     End If
 End Function
 
@@ -643,6 +648,12 @@ Sub VMove(cmd, res)
         Fail res, "motor " & motor & " is not present"
         Exit Sub
     End If
+    ' no_message=1: ls6t has asked the operator already (a manual objective turret): MOTOR_NO_MESSAGE keeps LabSpec
+    ' from asking a second time (2026-11-22, T3.2: LabSpec asked again during the move). Refused: the plain move.
+    If GetP(cmd, "no_message", "0") = "1" Then
+        mc = mc + LS_MOTOR_NO_MESSAGE
+        res("no_message") = 1
+    End If
     On Error Resume Next
     t0 = Timer
     ' blocking=1: MoveMotor without NO_WAIT, as HORIBA's scripts move the grating (MoveMotor("Grating", g, "",
@@ -657,6 +668,17 @@ Sub VMove(cmd, res)
         res("blocking") = 1
     Else
         moveId = LabSpec.MoveMotor(motor, posVal, posName, mc + LS_MOTOR_NO_WAIT)
+    End If
+    If res("no_message") = 1 And (Err.Number <> 0 Or moveId = -1) Then
+        Err.Clear
+        res("no_message") = 0
+        res("no_message_refused") = 1                ' this LabSpec does not take it: it may ask the operator again
+        mc = mc - LS_MOTOR_NO_MESSAGE
+        If GetP(cmd, "blocking", "0") = "1" Then
+            moveId = LabSpec.MoveMotor(motor, posVal, posName, mc)
+        Else
+            moveId = LabSpec.MoveMotor(motor, posVal, posName, mc + LS_MOTOR_NO_WAIT)
+        End If
     End If
     res("move_call_s") = Secs(Elapsed(t0))           ' how long MoveMotor itself took to return
     gMoveN = gMoveN + 1
@@ -1559,6 +1581,7 @@ Sub VVideo(cmd, res)
     res("x_um") = MotorValue(GetP(cmd, "m_x", "X"))
     res("y_um") = MotorValue(GetP(cmd, "m_y", "Y"))
     res("objective") = MotorLabel(GetP(cmd, "m_objective", "Objective"))
+    res("camera") = VidCam()                     ' the orientation found is remembered per camera
 End Sub
 
 ' ---------------------------------------------------------------- guided adjustment

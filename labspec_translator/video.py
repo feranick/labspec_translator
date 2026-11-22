@@ -1,5 +1,5 @@
 """video.py — video snapshots: decoding the bridge's frame file and drawing it with the laser position marked.
-Version: 2026.11.22.7
+Version: 2026.11.22.8
 
 The bridge writes a cloned video frame as '# key=value' header lines (axis types, sizes, units, values) and the
 pixel values in LabSpec's order. LabSpec's video axes are taken to be stage coordinates in µm ('mkm'), so the laser
@@ -9,6 +9,7 @@ position, TESTING T5b). How LabSpec packs colour pixels and which axis varies fa
 """
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import numpy as np
@@ -103,6 +104,151 @@ def _channels(data, W: int, H: int, nch: int, packing: str, order: str) -> np.nd
     return np.clip(img, 0, 255).astype(np.uint8)
 
 
+def detect_orientation(dec: dict, native: str | Path | None) -> dict | None:
+    """How ls6t's decoded frame relates to LabSpec's own saved image of the same frame (its JPEG / PNG, as LabSpec
+    shows it): rows reversed (flip_y), columns reversed (flip_x), red and blue swapped (swap_rb), chosen by the best
+    correlation. On the XploRA (2026-11-22) the decoded rows were reversed and red/blue swapped. None without
+    LabSpec's image or Pillow."""
+    if not native or not Path(native).is_file():
+        return None
+    try:
+        from PIL import Image as PILImage
+        with PILImage.open(native) as im:
+            ref = np.asarray(im.convert("RGB").resize((dec["width"], dec["height"])), dtype=float)
+    except Exception:  # noqa: BLE001 - no reference: nothing changed
+        return None
+    img = dec["img"].astype(float)
+    if img.ndim == 2:
+        img = np.stack([img] * 3, axis=-1)
+
+    def corr(a, b):
+        a, b = a - a.mean(), b - b.mean()
+        d = math.sqrt(float((a * a).sum() * (b * b).sum()))
+        return float((a * b).sum() / d) if d > 0 else 0.0
+    gray, rgray = img.mean(axis=2), ref.mean(axis=2)
+    cands = {(fy, fx): corr(gray[::-1 if fy else 1, ::-1 if fx else 1], rgray) for fy in (0, 1) for fx in (0, 1)}
+    (fy, fx), best = max(cands.items(), key=lambda kv: kv[1])
+    o = img[::-1 if fy else 1, ::-1 if fx else 1]
+    swap = False
+    if dec.get("channels", 1) > 1 or dec["img"].ndim == 3:
+        same = corr(o[..., 0], ref[..., 0]) + corr(o[..., 2], ref[..., 2])
+        crossed = corr(o[..., 0], ref[..., 2]) + corr(o[..., 2], ref[..., 0])
+        swap = crossed > same + 0.05
+    second = sorted(cands.values())[-2]
+    return {"flip_y": bool(fy), "flip_x": bool(fx), "swap_rb": bool(swap), "score": round(best, 3),
+            "margin": round(best - second, 3), "reference": str(native)}
+
+
+def apply_orientation(dec: dict, ori: dict | None) -> dict:
+    """The frame turned as LabSpec shows it (rows top to bottom), its axis values following the pixels."""
+    if not ori:
+        return dec
+    d = dict(dec)
+    img = d["img"]
+    if ori.get("flip_y"):
+        img, d["ys"] = img[::-1], d["ys"][::-1]
+    if ori.get("flip_x"):
+        img, d["xs"] = img[:, ::-1], d["xs"][::-1]
+    if ori.get("swap_rb") and img.ndim == 3:
+        img = img[..., ::-1]
+    d["img"] = np.ascontiguousarray(img)
+    return d
+
+
+def scale_store(new: dict | None = None) -> dict:
+    """µm per pixel and the axis signs measured per objective and camera (instrument video_scale):
+    LS6T_HOME/video_scale.json {"<objective>@<camera>": {"sx": µm/px along +image x, "ty": µm/px along -image y}}."""
+    import json
+    from . import config
+    p = config.home() / "video_scale.json"
+    if new is not None:
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(json.dumps(new, indent=1), encoding="utf-8")
+        except OSError:
+            pass
+        return new
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def image_shift(a: np.ndarray, b: np.ndarray) -> tuple[float, float]:
+    """(drow, dcol): how far the content of image a moved to appear in b (phase correlation, a parabola through the
+    peak for sub-pixel)."""
+    def g(i):
+        i = i.astype(float)
+        i = i.mean(axis=2) if i.ndim == 3 else i
+        return (i - i.mean()) * np.outer(np.hanning(i.shape[0]), np.hanning(i.shape[1]))
+    A, B = np.fft.fft2(g(a)), np.fft.fft2(g(b))
+    R = np.conj(A) * B
+    R /= np.abs(R) + 1e-12
+    r = np.fft.ifft2(R).real
+    i, j = np.unravel_index(int(np.argmax(r)), r.shape)
+    h, w = r.shape
+
+    def sub(_, m, n, axis):
+        y0 = r[(m - 1) % h, n] if axis == 0 else r[m, (n - 1) % w]
+        y2 = r[(m + 1) % h, n] if axis == 0 else r[m, (n + 1) % w]
+        den = y0 - 2 * r[m, n] + y2
+        return 0.5 * (y0 - y2) / den if den < 0 else 0.0
+    di = i + sub(None, i, j, 0)
+    dj = j + sub(None, i, j, 1)
+    if di > h / 2:
+        di -= h
+    if dj > w / 2:
+        dj -= w
+    return float(di), float(dj)
+
+
+def stage_axes(dec: dict, prof: dict, objective, x, y, camera=None) -> dict | None:
+    """Axes in stage µm from the objective's field of view (OLConfig.ini, objectives_info) around the stage
+    position: LabSpec's own video axes on the XploRA were one 'µm' per pixel from 0 (887 x 605 for an 862.9 x 590.0
+    µm field). The image is as LabSpec shows it (row 0 at the top); X grows to the right and Y upward unless the
+    profile says otherwise (video.image_x_right / video.image_y_up; TESTING T5b.2 checks them)."""
+    if x is None or y is None:
+        return None
+    cal = scale_store().get(f"{objective}@{camera}")
+    if cal and cal.get("sx") and cal.get("ty"):
+        w, h = dec["width"], dec["height"]
+        d = dict(dec)
+        d["xs"] = x + (np.arange(w) - (w - 1) / 2) * float(cal["sx"])
+        d["ys"] = y - (np.arange(h) - (h - 1) / 2) * float(cal["ty"])
+        d["um"] = True
+        d["axes_from"] = "measured (instrument video_scale)"
+        return d
+    info = (prof.get("objectives_info") or {}).get(objective) or {}
+    field = info.get("field_um")
+    if not field:
+        from .profile import match_label
+        lab, _ = match_label(str(objective or ""), list((prof.get("objectives_info") or {})))
+        field = ((prof.get("objectives_info") or {}).get(lab) or {}).get("field_um") if lab else None
+    if not field:
+        return None
+    w, h = dec["width"], dec["height"]
+    v = prof.get("video", {})
+    sx = float(field[0]) / w * (1 if v.get("image_x_right", True) else -1)
+    sy = float(field[1]) / h * (1 if v.get("image_y_up", True) else -1)
+    d = dict(dec)
+    d["xs"] = x + (np.arange(w) - (w - 1) / 2) * sx
+    d["ys"] = y - (np.arange(h) - (h - 1) / 2) * sy        # row 0 at the top: the largest Y when Y grows upward
+    d["um"] = True
+    d["axes_from"] = "the objective's field of view (OLConfig.ini) around the stage position"
+    return d
+
+
+DOG_NOISE_FLOOR = 0.1      # grey levels (0-255): the smallest DoG noise a quantised frame is credited with
+
+
+def frame_too_dark(lum) -> bool:
+    """True when the frame holds nothing to look at: almost black (99th percentile under 8 of 255) or flat (under 4
+    grey levels between its 1st and 99th percentiles). 2026-11-22: the x5 with too little light gave a black frame."""
+    lum = np.asarray(lum, float)
+    lo, hi = np.percentile(lum, [1, 99])
+    return bool(hi < 8 or hi - lo < 4)
+
+
 def _lum(img) -> np.ndarray:
     img = np.asarray(img, float)
     return img @ np.array([0.299, 0.587, 0.114]) if img.ndim == 3 else img
@@ -146,6 +292,8 @@ def features(dec: dict, n: int = 5) -> list:
     if not dec["um"]:
         return []
     lum = _lum(dec["img"])
+    if frame_too_dark(lum):
+        return []                       # nothing to see (2026-11-22: a black x5 frame gave strengths of 1e9)
     h, w = lum.shape
     xs, ys = dec["xs"], dec["ys"]
     um_px = abs(xs[-1] - xs[0]) / max(w - 1, 1)
@@ -160,7 +308,9 @@ def features(dec: dict, n: int = 5) -> list:
         best = np.where(upd, dog, best)
         sig_of = np.where(upd, sg, sig_of)
     mag = np.abs(best)
-    noise = 1.4826 * np.median(np.abs(mag - np.median(mag))) or 1e-9
+    # the noise, never below what 8-bit grey levels can resolve: a flat or black frame has a spread of ~1e-15
+    # (rounding in the filters), and dividing by it made any speck a 'feature' of strength 1e9 (2026-11-22)
+    noise = max(1.4826 * float(np.median(np.abs(mag - np.median(mag)))), DOG_NOISE_FLOOR)
     peaks = (mag == maximum_filter(mag, size=7)) & (mag > 8 * noise)
     m = max(3, int(min(h, w) * 0.05))
     peaks[:m, :] = peaks[-m:, :] = False
@@ -251,6 +401,24 @@ def render(dec: dict, png: Path, marker: tuple | None, title: str, note: str = "
     return {"path": str(png)}
 
 
+def _orientation_store(new: dict | None = None) -> dict:
+    """The frame orientation found per camera (LS6T_HOME/video_orientation.json): read, or written when new."""
+    import json
+    from . import config
+    p = config.home() / "video_orientation.json"
+    if new is not None:
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(json.dumps(new, indent=1), encoding="utf-8")
+        except OSError:
+            pass
+        return new
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
 def snapshot(res: dict, prof: dict, base: Path, title: str, laser_nm=None) -> dict:
     """The snapshot record from the bridge's answer: the PNG with the laser position marked (LabSpec's position
     plus the beam's remembered offset for this objective and laser), the raw frame, the files LabSpec saved, the
@@ -282,6 +450,36 @@ def snapshot(res: dict, prof: dict, base: Path, title: str, laser_nm=None) -> di
             out["warnings"].append(f"LabSpec's own image (no laser marker): get_image {nat}")
         return out
     out["channels"] = dec.get("channels", 1)
+    # turned as LabSpec shows it: from LabSpec's own image of this frame when it saved one, else as last found for
+    # this camera (LS6T_HOME/video_orientation.json)
+    nat = next((out["native"][f] for f in ("jpg", "png", "bmp", "tif") if f in out["native"]), None)
+    ori = detect_orientation(dec, nat)
+    store = _orientation_store()
+    cam = str(res.get("camera") if res.get("camera") not in (None, "") else "?")
+    if ori and ori["score"] >= 0.5 and ori["margin"] >= 0.05:
+        store[cam] = {k: ori[k] for k in ("flip_y", "flip_x", "swap_rb", "score")}
+        _orientation_store(store)
+    elif store.get(cam):
+        ori = dict(store[cam], reference="remembered for this camera")
+    else:
+        ori = None
+    out["orientation"] = ori
+    dec = apply_orientation(dec, ori)
+    labspec_span = [float(abs(dec["xs"][-1] - dec["xs"][0])), float(abs(dec["ys"][-1] - dec["ys"][0]))] \
+        if len(dec["xs"]) > 1 else None
+    sa = stage_axes(dec, prof, res.get("objective"), x, y, res.get("camera"))
+    if sa is not None:
+        dec = sa
+        out["axes_from"] = sa["axes_from"]
+        out["labspec_axes_span"] = labspec_span
+    else:
+        out["axes_from"] = "LabSpec's video axes"
+        per_px = labspec_span and abs(labspec_span[0] / max(dec["width"] - 1, 1) - 1) < 0.01
+        if per_px:
+            out["warnings"].append(f"no field of view or measured scale for the objective {res.get('objective')!r}: "
+                                   "the axes are LabSpec's, one per pixel whatever the objective, so positions "
+                                   "in µm are not to be trusted; run `ls6t instrument video-scale` with this "
+                                   "objective")
     off, src = SP.offset_for(prof, res.get("objective"), laser_nm)
     out["offset_used_um"], out["offset_source"] = off, src
     marker, note = None, ""
@@ -311,6 +509,9 @@ def snapshot(res: dict, prof: dict, base: Path, title: str, laser_nm=None) -> di
         if res.get("out_nolaser"):
             try:
                 dark = decode(res["out_nolaser"], v.get("packing", "colorref"), v.get("order", "x_fastest"))
+                dark = apply_orientation(dark, ori)
+                if sa is not None:
+                    dark = dict(dark, xs=dec["xs"], ys=dec["ys"], um=True)
                 out["raw_nolaser"] = res["out_nolaser"]
             except (ValueError, OSError) as exc:
                 out["warnings"].append(f"the frame without the laser could not be decoded: {exc}")
@@ -326,7 +527,11 @@ def snapshot(res: dict, prof: dict, base: Path, title: str, laser_nm=None) -> di
                 # what to put in the profile's video.laser_offset_um so the marker sits on the beam
                 out["measured_offset_um"] = [round(spot["x"] - x, 3), round(spot["y"] - y, 3)]
     feats = []
-    if dec["um"]:
+    if frame_too_dark(_lum(dec["img"])) and not spot:
+        out["frame_dark"] = True
+        out["warnings"].append("the frame is black or without contrast (too little light, the camera's exposure, or "
+                               "the video stopped): no features; turn the white light up or check LabSpec's image")
+    elif dec["um"]:
         try:
             feats = features(dec)
         except Exception as exc:  # noqa: BLE001

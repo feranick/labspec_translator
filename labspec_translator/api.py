@@ -1,5 +1,5 @@
 """api.py — the functions behind the command line and the MCP server (JSON in, JSON out).
-Version: 2026.11.22.7
+Version: 2026.11.22.8
 """
 from __future__ import annotations
 
@@ -450,6 +450,8 @@ def _instrument(action, camera, setup, seconds) -> dict:
             except (KeyError, TypeError, ValueError):
                 pass
             return r
+        if action == "video_scale":
+            return video_scale(b, seconds)
         if action == "end_bridge":
             # the bridge ends itself cleanly (laser closed, window closed, heartbeat 'stopped'): before the operator
             # uses LabSpec's live video buttons, which end a running script abruptly. A person starts it again.
@@ -696,9 +698,84 @@ def _move_timing(r: dict) -> dict:
             out[k] = float(r[k]) if k.endswith("_s") else True
     if r.get("move_id") not in (None, ""):
         out["move_id"] = r["move_id"]
+    if str(r.get("no_message", "")) == "1":
+        out["labspec_prompt"] = "suppressed (ls6t asked the operator)"
+    elif str(r.get("no_message_refused", "")) == "1":
+        out["labspec_prompt"] = "LabSpec refused MOTOR_NO_MESSAGE: it may have asked the operator again"
     if r.get("bridge_move_n") not in (None, ""):
         out["bridge_move_n"] = int(float(r["bridge_move_n"]))     # 1: the first move since this bridge started
     return out
+
+
+def video_scale(b: Bridge, step_um=None) -> dict:
+    """The video's µm per pixel and axis directions, measured: a frame, the stage moved step_um in +X (default 50
+    µm, no laser, nothing else moves), a frame, back; the same in +Y; the image shift by phase correlation. Stored
+    per objective and camera (video_scale.json) and used for every snapshot's axes from then on. On the XploRA's x10
+    (2026-11-22): 0.98-0.99 µm/px measured by hand vs 0.974 from OLConfig's field and 1.00 from LabSpec's axes."""
+    from . import video as V
+    prof = P.load()
+    step = float(step_um or 50.0)
+    if not 5 <= step <= min(500.0, float(prof["limits"]["max_xy_um"])):
+        return {"ok": False, "error": f"step: 5 to {min(500.0, float(prof['limits']['max_xy_um'])):g} µm"}
+    if runner.read_json(runner.lock_path(), None):
+        return {"ok": False, "error": "the instrument is busy with a request: wait or cancel it"}
+    v = prof.get("video", {})
+    st = b.call("status", timeout_s=15, **runner.motor_args(prof))
+    x0, y0 = _fnum(st.get("x_um")), _fnum(st.get("y_um"))
+    if x0 is None or y0 is None:
+        return {"ok": False, "error": "the stage position could not be read"}
+    folder = config.out_dir() / "video_scale" / time.strftime("%Y%m%d_%H%M%S")
+    folder.mkdir(parents=True, exist_ok=True)
+
+    def frame(tag):
+        r = b.call("video", timeout_s=90, out=str(folder / tag), settle_s=float(v.get("settle_s", 1.5)), laser_s=0,
+                   formats="jpg", camera=v.get("camera"), stop_video=int(bool(v.get("stop_from_script"))),
+                   switch_camera=int(bool(v.get("switch_camera"))), **runner.motor_args(prof))
+        if not r.get("ok") or not r.get("out"):
+            raise BridgeError(f"video frame {tag}: {r.get('error') or 'no frame'}")
+        d = V.decode(r["out"], v.get("packing", "colorref"), v.get("order", "x_fastest"))
+        ori = V.detect_orientation(d, f"{folder / tag}.jpg") or \
+            V._orientation_store().get(str(r.get("camera") if r.get("camera") not in (None, "") else "?"))
+        return V.apply_orientation(d, ori), r
+
+    try:
+        f0, r0 = frame("home")
+        out = {"ok": True, "objective": r0.get("objective"), "camera": r0.get("camera"), "step_um": step,
+               "folder": str(folder)}
+        res = {}
+        for axis, dx, dy in (("x", step, 0.0), ("y", 0.0, step)):
+            m = b.call("move_xy", timeout_s=120, x_um=round(x0 + dx, 3), y_um=round(y0 + dy, 3),
+                       **runner.motor_args(prof))
+            if not m.get("ok"):
+                raise BridgeError(f"move in {axis}: {m.get('error')}")
+            f1, _ = frame(f"plus_{axis}")
+            b.call("move_xy", timeout_s=120, x_um=round(x0, 3), y_um=round(y0, 3), **runner.motor_args(prof))
+            drow, dcol = V.image_shift(f0["img"], f1["img"])
+            res[axis] = {"shift_px": [round(dcol, 2), round(drow, 2)]}
+        # x_um(col) = X + (col - c) * sx, y_um(row) = Y - (row - r) * ty: a stage move +d shifts the content by
+        # -d/sx columns and +d/ty rows
+        sx = -step / res["x"]["shift_px"][0] if abs(res["x"]["shift_px"][0]) > 1 else None
+        ty = step / res["y"]["shift_px"][1] if abs(res["y"]["shift_px"][1]) > 1 else None
+        cross = max(abs(res["x"]["shift_px"][1]), abs(res["y"]["shift_px"][0]))
+        out.update(measured=res, um_per_px_x=None if sx is None else round(sx, 5),
+                   um_per_px_y=None if ty is None else round(ty, 5), cross_talk_px=round(cross, 2))
+        if sx is None or ty is None or cross > 0.1 * step / max(abs(sx or 1), 1e-6):
+            out.update(ok=False, error="no clear shift (a featureless view, or the stage did not move as asked): "
+                                       "nothing stored; use a sample with visible structure")
+            return out
+        store = V.scale_store()
+        store[f"{r0.get('objective')}@{r0.get('camera')}"] = {"sx": sx, "ty": ty, "measured": time.strftime(
+            "%Y-%m-%d %H:%M:%S"), "step_um": step}
+        V.scale_store(store)
+        out["stored"] = f"{r0.get('objective')}@{r0.get('camera')}"
+        out["note"] = ("image x grows with stage X" if sx > 0 else "image x runs against stage X") + "; " + \
+                      ("image up is stage +Y" if ty > 0 else "image up is stage -Y")
+        return out
+    finally:
+        try:
+            b.call("move_xy", timeout_s=120, x_um=round(x0, 3), y_um=round(y0, 3), **runner.motor_args(prof))
+        except BridgeError:
+            pass
 
 
 def objective_retract_wanted(prof: dict) -> bool:
@@ -761,6 +838,7 @@ def set_instrument(setup: dict) -> dict:
         S.ensure(b.dir)
     moves, out = [], {"ok": False}
     already: list = []                  # settings found in place before any move (the objective)
+    obj_asked = False                   # ls6t asked the operator about the objective: LabSpec need not ask again
     t_all = time.time()
     hb0 = b.heartbeat() or {}
     try:
@@ -807,6 +885,7 @@ def set_instrument(setup: dict) -> dict:
                     if r.get("answer") != "yes":
                         return {"ok": False, "error": "the operator declined in LabSpec" + nothing
                                 + (" except the retract: the stage is lowered" if retracted is not None else "")}
+                    obj_asked = True
                 moves.append(("objective", mot["objective"], "label", lab))
             else:
                 already.append({"set": "objective", "asked": lab, "got": before.get("objective"), "ok": True,
@@ -837,7 +916,7 @@ def set_instrument(setup: dict) -> dict:
                              "error": None})
                 continue
             r = b.call("move", timeout_s=600 if what in ("laser", "grating", "objective") else 120, motor=motor,
-                       mode=mode, value=value, **runner.move_extra(prof, motor))
+                       mode=mode, value=value, **runner.move_extra(prof, motor, what == "objective" and obj_asked))
             got = r.get("label") if mode == "label" else r.get("value")
             ok = bool(r.get("ok")) and P.same_position(got, value)
             done.append({"set": what, "asked": value, "got": got, "ok": ok, "error": r.get("error") or None,

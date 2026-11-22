@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.22.7)
+## Architecture (version 2026.11.22.8)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -656,6 +656,25 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
 - 2026-11-22, 2026.11.22.7: Nicola (on .22.6): set with the objective already in place reported objective.source
   'changed by hand and confirmed by the operator'; the 'asked' test counted the already_set entry; now it needs a
   change actually made. 138 tests.
+- 2026-11-22, 2026.11.22.8: Nicola's first real snapshot (Si, x10, top camera): frame rows reversed and R/B swapped
+  against LabSpec's JPEG; scale 1/px (LabSpec's axes); marker outside; +100 µm X -> -101 px, +100 µm Y -> +102 px
+  (flipped). video.detect_orientation (correlates with the saved jpg/png: flips by grayscale, swap by channels;
+  stored per camera in video_orientation.json when score >= 0.5 and margin >= 0.05), apply_orientation, stage_axes
+  (video_scale.json "<objective>@<camera>" if measured, else field_um / pixels around stage X,Y; signs
+  video.image_x_right / image_y_up), image_shift (phase correlation, sub-pixel). api.video_scale (instrument action,
+  CLI video-scale, step 5-500 µm, default 50; cross-talk > 10 % fails; returns home). Bridge VVideo returns the
+  camera. Nicola's per-objective test (x10 100 µm -> 101-102 px, 0.98-0.99 µm/px; x100 10 µm -> 103-105 px, 0.096;
+  profile fields 0.972 / 0.0963; ls6t's axes 1.00 for all, x5 field stayed 887 µm) confirms it. T3.2: LabSpec asked a
+  second time after ls6t's question: runner.move_extra(asked) adds no_message=1 (profile suppress_labspec_prompt,
+  default on), the bridge adds LS_MOTOR_NO_MESSAGE (100, 2018 manual; not in 6.8.1's constants.vbm) and retries
+  without it if refused (no_message_refused); api._move_timing reports labspec_prompt. Black x5 frame: features
+  divided by a ~1e-15 MAD (strength 1e9): video.frame_too_dark (p99 < 8 or p99 - p1 < 4) skips features and
+  warns (frame_dark), DOG_NOISE_FLOOR 0.1. Snapshot with LabSpec's 1/px axes and no field warns. 140 tests.
+  T3.14 on .22.7: clean stop, settle, Video(11) -> 0, restart: the view stayed on camera 0. Nicola asked whether
+  10 + id is the right code: LabSpec 6.8.1's HELP\VBS\Video.html documents long Video(long Mode) with
+  '10+CameraID : SET_ACTIVE_CAMERA' (constants.vbm SET_ACTIVE_CAMERA = 10): it is. CameraCheck now adds
+  camera_note (GET_ACTIVE_CAMERA is the selection, not the view). TESTING T3.14b: Video(11) from LabSpec's own
+  script window with no bridge, then a start by hand. video.switch_camera stays false.
 
 ## To do next
 

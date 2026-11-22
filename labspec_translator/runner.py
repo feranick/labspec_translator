@@ -1,5 +1,5 @@
 """runner.py — runs a request's studies on the instrument, one command at a time, and checks every result.
-Version: 2026.11.22.7
+Version: 2026.11.22.8
 
 A request runs in its own process (`ls6t run-request FOLDER`, started detached by api.start), so it outlives the
 MCP call that started it. One request at a time holds the instrument (a lock file under LS6T_HOME); others wait
@@ -340,9 +340,12 @@ def _setup(name: str, study: dict, ctx: Ctx, warnings: list, unreliable: list, c
             if ans.get("answer") != "yes":
                 raise Stop("the operator declined to change the objective", "operator")
             ctx.objective_by_operator = step["value"]
+            asked_here = True
+        else:
+            asked_here = False
         p = {k: v for k, v in step.items() if k not in ("verb", "why")}
         long_move = p["motor"] in (prof["motors"]["laser"], prof["motors"]["grating"], prof["motors"]["objective"])
-        r = ctx.call("move", timeout_s=600 if long_move else 120, **p, **move_extra(prof, p["motor"]))
+        r = ctx.call("move", timeout_s=600 if long_move else 120, **p, **move_extra(prof, p["motor"], asked_here))
         ok, got = _matches(step, r)
         from .api import _move_timing
         readback.append({"motor": step["motor"], "asked": step["value"], "got": r.get("label") or r.get("value"),
@@ -1121,7 +1124,8 @@ def run_move(name: str, study: dict, ctx: Ctx) -> dict:
             if ans.get("answer") != "yes":
                 raise Stop("the operator declined to change the objective", "operator")
             ctx.objective_by_operator = str(obj)
-        r = ctx.call("move", timeout_s=600, motor=prof["motors"]["objective"], mode="label", value=str(obj))
+        r = ctx.call("move", timeout_s=600, motor=prof["motors"]["objective"], mode="label", value=str(obj),
+                     **move_extra(prof, prof["motors"]["objective"], ctx.objective_by_operator == str(obj)))
         if not r["ok"] or not P.same_position(r.get("label"), obj):
             raise Stop(f"objective {obj}: {r.get('error') or 'got ' + str(r.get('label'))}", "study")
     hx, hy = ctx.home_xy
@@ -2075,12 +2079,17 @@ BLOCK_BY_HAND = ("THE LASER IS NOT TURNED OFF BY ls6t: without a confirmed laser
                  "source). Do not confirm from a remote session: nobody there can see the beam.")
 
 
-def move_extra(prof: dict, motor: str) -> dict:
+def move_extra(prof: dict, motor: str, asked: bool = False) -> dict:
     """{'blocking': 1} for the motors moved the blocking way (profile blocking_motors, by role; the grating by
-    default: with NO_WAIT it reported idle at once and once stopped part way, 2026-11-20)."""
+    default: with NO_WAIT it reported idle at once and once stopped part way, 2026-11-20). {'no_message': 1} when
+    ls6t has asked the operator about this motor already (a manual objective turret): LabSpec then does not ask a
+    second time (profile suppress_labspec_prompt, on by default; 2026-11-22, T3.2)."""
     roles = prof.get("blocking_motors", []) or []
     names = {prof["motors"].get(r) for r in roles if prof["motors"].get(r)}
-    return {"blocking": 1} if motor in names else {}
+    out = {"blocking": 1} if motor in names else {}
+    if asked and prof.get("suppress_labspec_prompt", True):
+        out["no_message"] = 1
+    return out
 
 
 def _matches(step: dict, r: dict) -> tuple[bool, str]:

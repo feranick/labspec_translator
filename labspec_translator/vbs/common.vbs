@@ -19,6 +19,7 @@ Const LS_MOTOR_STRING = 3
 Const LS_MOTOR_SIZE = 3
 Const LS_MOTOR_STOP = 6
 Const LS_MOTOR_NO_WAIT = 10
+Const LS_MOTOR_NO_MESSAGE = 100      ' the 2018 manual: no LabSpec prompt for a manual motor (not in 6.8.1's constants.vbm)
 Const LS_MOTOR_INDEXTOVALUE = 10
 Const LS_MOTOR_INDEXTOSTRING = 20
 ' LabSpec 6.7's own constants (macros\constants.vbm): the same reads for any number of positions
