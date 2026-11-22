@@ -12,7 +12,7 @@ stops and cancel on the simulator, and `ls6t bench` gives known answers. What re
 LabSpec and hardware. The plan goes from no laser and no motion to an LLM app driving a full map, in stages. Each
 stage starts only when the previous one passed.
 
-Version under test: 2026.11.22.8 (bridge protocol 1).
+Version under test: 2026.11.22.9 (bridge protocol 1).
 
 **Already known** (2026-11-20, from the instrument's discovery dump, its `NFActiveX.ocx`, `OLConfig.ini`,
 `OLSetup.ini` and LabSpec 6.7.1's service scripts): the motors and their positions (lasers 532, 637.75, 785.04 nm;
@@ -326,7 +326,7 @@ the single command underneath.
 | Step | Command | Pass |
 |---|---|---|
 | T3.1 | `ls6t instrument set --filter 1%`, then each other filter up to the caps; `--filter 50%` with the 10 % cap | the wheel moves; `after.filter` equals the label asked; above the cap: refused, nothing moves |
-| T3.2 | `ls6t instrument set --objective x5` (**Q5**), then back | LabSpec shows ls6t's question: change the objective BY HAND to x5, check the clearance, OK. After OK, LabSpec's objective reads `x5_VIS` and the answer's `objective.source` says it was changed by hand and confirmed. Cancel once: nothing changes. 2026-11-22 (.22.7): LabSpec asked a second time during the move (wait_s 3.4 s and 1.3 s). Since .22.8 the move goes with MOTOR_NO_MESSAGE after ls6t's question: pass when LabSpec does not ask again and the move's `labspec_prompt` says "suppressed" ("LabSpec refused MOTOR_NO_MESSAGE": record it; profile `suppress_labspec_prompt` false restores the old way). |
+| T3.2 | `ls6t instrument set --objective x5` (**Q5**), then back | LabSpec shows ls6t's question: change the objective BY HAND to x5, check the clearance, OK. After OK, LabSpec's objective reads `x5_VIS` and the answer's `objective.source` says it was changed by hand and confirmed. Cancel once: nothing changes. 2026-11-22 (.22.7): LabSpec asked a second time during the move (wait_s 3.4 s and 1.3 s). Since .22.8 the move goes with MOTOR_NO_MESSAGE only right after the operator's Yes to ls6t's question (never for any other objective move, and not with confirmations off: then LabSpec's own prompt is the one confirmation): pass when LabSpec does not ask again and the move's `labspec_prompt` says "suppressed" ("LabSpec refused MOTOR_NO_MESSAGE": record it; profile `suppress_labspec_prompt` false restores the old way). |
 | T3.3 | `ls6t instrument set --grating 600`, then back | the grating moves; read back; note `seconds` |
 | T3.4 | `ls6t instrument set --laser-nm 532` (and 638, 785) | the laser line changes in LabSpec (no emission); read back; note the time |
 | T3.5 | `ls6t instrument set --hole 300 --slit 100` | read back (or the error, if not motorised) |
@@ -494,14 +494,20 @@ remembering them per camera; the scale comes from the objective's field of view 
 - Take a snapshot with the same view as on 2026-11-22. Pass: `frame.marked.png` looks like LabSpec's image (same
   way up, same colours); `orientation` shows `flip_y` true, `swap_rb` true and a `score` above 0.8; `axes_from` names
   the objective's field; the laser marker is inside the image (at its centre, the stage position). With the x5 the field is about 1713 x 1170 µm, not 887 x 605 (2026-11-22). A black frame (too little light) gives `frame_dark`, a warning and no features (2026-11-22: five 'features' of strength 1e9).
-- `ls6t instrument video-scale` (x10, no laser, a view with visible structure; the stage moves 50 µm in +X and +Y
-  and comes back; `--seconds 20` for 20 µm). Pass: `ok`; `um_per_px_x` and `um_per_px_y` about 0.97-0.99 in size
+- `ls6t instrument video-scale` (x10, no laser, a lit view with visible structure; the stage moves a fifth of the
+  field, ~170 µm, in +X and +Y and comes back; `--um 100` for 100 µm; over half the field is refused). Pass: `ok`; `um_per_px_x` and `um_per_px_y` about 0.97-0.99 in size
   (field / pixels: 862.89 / 888 = 0.972; measured by hand 2026-11-22: x10 0.98-0.99, x100 0.096); `cross_talk_px` small; `note` names the axis directions; the stage back
   where it started. Record the values and the note.
 - Repeat the 2026-11-22 move test (snapshot, `move_xy` +100 µm in X, snapshot; then Y). Pass: `axes_from` says
   "measured"; the features move by about -100 µm in X and -100 µm in Y in ls6t's plot, in µm (the stage moved
   under the view: the features go the other way), and the same way as in LabSpec's video window.
-- Repeat `video-scale` for the x100 (and any other objective used for snapshots); each is stored separately.
+- Repeat `video-scale` for the x100 (default move ~17 µm; `step_from` says so) and the x5 (~340 µm); each is stored
+  separately.
+- Orientation from a black frame: with the x5 and the light off (black frame), take a snapshot. Pass: `orientation`
+  says "remembered for this camera (the frame is dark or flat)" and keeps `flip_y` / `swap_rb` from the lit view;
+  a grey Si view keeps the stored colour swap (`swap_from` "kept").
+- The marker: until a `spot` study measured the beam for this objective and laser, `marker_measured` is false,
+  `marker_source` starts with "ASSUMED" and the plot labels the marker "assumed".
 - If the colours or the way up still differ (no JPEG saved, or a view without structure: `score` low), set
   `video.packing` to `rgb`, or keep `raw` (the `.video.txt` file) for analysis.
 

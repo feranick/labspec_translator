@@ -1,5 +1,5 @@
 """runner.py — runs a request's studies on the instrument, one command at a time, and checks every result.
-Version: 2026.11.22.8
+Version: 2026.11.22.9
 
 A request runs in its own process (`ls6t run-request FOLDER`, started detached by api.start), so it outlives the
 MCP call that started it. One request at a time holds the instrument (a lock file under LS6T_HOME); others wait
@@ -1117,6 +1117,7 @@ def run_move(name: str, study: dict, ctx: Ctx) -> dict:
     before = ctx.call("status", timeout_s=15, **motor_args(prof))
     obj = (study.get("setup") or {}).get("objective")
     if obj is not None:
+        confirmed_now = False           # MOTOR_NO_MESSAGE only for the move the operator has just confirmed here
         if prof.get("manual_objective", True) and str(obj) != str(before.get("objective")) \
                 and config.confirm_policy() != "never":
             from .api import objective_question
@@ -1124,8 +1125,9 @@ def run_move(name: str, study: dict, ctx: Ctx) -> dict:
             if ans.get("answer") != "yes":
                 raise Stop("the operator declined to change the objective", "operator")
             ctx.objective_by_operator = str(obj)
+            confirmed_now = True
         r = ctx.call("move", timeout_s=600, motor=prof["motors"]["objective"], mode="label", value=str(obj),
-                     **move_extra(prof, prof["motors"]["objective"], ctx.objective_by_operator == str(obj)))
+                     **move_extra(prof, prof["motors"]["objective"], confirmed_now))
         if not r["ok"] or not P.same_position(r.get("label"), obj):
             raise Stop(f"objective {obj}: {r.get('error') or 'got ' + str(r.get('label'))}", "study")
     hx, hy = ctx.home_xy
@@ -2079,15 +2081,17 @@ BLOCK_BY_HAND = ("THE LASER IS NOT TURNED OFF BY ls6t: without a confirmed laser
                  "source). Do not confirm from a remote session: nobody there can see the beam.")
 
 
-def move_extra(prof: dict, motor: str, asked: bool = False) -> dict:
+def move_extra(prof: dict, motor: str, confirmed_now: bool = False) -> dict:
     """{'blocking': 1} for the motors moved the blocking way (profile blocking_motors, by role; the grating by
-    default: with NO_WAIT it reported idle at once and once stopped part way, 2026-11-20). {'no_message': 1} when
-    ls6t has asked the operator about this motor already (a manual objective turret): LabSpec then does not ask a
-    second time (profile suppress_labspec_prompt, on by default; 2026-11-22, T3.2)."""
+    default: with NO_WAIT it reported idle at once and once stopped part way, 2026-11-20). {'no_message': 1} only
+    for the objective move the operator has just confirmed in ls6t's question (confirmed_now: the caller sets it
+    right after that Yes, for that move alone): LabSpec then does not ask a second time, and every other objective
+    move keeps LabSpec's own prompt, so there is always exactly one confirmation (profile suppress_labspec_prompt,
+    on by default; 2026-11-22, T3.2)."""
     roles = prof.get("blocking_motors", []) or []
     names = {prof["motors"].get(r) for r in roles if prof["motors"].get(r)}
     out = {"blocking": 1} if motor in names else {}
-    if asked and prof.get("suppress_labspec_prompt", True):
+    if confirmed_now and motor == prof["motors"].get("objective") and prof.get("suppress_labspec_prompt", True):
         out["no_message"] = 1
     return out
 

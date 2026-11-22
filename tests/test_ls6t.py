@@ -2285,7 +2285,7 @@ def test_orientation_from_labspecs_image_and_video_scale(tmp_path):
     assert (fixed["img"] == shown).all() and fixed["ys"][0] == H - 1
     # the stage scale measured with known moves (the simulator's x100: 0.4 µm per pixel)
     S.ensure(config.active_bridge_dir())
-    r = api.instrument("video_scale", seconds=5)
+    r = api.instrument("video_scale", um=5)
     assert r["ok"] and abs(abs(r["um_per_px_x"]) - 0.4) < 0.02 and abs(abs(r["um_per_px_y"]) - 0.4) < 0.02
     assert r["stored"] in V.scale_store()
     snap = api.snapshot()
@@ -2304,6 +2304,7 @@ def test_no_labspec_prompt_after_ls6t_asked_and_black_frame(tmp_path):
     m = prof["motors"]
     assert runner.move_extra(prof, m["objective"], True) == {"no_message": 1}
     assert runner.move_extra(prof, m["objective"], False) == {}
+    assert runner.move_extra(prof, m["grating"], True) == {}                  # only the objective
     assert runner.move_extra(dict(prof, suppress_labspec_prompt=False), m["objective"], True) == {}
     S.ensure(config.active_bridge_dir())
     r = api.instrument("set", setup={"objective": "x50"})
@@ -2324,3 +2325,51 @@ def test_no_labspec_prompt_after_ls6t_asked_and_black_frame(tmp_path):
            "width": W, "height": H, "channels": 1, "meta": {}}
     f = V.features(dec)
     assert f and f[0]["strength"] < 1e5 and abs(f[0]["x_um"] - 80) < 3
+
+
+def test_orientation_kept_from_dark_frames_scale_step_marker_assumed(tmp_path):
+    """2026-11-22 review: a black frame must not overwrite the orientation remembered for the camera (nor a grey one
+    the colour swap); video_scale's default move is a fifth of the field (50 µm left the x100's ~85 µm view), given
+    with --um; the marker says it is assumed until a spot study measured the beam; LabSpec's own prompt is
+    suppressed only for the objective move just confirmed in ls6t's question."""
+    from labspec_translator import video as V
+    from PIL import Image as PILImage
+    H, W = 60, 80
+    rng = np.random.default_rng(2)
+    shown = rng.integers(0, 255, (H, W, 3)).astype(np.uint8)
+    PILImage.fromarray(shown).save(tmp_path / "lit.jpg", quality=95)
+    lit = {"img": shown[::-1, :, ::-1], "xs": np.arange(W, dtype=float), "ys": np.arange(H, dtype=float),
+           "um": True, "width": W, "height": H, "channels": 3, "meta": {}}
+    ori, why = V.orientation_for(lit, tmp_path / "lit.jpg", 7)
+    assert why is None and ori["flip_y"] and ori["swap_rb"]
+    assert V._orientation_store()["7"]["flip_y"] is True
+    # a black frame with its (black) JPEG: nothing learnt, the stored one applied
+    black = np.zeros((H, W, 3), np.uint8)
+    PILImage.fromarray(black).save(tmp_path / "black.jpg")
+    dk = dict(lit, img=black)
+    ori, why = V.orientation_for(dk, tmp_path / "black.jpg", 7)
+    assert ori["flip_y"] and ori["swap_rb"] and "dark or flat" in ori["reference"]
+    assert V._orientation_store()["7"]["swap_rb"] is True
+    # a grey (colourless) structured frame: flips learnt, the swap kept
+    grey = np.repeat(rng.integers(0, 255, (H, W, 1)).astype(np.uint8), 3, axis=2)
+    PILImage.fromarray(grey).save(tmp_path / "grey.jpg", quality=95)
+    ori, why = V.orientation_for(dict(lit, img=grey[::-1]), tmp_path / "grey.jpg", 7)
+    assert ori["flip_y"] and ori["swap_rb"] is True and ori["swap_from"].startswith("kept")
+    # nothing remembered for another camera and a dark frame: not applied, with a warning
+    ori, why = V.orientation_for(dk, tmp_path / "black.jpg", 9)
+    assert ori is None and "not decided" in why
+    # video_scale: default a fifth of the field; over half refused before anything moves
+    S.ensure(config.active_bridge_dir())
+    st0 = api.instrument("status")["status"]
+    r = api.instrument("video_scale")
+    assert r["ok"] and r["step_from"].startswith("a fifth of the field"), r
+    r2 = api.instrument("video_scale", um=400)
+    assert not r2["ok"] and ("over half the field" in r2["error"] or "1 to" in r2["error"])
+    st1 = api.instrument("status")["status"]
+    assert abs(float(st1["x_um"]) - float(st0["x_um"])) < 0.5 and abs(float(st1["y_um"]) - float(st0["y_um"])) < 0.5
+    # the marker is assumed until a spot study measured the offset
+    snap = api.snapshot()
+    assert snap["ok"] and snap["marker_measured"] is False and snap["marker_source"].startswith("ASSUMED")
+    # CLI flag
+    from labspec_translator import cli
+    assert "--um" in Path(cli.__file__).read_text()

@@ -1,5 +1,5 @@
 """api.py — the functions behind the command line and the MCP server (JSON in, JSON out).
-Version: 2026.11.22.8
+Version: 2026.11.22.9
 """
 from __future__ import annotations
 
@@ -358,13 +358,14 @@ def action_log(limit: int = 10) -> list:
     return rows[::-1][:limit]
 
 
-def instrument(action: str = "status", camera=None, setup: dict | None = None, seconds: float | None = None) -> dict:
+def instrument(action: str = "status", camera=None, setup: dict | None = None, seconds: float | None = None,
+               um: float | None = None) -> dict:
     """status: the bridge's ping and the instrument's state. discover: the discovery dump and a proposed profile
     (written next to the profile as profile.proposed.json; a person reviews it and applies it with `ls6t profile
     import <profile.proposed.json>`). resume: asks the operator in LabSpec to lift a halt. Every action but the
     reads goes to LS6T_HOME/instrument_log.jsonl (shown by jobs)."""
     t0 = time.time()
-    r = _instrument(action, camera, setup, seconds)
+    r = _instrument(action, camera, setup, seconds, um)
     if action not in QUIET_ACTIONS:
         row = {"time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t0)), "action": action,
                "ok": bool(r.get("ok", True)) if isinstance(r, dict) else None,
@@ -385,7 +386,7 @@ def instrument(action: str = "status", camera=None, setup: dict | None = None, s
     return r
 
 
-def _instrument(action, camera, setup, seconds) -> dict:
+def _instrument(action, camera, setup, seconds, um=None) -> dict:
     b = Bridge()
     if config.mode() == "sim":
         from . import sim as S
@@ -451,7 +452,7 @@ def _instrument(action, camera, setup, seconds) -> dict:
                 pass
             return r
         if action == "video_scale":
-            return video_scale(b, seconds)
+            return video_scale(b, um)
         if action == "end_bridge":
             # the bridge ends itself cleanly (laser closed, window closed, heartbeat 'stopped'): before the operator
             # uses LabSpec's live video buttons, which end a running script abruptly. A person starts it again.
@@ -707,16 +708,23 @@ def _move_timing(r: dict) -> dict:
     return out
 
 
+SCALE_STEP_FRACTION = 0.2      # video_scale's default move: a fifth of the field (x100 ~17 µm, x10 ~170 µm)
+
+
+def _sig2(v: float) -> float:
+    """v rounded to two significant figures (172.6 -> 170, 17.3 -> 17)."""
+    return float(f"{v:.2g}")
+
+
 def video_scale(b: Bridge, step_um=None) -> dict:
-    """The video's µm per pixel and axis directions, measured: a frame, the stage moved step_um in +X (default 50
-    µm, no laser, nothing else moves), a frame, back; the same in +Y; the image shift by phase correlation. Stored
-    per objective and camera (video_scale.json) and used for every snapshot's axes from then on. On the XploRA's x10
-    (2026-11-22): 0.98-0.99 µm/px measured by hand vs 0.974 from OLConfig's field and 1.00 from LabSpec's axes."""
+    """The video's µm per pixel and axis directions, measured: a frame, the stage moved step_um in +X (no laser,
+    nothing else moves), a frame, back; the same in +Y; the image shift by phase correlation. The default move is a
+    fifth of the objective's field (its measured scale, else OLConfig's field: x100 ~17 µm, x10 ~170 µm), so the
+    features stay in view; a move over half the field is refused. Stored per objective and camera
+    (video_scale.json) and used for every snapshot's axes from then on. On the XploRA (2026-11-22, by hand): x10
+    0.98-0.99 µm/px (field 0.972), x100 0.096 (0.0963); LabSpec's axes 1.00 for both."""
     from . import video as V
     prof = P.load()
-    step = float(step_um or 50.0)
-    if not 5 <= step <= min(500.0, float(prof["limits"]["max_xy_um"])):
-        return {"ok": False, "error": f"step: 5 to {min(500.0, float(prof['limits']['max_xy_um'])):g} µm"}
     if runner.read_json(runner.lock_path(), None):
         return {"ok": False, "error": "the instrument is busy with a request: wait or cancel it"}
     v = prof.get("video", {})
@@ -734,14 +742,38 @@ def video_scale(b: Bridge, step_um=None) -> dict:
         if not r.get("ok") or not r.get("out"):
             raise BridgeError(f"video frame {tag}: {r.get('error') or 'no frame'}")
         d = V.decode(r["out"], v.get("packing", "colorref"), v.get("order", "x_fastest"))
-        ori = V.detect_orientation(d, f"{folder / tag}.jpg") or \
-            V._orientation_store().get(str(r.get("camera") if r.get("camera") not in (None, "") else "?"))
+        ori, _why = V.orientation_for(d, f"{folder / tag}.jpg", r.get("camera"))
         return V.apply_orientation(d, ori), r
 
+    cap = min(500.0, float(prof["limits"]["max_xy_um"]))
     try:
         f0, r0 = frame("home")
+        if V.frame_too_dark(V._lum(f0["img"])):
+            return {"ok": False, "error": "the frame is black or without contrast: turn the white light up and focus "
+                                          "on a view with visible structure; nothing moved", "folder": str(folder)}
+        width = None                    # the field's width in µm: the measured scale, else OLConfig's field
+        sa = V.stage_axes(f0, prof, r0.get("objective"), x0, y0, r0.get("camera"))
+        if sa is not None:
+            width = float(abs(sa["xs"][-1] - sa["xs"][0]))
+        elif f0["um"] and len(f0["xs"]) > 1:
+            span = float(abs(f0["xs"][-1] - f0["xs"][0]))
+            if abs(span / (f0["width"] - 1) - 1) > 0.01:      # LabSpec's axes, when not its one-per-pixel ones
+                width = span
+        if step_um:
+            step = float(step_um)
+        elif width:
+            step = _sig2(SCALE_STEP_FRACTION * width)
+        else:
+            return {"ok": False, "error": f"no field of view known for objective {r0.get('objective')!r}: give the "
+                                          "move (--um), about a fifth of the field's width; nothing moved"}
+        if not 1 <= step <= cap:
+            return {"ok": False, "error": f"move: 1 to {cap:g} µm; nothing moved"}
+        if width and step > 0.5 * width:
+            return {"ok": False, "error": f"{step:g} µm is over half the field ({width:.0f} µm wide): the features "
+                                          f"would leave the view; about {_sig2(SCALE_STEP_FRACTION * width):g} µm "
+                                          "works; nothing moved"}
         out = {"ok": True, "objective": r0.get("objective"), "camera": r0.get("camera"), "step_um": step,
-               "folder": str(folder)}
+               "step_from": "asked" if step_um else f"a fifth of the field ({width:.0f} µm)", "folder": str(folder)}
         res = {}
         for axis, dx, dy in (("x", step, 0.0), ("y", 0.0, step)):
             m = b.call("move_xy", timeout_s=120, x_um=round(x0 + dx, 3), y_um=round(y0 + dy, 3),

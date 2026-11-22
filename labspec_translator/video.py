@@ -1,5 +1,5 @@
 """video.py — video snapshots: decoding the bridge's frame file and drawing it with the laser position marked.
-Version: 2026.11.22.8
+Version: 2026.11.22.9
 
 The bridge writes a cloned video frame as '# key=value' header lines (axis types, sizes, units, values) and the
 pixel values in LabSpec's order. LabSpec's video axes are taken to be stage coordinates in µm ('mkm'), so the laser
@@ -129,14 +129,47 @@ def detect_orientation(dec: dict, native: str | Path | None) -> dict | None:
     cands = {(fy, fx): corr(gray[::-1 if fy else 1, ::-1 if fx else 1], rgray) for fy in (0, 1) for fx in (0, 1)}
     (fy, fx), best = max(cands.items(), key=lambda kv: kv[1])
     o = img[::-1 if fy else 1, ::-1 if fx else 1]
-    swap = False
+    swap = None                         # None: this frame cannot tell (grey, or red and blue alike)
     if dec.get("channels", 1) > 1 or dec["img"].ndim == 3:
         same = corr(o[..., 0], ref[..., 0]) + corr(o[..., 2], ref[..., 2])
         crossed = corr(o[..., 0], ref[..., 2]) + corr(o[..., 2], ref[..., 0])
-        swap = crossed > same + 0.05
+        if abs(crossed - same) > 0.1 and corr(ref[..., 0], ref[..., 2]) < 0.98:
+            swap = crossed > same
     second = sorted(cands.values())[-2]
-    return {"flip_y": bool(fy), "flip_x": bool(fx), "swap_rb": bool(swap), "score": round(best, 3),
+    return {"flip_y": bool(fy), "flip_x": bool(fx), "swap_rb": swap, "score": round(best, 3),
             "margin": round(best - second, 3), "reference": str(native)}
+
+
+def orientation_for(dec: dict, native, camera) -> tuple[dict | None, str | None]:
+    """The orientation to apply to this frame, and a warning when it is not decided. Learnt from LabSpec's own image
+    only when the frame can decide it (not dark or flat, a clear best match; the colour swap only from a frame
+    with colour: a grey Si view cannot tell red from blue); stored per camera then. Otherwise what was stored for
+    this camera is kept and applied: a black frame (the x5 with too little light, 2026-11-22) must not overwrite it."""
+    store = _orientation_store()
+    cam = str(camera if camera not in (None, "") else "?")
+    prev = store.get(cam)
+    ori = detect_orientation(dec, native)
+    decided = bool(ori) and not frame_too_dark(_lum(dec["img"])) and ori["score"] >= 0.5 and ori["margin"] >= 0.05
+    if decided:
+        new = {k: ori[k] for k in ("flip_y", "flip_x", "score")}
+        if ori["swap_rb"] is None:
+            new["swap_rb"] = bool((prev or {}).get("swap_rb", False))
+            new["swap_from"] = "kept (this frame has too little colour to tell)" if prev else \
+                "not decided yet (a frame with colour decides it)"
+        else:
+            new["swap_rb"] = bool(ori["swap_rb"])
+        store[cam] = new
+        _orientation_store(store)
+        return dict(new, margin=ori["margin"], reference=ori["reference"]), None
+    why = "no LabSpec image to compare with" if not ori else \
+        ("the frame is dark or flat" if frame_too_dark(_lum(dec["img"])) else
+         f"no clear match with LabSpec's image (score {ori['score']}, margin {ori['margin']})")
+    if prev:
+        return dict(prev, reference=f"remembered for this camera ({why})"), None
+    if not ori:
+        return None, None               # no LabSpec image saved (formats without jpg/png): the frame as decoded
+    return None, f"orientation not decided ({why}) and none remembered for camera {cam}: the frame may be upside " \
+                 "down or its red and blue swapped against LabSpec's; take a snapshot of a lit, structured view"
 
 
 def apply_orientation(dec: dict, ori: dict | None) -> dict:
@@ -358,7 +391,7 @@ def refine_feature(dec: dict, x: float, y: float, r_um: float = 3.0) -> dict | N
 
 
 def render(dec: dict, png: Path, marker: tuple | None, title: str, note: str = "", spot: dict | None = None,
-           feats: list | None = None) -> dict:
+           feats: list | None = None, marker_label: str = "") -> dict:
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -384,6 +417,9 @@ def render(dec: dict, png: Path, marker: tuple | None, title: str, note: str = "
         ax.plot([mx, mx], [my - 2 * span, my - 0.6 * span], color="#ff2d2d", lw=1.4)
         ax.plot([mx, mx], [my + 0.6 * span, my + 2 * span], color="#ff2d2d", lw=1.4)
         ax.add_patch(plt.Circle((mx, my), 0.6 * span, fill=False, color="#ff2d2d", lw=1.2))
+        if marker_label:            # 'assumed': no spot study has measured where the beam is
+            ax.annotate(marker_label, (mx, my), xytext=(8, -14), textcoords="offset points", color="#ff2d2d",
+                        fontsize=8, weight="bold")
     for f in feats or []:
         span = abs(xs[-1] - xs[0]) * 0.025
         ax.add_patch(plt.Circle((f["x_um"], f["y_um"]), max(span, f["size_um"] / 2 + 0.5), fill=False, color="#ffd400",
@@ -453,16 +489,9 @@ def snapshot(res: dict, prof: dict, base: Path, title: str, laser_nm=None) -> di
     # turned as LabSpec shows it: from LabSpec's own image of this frame when it saved one, else as last found for
     # this camera (LS6T_HOME/video_orientation.json)
     nat = next((out["native"][f] for f in ("jpg", "png", "bmp", "tif") if f in out["native"]), None)
-    ori = detect_orientation(dec, nat)
-    store = _orientation_store()
-    cam = str(res.get("camera") if res.get("camera") not in (None, "") else "?")
-    if ori and ori["score"] >= 0.5 and ori["margin"] >= 0.05:
-        store[cam] = {k: ori[k] for k in ("flip_y", "flip_x", "swap_rb", "score")}
-        _orientation_store(store)
-    elif store.get(cam):
-        ori = dict(store[cam], reference="remembered for this camera")
-    else:
-        ori = None
+    ori, why = orientation_for(dec, nat, res.get("camera"))
+    if why:
+        out["warnings"].append(why)
     out["orientation"] = ori
     dec = apply_orientation(dec, ori)
     labspec_span = [float(abs(dec["xs"][-1] - dec["xs"][0])), float(abs(dec["ys"][-1] - dec["ys"][0]))] \
@@ -490,14 +519,22 @@ def snapshot(res: dict, prof: dict, base: Path, title: str, laser_nm=None) -> di
             out["warnings"].append("the laser position falls outside the frame: the video axes may not be stage "
                                    "coordinates (profile video.marker 'center' marks the image centre instead)")
             marker = None
-        note = "marker: LabSpec's laser position" + (f" + offset ({src})" if any(off) else
-                                                     " (offset not measured yet)")
+        measured = src.startswith("measured")
+        out["marker_measured"] = measured
+        out["marker_source"] = (f"the beam, measured: stage position + offset ({src})" if measured else
+                                "ASSUMED: the stage position" + (f" + the profile's offset ({src})" if any(off) else
+                                                                 " (the image centre)") +
+                                "; not where the beam was measured: run a 'spot' study before aiming at it")
+        note = ("marker: the beam (measured offset)" if measured else
+                "marker: ASSUMED beam position, not measured (run a 'spot' study)")
     else:
         if dec["um"]:
             marker = (float(np.mean(dec["xs"])), float(np.mean(dec["ys"])))
         else:
             marker = (dec["width"] / 2, dec["height"] / 2)
-        note = "marker: image centre" + ("" if dec["um"] else " (video axes not in µm)")
+        note = "marker: image centre, ASSUMED beam position" + ("" if dec["um"] else " (video axes not in µm)")
+        out["marker_measured"] = False
+        out["marker_source"] = "ASSUMED: the image centre (profile video.marker 'center')"
         if not dec["um"]:
             out["warnings"].append("the video axes are not in µm: positions cannot be marked on the frame")
     spot = None
@@ -542,7 +579,8 @@ def snapshot(res: dict, prof: dict, base: Path, title: str, laser_nm=None) -> di
         note += "; yellow: features to aim at"
     try:
         # its own name: LabSpec saves its own image as <base>.png (2026-11-20: the plot replaced it)
-        out.update(render(dec, Path(f"{base}.marked.png"), marker, title, note, spot, feats))
+        out.update(render(dec, Path(f"{base}.marked.png"), marker, title, note, spot, feats,
+                          "" if out.get("marker_measured") else "assumed"))
     except ImportError:
         out["warnings"].append("matplotlib is missing (pip install labspec-translator[render]): no PNG")
     out.update(marker_um=list(marker) if marker and dec["um"] else None, um_axes=dec["um"],

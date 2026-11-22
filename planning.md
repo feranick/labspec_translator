@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.22.8)
+## Architecture (version 2026.11.22.9)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -675,6 +675,15 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   '10+CameraID : SET_ACTIVE_CAMERA' (constants.vbm SET_ACTIVE_CAMERA = 10): it is. CameraCheck now adds
   camera_note (GET_ACTIVE_CAMERA is the selection, not the view). TESTING T3.14b: Video(11) from LabSpec's own
   script window with no bridge, then a start by hand. video.switch_camera stays false.
+- 2026-11-22, 2026.11.22.9: Nicola's review of .22.8: (1) orientation learnt from a black frame would be stored
+  and applied later: video.orientation_for learns only when not frame_too_dark, score >= 0.5, margin >= 0.05;
+  swap_rb only when the channels can tell (|crossed - same| > 0.1, ref R/B corr < 0.98), else kept
+  (swap_from); otherwise the stored one applies; a warning only when a reference existed. video_scale uses it.
+  (2) video_scale: --um / um (MCP, api), default SCALE_STEP_FRACTION 0.2 of the field width (measured scale,
+  OLConfig field, or LabSpec's axes when not 1/px), two significant figures; > half the field refused; black
+  first frame refused; nothing moves before the checks. (3) move_extra(confirmed_now): only the objective
+  motor, only right after the Yes (runner move study: local confirmed_now, not objective_by_operator).
+  (4) marker_measured / marker_source ('ASSUMED ...'), plot label 'assumed'. 141 tests.
 
 ## To do next
 

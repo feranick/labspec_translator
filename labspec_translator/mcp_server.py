@@ -1,5 +1,5 @@
 """mcp_server.py — MCP server: lets LLM-based tools run Raman measurements on a HORIBA instrument through LabSpec 6.
-Version: 2026.11.22.8
+Version: 2026.11.22.9
 
 Tools (all JSON):
   study_format      the study format, the profile's choices and limits, the bridge's state. Read it first.
@@ -179,7 +179,7 @@ def jobs(limit: int = 20, active: bool = False) -> dict:
 
 @server.tool()
 async def instrument(ctx: Context, action: str = "status", camera: str | int | None = None,
-                     setup: dict | None = None, seconds: float | None = None) -> dict:
+                     setup: dict | None = None, seconds: float | None = None, um: float | None = None) -> dict:
     """status: the bridge's version and the instrument's state now (laser, grating, filter, objective, stage,
     detector temperature, live_video, the active camera, laser_open). set: change the set-up now without
     measuring, setup {laser_nm, grating, filter, objective, hole_um, slit_um} (any of them, named as people say
@@ -194,13 +194,14 @@ async def instrument(ctx: Context, action: str = "status", camera: str | int | N
     active one is switched only where the profile allows it (a video restart, checked); otherwise, and whenever an
     answer refuses, it says what the operator does: relay it, do not retry. end_bridge: ends the bridge cleanly
     (before the operator uses LabSpec's video buttons, which end a running script); a person starts it again.
-    video_scale (seconds = the stage step in µm, default 50; no laser; a view with visible structure): measures the
-    video's µm per pixel and axis directions for the objective and camera in use, used by every snapshot after.
+    video_scale (um = the stage move in µm; default a fifth of the objective's field, ~17 µm with the x100, ~170
+    with the x10; no laser; a lit view with visible structure): measures the video's µm per pixel and axis
+    directions for the objective and camera in use, used by every snapshot after.
     discover: runs the discovery
     and proposes a machine profile (a person applies it). resume: asks the operator to lift a halt. last_error:
     LabSpec's last error. calibration: LabSpec's spectrometer calibration per grating (read only). autocal_info:
     LabSpec's AutoCalibration script(s) here and whether they can run unattended (nothing runs)."""
-    return await _keepalive(ctx, api.instrument, action, camera, setup, seconds)
+    return await _keepalive(ctx, api.instrument, action, camera, setup, seconds, um)
 
 
 @server.tool()

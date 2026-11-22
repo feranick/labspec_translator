@@ -1,6 +1,6 @@
 # labspec-translator (ls6t): what it can do
 
-This is the complete list of functions in version 2026.11.22.8. It covers:
+This is the complete list of functions in version 2026.11.22.9. It covers:
 
 - what a study can ask for;
 - the tools an LLM sees;
@@ -63,7 +63,7 @@ A request is `{name: study}`; each study has a `kind`.
 | `cancel` | Stops a request: the acquisition or move in progress stops |
 | `jobs` | Recent requests, and which one holds the instrument |
 | `instrument` | `status` (bridge and instrument now, with LabSpec's last error and whether the live camera view is on), `laser_on` / `laser_off` (the laser shutter open for viewing, at most `limits.max_laser_on_s`, after the operator's Yes; closed by the bridge when the time is up, at a halt, or before any other command), `calibration` (LabSpec's spectrometer calibration per grating, read only), `autocal_info` / `autocal_run` (LabSpec's AutoCalibration script: can it run unattended; run it once after the operator's Yes), `set` (laser, grating, filter, objective, hole, slit now, without measuring: filter within the caps, the objective after the operator's Yes, without LabSpec asking again, read-back), `camera_on` / `camera_off` (LabSpec's live view; `camera` by name from the profile's `video.cameras`, e.g. "top", or number), `video_scale` (the video's µm per pixel and axis directions for the current objective and camera, measured with two known stage moves; no laser; snapshots use it), `discover` (proposes a machine profile), `resume` (after an operator halt), `last_error` |
-| `snapshot` | A video frame now, returned as an image, the same way up and in the same colours as LabSpec's, in stage µm (the objective's field or its measured scale): the beam's position marked, small features numbered (none on a black frame); `with_laser` shows the beam and measures its offset; `extended` takes LabSpec's extended video (a stitched still over the area set in LabSpec; the stage moves; only when the profile allows it, after the operator's Yes) |
+| `snapshot` | A video frame now, returned as an image, the same way up and in the same colours as LabSpec's, in stage µm (the objective's field or its measured scale): the beam's position marked (labelled assumed until a `spot` study measured it), small features numbered (none on a black frame); `with_laser` shows the beam and measures its offset; `extended` takes LabSpec's extended video (a stitched still over the area set in LabSpec; the stage moves; only when the profile allows it, after the operator's Yes) |
 | `references` | Spectral corrections, white-light backgrounds, beam offsets, alignment state and saved LabSpec configurations (read-only) |
 | `hardware_test` | Only in test mode (`ls6t connect APP --test`): TESTING.md with the maintainer. `plan`, `step`, `call` (one bridge command, with guards and the operator's Yes for the laser), `record`, `report`, `status`, `last_error`, `config` |
 | `spot_status` | The beam's remembered offsets, their age and drift (read-only) |
@@ -93,7 +93,7 @@ trusting numbers, the safety rules and the polling etiquette.
 | `ls6t instrument status / discover / resume / last-error` | The instrument now; the discovery; lift a halt; LabSpec's last error (`GetLastErrorInfo`) |
 | `ls6t instrument set [--laser-nm --grating --filter --objective --hole --slit]` | Change the set-up now, without measuring |
 | `ls6t instrument snapshot [--laser / --extended]` | A video frame with the beam marked; `--extended`: LabSpec's extended video |
-| `ls6t instrument video-scale [--seconds <step µm>]` | Measure the video's µm per pixel and directions for the current objective (stage moves +X and +Y, 50 µm by default, then back) |
+| `ls6t instrument video-scale [--um <move µm>]` | Measure the video's µm per pixel and directions for the current objective (stage moves +X and +Y, a fifth of the field by default, then back) |
 | `ls6t instrument config list / save NAME / load NAME [--show]` | LabSpec's whole configuration as `LS6T_HOME\configs\NAME.ini` (`SaveConfig` / `LoadConfig`); loading asks the operator; `--show` opens LabSpec's dialog. Maintainer only |
 | `ls6t bridge install [--dest DIR]` | Write the LabSpec scripts for this PC: the bridge, the discovery, and the optional script-motor logger |
 | `ls6t bridge call VERB key=value ... [--laser]` | One bridge command, for the maintainer's tests |
