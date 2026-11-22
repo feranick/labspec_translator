@@ -428,7 +428,7 @@ End Sub
 Function CameraCheck(res)
     Dim now
     CameraCheck = ""
-    If CStr(res("camera_asked")) = "" Then Exit Function
+    If Not res.Exists("camera_asked") Then Exit Function    ' (reading a missing key would add it, empty)
     now = VidCam()
     res("camera_after") = now
     If CStr(now) <> CStr(res("camera_asked")) Then
@@ -549,7 +549,7 @@ Sub VCamera(cmd, res)
             Fail res, e
             Exit Sub
         End If
-        If CStr(res("camera_restart")) = "1" Then live0 = False      ' stopped for the switch: started below
+        If res.Exists("camera_restart") Then live0 = False      ' stopped for the switch: started below
     ElseIf action = "status" And cam <> "" Then
         If CStr(VidCam()) <> CStr(CLng(ParseNum(cam))) Then
             Fail res, "LabSpec's camera is " & VidCam() & ", not " & cam
@@ -1352,7 +1352,7 @@ Sub VVideo(cmd, res)
         Fail res, r
         Exit Sub
     End If
-    keepOn = (CStr(res("camera_restart")) = "1")      ' it ran before the switch: it stays on afterwards
+    keepOn = res.Exists("camera_restart")       ' it ran before the switch: it stays on afterwards
     If keepOn Then wasOn = False
     clone = 0
     If GetP(cmd, "extended", "0") = "1" Then

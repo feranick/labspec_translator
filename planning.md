@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.21.4)
+## Architecture (version 2026.11.22.1)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -576,6 +576,19 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
 - 2026-11-21, 2026.11.21.4: Nicola: the welcome page said a running bridge 'gets started again at the end'; the
   installer cannot start a LabSpec script: it now says the operator starts ls6t_bridge.vbs again after the
   installation, as the finish page does. (The 2026.11.21.2 tag was pushed after .3 on the same code; removed.)
+- 2026-11-22, 2026.11.22.1: stage tests on 2026.11.21.4 (remote, empty holder): XY right (encoder read-backs,
+  0.73 s / 580 µm, 1.14 s / 4950 µm), stay true/false right, max_xy_um radial (5657 refused), Halt mid-request
+  right, Y creep 0.1 -> 0.3 µm over three round trips; video stop/start x4 fine (stops 3.05-3.40 s, starts 6.9-10.2
+  s). Changes: runner state 'returned' {done, why} and 'stage_at_end' (with from_home_um) for every request, also
+  stopped ones (status exposes both); moves report objective + objective_source (_objective_source); summary
+  limits_meaning; maps checked radially (farthest corner). Nicola's Z safety: plan.WD_BY_MAG_UM (Olympus MPlan N
+  class: 100x 210, 50x 350, 20x 1300, 10x 10600, 5x 20000 µm) / objectives_wd_um; plan.z_limits (toward =
+  min(max_dz, z_toward_wd_fraction x WD), away = max_dz, toward_sign from stage.z_into_sample or None = both ways
+  limited), z_check, toward; format._z_safety (map z_um, points / move / focus dz, focus-scan half range;
+  sample.unevenness_um >= WD/2 -> XY within focus_valid_xy_um); runner._z_guard in move_z (limits; toward + stale
+  focus -> Stop unless a focus scan), _focus_here after a focus is found, _retract_before_xy in the map loop. TESTING
+  T3.17 (Z direction by watching, x10, empty holder). VBS: res.Exists for camera_asked / camera_restart (reading a
+  missing Dictionary key adds it, empty). 131 tests.
 
 ## To do next
 

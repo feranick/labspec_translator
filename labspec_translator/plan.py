@@ -1,5 +1,5 @@
 """plan.py — a study as bridge commands: the setup moves, the points, the acquisitions; and the time estimate.
-Version: 2026.11.21.4
+Version: 2026.11.22.1
 
 Everything here is computed from the study and the profile alone: wavelengths from Raman shifts, the number of
 detector windows, the stage positions (always offsets from where the operator left the stage, Z from the
@@ -269,6 +269,81 @@ def map_engine(study: dict, prof: dict) -> str:
         return "points"
     n = len(positions(study if study.get("kind") == "map" else depth_as_map(study, prof)))
     return "native" if n >= int(prof.get("mapping", {}).get("native_min_points", 400)) else "points"
+
+
+# Typical working distances (µm) of metallurgical microscope objectives by magnification (Olympus MPlan N class, as on
+# HORIBA's XploRA): the free space between the objective and the sample at focus. A profile can give its own
+# (objectives_wd_um: {"x100_VIS": 210, ...}).
+WD_BY_MAG_UM = {100: 210.0, 50: 350.0, 20: 1300.0, 10: 10600.0, 5: 20000.0}
+
+
+def objective_mag(objective) -> int | None:
+    import re
+    m = re.search(r"(\d+)", str(objective or ""))
+    return int(m.group(1)) if m else None
+
+
+def working_distance_um(prof: dict, objective) -> float | None:
+    """The objective's working distance (µm): the profile's objectives_wd_um, else the typical one for its
+    magnification; with no objective known, the shortest of the profile's objectives (the cautious one)."""
+    wd = prof.get("objectives_wd_um") or {}
+    if objective is not None:
+        if objective in wd:
+            return float(wd[objective])
+        mag = objective_mag(objective)
+        if mag in WD_BY_MAG_UM:
+            return WD_BY_MAG_UM[mag]
+        return None
+    known = [working_distance_um(prof, o) for o in prof.get("objectives", [])]
+    known = [k for k in known if k]
+    return min(known) if known else WD_BY_MAG_UM[100]
+
+
+def z_limits(prof: dict, objective) -> dict:
+    """How far Z may go from the focus with this objective. Toward the objective (deeper into the sample): a fraction
+    of the working distance (limits.z_toward_wd_fraction, 0.1: x100 ~21 µm, x50 ~35 µm), never more than
+    limits.max_dz_um; away from it: limits.max_dz_um. Until stage.z_into_sample says which way is toward, both
+    directions get the toward limit. focus_valid_xy_um: how far the stage may go in XY before the focus counts as
+    stale for moves toward the sample (limits.focus_valid_xy_um per magnification; none for long working
+    distances)."""
+    lim = prof.get("limits", {})
+    max_dz = float(lim.get("max_dz_um", 100.0))
+    wd = working_distance_um(prof, objective)
+    frac = float(lim.get("z_toward_wd_fraction", 0.1))
+    toward = min(max_dz, frac * wd) if wd else min(max_dz, frac * WD_BY_MAG_UM[100])
+    sign, known = into_sign(prof)
+    fv = lim.get("focus_valid_xy_um") or {"100": 200.0, "50": 400.0, "20": 2000.0}
+    mag = objective_mag(objective) if objective is not None else 100
+    valid = fv.get(str(mag)) if mag is not None else fv.get("100")
+    return {"objective": objective, "working_distance_um": wd, "toward_um": round(toward, 1),
+            "away_um": max_dz, "toward_sign": sign if known else None,
+            "focus_valid_xy_um": float(valid) if valid is not None else None}
+
+
+def z_check(zl: dict, dz: float) -> str | None:
+    """Why a Z offset from the focus is refused under z_limits, or None."""
+    if dz is None or abs(dz) < 1e-9:
+        return None
+    s = zl["toward_sign"]
+    obj = zl["objective"] or "the objective"
+    if s is None:
+        if abs(dz) > zl["toward_um"]:
+            return (f"{dz:+g} µm from the focus: above {zl['toward_um']:g} µm, the limit toward the sample for {obj} "
+                    "(applied both ways until stage.z_into_sample says which Z direction approaches the objective: "
+                    "TESTING T3.17)")
+        return None
+    if dz * s > 0 and dz * s > zl["toward_um"]:
+        return (f"{dz:+g} µm from the focus is toward the sample by {abs(dz):g} µm: above {zl['toward_um']:g} µm for "
+                f"{obj} (working distance ~{zl['working_distance_um']:g} µm; limits.z_toward_wd_fraction)")
+    if dz * s < 0 and abs(dz) > zl["away_um"]:
+        return f"{dz:+g} µm from the focus, away from the sample: above limits.max_dz_um = {zl['away_um']:g} µm"
+    return None
+
+
+def toward(zl: dict, dz: float) -> bool:
+    """Whether a Z offset approaches the sample (unknown direction: both count)."""
+    s = zl["toward_sign"]
+    return abs(dz) > 1e-9 if s is None else dz * s > 1e-9
 
 
 def into_sign(prof: dict) -> tuple[int, bool]:

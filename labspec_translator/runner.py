@@ -1,5 +1,5 @@
 """runner.py — runs a request's studies on the instrument, one command at a time, and checks every result.
-Version: 2026.11.21.4
+Version: 2026.11.22.1
 
 A request runs in its own process (`ls6t run-request FOLDER`, started detached by api.start), so it outlives the
 MCP call that started it. One request at a time holds the instrument (a lock file under LS6T_HOME); others wait
@@ -96,6 +96,8 @@ class Ctx:
         self.saved_config = None            # LabSpec's configuration saved at the start (session.restore_config)
         self.confirmed = False
         self.objective_by_operator = None      # the objective the operator confirmed in this request
+        self.objective = None               # LabSpec's objective now (its record)
+        self.focus_xy = (None, None)        # where the focus was found (the operator's spot, or the last focus)
         self.last_beat = 0.0
         self.bridge_version = None
 
@@ -197,6 +199,8 @@ def run_request(folder: Path | str) -> dict:
         ctx.start["laser_nm"] = _f(st.get("laser_nm"))
         ctx.home_xy = (ctx.start["x_um"], ctx.start["y_um"])
         ctx.z_focus = ctx.start["z_um"]
+        ctx.focus_xy = ctx.home_xy
+        ctx.objective = st.get("objective")
         write_json(folder / "start.json", {"status": st, "time": time.time()})
         if prof.get("session", {}).get("restore_config"):
             ini = folder / "labspec_before.ini"
@@ -226,16 +230,27 @@ def run_request(folder: Path | str) -> dict:
                     stopped = exc
         state.update(state="cancelled" if stopped else "done", finished=time.time(),
                      why=stopped.why if stopped else None, stopped_by=stopped.by if stopped else None)
-        if not stopped:
+        if stopped:
+            # a halt or a cancel leaves the stage where it is: said, with where that is (2026-11-22)
+            state["returned"] = {"done": False, "why": f"stopped ({stopped.by}): the stage stays where it is; the "
+                                                       "return to the home spot did not happen"}
+        else:
             state["returned"] = _return_home(ctx)
             if getattr(ctx, "saved_config", None):
                 r = ctx.call("config", timeout_s=60, action="load", path=ctx.saved_config)
                 state["config_restored"] = bool(r["ok"])
                 if not r["ok"]:
                     state["config_restore_error"] = r.get("error")
+        state["stage_at_end"] = _stage_now(ctx)
     except Stop as exc:
         state.update(state="cancelled" if exc.by in ("cancel", "operator") else "failed", why=exc.why,
-                     stopped_by=exc.by, finished=time.time())
+                     stopped_by=exc.by, finished=time.time(),
+                     returned={"done": False, "why": f"stopped ({exc.by}): the stage stays where it is; the return "
+                                                     "to the home spot did not happen"})
+        try:
+            state["stage_at_end"] = _stage_now(ctx)
+        except Exception:  # noqa: BLE001 - the bridge may be gone
+            pass
         for name in studies:
             res = folder / name / f"{name}.json"
             if not res.exists():
@@ -322,6 +337,7 @@ def _setup(name: str, study: dict, ctx: Ctx, warnings: list, unreliable: list, c
             unreliable.append(f"{step['why']}: asked {step['value']}, " +
                               (f"LabSpec said: {r.get('error')}" if not r["ok"] else f"got {got}"))
     after = ctx.call("status", timeout_s=15, **motor_args(prof))
+    ctx.objective = after.get("objective") or ctx.objective
     laser = _f(after.get("laser_nm")) or plan.laser_nm(study, prof) or ctx.start.get("laser_nm")
     temp = _f(after.get("detector_temp_c"))
     checks["detector_temp_c"] = {"value": temp, "max": prof["detector"]["max_temp_c"],
@@ -438,10 +454,12 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
                     focus_scans.append(fs)
                     if fs.get("found"):
                         zref = zcur = ctx.z_focus = fs["z_um"]
+                        _focus_here(ctx)
                 else:
                     r = ctx.call("autofocus", timeout_s=240, how=af, **motor_args(prof))
                     if r["ok"] and _f(r.get("z_um")) is not None:
                         zref = zcur = ctx.z_focus = _f(r.get("z_um"))
+                        _focus_here(ctx)
             if want_before:
                 snaps["before"] = _snapshot(ctx, name, sd, "before", bool(vd.get("with_laser")), warnings, laser)
             t_a = time.time()
@@ -475,6 +493,7 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
                     if lim and not lim[0] <= val <= lim[1]:
                         raise Stop(f"point {k}: stage {lim_key[0].upper()} = {val:g} µm is outside the profile's "
                                    f"stage limits {lim}", "study")
+                zcur = _retract_before_xy(ctx, ax, ay, zcur, zref, f"point {k}")
                 r = ctx.call("move_xy", timeout_s=180, x_um=round(ax, 3), y_um=round(ay, 3),
                              **motor_args(prof))
                 if not r["ok"]:
@@ -631,12 +650,82 @@ def _check_abs(prof: dict, axis: str, value: float, what: str):
         raise Stop(f"{what}: stage {axis.upper()} = {value:g} µm is outside the profile's stage limits {lim}", "study")
 
 
-def move_z(ctx: Ctx, target: float, what: str) -> float:
+def _focus_here(ctx: Ctx) -> None:
+    """The focus was just found here: offsets toward the sample are measured from this spot's focus again."""
+    s = _stage_now(ctx)
+    if s.get("x_um") is not None:
+        ctx.focus_xy = (s["x_um"], s["y_um"])
+
+
+def _z_guard(ctx: Ctx, target: float, what: str, focusing: bool) -> None:
+    """Z from the focus within the objective's limits (plan.z_limits: toward the sample a fraction of its working
+    distance, away limits.max_dz_um; both ways the toward limit until stage.z_into_sample is set); and toward the
+    sample only while the focus is fresh: after an XY move farther than focus_valid_xy_um from where the focus was
+    found (short working distances), only a focus scan or an autofocus may approach (they find it again)."""
+    if ctx.z_focus is None or target is None:
+        return
+    zl = plan.z_limits(ctx.prof, ctx.objective)
+    dz = float(target) - float(ctx.z_focus)
+    err = plan.z_check(zl, dz)
+    if err:
+        raise Stop(f"{what}: {err}", "study")
+    if focusing or not plan.toward(zl, dz) or zl["focus_valid_xy_um"] is None or None in ctx.focus_xy:
+        return
+    s = _stage_now(ctx)
+    if s.get("x_um") is None:
+        return
+    d = math.hypot(s["x_um"] - ctx.focus_xy[0], s["y_um"] - ctx.focus_xy[1])
+    if d > zl["focus_valid_xy_um"]:
+        raise Stop(f"{what}: the focus was found {d:.0f} µm away (more than {zl['focus_valid_xy_um']:g} µm for "
+                   f"{ctx.objective or 'this objective'}): Z toward the sample needs a fresh focus here first (a "
+                   "focus scan or an autofocus)", "study")
+
+
+def _retract_before_xy(ctx: Ctx, ax, ay, zcur, zref, what: str):
+    """Before an XY move beyond where the focus stays valid (short working distances), Z goes back to the focus if
+    it is offset toward the sample: the stage never travels sideways with the sample closer than at focus."""
+    if zcur is None or zref is None or None in ctx.focus_xy:
+        return zcur
+    zl = plan.z_limits(ctx.prof, ctx.objective)
+    if zl["focus_valid_xy_um"] is None or not plan.toward(zl, zcur - zref):
+        return zcur
+    if math.hypot(ax - ctx.focus_xy[0], ay - ctx.focus_xy[1]) <= zl["focus_valid_xy_um"]:
+        return zcur
+    return move_z(ctx, zref, f"{what}: back to the focus before moving away", focusing=True)
+
+
+def move_z(ctx: Ctx, target: float, what: str, focusing: bool = False) -> float:
     _check_abs(ctx.prof, "z", target, what)
+    _z_guard(ctx, target, what, focusing)
     r = ctx.call("move", timeout_s=120, motor=ctx.prof["motors"]["z"], mode="value", value=round(target, 3))
     if not r["ok"]:
         raise Stop(f"{what}: Z move failed: {r.get('error')}", "study")
     return _f(r.get("value")) if _f(r.get("value")) is not None else target
+
+
+def _objective_source(ctx: Ctx, obj) -> str | None:
+    """Where the objective of a result comes from: confirmed by the operator in this request, or LabSpec's record
+    (a manual turret: ls6t cannot see the lens)."""
+    if obj is None:
+        return None
+    if not ctx.prof.get("manual_objective", True):
+        return "LabSpec's motorised turret"
+    return ("confirmed by the operator in this request" if ctx.objective_by_operator == obj else
+            "LabSpec's setting, not checked (manual turret)")
+
+
+def _stage_now(ctx: Ctx) -> dict:
+    """Where the stage is now (X, Y, Z in µm, read back), and how far from the home spot; {} if it cannot be read."""
+    try:
+        st = ctx.call("status", timeout_s=15, **motor_args(ctx.prof))
+    except Stop:
+        return {}
+    x, y, z = _f(st.get("x_um")), _f(st.get("y_um")), _f(st.get("z_um"))
+    out = {"x_um": x, "y_um": y, "z_um": z}
+    hx, hy = ctx.home_xy
+    if None not in (x, y, hx, hy):
+        out["from_home_um"] = [round(x - hx, 2), round(y - hy, 2)]
+    return out
 
 
 def _return_home(ctx: Ctx) -> dict:
@@ -653,8 +742,10 @@ def _return_home(ctx: Ctx) -> dict:
         if None not in (hx, hy, x, y) and math.hypot(x - hx, y - hy) > 0.5:
             r = ctx.call("move_xy", timeout_s=300, x_um=round(hx, 3), y_um=round(hy, 3), **motor_args(ctx.prof))
             out["xy_um"] = [_f(r.get("x_um")), _f(r.get("y_um"))]
+        out["done"] = True
     except Stop as exc:
         out["error"] = exc.why
+        out["done"] = False
     return out
 
 
@@ -673,7 +764,7 @@ def focus_scan(ctx: Ctx, study: dict, laser: float, z0: float | None, sd: Path, 
     nm = round(shift_to_nm(line, laser), 4)
     zs, vals = [], []
     for i, dz in enumerate(offs):
-        z = move_z(ctx, z0 + dz, f"focus scan step {i}")
+        z = move_z(ctx, z0 + dz, f"focus scan step {i}", focusing=True)
         out = sd / f"z{i:03d}.txt"
         r = ctx.call("acquire", timeout_s=60 + 3 * float(sc["exposure_s"]), mode=110, exposure_s=float(sc["exposure_s"]),
                      accumulations=1, from_nm=nm, to_nm=nm, out=str(out), sample="focus scan")
@@ -693,7 +784,7 @@ def focus_scan(ctx: Ctx, study: dict, laser: float, z0: float | None, sd: Path, 
     if v.max() <= 0 or contrast < 0.2 or not interior:
         res["why"] = ("the best is at the edge of the range: widen focus.scan.range_um or start closer" if not interior
                       else "the signal hardly changes with Z: no line, or the range is far from focus")
-        res["z_now"] = move_z(ctx, z0, "focus scan: back to the start")
+        res["z_now"] = move_z(ctx, z0, "focus scan: back to the start", focusing=True)
     else:
         # a Gaussian through the points above 30 % of the best (a parabola in log, weighted by the signal); a
         # three-point parabola around the best when too few points qualify
@@ -711,7 +802,7 @@ def focus_scan(ctx: Ctx, study: dict, laser: float, z0: float | None, sd: Path, 
             step = zs_a[i + 1] - zs_a[i]
             frac = 0.5 * (y1 - y3) / den if den < 0 else 0.0
             zb = float(zs_a[i] + max(-0.5, min(0.5, frac)) * step)
-        res.update(found=True, z_um=round(move_z(ctx, zb, "focus scan: to the best"), 3),
+        res.update(found=True, z_um=round(move_z(ctx, zb, "focus scan: to the best", focusing=True), 3),
                    best_signal=round(float(v.max()), 3), shift_um=round(zb - z0, 3), contrast=round(contrast, 3))
         if fwhm is not None and fwhm < 0.9 * (zs_a.max() - zs_a.min()):
             res["axial_fwhm_um"] = round(fwhm, 3)       # the depth resolution on this sample (stage µm)
@@ -742,6 +833,7 @@ def run_focus(name: str, study: dict, ctx: Ctx) -> dict:
     fs = focus_scan(ctx, study, su["laser"], ctx.z_focus if ctx.z_focus is not None else z0, sd / "focus", warnings)
     if fs.get("found"):
         ctx.z_focus = fs["z_um"]
+        _focus_here(ctx)
         if fs.get("axial_fwhm_um"):
             from . import perf
             k = perf.key(su["after"].get("objective") or "?", su["laser"], _f(su["after"].get("hole_um")))
@@ -842,7 +934,8 @@ def run_move(name: str, study: dict, ctx: Ctx) -> dict:
     result = {"ok": True, "complete": True, "reliable": True, "unreliable_because": [], "warnings": warnings,
               "kind": "move", "move": {"offset_um": [float(m.get("x_um", 0) or 0), float(m.get("y_um", 0) or 0)],
                                        "dz_um": dz, "stage_um": xy, "z_um": z, "stay": m.get("stay", True),
-                                       "home_um": list(ctx.home_xy), "objective": obj, "beam": beam},
+                                       "home_um": list(ctx.home_xy), "objective": cur_obj,
+                                       "objective_source": _objective_source(ctx, cur_obj), "beam": beam},
               "setup": {"before": before}, "seconds": {"total": round(time.time() - t_start, 2)}}
     if snap:
         result["video"] = {"here": snap}

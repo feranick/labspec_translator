@@ -1,5 +1,5 @@
 """format.py — the study format and its static checks (no instrument needed).
-Version: 2026.11.21.4
+Version: 2026.11.22.1
 """
 from __future__ import annotations
 
@@ -39,7 +39,7 @@ SERIES_KEYS = {"count", "interval_s"}
 PROCESS_KEYS = {"baseline", "peaks", "auto_peaks", "bands"}
 PEAK_KEYS = {"near_cm1", "window_cm1", "shape", "name"}
 SHAPES = ("pseudo_voigt", "lorentz", "gauss")
-SAMPLE_KEYS = {"name", "notes", "sensitive"}
+SAMPLE_KEYS = {"name", "notes", "sensitive", "unevenness_um"}
 
 EXAMPLE = {
     "si_check": {"kind": "calibration", "sample": {"name": "Si wafer"},
@@ -209,6 +209,70 @@ def _blocked_by_hand(study: dict, prof: dict, errors: list, warnings: list, what
         if lowest is None or asked is None or not match_label(str(asked), [lowest])[0]:
             errors.append(f"{what} with the laser blocked by hand and a profile not reviewed: setup.filter must be "
                           f"the strongest attenuation ({lowest!r}), in case the block is not in place")
+
+
+def _z_safety(study: dict, prof: dict, errors: list, warnings: list) -> None:
+    """Z offsets from the focus against the objective's limits (plan.z_limits: toward the sample a fraction of the
+    working distance, away limits.max_dz_um; both ways the toward limit until the Z direction is known), and the
+    sample's stated unevenness against the gap: with sample.unevenness_um at least half the working distance, XY
+    moves beyond the distance where the focus stays valid are refused."""
+    s = study.get("setup") or {}
+    obj = s.get("objective")
+    if obj is not None:
+        lab, _ = match_label(str(obj), list(prof.get("objectives", [])))
+        obj = lab or obj
+    zl = plan.z_limits(prof, obj)
+    kind = study.get("kind", "spectrum")
+    dzs = []
+    m = study.get("map") if kind == "map" else None
+    if isinstance(m, dict) and isinstance(m.get("z_um"), list) and len(m["z_um"]) == 3:
+        try:
+            dzs += plan.axis_values(m["z_um"])
+        except (TypeError, ValueError, ZeroDivisionError):
+            pass
+    for p in study.get("points") or []:
+        if isinstance(p, dict) and _num(p.get("dz_um")):
+            dzs.append(float(p["dz_um"]))
+    for blk in ("move", "focus"):
+        b = study.get(blk)
+        if isinstance(b, dict) and _num(b.get("dz_um")):
+            dzs.append(float(b["dz_um"]))
+    if kind == "focus" or (isinstance(study.get("focus"), dict) and study["focus"].get("autofocus") == "scan"):
+        try:
+            half = float(plan.scan_params(study, prof)["range_um"]) / 2
+            dzs += [half, -half]
+        except (TypeError, ValueError, KeyError):
+            pass
+    for dz in sorted(set(dzs), key=abs, reverse=True):
+        err = plan.z_check(zl, dz)
+        if err:
+            errors.append(err)
+            break
+    # the sample's unevenness against the gap left at focus
+    un = (study.get("sample") or {}).get("unevenness_um")
+    if un is not None:
+        if not _num(un) or float(un) < 0:
+            errors.append("sample.unevenness_um: how much the sample's height varies (µm, >= 0)")
+            return
+        far = 0.0
+        if isinstance(m, dict):
+            try:
+                xs = [abs(v) for v in plan.axis_values(m["x_um"])] if isinstance(m.get("x_um"), list) else [0.0]
+                ys = [abs(v) for v in plan.axis_values(m["y_um"])] if isinstance(m.get("y_um"), list) else [0.0]
+            except (TypeError, ValueError, ZeroDivisionError):
+                xs = ys = [0.0]
+            far = math.hypot(max(xs), max(ys))
+        for p in study.get("points") or []:
+            if isinstance(p, dict):
+                far = max(far, math.hypot(p.get("x_um", 0) or 0, p.get("y_um", 0) or 0))
+        mv = study.get("move")
+        if isinstance(mv, dict):
+            far = max(far, math.hypot(mv.get("x_um", 0) or 0, mv.get("y_um", 0) or 0))
+        wd, fv = zl["working_distance_um"], zl["focus_valid_xy_um"]
+        if wd and fv is not None and float(un) >= 0.5 * wd and far > fv:
+            errors.append(f"sample.unevenness_um = {float(un):g} µm is at least half {obj or 'the objective'}'s "
+                          f"working distance (~{wd:g} µm): XY moves are kept within {fv:g} µm of the focus (this "
+                          f"study goes {far:.0f} µm); a longer working distance objective, or a smaller area")
 
 
 def validate_study(name: str, study: dict, prof: dict) -> dict:
@@ -517,6 +581,18 @@ def validate_study(name: str, study: dict, prof: dict) -> dict:
                     found = prof.get("discovered", {}).get("motors")
                     if found is not None and motor not in found:
                         errors.append(f"map.{ax}: the stage axis {motor!r} was not found by the discovery script")
+            # limits.max_xy_um is a distance from the home spot (as for points and moves): the map's farthest corner
+            try:
+                xs = [abs(v) for v in plan.axis_values(m["x_um"])] if m.get("x_um") and isinstance(m["x_um"], list) \
+                    and len(m["x_um"]) == 3 else [0.0]
+                ys = [abs(v) for v in plan.axis_values(m["y_um"])] if m.get("y_um") and isinstance(m["y_um"], list) \
+                    and len(m["y_um"]) == 3 else [0.0]
+            except (TypeError, ValueError, ZeroDivisionError):
+                xs = ys = [0.0]                 # already reported by the axis checks above
+            far = math.hypot(max(xs), max(ys))
+            if far > lim["max_xy_um"] and max(max(xs), max(ys)) <= lim["max_xy_um"]:
+                errors.append(f"map: its farthest corner is {far:.0f} µm from the start: above limits.max_xy_um = "
+                              f"{lim['max_xy_um']:g} µm (a distance from the home spot, not per axis)")
     elif study.get("map") is not None:
         errors.append("map: only with kind 'map'")
     if kind == "map" and isinstance(study.get("map"), dict):
@@ -608,6 +684,8 @@ def validate_study(name: str, study: dict, prof: dict) -> dict:
     out = {"ok": not errors, "errors": errors, "warnings": warnings}
     if errors:
         return out
+
+    _z_safety(study, prof, errors, warnings)
 
     # ---- range in nm, windows, estimate (now that the study is well formed)
     laser = plan.laser_nm(study, prof)
@@ -806,7 +884,8 @@ def _validate_move(name, study, prof, errors, warnings) -> dict:
     if not errors:
         d = math.hypot(m.get("x_um", 0) or 0, m.get("y_um", 0) or 0)
         if d > lim["max_xy_um"]:
-            errors.append(f"move: {d:g} µm from the home spot, above limits.max_xy_um = {lim['max_xy_um']:g} µm")
+            errors.append(f"move: {d:g} µm from the home spot, above limits.max_xy_um = {lim['max_xy_um']:g} µm (the "
+                          "distance from the home spot, not per axis)")
         if abs(m.get("dz_um", 0) or 0) > lim["max_dz_um"]:
             errors.append(f"move.dz_um: |dz| <= limits.max_dz_um = {lim['max_dz_um']:g} µm")
     s = study.get("setup") or {}

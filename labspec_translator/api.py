@@ -1,5 +1,5 @@
 """api.py — the functions behind the command line and the MCP server (JSON in, JSON out).
-Version: 2026.11.21.4
+Version: 2026.11.22.1
 """
 from __future__ import annotations
 
@@ -204,7 +204,7 @@ def status(request: str, wait_s: float = 0) -> dict:
             prog[n] = runner.read_json(folder / n / "progress.json", {})
     out = {"request": str(folder), "translator": __version__, "state": st.get("state"),
            "done": st.get("state") in runner.FINAL, "pending": pending, "studies": res, "progress": prog}
-    for k in ("why", "stopped_by", "reason", "config_restored", "config_restore_error"):
+    for k in ("why", "stopped_by", "reason", "config_restored", "config_restore_error", "returned", "stage_at_end"):
         if st.get(k) is not None:
             out[k] = st[k]
     if pending:

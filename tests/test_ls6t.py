@@ -946,7 +946,7 @@ def test_native_map_export_and_discovery_probes(tmp_path):
     assert st["studies"]["m"]["reliable"]
     S.ensure(config.active_bridge_dir())
     r = bridge.Bridge().call("discover", timeout_s=10, out=str(tmp_path / "dump.txt"))
-    # discovery no longer probes these (2026.11.21.4): dumps from older bridges still carry them
+    # discovery no longer probes these (2026.11.22.1): dumps from older bridges still carry them
     old = (tmp_path / "dump.txt").read_text() + "\n".join([
         "selftest.get_value_ex=0", "selftest.get_value_simple_part=1", "selftest.get_value_simple_part_size=8",
         "selftest.get_value_simple_part_values=4,5,6,7,8,9,10,11", "selftest.get_config_param=1",
@@ -2014,3 +2014,73 @@ def test_durations_plain_decimals(tmp_path):
     """prompt_shown_after_s came back as '1.953125E-02' (VBScript's CStr)."""
     br = Path(api.install_bridge(tmp_path / "vbs")["files"]["ls6t_bridge.vbs"]).read_text()
     assert "Fmt(Elapsed(" not in br and "Secs = Fmt(Round(CDbl(x), 2))" in br
+
+
+def test_stopped_request_reports_where_the_stage_is(tmp_path):
+    """2026-11-22: after a halt the stage stays where it was (right), but the answer did not say where, nor that the
+    return home did not happen; moves did not say which objective they assumed; max_xy_um read as per axis."""
+    S.ensure(config.active_bridge_dir())
+    (config.active_bridge_dir() / "sim_operator_stop_after").write_text("1")
+    st = run_inline({"m1": {"kind": "move", "move": {"x_um": 30, "y_um": 0, "stay": False}},
+                     "s": {"kind": "spectrum", "sample": {"name": "Si"},
+                           "setup": {"laser_nm": 532, "grating": 1800, "filter": "1%", "objective": "x100"},
+                           "acquire": {"center_cm1": 520, "exposure_s": 1}},
+                     "m2": {"kind": "move", "move": {"x_um": 60, "y_um": 0}}})
+    if st["state"] == "cancelled":
+        assert st["returned"]["done"] is False and "stays where it is" in st["returned"]["why"]
+        assert "x_um" in st["stage_at_end"]
+    f = config.active_bridge_dir() / "sim_operator_stop_after"
+    if f.exists():
+        f.unlink()
+    api.instrument("resume")
+    st = run_inline({"m": {"kind": "move", "move": {"x_um": 20, "y_um": 0, "stay": False}}})
+    assert st["returned"]["done"] is True and st["stage_at_end"]["from_home_um"] == [0.0, 0.0]
+    mv = st["studies"]["m"]["move"]
+    assert mv["objective"] and mv["objective_source"].startswith("LabSpec's setting")
+    v = api.validate({"mp": {"kind": "map", "sample": {"name": "x"}, "setup": {"laser_nm": 532, "grating": 1800,
+                      "filter": "1%", "objective": "x100"}, "acquire": {"center_cm1": 520, "exposure_s": 0.1},
+                      "map": {"x_um": [-4000, 4000, 4000], "y_um": [-4000, 4000, 4000]}}})["mp"]
+    assert not v["ok"] and any("not per axis" in e for e in v["errors"])
+    assert "not per axis" in P.summary(P.load())["limits_meaning"]["max_xy_um"]
+
+
+def test_z_safety_per_objective_direction_and_stale_focus(tmp_path):
+    """Toward the sample, Z is limited to a fraction of the objective's working distance (both ways until the Z
+    direction is known); the focus expires after a large XY move with a short working distance; a stated sample
+    unevenness keeps x100 moves within that distance."""
+    prof = P.load()
+    zl = plan.z_limits(prof, "x100_VIS")
+    assert zl["working_distance_um"] == 210 and zl["toward_um"] == 21.0 and zl["toward_sign"] is None
+    assert plan.z_check(zl, 15) is None and "T3.17" in plan.z_check(zl, -30)        # unknown direction: both ways
+    P.save(dict(prof, stage=dict(prof["stage"], z_into_sample="+")))
+    prof = P.load()
+    zl = plan.z_limits(prof, "x100_VIS")
+    assert "toward the sample" in plan.z_check(zl, 30) and plan.z_check(zl, -30) is None
+    assert plan.z_limits(prof, "x10_VIS")["toward_um"] == prof["limits"]["max_dz_um"]       # long WD: max_dz
+    assert plan.z_limits(prof, "x10_VIS")["focus_valid_xy_um"] is None
+    base = {"sample": {"name": "film"}, "setup": {"laser_nm": 532, "grating": 1800, "filter": "1%",
+            "objective": "x100"}, "acquire": {"center_cm1": 520, "exposure_s": 0.5}}
+    v = api.validate({"d": dict(base, kind="map", map={"x_um": [0, 2, 1], "z_um": [-5, 40, 5]})})["d"]
+    assert not v["ok"] and any("toward the sample" in e for e in v["errors"])
+    v = api.validate({"d": dict(base, kind="map", map={"x_um": [0, 2, 1], "z_um": [-40, 10, 5]})})["d"]
+    assert v["ok"], v["errors"]                                                       # away: up to max_dz
+    s = dict(base, kind="map", map={"x_um": [0, 1000, 500]})
+    s["sample"] = {"name": "rough", "unevenness_um": 150}
+    v = api.validate({"m": s})["m"]
+    assert not v["ok"] and any("unevenness" in e for e in v["errors"])
+    s["sample"] = {"name": "rough", "unevenness_um": 20}
+    assert api.validate({"m": s})["m"]["ok"]
+    br = runner.move_z.__code__.co_varnames
+    assert "focusing" in br
+
+
+def test_stale_focus_stops_z_toward_the_sample_at_run_time():
+    prof = P.load()
+    P.save(dict(prof, stage=dict(prof["stage"], z_into_sample="+")))
+    S.ensure(config.active_bridge_dir())
+    st = run_inline({"m": {"kind": "map", "sample": {"name": "x"},
+                           "setup": {"laser_nm": 532, "grating": 1800, "filter": "1%", "objective": "x100"},
+                           "acquire": {"center_cm1": 520, "exposure_s": 0.1},
+                           "map": {"x_um": [0, 600, 600], "z_um": [0, 10, 10]}}})
+    txt = json.dumps(st["studies"]["m"])
+    assert "needs a fresh focus here first" in txt
