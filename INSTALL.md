@@ -36,8 +36,8 @@ network: it carries its own Python with every package. Use it unless you develop
    `ls6t connect auto` ([step 8](#8-connect-an-llm-app)).
 4. **Then** start `ls6t_bridge.vbs` in LabSpec (step [6](#6-install-the-labspec-scripts), from *"In LabSpec 6"*).
    An update ends a running bridge cleanly first (its window closes; `deploy_log.jsonl` records it): start it again.
-   LabSpec need not be restarted for an update; after a LabSpec start, the grating answers its first status only
-   after about a minute (the bridge's start-up warm-up waits for it). When
+   LabSpec need not be restarted for an update. The grating's first status after a start has sometimes taken
+   30–50 s (cause under observation, `warmup_log.jsonl`); the bridge's start-up warm-up waits for it. When
    it starts, it reads the instrument's inventory and ls6t builds the machine profile from it by itself (cautious
    until reviewed: step [7](#7-the-machine-profile)); running `ls6t_discover.vbs` separately is optional. Restart
    the connected apps, and check with the instrument (step [9](#9-check-with-the-instrument)). Steps 1–5 and 8 are

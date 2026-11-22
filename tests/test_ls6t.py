@@ -946,7 +946,7 @@ def test_native_map_export_and_discovery_probes(tmp_path):
     assert st["studies"]["m"]["reliable"]
     S.ensure(config.active_bridge_dir())
     r = bridge.Bridge().call("discover", timeout_s=10, out=str(tmp_path / "dump.txt"))
-    # discovery no longer probes these (2026.11.22.2): dumps from older bridges still carry them
+    # discovery no longer probes these (2026.11.22.3): dumps from older bridges still carry them
     old = (tmp_path / "dump.txt").read_text() + "\n".join([
         "selftest.get_value_ex=0", "selftest.get_value_simple_part=1", "selftest.get_value_simple_part_size=8",
         "selftest.get_value_simple_part_values=4,5,6,7,8,9,10,11", "selftest.get_config_param=1",
@@ -2141,3 +2141,34 @@ def test_stop_messages_say_where_and_how_to_resume():
     st = run_inline({"m": {"kind": "move", "move": {"x_um": 10, "y_um": 0}}})       # the bridge is halted
     assert "ls6t instrument resume" in st["why"]
     assert st["stage_at_end"]["from_home_um"] == [0.0, 0.0] and "nothing moved" in st["returned"]["why"]
+
+
+def test_retract_travel_return_and_focus_from_below():
+    """Nicola: an optional retract-travel-return for large XY moves on uneven samples, then a focus search from
+    below; also a retract before a manual objective change."""
+    prof = P.load()
+    st = {"kind": "move", "sample": {"name": "rough", "unevenness_um": 30}, "move": {"x_um": 1000, "y_um": 0}}
+    v = api.validate({"m": st})["m"]
+    assert not v["ok"] and any("T3.17" in e for e in v["errors"])          # needs the Z direction
+    P.save(dict(prof, stage=dict(prof["stage"], z_into_sample="+")))
+    v = api.validate({"m": st})["m"]
+    assert v["ok"], v["errors"]
+    assert any("retract-travel-return" in w for w in v["warnings"])
+    S.ensure(config.active_bridge_dir())
+    z0 = float(api.instrument("status")["status"]["z_um"])
+    r = run_inline({"m": dict(st, move=dict(st["move"], snapshot=False)),
+                    "f": {"kind": "focus", "sample": {"name": "rough"},
+                          "setup": {"laser_nm": 532, "grating": 1800, "filter": "1%", "objective": "x100"},
+                          "focus": {"scan": {"from_below": True, "step_um": 0.5}}}})
+    tr = r["studies"]["m"]["move"]["travel"]
+    assert tr["mode"] == "retract" and abs(tr["retracted_to_um"] - (z0 - 2000)) < 1e-6
+    assert abs(tr["descended_to_um"] - (z0 - 30)) < 1e-6
+    f = r["studies"]["f"]["focus"]
+    assert f["from_below"] is True and f["coarse_step_um"] <= 2.0 and f["found"], f
+    assert abs(f["z_um"] - z0) < 1.0                                       # the sim's focus: where it was
+    assert plan.coarse_focus_step_um(prof, "x10_VIS") == 25.0
+    # retract before a manual objective change (opt-in)
+    P.save(dict(P.load(), stage=dict(P.load()["stage"], retract_for_objective_change=True)))
+    zb = float(api.instrument("status")["status"]["z_um"])
+    r = api.instrument("set", setup={"objective": "x10"})
+    assert r["ok"] and abs(float(api.instrument("status")["status"]["z_um"]) - (zb - 2000)) < 1e-6

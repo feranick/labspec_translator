@@ -1,5 +1,5 @@
 """bridge.py — the Python side of the LabSpec bridge: commands as files in a folder the bridge script watches.
-Version: 2026.11.22.2
+Version: 2026.11.22.3
 
 Protocol 1 (the same for ls6t_bridge.vbs inside LabSpec and for sim.py):
 
@@ -187,10 +187,24 @@ def decode(text: str) -> dict:
     return parse_kv(text)
 
 
+def replace_retry(src, dst, tries: int = 100, wait_s: float = 0.02):
+    """os.replace, tried again while Windows refuses it (PermissionError while another process, e.g. a virus
+    scanner or the reader, has one of the files open): a renamed file must not be lost to a moment's lock (the
+    simulated bridge's thread died of it in the Windows CI now and then: bench graphene_map)."""
+    for k in range(tries):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if k == tries - 1:
+                raise
+            time.sleep(wait_s)
+
+
 def _write_atomic(path: Path, text: str):
     tmp = path.with_suffix(".tmp")
     tmp.write_bytes(text.encode("utf-16"))      # with a BOM; LabSpec's FSO reads it in Unicode mode
-    os.replace(tmp, path)
+    replace_retry(tmp, path)
 
 
 class Bridge:

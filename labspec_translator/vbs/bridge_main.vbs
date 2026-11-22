@@ -1022,7 +1022,11 @@ Sub VAcquireInner(cmd, res)
     If Not WriteSpectrum(id, outPath, res) Then Exit Sub
     On Error Resume Next
     If sample <> "" Then LabSpec.PutDataInfo id, "Custom", "Sample", sample
-    LabSpec.PutDataInfo id, "Custom", "Remark", "ls6t " & gSeq
+    If GetP(cmd, "remark", "") <> "" Then
+        LabSpec.PutDataInfo id, "Custom", "Remark", "ls6t " & gSeq & ": " & GetP(cmd, "remark", "")
+    Else
+        LabSpec.PutDataInfo id, "Custom", "Remark", "ls6t " & gSeq
+    End If
     Err.Clear
     If native <> "" Then
         r = LabSpec.Save(id, native, "")

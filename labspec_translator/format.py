@@ -1,5 +1,5 @@
 """format.py — the study format and its static checks (no instrument needed).
-Version: 2026.11.22.2
+Version: 2026.11.22.3
 """
 from __future__ import annotations
 
@@ -19,11 +19,11 @@ CUTOFF_KEYS = {"from_cm1", "to_cm1", "light", "laser_off", "plateau_cm1"}
 CAL_KEYS = {"reference", "lines_cm1", "tol_cm1", "adjust"}
 BG_KEYS = {"name", "laser_off"}
 DEPTH_KEYS = {"from_um", "to_um", "step_um", "refractive_index", "engine", "swift"}
-MOVE_KEYS = {"x_um", "y_um", "to_um", "dz_um", "stay", "snapshot"}
+MOVE_KEYS = {"x_um", "y_um", "to_um", "dz_um", "stay", "snapshot", "travel"}
 SPOT_KEYS = {"method", "feature_um", "refine", "range_um", "step_um", "line_cm1", "window_cm1", "exposure_s",
              "acq_exposure_s", "remember"}
 SPOT_METHODS = ("auto", "shutter", "acquisition", "raman")
-SCAN_KEYS = {"range_um", "step_um", "line_cm1", "window_cm1", "exposure_s"}
+SCAN_KEYS = {"range_um", "step_um", "line_cm1", "window_cm1", "exposure_s", "from_below"}
 ALIGN_KEYS = {"guided", "focus_guide"}
 GUIDE_KEYS = {"instruction", "mode", "target", "line_cm1", "center_cm1", "window_cm1", "exposure_s", "max_s",
               "stable_n", "drop_frac"}
@@ -237,7 +237,9 @@ def _z_safety(study: dict, prof: dict, errors: list, warnings: list) -> None:
         b = study.get(blk)
         if isinstance(b, dict) and _num(b.get("dz_um")):
             dzs.append(float(b["dz_um"]))
-    if kind == "focus" or (isinstance(study.get("focus"), dict) and study["focus"].get("autofocus") == "scan"):
+    from_below = bool(((study.get("focus") or {}).get("scan") or {}).get("from_below"))
+    if (kind == "focus" or (isinstance(study.get("focus"), dict) and study["focus"].get("autofocus") == "scan")) \
+            and not from_below:
         try:
             half = float(plan.scan_params(study, prof)["range_um"]) / 2
             dzs += [half, -half]
@@ -269,10 +271,12 @@ def _z_safety(study: dict, prof: dict, errors: list, warnings: list) -> None:
         if isinstance(mv, dict):
             far = max(far, math.hypot(mv.get("x_um", 0) or 0, mv.get("y_um", 0) or 0))
         wd, fv = zl["working_distance_um"], zl["focus_valid_xy_um"]
-        if wd and fv is not None and float(un) >= 0.5 * wd and far > fv:
+        retract_move = kind == "move" and plan.travel_mode(prof, study, far, obj) == "retract"
+        if wd and fv is not None and float(un) >= 0.5 * wd and far > fv and not retract_move:
             errors.append(f"sample.unevenness_um = {float(un):g} µm is at least half {obj or 'the objective'}'s "
                           f"working distance (~{wd:g} µm): XY moves are kept within {fv:g} µm of the focus (this "
-                          f"study goes {far:.0f} µm); a longer working distance objective, or a smaller area")
+                          f"study goes {far:.0f} µm); a longer working distance objective, a smaller area, or a 'move' "
+                          "with travel 'retract' first")
 
 
 def validate_study(name: str, study: dict, prof: dict) -> dict:
@@ -803,6 +807,12 @@ def _validate_scan(sc: dict, prof: dict, errors: list):
                           + (" (2 x limits.max_dz_um)" if k == "range_um" else ""))
     if sc.get("line_cm1") is not None and not _num(sc["line_cm1"]):
         errors.append("focus.scan.line_cm1: a number (cm-1)")
+    if sc.get("from_below") is not None:
+        if not isinstance(sc["from_below"], bool):
+            errors.append("focus.scan.from_below: true or false")
+        elif sc["from_below"] and not plan.into_sign(prof)[1]:
+            errors.append("focus.scan.from_below: needs stage.z_into_sample (which Z direction approaches the "
+                          "objective: TESTING T3.17)")
     try:
         n = len(plan.scan_offsets(p))
         if n < 5:
@@ -890,6 +900,23 @@ def _validate_move(name, study, prof, errors, warnings) -> dict:
                           "distance from the home spot, not per axis)")
         if abs(m.get("dz_um", 0) or 0) > lim["max_dz_um"]:
             errors.append(f"move.dz_um: |dz| <= limits.max_dz_um = {lim['max_dz_um']:g} µm")
+        if m.get("travel") not in (None, "retract", "direct"):
+            errors.append("move.travel: 'retract' (Z away by limits.retract_um, travel, back to the old focus minus "
+                          "sample.unevenness_um) or 'direct'")
+        obj = (study.get("setup") or {}).get("objective")
+        if plan.travel_mode(prof, study, d, obj) == "retract":
+            un = float((study.get("sample") or {}).get("unevenness_um") or 0)
+            if not plan.into_sign(prof)[1]:
+                errors.append("move: a retract-travel-return needs stage.z_into_sample (which Z direction approaches "
+                              "the objective: TESTING T3.17)")
+            elif un >= plan.retract_um(prof):
+                errors.append(f"move: sample.unevenness_um ({un:g}) must be below limits.retract_um "
+                              f"({plan.retract_um(prof):g})")
+            elif m.get("dz_um"):
+                errors.append("move.dz_um: not with a retract-travel-return (it ends short of the focus; focus first)")
+            warnings.append(f"retract-travel-return: Z goes {plan.retract_um(prof):g} µm away, the stage travels, Z "
+                            f"comes back to the old focus minus {un:g} µm (away from the sample): focus there (a "
+                            "'focus' study with focus.scan.from_below) before measuring")
     s = study.get("setup") or {}
     if set(s) - {"objective"}:
         errors.append("setup: only the objective with kind 'move' (no laser is used)")

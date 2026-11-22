@@ -1,5 +1,5 @@
 """sim.py — a simulated LabSpec + XploRA behind the same bridge protocol as ls6t_bridge.vbs.
-Version: 2026.11.22.2
+Version: 2026.11.22.3
 
 It answers every verb of the bridge with the same keys, so the runner, the checks and the MCP server are tested
 without the instrument (LS6T_MODE=sim, and the tests). The simulated sample is a silicon wafer with a graphene
@@ -33,7 +33,7 @@ from pathlib import Path
 import numpy as np
 
 from . import __version__, BRIDGE_PROTOCOL, config
-from .bridge import decode, encode
+from .bridge import decode, encode, replace_retry
 from .profile import DEFAULT_PROFILE, filter_pct, read_text
 
 FULL_SCALE = 65535.0
@@ -110,7 +110,7 @@ class SimLabSpec:
         tmp = self.dir / "heartbeat.tmp"
         try:
             tmp.write_text(txt, encoding="utf-8")
-            os.replace(tmp, self.dir / "heartbeat.txt")
+            replace_retry(tmp, self.dir / "heartbeat.txt", tries=10)
         except OSError:
             pass
 
@@ -137,8 +137,18 @@ class SimLabSpec:
             path = cmds[0]
             try:
                 params = decode(read_text(path))
-                path.unlink()
             except OSError:
+                time.sleep(0.02)
+                continue
+            for _ in range(50):                     # Windows: the file may be held a moment (scanner, the writer)
+                try:
+                    path.unlink()
+                    break
+                except FileNotFoundError:
+                    break
+                except OSError:
+                    time.sleep(0.02)
+            else:
                 continue
             self.verb, self.seq = params.get("verb", ""), params.get("seq", "")
             self.state = "busy"
@@ -149,8 +159,11 @@ class SimLabSpec:
             res = {"seq": self.seq, "ok": res.pop("ok", 1), "error": res.pop("error", ""), **res}
             out = self.outbox / f"{self.seq}.res"
             tmp = self.outbox / f"{self.seq}.tmp"
-            tmp.write_text(encode(res), encoding="utf-8")
-            os.replace(tmp, out)
+            try:
+                tmp.write_text(encode(res), encoding="utf-8")
+                replace_retry(tmp, out)
+            except OSError:
+                pass                                # the thread goes on: the caller times out on this one command
             self.state = "idle"
             self.verb = ""
 
@@ -935,7 +948,7 @@ class SimLabSpec:
             fh.write(f"# acq.Grating={self._cur('Grating')[0]:g}\n# acq.Filter={self._cur('Filter')[1]}\n")
             for a, b in zip(nm, y):
                 fh.write(f"{a:.5f}\t{b:.3f}\n")
-        os.replace(tmp, out)
+        replace_retry(tmp, out)
         if p.get("native"):
             Path(p["native"]).write_text(f"simulated LabSpec spectrum {sid}\n", encoding="utf-8")
         return {"id": sid, "out": str(out), "points": int(nm.size), "x_unit": "nm", "y_unit": "cnt",

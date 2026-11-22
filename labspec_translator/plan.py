@@ -1,5 +1,5 @@
 """plan.py — a study as bridge commands: the setup moves, the points, the acquisitions; and the time estimate.
-Version: 2026.11.22.2
+Version: 2026.11.22.3
 
 Everything here is computed from the study and the profile alone: wavelengths from Raman shifts, the number of
 detector windows, the stage positions (always offsets from where the operator left the stage, Z from the
@@ -314,6 +314,10 @@ def z_limits(prof: dict, objective, purpose: str | None = None) -> dict:
     max_dz = float(lim.get("max_dz_um", 100.0))
     wd = working_distance_um(prof, objective)
     frac = float(lim.get("z_toward_wd_fraction", 0.1))
+    away = float(lim.get("max_dz_um", 100.0))
+    if purpose == "travel":
+        # moving away from the sample to travel or to search the focus from below: away up to limits.retract_um
+        away = max(away, retract_um(prof))
     if purpose == "depth":
         # depth profiles into transparent samples (polymers, coatings) go further, after the operator confirms the
         # gap in LabSpec (runner): limits.depth_toward_wd_fraction, 0.3 by default (x100: ~63 µm of ~210 µm)
@@ -324,8 +328,42 @@ def z_limits(prof: dict, objective, purpose: str | None = None) -> dict:
     mag = objective_mag(objective) if objective is not None else 100
     valid = fv.get(str(mag)) if mag is not None else fv.get("100")
     return {"objective": objective, "purpose": purpose, "working_distance_um": wd, "toward_um": round(toward, 1),
-            "away_um": max_dz, "toward_sign": sign if known else None,
+            "away_um": away, "toward_sign": sign if known else None,
             "focus_valid_xy_um": float(valid) if valid is not None else None}
+
+
+def coarse_focus_step_um(prof: dict, objective) -> float:
+    """The largest step of a focus search from below that cannot jump over the focus: about half the objective's
+    depth of field (the measured axial FWHM when there is one, else by magnification: x100 2, x50 4, x20 10, x10 25,
+    x5 50 µm)."""
+    from . import perf
+    try:
+        rec = [v for k, v in (perf.status().get("axial") or {}).items() if str(objective) in str(k)]
+        fw = [float(r["latest"]["fwhm_um"]) for r in rec if r.get("latest", {}).get("fwhm_um")]
+        if fw:
+            return max(0.5, min(fw) / 2)
+    except Exception:  # noqa: BLE001 - the table below then
+        pass
+    mag = objective_mag(objective) if objective is not None else 100
+    return {100: 2.0, 50: 4.0, 20: 10.0, 10: 25.0, 5: 50.0}.get(mag or 100, 2.0)
+
+
+def retract_um(prof: dict) -> float:
+    """How far Z goes away from the sample for a retract-travel-return (limits.retract_um, 2000 µm by default;
+    away only, its own limit, not max_dz_um)."""
+    return float(prof.get("limits", {}).get("retract_um", 2000.0))
+
+
+def travel_mode(prof: dict, study: dict, dist_um: float, objective) -> str:
+    """'retract' (Z away by retract_um, travel, Z back to the old focus minus the sample's unevenness) or 'direct'
+    for an XY move of dist_um: as move.travel says, else 'retract' when sample.unevenness_um is given and the move
+    goes beyond where the focus stays valid for the objective."""
+    t = (study.get("move") or {}).get("travel")
+    if t in ("retract", "direct"):
+        return t
+    un = (study.get("sample") or {}).get("unevenness_um")
+    fv = z_limits(prof, objective)["focus_valid_xy_um"]
+    return "retract" if un is not None and fv is not None and dist_um > fv else "direct"
 
 
 def z_check(zl: dict, dz: float) -> str | None:

@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.22.2)
+## Architecture (version 2026.11.22.3)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -571,7 +571,8 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   says to quit the LLM apps (Claude from the tray) and that LabSpec may stay open, the finish page that a running
   bridge was ended and must be started again; INSTALL.md the same. Warm-up settled: Grating 29.5 s with LabSpec
   restarted right after the deploy (bridge 43 s later; ready ~73 s after LabSpec's launch), 0 s with LabSpec
-  running 8.3 min: the grating initialises for about a minute after LabSpec starts; WarmUp absorbs it. The
+  running 8.3 min: the grating initialises for about a minute after LabSpec starts (later revised: 2026-11-22 a
+  bridge 26 s after LabSpec had 0 s: likely at best, under observation); WarmUp absorbs it. The
   scientific-notation duration was fixed in 2026.11.21.2. 129 tests.
 - 2026-11-21, 2026.11.21.4: Nicola: the welcome page said a running bridge 'gets started again at the end'; the
   installer cannot start a LabSpec script: it now says the operator starts ls6t_bridge.vbs again after the
@@ -602,6 +603,23 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   message suggested the stage was away (runner._not_returned: 'nothing moved away; at the home spot', or the
   distance it stays); 'resume it in LabSpec' -> `ls6t instrument resume` (runner, bridge, sim); _stage_now gives
   from_home_um also when the request stopped before taking its home spot (home = here). 134 tests.
+- 2026-11-22, 2026.11.22.3: Nicola's retract-travel-return: plan.retract_um (limits.retract_um 2000, away only),
+  travel_mode (move.travel, or auto with sample.unevenness_um beyond focus_valid_xy_um), coarse_focus_step_um
+  (half the measured axial FWHM, else by magnification); z_limits purpose 'travel' (away up to retract_um);
+  runner.travel_xy (retract from the focus, travel, descend to focus - unevenness; _z_direct for these away moves),
+  run_move uses it and says Z is short of the focus; focus_scan from_below -> _focus_from_below (coarse steps toward
+  the sample to old focus + toward limit, stop past a clear peak (> 3x the first steps' median), fine symmetric scan
+  around it). Optional stage.retract_for_objective_change (api.objective_retract, set and the runner's set-up;
+  ctx.focus_stale until a focus is found). format: move.travel, focus.scan.from_below, both need
+  stage.z_into_sample; a retract move is exempt from the unevenness refusal. sample.notes -> LabSpec Remark (bridge
+  'remark'). Warm-up cause revised to 'likely, under observation' (a bridge 26 s after LabSpec: 0 s). TESTING T6.8.
+  CI: graphene_map failed again on Windows, intermittently. Likely cause: on Windows os.replace raises
+  PermissionError while another process has the target or source open (study_status reading progress/state while
+  the runner rewrites them, a virus scanner on new files); in the runner (write_json) that ended the request, in the
+  simulator's command loop it killed its thread. bridge.replace_retry (100 x 20 ms) for write_json, the bridge's
+  command files, the sim's results / heartbeat / spectra, profile and spectra saves; the sim's loop no longer dies
+  on a write error and retries a locked command file's removal. Not reproducible on Linux; the next tag's CI runs
+  will tell. 134 tests.
 
 ## To do next
 

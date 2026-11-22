@@ -1,5 +1,5 @@
 """runner.py — runs a request's studies on the instrument, one command at a time, and checks every result.
-Version: 2026.11.22.2
+Version: 2026.11.22.3
 
 A request runs in its own process (`ls6t run-request FOLDER`, started detached by api.start), so it outlives the
 MCP call that started it. One request at a time holds the instrument (a lock file under LS6T_HOME); others wait
@@ -20,7 +20,7 @@ import numpy as np
 from . import __version__, BRIDGE_PROTOCOL, config, plan, spectra, video
 from . import spot as SP
 from . import profile as P
-from .bridge import Bridge, BridgeError, BridgeGone, BridgeTimeout
+from .bridge import replace_retry, Bridge, BridgeError, BridgeGone, BridgeTimeout
 
 FINAL = ("done", "cancelled", "failed", "interrupted")
 
@@ -39,7 +39,7 @@ def write_json(path: Path, data):
     path = Path(path)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(data, indent=1, default=_jsonable), encoding="utf-8")
-    os.replace(tmp, path)
+    replace_retry(tmp, path)        # Windows: a reader (study_status) holding the file must not crash the runner
 
 
 def read_json(path: Path, default=None):
@@ -99,6 +99,7 @@ class Ctx:
         self.objective = None               # LabSpec's objective now (its record)
         self.focus_xy = (None, None)        # where the focus was found (the operator's spot, or the last focus)
         self.z_purpose = None               # 'depth' while a depth profile runs (its own Z limit, confirmed)
+        self.focus_stale = False            # after a retract for an objective change: a fresh focus is needed
         self.last_beat = 0.0
         self.bridge_version = None
 
@@ -320,7 +321,15 @@ def _setup(name: str, study: dict, ctx: Ctx, warnings: list, unreliable: list, c
         if step["motor"] == prof["motors"]["objective"] and prof.get("manual_objective", True) \
                 and str(step["value"]) != str(before.get("objective")) and config.confirm_policy() != "never":
             # a manual turret: the operator changes the lens by hand; LabSpec only records it (then moved below)
-            from .api import objective_question
+            from .api import objective_question, objective_retract, objective_retract_wanted
+            lowered = None
+            if objective_retract_wanted(prof):
+                lowered = objective_retract(lambda **kw: ctx.call("move", timeout_s=180, **kw), prof,
+                                            _f(before.get("z_um")))
+                if lowered is not None:
+                    ctx.focus_stale = True          # another lens: Z toward the sample needs a fresh focus
+                    warnings.append(f"the stage was lowered {plan.retract_um(prof):g} µm before the objective change: "
+                                    "focus again (a 'focus' study with focus.scan.from_below) before measuring")
             ans = ctx.call("confirm", timeout_s=3600, text=objective_question(prof, before.get("objective"),
                                                                               step["value"]))
             if ans.get("answer") != "yes":
@@ -538,6 +547,8 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
             params.pop("verb", None)
             params["out"] = str(out)
             params["sample"] = study.get("sample", {}).get("name", name)
+            if study.get("sample", {}).get("notes"):
+                params["remark"] = str(study["sample"]["notes"])[:200]     # LabSpec's Remark, after "ls6t <seq>"
             if native and kind not in ("map", "series"):
                 params["native"] = str(sd / "spectra" / f"p{k:05d}.l6s")
             if kind == "series" and k == 0:
@@ -657,23 +668,27 @@ def _check_abs(prof: dict, axis: str, value: float, what: str):
 
 def _focus_here(ctx: Ctx) -> None:
     """The focus was just found here: offsets toward the sample are measured from this spot's focus again."""
+    ctx.focus_stale = False
     s = _stage_now(ctx)
     if s.get("x_um") is not None:
         ctx.focus_xy = (s["x_um"], s["y_um"])
 
 
-def _z_guard(ctx: Ctx, target: float, what: str, focusing: bool) -> None:
+def _z_guard(ctx: Ctx, target: float, what: str, focusing: bool, purpose: str | None = None) -> None:
     """Z from the focus within the objective's limits (plan.z_limits: toward the sample a fraction of its working
     distance, away limits.max_dz_um; both ways the toward limit until stage.z_into_sample is set); and toward the
     sample only while the focus is fresh: after an XY move farther than focus_valid_xy_um from where the focus was
     found (short working distances), only a focus scan or an autofocus may approach (they find it again)."""
     if ctx.z_focus is None or target is None:
         return
-    zl = plan.z_limits(ctx.prof, ctx.objective, getattr(ctx, "z_purpose", None))
+    zl = plan.z_limits(ctx.prof, ctx.objective, purpose or getattr(ctx, "z_purpose", None))
     dz = float(target) - float(ctx.z_focus)
     err = plan.z_check(zl, dz)
     if err:
         raise Stop(f"{what}: {err}", "study")
+    if not focusing and plan.toward(zl, dz) and getattr(ctx, "focus_stale", False):
+        raise Stop(f"{what}: the stage was lowered for an objective change: Z toward the sample needs a fresh focus "
+                   "first (a focus scan or an autofocus)", "study")
     if focusing or not plan.toward(zl, dz) or zl["focus_valid_xy_um"] is None or None in ctx.focus_xy:
         return
     s = _stage_now(ctx)
@@ -706,6 +721,44 @@ def _confirm_depth(name: str, derived: dict, ctx: Ctx) -> None:
         raise Stop("the operator did not confirm the depth profile's Z range", "operator")
 
 
+def _z_direct(ctx: Ctx, target: float, what: str) -> float:
+    """A Z move away from the sample (retract, or the descent that stops short of the old focus): checked against
+    the profile's absolute stage limits only; travel_xy decides that it moves away."""
+    _check_abs(ctx.prof, "z", target, what)
+    r = ctx.call("move", timeout_s=180, motor=ctx.prof["motors"]["z"], mode="value", value=round(target, 3))
+    if not r["ok"]:
+        raise Stop(f"{what}: Z move failed: {r.get('error')}", "study")
+    return _f(r.get("value")) if _f(r.get("value")) is not None else target
+
+
+def travel_xy(ctx: Ctx, tx: float, ty: float, unevenness_um: float, what: str) -> dict:
+    """Retract-travel-return for an uneven sample: Z goes limits.retract_um away from the sample (from the focus),
+    the stage travels to (tx, ty), and Z comes back to the old focus minus the sample's unevenness, still on the
+    away side: the new spot's surface is at most that much higher, so nothing is touched; the focus is then searched
+    approaching from below (focus.scan.from_below). Needs stage.z_into_sample (TESTING T3.17)."""
+    zl = plan.z_limits(ctx.prof, ctx.objective)
+    s = zl["toward_sign"]
+    if s is None:
+        raise Stop(f"{what}: a retract-travel-return needs stage.z_into_sample (TESTING T3.17)", "study")
+    st = ctx.call("status", timeout_s=15, **motor_args(ctx.prof))
+    z0 = _f(st.get("z_um"))
+    zf = ctx.z_focus if ctx.z_focus is not None else z0
+    if zf is None:
+        raise Stop(f"{what}: the Z position could not be read: no retract-travel-return", "study")
+    R = plan.retract_um(ctx.prof)
+    z_up = zf - s * R
+    if z0 is not None and (z0 - z_up) * s < 0:      # already farther away than that
+        z_up = z0
+    z_up = _z_direct(ctx, z_up, f"{what}: retract")
+    r = ctx.call("move_xy", timeout_s=300, x_um=round(tx, 3), y_um=round(ty, 3), **motor_args(ctx.prof))
+    if not r["ok"]:
+        raise Stop(f"{what}: XY move failed (Z left retracted at {z_up:g} µm): {r.get('error')}", "study")
+    z_down = _z_direct(ctx, zf - s * float(unevenness_um), f"{what}: back down")
+    return {"mode": "retract", "retract_um": R, "retracted_to_um": z_up, "old_focus_um": zf,
+            "unevenness_um": float(unevenness_um), "descended_to_um": z_down,
+            "xy_um": [_f(r.get("x_um")), _f(r.get("y_um"))]}
+
+
 def _retract_before_xy(ctx: Ctx, ax, ay, zcur, zref, what: str):
     """Before an XY move beyond where the focus stays valid (short working distances), Z goes back to the focus if
     it is offset toward the sample: the stage never travels sideways with the sample closer than at focus."""
@@ -719,9 +772,9 @@ def _retract_before_xy(ctx: Ctx, ax, ay, zcur, zref, what: str):
     return move_z(ctx, zref, f"{what}: back to the focus before moving away", focusing=True)
 
 
-def move_z(ctx: Ctx, target: float, what: str, focusing: bool = False) -> float:
+def move_z(ctx: Ctx, target: float, what: str, focusing: bool = False, away_ok: bool = False) -> float:
     _check_abs(ctx.prof, "z", target, what)
-    _z_guard(ctx, target, what, focusing)
+    _z_guard(ctx, target, what, focusing, "travel" if away_ok else None)
     r = ctx.call("move", timeout_s=120, motor=ctx.prof["motors"]["z"], mode="value", value=round(target, 3))
     if not r["ok"]:
         raise Stop(f"{what}: Z move failed: {r.get('error')}", "study")
@@ -801,6 +854,8 @@ def focus_scan(ctx: Ctx, study: dict, laser: float, z0: float | None, sd: Path, 
     if z0 is None:
         raise Stop("the Z position could not be read: a focus scan needs it", "study")
     sd.mkdir(parents=True, exist_ok=True)
+    if sc.get("from_below"):
+        return _focus_from_below(ctx, study, laser, sc, sd, warnings)
     offs = plan.scan_offsets(sc)
     line, win = float(sc["line_cm1"]), float(sc["window_cm1"])
     nm = round(shift_to_nm(line, laser), 4)
@@ -856,6 +911,75 @@ def focus_scan(ctx: Ctx, study: dict, laser: float, z0: float | None, sd: Path, 
         warnings.append(f"focus scan plot not drawn: {type(exc).__name__}: {exc}")
     write_json(sd / "focus_scan.json", clean(res))
     return res
+
+
+def _scan_signal(ctx: Ctx, laser: float, sc: dict, out: Path) -> float:
+    """One short acquisition on the focus line: its height above the window's edges, per second."""
+    from .profile import shift_to_nm
+    line, win = float(sc["line_cm1"]), float(sc["window_cm1"])
+    nm = round(shift_to_nm(line, laser), 4)
+    r = ctx.call("acquire", timeout_s=60 + 3 * float(sc["exposure_s"]), mode=110, exposure_s=float(sc["exposure_s"]),
+                 accumulations=1, from_nm=nm, to_nm=nm, out=str(out), sample="focus scan")
+    if not r["ok"]:
+        raise Stop(f"focus search: acquisition failed: {r.get('error')}", "study")
+    sp = spectra.read(out)
+    x, _ = spectra.to_shift(sp["x"], sp["meta"].get("x_unit", "nm"), laser)
+    x, y = spectra.sort_xy(x, sp["y"])
+    return spectra.line_signal(x, y, line, win) / float(sc["exposure_s"])
+
+
+def _focus_from_below(ctx: Ctx, study: dict, laser: float, sc: dict, sd: Path, warnings: list) -> dict:
+    """The focus searched approaching the sample from the away side (after a retract-travel-return): coarse steps
+    from where Z is toward the sample, never past the old focus plus the objective's toward limit, stopping once the
+    signal has clearly passed its peak; then an ordinary fine scan around the best coarse step."""
+    zl = plan.z_limits(ctx.prof, ctx.objective)
+    s = zl["toward_sign"]
+    if s is None:
+        raise Stop("a focus search from below needs stage.z_into_sample (TESTING T3.17)", "study")
+    st = ctx.call("status", timeout_s=15, **motor_args(ctx.prof))
+    z_start = _f(st.get("z_um"))
+    if z_start is None:
+        raise Stop("the Z position could not be read: no focus search", "study")
+    ref = ctx.z_focus if ctx.z_focus is not None else z_start
+    z_end = ref + s * zl["toward_um"]
+    span = (z_end - z_start) * s
+    if span <= float(sc["step_um"]):
+        raise Stop("focus search from below: Z is not on the away side of the old focus (nothing to approach)", "study")
+    coarse = max(float(sc["step_um"]), min(span / 30.0, plan.coarse_focus_step_um(ctx.prof, ctx.objective)))
+    zs, vals = [], []
+    k = 0
+    while True:
+        z_t = z_start + s * k * coarse
+        if (z_t - z_end) * s > 1e-9:
+            break
+        z = move_z(ctx, z_t, f"focus search from below, step {k}", focusing=True, away_ok=True)
+        zs.append(z)
+        vals.append(_scan_signal(ctx, laser, sc, sd / f"below{k:03d}.txt"))
+        k += 1
+        i = int(np.argmax(vals))
+        base = float(np.median(vals[:3])) if len(vals) >= 3 else None
+        if base is not None and vals[i] > 3 * max(base, 1e-12) and len(vals) - 1 - i >= 2 and vals[-1] < 0.5 * vals[i]:
+            break                                    # a clear peak, well passed: no need to go nearer
+    i = int(np.argmax(vals)) if vals else 0
+    base = float(np.median(vals[:3])) if len(vals) >= 3 else (vals[0] if vals else 0.0)
+    res = {"from_below": True, "z_start_um": z_start, "z_limit_um": z_end, "coarse_step_um": round(coarse, 3),
+           "coarse_z_um": zs, "coarse_signal": [round(v, 3) for v in vals]}
+    if not vals or vals[i] <= 3 * max(base, 1e-12) or not 0 < i < len(vals) - 1:
+        res.update(found=False, why="no clear peak between the start and the limit toward the sample",
+                   z_now=_z_direct(ctx, z_start, "focus search: back to the start"))
+        write_json(sd / "focus_scan.json", clean(res))
+        return res
+    half = min(2 * coarse, max(float(sc["step_um"]), (z_end - zs[i]) * s))
+    fine = dict(study, focus=dict(study.get("focus") or {}, scan=dict(sc, from_below=False, range_um=round(2 * half, 3))))
+    ctx_z = ctx.z_focus
+    ctx.z_focus = zs[i]                          # the fine scan's Z limits count from the coarse best
+    try:
+        fs = focus_scan(ctx, fine, laser, zs[i], sd / "fine", warnings)
+    finally:
+        ctx.z_focus = ctx_z                      # the caller sets the new focus from the result
+    fs.update({k_: v for k_, v in res.items() if k_ not in ("found",)})
+    write_json(sd / "focus_scan.json", clean(fs))
+    return fs
 
 
 def run_focus(name: str, study: dict, ctx: Ctx) -> dict:
@@ -960,14 +1084,23 @@ def run_move(name: str, study: dict, ctx: Ctx) -> dict:
         tx, ty = hx + float(m.get("x_um", 0) or 0), hy + float(m.get("y_um", 0) or 0)
     _check_abs(prof, "x", tx, name)
     _check_abs(prof, "y", ty, name)
-    r = ctx.call("move_xy", timeout_s=300, x_um=round(tx, 3), y_um=round(ty, 3), **motor_args(prof))
-    if not r["ok"]:
-        raise Stop(f"{name}: XY move failed: {r.get('error')}", "study")
-    xy = [_f(r.get("x_um")), _f(r.get("y_um"))]
-    z = _f(before.get("z_um"))
+    bx, by = _f(before.get("x_um")), _f(before.get("y_um"))
+    dist = math.hypot(tx - (bx if bx is not None else tx), ty - (by if by is not None else ty))
+    travel = None
     dz = float(m.get("dz_um", 0) or 0)
-    if ctx.z_focus is not None and (dz or (z is not None and abs(z - ctx.z_focus) > 0.05)):
-        z = move_z(ctx, ctx.z_focus + dz, name)
+    if plan.travel_mode(prof, study, dist, cur_obj) == "retract":
+        travel = travel_xy(ctx, tx, ty, float((study.get("sample") or {}).get("unevenness_um") or 0), name)
+        xy, z = travel["xy_um"], travel["descended_to_um"]
+        warnings.append(f"retract-travel-return: Z is {travel['unevenness_um']:g} µm short of the old focus, away "
+                        "from the sample: focus here (a 'focus' study with focus.scan.from_below) before measuring")
+    else:
+        r = ctx.call("move_xy", timeout_s=300, x_um=round(tx, 3), y_um=round(ty, 3), **motor_args(prof))
+        if not r["ok"]:
+            raise Stop(f"{name}: XY move failed: {r.get('error')}", "study")
+        xy = [_f(r.get("x_um")), _f(r.get("y_um"))]
+        z = _f(before.get("z_um"))
+        if ctx.z_focus is not None and (dz or (z is not None and abs(z - ctx.z_focus) > 0.05)):
+            z = move_z(ctx, ctx.z_focus + dz, name)
     if m.get("stay", True):
         ctx.home_xy = (xy[0] if xy[0] is not None else tx, xy[1] if xy[1] is not None else ty)
     snap = None
@@ -977,7 +1110,8 @@ def run_move(name: str, study: dict, ctx: Ctx) -> dict:
               "kind": "move", "move": {"offset_um": [float(m.get("x_um", 0) or 0), float(m.get("y_um", 0) or 0)],
                                        "dz_um": dz, "stage_um": xy, "z_um": z, "stay": m.get("stay", True),
                                        "home_um": list(ctx.home_xy), "objective": cur_obj,
-                                       "objective_source": _objective_source(ctx, cur_obj), "beam": beam},
+                                       "objective_source": _objective_source(ctx, cur_obj), "beam": beam,
+                                       "travel": travel or "direct"},
               "setup": {"before": before}, "seconds": {"total": round(time.time() - t_start, 2)}}
     if snap:
         result["video"] = {"here": snap}

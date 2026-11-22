@@ -1,5 +1,5 @@
 """api.py — the functions behind the command line and the MCP server (JSON in, JSON out).
-Version: 2026.11.22.2
+Version: 2026.11.22.3
 """
 from __future__ import annotations
 
@@ -686,6 +686,23 @@ def _move_timing(r: dict) -> dict:
     return out
 
 
+def objective_retract_wanted(prof: dict) -> bool:
+    """Retract before a manual objective change: profile stage.retract_for_objective_change (off by default), and
+    only with stage.z_into_sample known (TESTING T3.17)."""
+    return bool((prof.get("stage") or {}).get("retract_for_objective_change")) and plan.into_sign(prof)[1]
+
+
+def objective_retract(move, prof: dict, z_now) -> float | None:
+    """Z limits.retract_um away from the sample before the operator turns the turret; it stays there (a lens of
+    another working distance: the operator focuses again). move(**params) is the bridge's 'move' call."""
+    if z_now is None:
+        return None
+    s, _ = plan.into_sign(prof)
+    target = round(float(z_now) - s * plan.retract_um(prof), 3)
+    r = move(motor=prof["motors"]["z"], mode="value", value=target)
+    return _fnum(r.get("value")) if r.get("ok") else None
+
+
 def objective_question(prof: dict, now, want) -> str:
     """The operator's question before LabSpec's objective changes. On a manual turret (profile manual_objective, as
     on this XploRA) the operator changes the lens by hand: LabSpec only records which one is in place, and every
@@ -763,10 +780,17 @@ def set_instrument(setup: dict) -> dict:
             if err:
                 return {"ok": False, "error": f"objective {err}" + nothing}
             if lab != before.get("objective"):
+                retracted = None
+                if objective_retract_wanted(prof):
+                    retracted = objective_retract(lambda **kw: b.call("move", timeout_s=180, **kw), prof,
+                                                  _fnum(before.get("z_um")))
                 if config.confirm_policy() != "never":
-                    r = b.call("confirm", timeout_s=3600, text=objective_question(prof, before.get("objective"), lab))
+                    r = b.call("confirm", timeout_s=3600, text=objective_question(prof, before.get("objective"), lab)
+                               + (f" (ls6t lowered the stage {plan.retract_um(prof):g} µm first: focus again after "
+                                  "the change)" if retracted is not None else ""))
                     if r.get("answer") != "yes":
-                        return {"ok": False, "error": "the operator declined in LabSpec" + nothing}
+                        return {"ok": False, "error": "the operator declined in LabSpec" + nothing
+                                + (" except the retract: the stage is lowered" if retracted is not None else "")}
                 moves.append(("objective", mot["objective"], "label", lab))
         for role in ("laser_pol", "raman_pol"):
             if role in s:

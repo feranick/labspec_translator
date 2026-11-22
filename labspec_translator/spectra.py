@@ -1,5 +1,5 @@
 """spectra.py — reading the bridge's spectrum files, and the analysis done here rather than in LabSpec.
-Version: 2026.11.22.2
+Version: 2026.11.22.3
 
 Raman shift from wavelength with the laser line read back from the instrument; an iterative polynomial baseline;
 noise from second differences; spikes; peak fits (pseudo-Voigt, Lorentz, Gauss with a local linear background);
@@ -53,7 +53,8 @@ def write(path: Path | str, x, y, meta: dict | None = None):
             fh.write(f"# {k}={v}\n")
         for a, b in zip(x, y):
             fh.write(f"{a:.6f}\t{b:.4f}\n")
-    tmp.replace(p)
+    from .bridge import replace_retry
+    replace_retry(tmp, p)
 
 
 def to_shift(x, unit: str, laser_nm: float | None) -> tuple[np.ndarray, str]:

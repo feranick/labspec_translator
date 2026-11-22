@@ -1,6 +1,6 @@
 """background.py — white-light backgrounds: spectra taken with the white light on and the laser off, kept by name and
 subtracted from later spectra taken with the same light.
-Version: 2026.11.22.2
+Version: 2026.11.22.3
 
 A background is stored as counts per second per accumulation against wavelength (nm), with the settings it was
 taken with (laser line, grating, objective, range). Subtraction scales it by each spectrum's exposure and

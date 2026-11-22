@@ -1,5 +1,5 @@
 """profile.py — the machine profile: what the instrument has (from the discovery script) and the limits a person sets.
-Version: 2026.11.22.2
+Version: 2026.11.22.3
 
 The profile is a JSON file (LS6T_PROFILE, default ~/ls6t/profile.json). Studies never change it: an LLM can only
 ask for what the profile allows. Without a file, the built-in XploRA defaults below apply and every result says so
@@ -48,7 +48,8 @@ DEFAULT_PROFILE: dict = {
     "slits_um": None,
     "detector": {"full_scale": 65535, "max_temp_c": -50.0, "pixels": 1024},
     "stage": {"x_um": None, "y_um": None, "z_um": None,    # absolute limits [min, max]; null: only the relative ones
-              "z_into_sample": None},                     # "+" or "-": which Z direction focuses deeper (TESTING)
+              "z_into_sample": None,                      # "+" or "-": which Z direction focuses deeper (TESTING)
+              "retract_for_objective_change": False},     # lower the stage by limits.retract_um before a lens change
     "limits": {"max_xy_um": 5000.0,          # farthest a study may move from the home spot (the distance, not per axis)
                "max_dz_um": 100.0,           # farthest from the operator's focus (Z is always relative)
                "max_exposure_s": 600.0, "max_accumulations": 500, "max_points": 10000,
@@ -251,7 +252,8 @@ def save(prof: dict, path: Path | None = None) -> Path:
     data = {k: v for k, v in prof.items() if k not in ("measured", "path")}
     tmp = p.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, indent=1), encoding="utf-8")
-    tmp.replace(p)
+    from .bridge import replace_retry
+    replace_retry(tmp, p)
     return p
 
 

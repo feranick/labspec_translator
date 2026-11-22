@@ -1,5 +1,5 @@
 """autocal.py — LabSpec's own AutoCalibration: where its script is, and whether the bridge can run it.
-Version: 2026.11.22.2
+Version: 2026.11.22.3
 
 ls6t checks the spectral calibration itself (calibration studies). To correct LabSpec's own calibration, the best
 tool is HORIBA's: LabSpec's AutoCalibration, a VBS script (OLSetup.ini names it, e.g. ...\\AutoCalibration\\
