@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.22.16)
+## Architecture (version 2026.11.23.1)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -763,6 +763,20 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   which controls are blocked (grating only, or laser / filter / slit / hole too); blocked from the bridge's start
   or only after its first grating command; released at once by End bridge; and whether a grating changed in
   LabSpec with the bridge ended, then the bridge started, gives a fast or slow first status.
+
+- 2026-11-23, 2026.11.23.1: Nicola (.22.15, 637.75 nm, x100): 1800 -> data "-1016 to -974 nm", Spectro -996.66; 1200
+  -> 646-728 nm centred ~687 (asked 659.66); 520 and 1500 cm-1 studies with all motors set gave the same window; the
+  1200's window measures 85-87 nm (profile 39). Cause found: the bridge passed the centre only as Acq From = To, which
+  LabSpec does not use to move the spectrometer. VAcquireInner: single window -> WaitMotor all, MoveMotor Spectro
+  (MOTOR_VALUE, blocking, beat), wait, read back spectro_nm. plan.grating_window_check + window_store
+  (grating_windows.json, learnt when centred) + runner.grating_guard on the first spectrum of every study (and
+  cut-off, background): stop on impossible nm, centre > 1/4 window off, Spectro read-back > 1 nm off, width > 20 %
+  from the learnt one; warn on profile window_nm (defaults look ~2.2x small). Also: save_native was overwritten by
+  `native = map_engine == native` (no .l6s, Remark not checkable): native_map; note_grating_set
+  (last_grating_set.json) from study setups and set, read by the warm-up log. T3.16 item 4: after a hand grating
+  change, the restarted bridge's inventory sat in LabSpec > 76 s (LabSpec restarted). Installer: PROMPTS.html did not
+  open from FinishLeave: state kept in $PromptsWanted (OnClick and leave), opened in .onGUIEnd after a completed
+  install ($InstallDone); fixed fallback position when MUI's checkboxes cannot be measured. 148 tests.
 
 ## To do next
 

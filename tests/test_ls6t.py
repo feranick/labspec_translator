@@ -1120,7 +1120,8 @@ def test_installer_files(tmp_path):
     nsi = (ROOT / "installer" / "ls6t.nsi").read_text()
     for needle in ("labspec_translator.winsetup install", "labspec_translator.winsetup uninstall",
                    "RequestExecutionLevel user", "ls6t-shell.ps1", "INSTALL.html", "PROMPTS.html",
-                   "MUI_PAGE_CUSTOMFUNCTION_SHOW FinishShow", "Function FinishLeave"):
+                   "MUI_PAGE_CUSTOMFUNCTION_SHOW FinishShow", "Function FinishLeave", "Function .onGUIEnd",
+                   'StrCpy $InstallDone "1"', "${NSD_OnClick} $PromptsBox PromptsClick"):
         assert needle in nsi, needle
     # the finish page's third option opens the prompts, which the build renders with the other guides
     assert "PROMPTS.md" in B.DOCS and (ROOT / "PROMPTS.md").is_file()
@@ -2588,3 +2589,42 @@ def test_video_scale_step_from_the_smaller_side_height_limit_and_camera_agreemen
     r3 = api.instrument("video_scale")
     assert r3["ok"] and r3["warnings"] and "disagrees" in r3["warnings"][0] and "pixel aspect" in r3["warnings"][0]
     assert V.scale_store()[r3["stored"]]["disagrees"]
+
+
+def test_spectrometer_centre_moved_and_the_window_checked(tmp_path):
+    """2026-11-23 at the XploRA (637.75 nm): a study centred at 1500 cm-1 kept the previous window (LabSpec's Acq does
+    not move the spectrometer); after grating changes the window read '-1016 to -974 nm' or sat 27 nm off centre; no
+    .l6s was saved (save_native overwritten); the warm-up's last grating change ignored study setups."""
+    br = Path(api.install_bridge(tmp_path / "vbs")["files"]["ls6t_bridge.vbs"]).read_text()
+    vi = br[br.index("Sub VAcquireInner("):]
+    vi = vi[:vi.index("End Sub")]
+    assert vi.index("LabSpec.MoveMotor(spm, f, \"\", LS_MOTOR_VALUE)") < vi.index("LabSpec.Acq mode, ex, acc, f, t")
+    assert 'res("spectro_nm") = MotorValue(spm)' in vi
+    prof = P.load()
+    rng = {"single": True, "center_nm": 659.66, "from_nm": 659.66}
+    plan.window_store({})
+    nm = np.linspace(-1016, -974, 100)
+    r = plan.grating_window_check(nm, "nm", 637.75, 1800, prof, rng)
+    assert not r["ok"] and "impossible" in r["stop"][0]
+    nm = np.linspace(646, 728, 1000)                   # 82 nm around 687: off centre
+    r = plan.grating_window_check(nm, "nm", 637.75, 1200, prof, rng)
+    assert not r["ok"] and "centred at 687" in r["stop"][0]
+    nm = np.linspace(616.5, 702.5, 1000)               # 86 nm around 659.5: right; the profile's 39 nm is off
+    r = plan.grating_window_check(nm, "nm", 637.75, 1200, prof, rng)
+    assert r["ok"] and r.get("learned_now") and "window_nm" in r["warn"][0]
+    nm = np.linspace(640, 680, 1000)                   # later: 40 nm with "1200": not the grating measured before
+    r = plan.grating_window_check(nm, "nm", 637.75, 1200, prof, rng)
+    assert not r["ok"] and "86.0 nm was measured" in r["stop"][0]
+    plan.window_store({})
+    # end to end on the simulator: centred spectra, the spectrometer read back, .l6s saved, last grating noted
+    S.ensure(config.active_bridge_dir())
+    st = run_inline({"a": {"kind": "spectrum", "sample": {"name": "Si"}, "setup": dict(SETUP, grating=1200),
+                           "acquire": {"center_cm1": 520, "exposure_s": 1}},
+                     "b": {"kind": "spectrum", "sample": {"name": "Si"}, "setup": dict(SETUP, grating=1800),
+                           "acquire": {"center_cm1": 1500, "exposure_s": 1}}})
+    for k in ("a", "b"):
+        s = st["studies"][k]
+        assert s["ok"], s
+        assert s["checks"]["grating_window"]["pass"] and s["checks"]["grating_window"]["spectro_nm"]
+    assert list(config.out_dir().rglob("p00000.l6s"))           # LabSpec's own file saved (save_native)
+    assert json.loads((config.home() / "last_grating_set.json").read_text())["by"].startswith("study")

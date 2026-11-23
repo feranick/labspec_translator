@@ -1,6 +1,6 @@
 # labspec-translator (ls6t): what it can do
 
-This is the complete list of functions in version 2026.11.22.16. It covers:
+This is the complete list of functions in version 2026.11.23.1. It covers:
 
 - what a study can ask for;
 - the tools an LLM sees;
@@ -42,7 +42,7 @@ A request is `{name: study}`; each study has a `kind`.
 | Key | What it does |
 |---|---|
 | `setup` | Laser, grating, filter (laser power), objective, confocal hole, slit; each move read back |
-| `acquire` | Range in cm⁻¹ (extended range: LabSpec stitches windows) or one window; exposure (or auto-exposure to a target); accumulations; spike removal; dark correction; `subtract_background` (a stored white-light background) |
+| `acquire` | Range in cm⁻¹ (extended range: LabSpec stitches windows) or one window (the spectrometer moved to its centre and read back; the first spectrum checked against the grating and centre asked); exposure (or auto-exposure to a target); accumulations; spike removal; dark correction; `subtract_background` (a stored white-light background) |
 | `focus` | LabSpec autofocus (`laser`, `raman`, `video`) or ls6t's `scan`, before the first point and every N points; `dz_um` (an offset from the focus) |
 | `process` | Polynomial baseline; peak fits (pseudo-Voigt, Lorentz, Gauss) by name and position, or the N strongest peaks found; band integrals |
 | `expect` | Expected values (any result path) with tolerances, checked after the run |

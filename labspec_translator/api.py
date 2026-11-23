@@ -1,5 +1,5 @@
 """api.py — the functions behind the command line and the MCP server (JSON in, JSON out).
-Version: 2026.11.22.16
+Version: 2026.11.23.1
 """
 from __future__ import annotations
 
@@ -309,6 +309,13 @@ def log_warmup(ping: dict) -> dict | None:
                 None)
     if last:
         rec["last_grating_set"] = last.get("time")
+    try:                                    # study setups write it too (runner.note_grating_set)
+        lg = json.loads((config.home() / "last_grating_set.json").read_text(encoding="utf-8"))
+        if not rec.get("last_grating_set") or str(lg.get("time", "")) > str(rec["last_grating_set"]):
+            rec["last_grating_set"] = lg.get("time")
+            rec["last_grating_set_by"] = lg.get("by")
+    except (OSError, ValueError):
+        pass
     try:                                    # the last deploy before it (all slow warm-ups followed one, 2026-11-21)
         deps = [json.loads(x) for x in (config.home() / "deploy_log.jsonl").read_text(encoding="utf-8").splitlines()
                 if x.strip()]
@@ -1033,6 +1040,8 @@ def set_instrument(setup: dict) -> dict:
             ok = bool(r.get("ok")) and P.same_position(got, value)
             done.append({"set": what, "asked": value, "got": got, "ok": ok, "error": r.get("error") or None,
                          **_move_timing(r)})
+            if r.get("ok") and what == "grating":
+                runner.note_grating_set(value, got, "instrument set")
             if r.get("ok") and not ok and what == "grating":
                 done[-1]["error"] = _grating_short(b, prof, value, got, r)
             if not r.get("ok"):

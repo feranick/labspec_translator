@@ -1,5 +1,5 @@
 """sim.py — a simulated LabSpec + XploRA behind the same bridge protocol as ls6t_bridge.vbs.
-Version: 2026.11.22.16
+Version: 2026.11.23.1
 
 It answers every verb of the bridge with the same keys, so the runner, the checks and the MCP server are tested
 without the instrument (LS6T_MODE=sim, and the tests). The simulated sample is a silicon wafer with a graphene
@@ -990,7 +990,8 @@ class SimLabSpec:
             Path(p["native"]).write_text(f"simulated LabSpec spectrum {sid}\n", encoding="utf-8")
         return {"id": sid, "out": str(out), "points": int(nm.size), "x_unit": "nm", "y_unit": "cnt",
                 "max_counts": float(y.max()), "exposure_s": exp, "accumulations": acc,
-                "detector_temp_c": self.temp_c, "windows": windows}
+                "detector_temp_c": self.temp_c, "windows": windows,
+                **({"spectro_asked_nm": f_nm, "spectro_nm": f_nm} if abs(t_nm - f_nm) < 1e-9 else {})}
 
 
 def hist_write(out: str, hist: list):

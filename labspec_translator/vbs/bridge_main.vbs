@@ -1020,7 +1020,7 @@ Sub VAcquire(cmd, res)
 End Sub
 
 Sub VAcquireInner(cmd, res)
-    Dim mode, ex, acc, f, t, outPath, native, sample, id, t0, started, who, tmo, r
+    Dim mode, ex, acc, f, t, outPath, native, sample, id, t0, started, who, tmo, r, spm, waitedS
     mode = CLng(ParseNum(GetP(cmd, "mode", "10")))
     ex = ParseNum(GetP(cmd, "exposure_s", "1"))
     acc = CLng(ParseNum(GetP(cmd, "accumulations", "1")))
@@ -1047,6 +1047,29 @@ Sub VAcquireInner(cmd, res)
             Err.Clear
             Exit Sub
         End If
+    End If
+    ' One window (From = To): every motor still (the grating first), then the spectrometer to its centre, as HORIBA's
+    ' scripts do (MoveMotor "Spectro", MOTOR_VALUE, then the acquisition). LabSpec's Acq does not move it: on
+    ' 2026-11-23 a study centred at 1500 cm-1 kept the previous study's window, and after a grating change the centre
+    ' was lost (687 instead of 659.66 nm) or garbled (Spectro = -996.66 nm).
+    If f > 0 And f = t And GetP(cmd, "center_move", "1") = "1" Then
+        spm = GetP(cmd, "m_spectro", "Spectro")
+        waitedS = WaitMotor("", 0, 120, res)
+        gBlocking = spm
+        Beat "busy", True
+        r = LabSpec.MoveMotor(spm, f, "", LS_MOTOR_VALUE)
+        gBlocking = ""
+        Beat "busy", True
+        If Err.Number <> 0 Then
+            Fail res, ErrText("MoveMotor " & spm)
+            Err.Clear
+            Exit Sub
+        End If
+        waitedS = WaitMotor(spm, gNoId, 120, res)
+        waitedS = WaitMotor("", 0, 120, res)
+        res("spectro_asked_nm") = f
+        res("spectro_nm") = MotorValue(spm)
+        Err.Clear
     End If
     ' collect earlier results (and a 'cancelled' state) until LabSpec reports none, so the next ID is ours
     For r = 1 To 50

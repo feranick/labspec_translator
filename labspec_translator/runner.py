@@ -1,5 +1,5 @@
 """runner.py — runs a request's studies on the instrument, one command at a time, and checks every result.
-Version: 2026.11.22.16
+Version: 2026.11.23.1
 
 A request runs in its own process (`ls6t run-request FOLDER`, started detached by api.start), so it outlives the
 MCP call that started it. One request at a time holds the instrument (a lock file under LS6T_HOME); others wait
@@ -350,6 +350,8 @@ def _setup(name: str, study: dict, ctx: Ctx, warnings: list, unreliable: list, c
         from .api import _move_timing
         readback.append({"motor": step["motor"], "asked": step["value"], "got": r.get("label") or r.get("value"),
                          "ok": bool(r["ok"] and ok), "error": r.get("error") or None, **_move_timing(r)})
+        if p["motor"] == prof["motors"]["grating"] and r.get("ok"):
+            note_grating_set(step["value"], r.get("value"), f"study {name}")
         if not r["ok"] or not ok:
             unreliable.append(f"{step['why']}: asked {step['value']}, " +
                               (f"LabSpec said: {r.get('error')}" if not r["ok"] else f"got {got}"))
@@ -466,8 +468,10 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
     want_before = vd.get("before", kind == "calibration")
     focus_scans: list = []
     snaps: dict = {}
-    native = plan.map_engine(study, prof) == "native"
-    if native:
+    # LabSpec's own map engine: not the same as save_native (`native` above), which this name once overwrote, so no
+    # .l6s was saved for ordinary spectra and their Remark could not be checked (2026-11-23)
+    native_map = plan.map_engine(study, prof) == "native"
+    if native_map:
         try:
             if af:
                 if af == "scan":
@@ -490,7 +494,7 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
             t_acq += time.time() - t_a
         except Stop as exc:
             stop_exc = exc
-    for k, p in enumerate(pts if not native else []):
+    for k, p in enumerate(pts if not native_map else []):
         if ctx.cancelled():
             stop_exc = Stop("cancelled", "cancel")
             break
@@ -568,6 +572,8 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
             t_acq += time.time() - t_a
             if not r["ok"]:
                 raise Stop(f"point {k}: acquisition failed: {r.get('error')}", "study")
+            if k == 0:
+                grating_guard(prof, study, after, laser, rng, out, checks, warnings, r)
             rec = {"point": k, "offset": {"x_um": p["x_um"], "y_um": p["y_um"], "dz_um": p["dz_um"]},
                    "stage": {"x_um": ax, "y_um": ay, "z_um": zcur}, "file": str(out),
                    "native": params.get("native"), "id": r.get("id"), "t": round(time.time() - t_start, 3),
@@ -1653,6 +1659,7 @@ def run_cutoff(name: str, study: dict, ctx: Ctx) -> dict:
         ctx.call("notice", timeout_s=3600, text="ls6t: done. Unblock the laser when you want to measure again. OK.")
     if not r["ok"]:
         raise Stop(f"cut-off acquisition failed: {r.get('error')}", "study")
+    grating_guard(prof, study, su.get("after"), laser, rng, out, checks, warnings, r)
     sp = spectra.read(out)
     x, _ = spectra.to_shift(sp["x"], sp["meta"].get("x_unit", "nm"), laser)
     x, y = spectra.sort_xy(x, sp["y"])
@@ -1746,6 +1753,7 @@ def run_background(name: str, study: dict, ctx: Ctx) -> dict:
                                                  "to measure again. OK.")
     if not r["ok"]:
         raise Stop(f"background acquisition failed: {r.get('error')}", "study")
+    grating_guard(prof, study, su.get("after"), laser, rng, out, checks, warnings, r)
     sp = spectra.read(out)
     ex = _f(r.get("exposure_s")) or float(acq.get("exposure_s") or 1.0)
     per_s = sp["meta"].get("y_unit", "cnt").lower().startswith("cnt/s")
@@ -2086,6 +2094,45 @@ BLOCK_BY_HAND = ("THE LASER IS NOT TURNED OFF BY ls6t: without a confirmed laser
                  "for this acquisition as for any other. Press OK ONLY IF YOU ARE AT THE INSTRUMENT and the beam is "
                  "PHYSICALLY BLOCKED (a beam block in the laser path, or the laser switched off at its key or "
                  "source). Do not confirm from a remote session: nobody there can see the beam.")
+
+
+def note_grating_set(asked, got, by: str) -> None:
+    """The last grating change ls6t made, for the warm-up log (LS6T_HOME/last_grating_set.json): study setups too,
+    not only `instrument set` (2026-11-23)."""
+    try:
+        (config.home() / "last_grating_set.json").write_text(json.dumps(
+            {"time": time.strftime("%Y-%m-%dT%H:%M:%S"), "asked": asked, "got": got, "by": by}), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def grating_guard(prof: dict, study: dict, after: dict, laser, rng: dict, path, checks: dict | None = None,
+                  warnings: list | None = None, acq_res: dict | None = None) -> None:
+    """Stops the study when the first spectrum's own axis does not fit the grating LabSpec reports (plan.
+    grating_window_check): 2026-11-23, LabSpec said 1800 / 1200 while the light came through 1200 / 600. Profile
+    checks.grating_window false turns it off."""
+    if not (prof.get("checks") or {}).get("grating_window", True):
+        return
+    grating = (study.get("setup") or {}).get("grating", (after or {}).get("grating"))
+    try:
+        sp = spectra.read(path)
+    except OSError:
+        return
+    res = plan.grating_window_check(sp["x"], sp["meta"].get("x_unit", "nm"), laser, grating, prof, rng)
+    if acq_res and acq_res.get("spectro_asked_nm") not in (None, "") and acq_res.get("spectro_nm") not in (None, ""):
+        a, g = float(acq_res["spectro_asked_nm"]), float(acq_res["spectro_nm"])
+        res["spectro_nm"] = {"asked": a, "got": g}
+        if abs(a - g) > 1.0:
+            res["stop"].append(f"the spectrometer reads {g:.2f} nm after being sent to {a:.2f} nm")
+            res["ok"] = False
+    if checks is not None:
+        checks["grating_window"] = {"pass": res["ok"], **{k: v for k, v in res.items() if k != "ok"}}
+    if warnings is not None:
+        warnings.extend(res.get("warn") or [])
+    if not res["ok"]:
+        raise Stop("the spectrum does not fit what was asked (" + "; ".join(res["stop"]) + "): the spectrometer may "
+                   "not have followed the grating or centre sent through the script (TESTING T3.16); nothing more "
+                   "was measured. Check one acquisition in LabSpec by hand with the same grating and centre", "study")
 
 
 def move_extra(prof: dict, motor: str, confirmed_now: bool = False) -> dict:

@@ -1,5 +1,5 @@
 """plan.py — a study as bridge commands: the setup moves, the points, the acquisitions; and the time estimate.
-Version: 2026.11.22.16
+Version: 2026.11.23.1
 
 Everything here is computed from the study and the profile alone: wavelengths from Raman shifts, the number of
 detector windows, the stage positions (always offsets from where the operator left the stage, Z from the
@@ -8,6 +8,7 @@ operator's focus), the order of the points and how long it should take. The runn
 from __future__ import annotations
 
 import math
+import numpy as np
 
 from .profile import laser_key, match_label, shift_to_nm
 
@@ -116,6 +117,92 @@ def acq_range(study: dict, prof: dict, laser: float | None) -> dict:
             out.update(from_cm1=round(1e7 / laser - 1e7 / (nm - half), 2),
                        to_cm1=round(1e7 / laser - 1e7 / (nm + half), 2),
                        window_nm=[round(nm - half, 2), round(nm + half, 2)])
+    return out
+
+
+GRATING_WIDTH_TOL = 0.2    # a window this much wider or narrower than the one measured before with the grating: stop
+
+
+def window_store(new: dict | None = None) -> dict:
+    """The width of one detector window, measured per grating and laser (LS6T_HOME/grating_windows.json,
+    "<grating>@<laser nm>": {width_nm, center_nm, time}): learnt from acquisitions whose centre was right."""
+    import json
+    from . import config
+    path = config.home() / "grating_windows.json"
+    if new is not None:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(new, indent=1), encoding="utf-8")
+        except OSError:
+            pass
+        return new
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def grating_window_check(x, x_unit: str, laser_nm, grating, prof: dict, rng: dict, learn: bool = True) -> dict:
+    """Does the spectrum's own axis fit what was asked? 2026-11-23 at the XploRA (637.75 nm): with 1800 set (and
+    reported) the data read "-1016 to -974 nm" (header Spectro = -996.66 nm); with 1200, 646-728 nm, centred near 687
+    instead of 659.66; a second study centred at 1500 cm-1 kept the first one's window. Stops on: impossible
+    wavelengths; a single window centred more than a quarter of its width from the centre asked; a width more than
+    20 % off the one measured before with this grating and laser (another grating than LabSpec reports). Warns when
+    the profile's window_nm is off (the XploRA's 1200 gives 85-87 nm at 638 nm, the profile said 39). Learns the
+    width when the centre is right. {ok, stop, warn, width_nm, center_nm, learned_nm}."""
+    x = np.asarray(x, float)
+    u = (x_unit or "nm").strip().lower().replace("cm-1", "1/cm").replace("cm^-1", "1/cm")
+    if u in ("1/cm", "rel 1/cm", "raman shift"):
+        nm = shift_to_nm(x, float(laser_nm)) if laser_nm else None
+    elif u == "ev":
+        nm = 1239.841984 / x
+    else:
+        nm = x
+    out: dict = {"ok": True, "stop": [], "warn": []}
+    if nm is None or nm.size < 2:
+        return out
+    if not np.all(np.isfinite(nm)) or float(np.min(nm)) <= 0:
+        out["stop"].append(f"the spectrum's wavelengths are impossible ({float(np.nanmin(nm)):.1f} to "
+                           f"{float(np.nanmax(nm)):.1f} nm)")
+        out["ok"] = False
+        return out
+    lo, hi = float(np.min(nm)), float(np.max(nm))
+    width, center = hi - lo, (lo + hi) / 2
+    out.update(width_nm=round(width, 2), center_nm=round(center, 2))
+    if not rng.get("single", True):
+        a, b = sorted((float(rng["from_nm"]), float(rng["to_nm"]))) if rng.get("from_nm") is not None else (lo, hi)
+        if lo > a + 0.1 * (b - a) or hi < b - 0.1 * (b - a):
+            out["stop"].append(f"the spectrum covers {lo:.1f}-{hi:.1f} nm, {a:.1f}-{b:.1f} nm was asked")
+        out["ok"] = not out["stop"]
+        return out
+    asked = rng.get("center_nm") or rng.get("from_nm")
+    centred = asked is None or abs(center - float(asked)) <= 0.25 * width
+    if not centred:
+        out["stop"].append(f"the window is centred at {center:.1f} nm, {float(asked):.1f} nm was asked")
+    g = f"{float(grating):g}" if grating not in (None, "") else None
+    key = f"{g}@{float(laser_nm):g}" if g and laser_nm else None
+    store = window_store() if key else {}
+    known = store.get(key)
+    if known and known.get("width_nm"):
+        out["learned_nm"] = known["width_nm"]
+        if abs(width / float(known["width_nm"]) - 1) > GRATING_WIDTH_TOL:
+            others = sorted((abs(width / float(v["width_nm"]) - 1), k.split("@")[0]) for k, v in store.items()
+                            if k.endswith(f"@{float(laser_nm):g}") and v.get("width_nm"))
+            like = others[0][1] if others and others[0][0] < GRATING_WIDTH_TOL else None
+            out["stop"].append(f"the window is {width:.1f} nm wide, {float(known['width_nm']):.1f} nm was measured "
+                               f"with grating {g} before" + (f": it looks like grating {like}" if like and like != g
+                                                             else ""))
+    pg = prof.get("gratings", {}).get(g) if g else None
+    if pg and pg.get("window_nm") and abs(width / float(pg["window_nm"]) - 1) > GRATING_WIDTH_TOL:
+        out["warn"].append(f"grating {g}: the window is {width:.1f} nm wide here, the profile says "
+                           f"{float(pg['window_nm']):g} nm (estimates and extended-range windows use it): "
+                           f"ls6t profile set gratings.{g}.window_nm {width:.1f}")
+    if learn and key and centred and not out["stop"] and not known:
+        store[key] = {"width_nm": round(width, 2), "center_nm": round(center, 2),
+                      "time": __import__("time").strftime("%Y-%m-%d %H:%M:%S")}
+        window_store(store)
+        out["learned_now"] = True
+    out["ok"] = not out["stop"]
     return out
 
 

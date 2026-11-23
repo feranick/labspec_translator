@@ -81,10 +81,15 @@ VIAddVersionKey "LegalCopyright" "MIT license"
 ; ------------------------------------------------------------------------------------------------ helpers
 
 ; The finish page has room for MUI's two options only: a third checkbox goes under them at the same spacing, with
-; their font and background ("Show prompts to try"), checked; Finish opens docs\PROMPTS.html when it stays checked.
+; their font and background ("Show prompts to try"), checked. Its state is kept in $PromptsWanted (on every click and
+; when the page is left), and docs\PROMPTS.html opens in .onGUIEnd, after the window has closed: 2026-11-23 it did not
+; open from the page's leave function. When MUI's checkboxes cannot be measured, it goes at a fixed place.
 Var PromptsBox
+Var PromptsWanted
+Var InstallDone
 
 Function FinishShow
+  StrCpy $PromptsWanted "1"
   System::Call '*(i 0, i 0, i 0, i 0) p .r1'
   System::Call '*(i 0, i 0, i 0, i 0) p .r2'
   System::Call 'user32::GetWindowRect(p $mui.FinishPage.Run, p r1)'
@@ -99,17 +104,53 @@ Function FinishShow
   IntOp $9 $6 + $9                ; the top of the third
   IntOp $7 $7 - $5                ; its width
   IntOp $8 $8 - $6                ; its height
-  ${NSD_CreateCheckbox} $5 $9 $7 $8 "Show prompts to try (first steps and advanced)"
+  ${If} $8 > 4
+  ${AndIf} $7 > 40
+  ${AndIf} $9 > $6
+    ${NSD_CreateCheckbox} $5 $9 $7 $8 "Show prompts to try (first steps and advanced)"
+  ${Else}
+    ${NSD_CreateCheckbox} 120u 170u 195u 10u "Show prompts to try (first steps and advanced)"
+  ${EndIf}
   Pop $PromptsBox
+  ${If} $PromptsBox == "error"
+    StrCpy $PromptsWanted "0"
+    Return
+  ${EndIf}
   SetCtlColors $PromptsBox "" "${MUI_BGCOLOR}"
   SendMessage $mui.FinishPage.ShowReadme ${WM_GETFONT} 0 0 $0
-  SendMessage $PromptsBox ${WM_SETFONT} $0 1
+  ${If} $0 <> 0
+    SendMessage $PromptsBox ${WM_SETFONT} $0 1
+  ${EndIf}
   ${NSD_Check} $PromptsBox
+  ${NSD_OnClick} $PromptsBox PromptsClick
+FunctionEnd
+
+Function PromptsClick
+  Pop $0                          ; the control
+  ${NSD_GetState} $PromptsBox $0
+  ${If} $0 == ${BST_CHECKED}
+    StrCpy $PromptsWanted "1"
+  ${Else}
+    StrCpy $PromptsWanted "0"
+  ${EndIf}
 FunctionEnd
 
 Function FinishLeave
-  ${NSD_GetState} $PromptsBox $0
-  ${If} $0 == ${BST_CHECKED}
+  ${If} $PromptsBox != ""
+  ${AndIf} $PromptsBox != "error"
+    ${NSD_GetState} $PromptsBox $0
+    ${If} $0 == ${BST_CHECKED}
+      StrCpy $PromptsWanted "1"
+    ${Else}
+      StrCpy $PromptsWanted "0"
+    ${EndIf}
+  ${EndIf}
+FunctionEnd
+
+Function .onGUIEnd
+  ${If} $InstallDone == "1"
+  ${AndIf} $PromptsWanted == "1"
+  ${AndIf} ${FileExists} "$INSTDIR\docs\PROMPTS.html"
     ExecShell "open" "$INSTDIR\docs\PROMPTS.html"
   ${EndIf}
 FunctionEnd
@@ -242,6 +283,7 @@ Section "-setup" SecSetup
     MessageBox MB_OK|MB_ICONSTOP "The setup step could not run ($0): see $INSTDIR\install.log." /SD IDOK
     Abort "Setup step failed"
   ${EndIf}
+  StrCpy $InstallDone "1"         ; .onGUIEnd opens the prompts only after an installation that went through
 SectionEnd
 
 !insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
