@@ -724,6 +724,10 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   and restart Claude, tools present? running_app_reads, marker present? deploy_log for .22.4 / .22.6: bridge_was
   stopped, ended not running: only the bridge's own exit writes 'stopped' (a running one beats every second), so no
   regression. 142 tests.
+  T0.3 passed on .14: running_app_reads Claude-Data\claude_pzs8sxrjxfjjc, 15 tools in 2.48 s, tools present after a
+  restart; marker .user-data-left.claude_pzs8sxrjxfjjc present (122 bytes, 21:17, the install and restart minute:
+  written by the app; ls6t only reads it: clients.claude_dirs iterdir, ls6t_diagnose.ps1 lists it). Deploy: bridge
+  stopped, not running; warm-up 0 s, bridge 20 s after LabSpec (a fourth early start at 0 s).
 
 ## To do next
 
