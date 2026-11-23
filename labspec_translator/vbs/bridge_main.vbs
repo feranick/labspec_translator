@@ -375,6 +375,58 @@ Sub VRunVbs(cmd, res)
     BeatNow
 End Sub
 
+'' LabSpec's own AutoCalibration routine, called directly (LabSpec's help, VBS: AutoCalibration(Mode, Status):
+' START_AUTOCALIB = 0 (zero order, then the Si 520.7 band: Si in focus, the laser fires), START_AUTOCALIB_OFFSET_ONLY = 2
+' (zero order only, no sample), GET_AUTOCALIB_STATUS = 1 polled until >= 0: 0 done and saved, 1 Koeff too far, 2
+' Offset too far, 3 both). The help says it is meant for HORIBA's own script: ls6t uses it only when the profile says
+' so (calibration.autocal.method 'call'), after the operator's Yes. The operator's stop ends the polling.
+Sub VAutoCal(cmd, res)
+    Dim mode, st, r, t0, tmo, who, lastS
+    mode = CLng(ParseNum(GetP(cmd, "mode", "0")))
+    If mode <> 0 And mode <> 2 Then
+        Fail res, "autocal: mode 0 (offset and Si band) or 2 (offset only)"
+        Exit Sub
+    End If
+    tmo = ParseNum(GetP(cmd, "timeout_s", "900"))
+    st = ""
+    On Error Resume Next
+    r = LabSpec.AutoCalibration(mode, st)
+    If Err.Number <> 0 Then
+        Fail res, ErrText("AutoCalibration (this LabSpec may not offer it to scripts)")
+        Err.Clear
+        Exit Sub
+    End If
+    t0 = Timer
+    Do
+        LabSpec.Pause 500
+        BeatNow
+        st = ""
+        r = LabSpec.AutoCalibration(1, st)
+        If Err.Number <> 0 Then
+            Fail res, ErrText("AutoCalibration status")
+            Err.Clear
+            Exit Sub
+        End If
+        If st <> "" Then lastS = st
+        If r >= 0 Then Exit Do
+        who = StopRequested()
+        If who <> "" Then
+            gStoppedBy = who
+            res("stopped_during") = r
+            Exit Do
+        End If
+        If Elapsed(t0) > tmo Then
+            Fail res, "AutoCalibration: not done after " & tmo & " s (last state " & r & ")"
+            Exit Sub
+        End If
+    Loop
+    On Error GoTo 0
+    res("code") = r
+    res("status") = lastS
+    res("seconds") = Secs(Elapsed(t0))
+    If r > 0 Then Fail res, "LabSpec's AutoCalibration failed (" & r & "): " & lastS
+End Sub
+
 ' A motor's named positions (labels and values, up to 60) and the current one
 Sub VLabels(cmd, res)
     Dim motor, n, i
@@ -2344,6 +2396,7 @@ Sub HandleFile(path)
             Case "labels": VLabels cmd, res
             Case "calib_params": VCalibParams cmd, res
             Case "run_vbs": VRunVbs cmd, res
+            Case "autocal": VAutoCal cmd, res
             Case "map_native": VMapNative cmd, res
             Case "config": VConfig cmd, res
             Case "last_error": res("info") = LabSpecError()

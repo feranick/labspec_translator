@@ -264,6 +264,30 @@ def acq_mode(study: dict) -> int:
 ACQ_NO_ICS, ACQ_ICS = 100000, 200000      # LabSpec's Acq mode digits (ActiveX manual)
 
 
+_ICS_CACHE: dict = {}
+
+
+def ics_files(prof: dict) -> set | None:
+    """The (laser label, grating number) pairs LabSpec has an ICS response for: its
+    Parameters\\ACQUISITION\\Responses\\Response_<detector>_<laser label>_<grating label>.l6s files (HORIBA's ICS script
+    makes them per laser and grating). None when the folder is not found (not on the instrument PC)."""
+    from . import labspec_ini
+    try:
+        ini = labspec_ini.find((prof.get("discovered") or {}).get("labspec_path"))
+    except Exception:  # noqa: BLE001
+        ini = None
+    if ini is None:
+        return None
+    d = ini.parent / "Responses"
+    if not d.is_dir():
+        return None
+    key = (str(d), d.stat().st_mtime)
+    if key not in _ICS_CACHE:
+        _ICS_CACHE.clear()
+        _ICS_CACHE[key] = {f.name.lower() for f in d.glob("Response_*.l6s")}
+    return _ICS_CACHE[key]
+
+
 def ics_off(prof: dict, laser, grating) -> bool:
     """True where LabSpec has no ICS (intensity correction) file for this grating and laser (profile ics.off_for,
     entries "<grating>@<laser nm>"): with ICS on, LabSpec stops every acquisition there with a modal "The required
@@ -276,7 +300,20 @@ def ics_off(prof: dict, laser, grating) -> bool:
     if not mg:
         return False
     key = f"{float(mg.group(1)):g}@{float(laser):g}"
-    return key in set((prof.get("ics") or {}).get("off_for") or [])
+    if key in set((prof.get("ics") or {}).get("off_for") or []):
+        return True
+    if not (prof.get("ics") or {}).get("auto", True):
+        return False
+    pairs = ics_files(prof)
+    if pairs is None:
+        return False
+    lab = next((str(v.get("label", "")).lower() for v in (prof.get("lasers") or {}).values()
+                if abs(float(v["nm"]) - float(laser)) < 0.5), None)
+    if not lab:
+        return False
+    g = int(round(float(mg.group(1))))
+    pat = _re.compile(rf"^response_.*_{_re.escape(lab)}_{g}(?:\D.*)?\.l6s$")
+    return not any(pat.match(n) for n in pairs)          # no ICS response for this laser and grating
 
 
 def setup_steps(study: dict, prof: dict) -> list[dict]:

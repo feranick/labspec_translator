@@ -592,13 +592,34 @@ def autocal_info() -> dict:
     return {"ok": True, **autocal.info(P.load(), bridge_text)}
 
 
+def autocal_question(ac: dict) -> str:
+    """The operator's question before LabSpec's AutoCalibration runs."""
+    what = (f"LabSpec's AutoCalibration ({ac['script']})" if ac.get("method") != "call" else
+            "LabSpec's AutoCalibration (" + ("zero order only, no sample" if ac.get("mode") == "offset" else
+                                             "zero order, then the Si 520.7 cm-1 band: the laser fires") + ")")
+    return (f"ls6t asks to run {what}."
+            + (f" Put {ac['sample']} under the objective, in focus, first." if ac.get("sample") else
+               " Put the silicon wafer under the objective, in focus, first." if ac.get("method") == "call"
+               and ac.get("mode") != "offset" else "") + " Continue?")
+
+
+def autocal_call(call, ac: dict) -> dict:
+    """Runs LabSpec's AutoCalibration: its own routine called directly (calibration.autocal.method 'call'; LabSpec's
+    help, VBS AutoCalibration: mode 0 offset and Si band, 2 offset only; result 0 done and saved, 1-3 failed), or
+    HORIBA's script (calibration.autocal.script, run_vbs). call(verb, timeout_s=..., **params) is the bridge's."""
+    t = float(ac.get("timeout_s", 1800))
+    if ac.get("method") == "call":
+        return call("autocal", timeout_s=t, mode=2 if ac.get("mode") == "offset" else 0)
+    return call("run_vbs", timeout_s=t, path=str(ac["script"]))
+
+
 def autocal_run() -> dict:
     """Runs LabSpec's AutoCalibration once from the bridge (profile calibration.autocal enabled by a person; the
     operator says Yes in LabSpec first), with LabSpec's calibration read before and after. For the maintainer's test
     (TESTING T4.9); calibration studies with adjust 'auto' do the same when the calibration is off."""
     prof = P.load()
     ac = prof.get("calibration", {}).get("autocal") or {}
-    if not ac.get("enabled") or not ac.get("script"):
+    if not ac.get("enabled") or not (ac.get("script") or ac.get("method") == "call"):
         return {"ok": False, "error": "LabSpec's AutoCalibration is not enabled in the profile (calibration.autocal): "
                                       "see instrument autocal_info"}
     if runner.read_json(runner.lock_path(), None):
@@ -609,13 +630,11 @@ def autocal_run() -> dict:
         S.ensure(b.dir)
     try:
         before = labspec_calibration(b)
-        r = b.call("confirm", timeout_s=3600,
-                   text=f"ls6t asks to run LabSpec's AutoCalibration ({ac['script']})."
-                        + (f" Put {ac['sample']} under the objective first." if ac.get("sample") else "") + " Continue?")
+        r = b.call("confirm", timeout_s=3600, text=autocal_question(ac))
         if r.get("answer") != "yes":
             return {"ok": False, "error": "the operator declined in LabSpec"}
         t0 = time.time()
-        r = b.call("run_vbs", timeout_s=float(ac.get("timeout_s", 1800)), path=str(ac["script"]))
+        r = autocal_call(b.call, ac)
         after = labspec_calibration(b)
     except BridgeError as exc:
         return {"ok": False, "error": str(exc)}
@@ -1398,8 +1417,9 @@ def references() -> dict:
     from . import spot as SP
     from . import xcal
     corr = {k: {**v, "age_h": xcal.age_h(v)} for k, v in xcal.load().items()}
-    from . import perf
+    from . import perf, qc
     return {"spectral_corrections": corr, "backgrounds": BG.index(), "performance": perf.status(),
+            "horiba_qc": qc.summary(P.load()),
             "beam_offsets": SP.status(P.load())["records"], "labspec_configs": _configs(),
             "alignment": {k: v.get("last_check") for k, v in alignment_status()["lasers"].items()}}
 

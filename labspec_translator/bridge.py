@@ -264,7 +264,7 @@ class Bridge:
         hb = self.heartbeat()
         if not hb or hb.get("state") == "stopped":
             return False
-        if hb.get("state") == "busy" and hb.get("verb") in ("confirm", "resume", "notice", "guide", "run_vbs"):
+        if hb.get("state") == "busy" and hb.get("verb") in ("confirm", "resume", "notice", "guide", "run_vbs", "autocal"):
             return True             # a modal question in LabSpec, or LabSpec's own script running: no beats
         if hb.get("state") == "busy" and hb.get("blocking"):
             # a blocking move (the grating), or LabSpec's Acq holding the script (an extended range: blocking_s is

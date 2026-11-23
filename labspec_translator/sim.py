@@ -273,6 +273,17 @@ class SimLabSpec:
         self.laser_until = time.time() + float(p["seconds"])
         return {"open": 1, "seconds": p["seconds"]}
 
+    def v_autocal(self, p):
+        """LabSpec's AutoCalibration called directly: in the simulator it corrects the spectral zero."""
+        if str(p.get("mode", "0")) not in ("0", "2"):
+            return {"ok": 0, "error": "autocal: mode 0 or 2"}
+        try:
+            (self.dir / "sim_xshift").unlink()
+        except FileNotFoundError:
+            pass
+        self.autocal_runs = getattr(self, "autocal_runs", 0) + 1
+        return {"code": 0, "status": "AutoCalibration done (simulated)", "seconds": "30"}
+
     def v_run_vbs(self, p):
         """LabSpec's AutoCalibration: in the simulator it corrects the spectral zero (removes sim_xshift)."""
         if not str(p.get("path", "")).lower().endswith(".vbs"):

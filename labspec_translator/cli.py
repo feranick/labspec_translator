@@ -24,6 +24,8 @@
   ls6t profile propose [DUMP]        profile.proposed.json from the bridge's inventory, to edit with the maintainer
   ls6t profile import FILE           the edited profile.proposed.json: checked, marked reviewed (the laser may fire)
   ls6t profile show|default
+  ls6t profile qc [FOLDER]           HORIBA's QC reports (default C:\Horiba Jobin Yvon\1-QC\QC Auto) as references
+  ls6t profile ics                   where LabSpec has an ICS correction (grating@laser); ls6t turns ICS off elsewhere
   ls6t profile set KEY VALUE         one value (JSON), e.g. video.laser_offset_um "[1.4, -0.6]"
   ls6t profile ini [OLConfig.ini]    what LabSpec's own configuration says (cameras, objectives, motors)
   ls6t alignment status              per laser: baseline, last check, age
@@ -55,7 +57,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import __version__, api, config
+from . import __version__, api, config, plan
 from . import profile as P
 
 
@@ -117,7 +119,7 @@ def main(argv=None) -> int:
     s.add_argument("--timeout", type=float, default=120)
     s.add_argument("--laser", action="store_true", help="allow acquire and autofocus (the laser fires)")
     s = sub.add_parser("profile")
-    s.add_argument("action", choices=["show", "default", "propose", "import", "set", "ini"])
+    s.add_argument("action", choices=["show", "default", "propose", "import", "set", "ini", "qc", "ics"])
     s.add_argument("dump", nargs="?", help="propose: a discovery dump (default: the bridge's inventory); import: the "
                    "edited profile.proposed.json (or a dump); set: the key")
     s.add_argument("value", nargs="?", help="set: the value (JSON)")
@@ -243,6 +245,19 @@ def main(argv=None) -> int:
                 _print({"ok": False, "error": "OLConfig.ini not found: give its path (it is in LabSpec's folder)"})
                 return 1
             _print({"ok": True, "file": str(p), **L.summary(L.read(p))})
+        elif a.action == "qc":
+            from . import qc
+            r = qc.import_dir(P.load(), a.dump)
+            _print(r)
+            return 0 if r["ok"] else 1
+        elif a.action == "ics":
+            prof = P.load()
+            pairs = plan.ics_files(prof)
+            table = {f"{float(g):g}@{float(v['nm']):g}": not plan.ics_off(prof, v["nm"], g)
+                     for v in prof.get("lasers", {}).values() for g in prof.get("gratings", {})}
+            _print({"ok": True, "responses_found": None if pairs is None else sorted(pairs),
+                    "ics_on": table, "off_for": (prof.get("ics") or {}).get("off_for", []),
+                    "note": "ICS on = LabSpec has a correction for that grating@laser; off: ls6t sends ACQ_NO_ICS"})
         elif a.action == "propose":
             r = api.profile_propose(a.dump)
             _print(r)

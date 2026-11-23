@@ -1449,16 +1449,14 @@ def run_calibration(name: str, study: dict, ctx: Ctx) -> dict:
                          "labspec_parameters": _labspec_params(ctx)})
         if cal.get("pass") or k == n_max or not cal.get("lines_used"):
             break
-        if auto and not autocal_runs and ac.get("enabled") and ac.get("script"):
+        if auto and not autocal_runs and ac.get("enabled") and (ac.get("script") or ac.get("method") == "call"):
             # LabSpec's own AutoCalibration, once; then measure again
-            txt = (f"ls6t: the calibration is off ({cal.get('offset_cm1')} cm-1). ls6t asks to run LabSpec's "
-                   f"AutoCalibration ({ac['script']})."
-                   + (f" Put {ac['sample']} under the objective first." if ac.get("sample") else "")
-                   + " Continue?")
+            from .api import autocal_call, autocal_question
+            txt = f"ls6t: the calibration is off ({cal.get('offset_cm1')} cm-1). " + autocal_question(ac)
             ans = ctx.call("confirm", timeout_s=3600, text=txt)
             if ans.get("answer") == "yes":
                 t0 = time.time()
-                r = ctx.call("run_vbs", timeout_s=float(ac.get("timeout_s", 1800)), path=str(ac["script"]))
+                r = autocal_call(ctx.call, ac)
                 autocal_runs.append({"ok": bool(r["ok"]), "error": r.get("error"), "seconds": round(time.time() - t0, 1)})
                 if r["ok"]:
                     continue                       # measure again

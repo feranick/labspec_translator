@@ -1291,3 +1291,60 @@ def test_ics_off_where_labspec_has_no_correction_file():
                                "acquire": {"center_cm1": 520, "exposure_s": 1}}})
     assert sent and all((m // 100000) % 10 == 1 for m in sent), sent
     assert any("ICS" in w for w in st["studies"]["s"]["warnings"])
+
+
+def test_horiba_qc_reports_and_ics_responses(tmp_path, monkeypatch):
+    """HORIBA's QC folder (2026-11-23): per-laser reports (cut-off, laser power, axial resolution...) kept as
+    references, the cut-off used for range warnings; ICS on only where LabSpec has a Response_*_<laser>_<grating>.l6s
+    (on this XploRA: 532 all four gratings, 638 600/1200/1800, none at 785 in the 6.8.1 install)."""
+    from labspec_translator import qc, perf, labspec_ini
+    prof = P.load()
+    prof["lasers"] = {"532": {"nm": 532.0, "label": "532nm_Edge", "power_mw": 100, "max_filter_pct": 100},
+                      "637.75": {"nm": 637.75, "label": "638nm_Edge", "power_mw": 35, "max_filter_pct": 100}}
+    P.save(prof)
+    prof = P.load()
+    # synthetic reports in the QC scripts' layout (UTF-16, as they are written)
+    d = tmp_path / "QC Auto" / "Laser 638nm_Edge" / "Cut-Off" / "06_09_2023_14_21_27"
+    d.mkdir(parents=True)
+    (d / "r.txt").write_bytes("info=test=Cut-Off\r\nmoteur=Laser Filtering=638nm_Edge\r\nvalue=Ratio=0.88\r\n"
+                              "value=Low_Cut-Off=35.3\r\nvalue=High_Cut-Off=58.7\r\n".encode("utf-16-le"))
+    d2 = tmp_path / "QC Auto" / "Laser 638nm_Edge" / "Laser Power" / "06_09_2023_13_48_12"
+    d2.mkdir(parents=True)
+    (d2 / "p.txt").write_text("info=test=Laser Power\nmoteur=Laser Filtering=638nm_Edge\nvalue=Output_Power=55\n"
+                              "value=Sample_Power=40\n")
+    r = qc.import_dir(prof, tmp_path / "QC Auto")
+    assert r["ok"] and r["cutoff_cm1"] == {"638nm_Edge": 58.7}
+    assert perf.cutoff_for(637.75, 1200) == 58.7                  # the laser's own cut-off for any grating
+    s = api.references()["horiba_qc"]["lasers"]["638nm_Edge"]
+    assert s["at_sample_mw"] == 40 and s["profile_power_mw"] == 35 and s["cutoff_cm1"] == [35.3, 58.7]
+    v = api.validate({"s": {"kind": "spectrum", "sample": {"name": "x"},
+                            "setup": {"laser_nm": 637.75, "grating": 1200, "filter": "10%"},
+                            "acquire": {"range_cm1": [40, 1000], "exposure_s": 1}}})["s"]
+    assert any("below the measured cut-off (58.7" in w for w in v["warnings"])
+    # ICS responses in LabSpec's folder
+    acq = tmp_path / "LabSpec" / "Parameters" / "ACQUISITION"
+    (acq / "Responses").mkdir(parents=True)
+    (acq / "OLConfig.ini").write_text("[x]\n")
+    for name in ("532nm_Edge_1200 (750nm)", "532nm_Edge_2400 (400nm)", "638nm_Edge_1200 (750nm)"):
+        (acq / "Responses" / f"Response_Syncerity OE_{name}.l6s").write_text("x")
+    monkeypatch.setattr(labspec_ini, "find", lambda lp=None, name="OLConfig.ini": acq / "OLConfig.ini")
+    plan._ICS_CACHE.clear()
+    assert not plan.ics_off(prof, 532, "2400 (400nm)") and not plan.ics_off(prof, 637.75, 1200)
+    assert plan.ics_off(prof, 637.75, "2400 (400nm)") and plan.ics_off(prof, 637.75, 600)
+    assert not plan.ics_off(dict(prof, ics={"off_for": [], "auto": False}), 637.75, 2400)
+
+
+def test_labspec_autocalibration_called_directly(tmp_path):
+    """HORIBA's service folder (2026-11-23): LabSpec 6.7+ runs AutoCalibration from a compiled module (no .vbs for
+    autocal_info to find); LabSpec's help documents AutoCalibration(Mode, Status) for scripts. ls6t calls it when the
+    profile says method 'call', after the operator's Yes."""
+    br = Path(api.install_bridge(tmp_path / "vbs")["files"]["ls6t_bridge.vbs"]).read_text()
+    assert 'Case "autocal": VAutoCal cmd, res' in br and "LabSpec.AutoCalibration(1, st)" in br
+    assert "ls6t instrument autocal-run" in api.autocal_info()["labspec_call"]
+    S.ensure(config.active_bridge_dir())
+    P.save(dict(P.load(), calibration=dict(P.load()["calibration"],
+                                           autocal={"enabled": True, "method": "call", "mode": "full"})))
+    r = api.autocal_run()
+    assert r["ok"], r
+    assert "the laser fires" in api.autocal_question({"method": "call"})
+    assert "no sample" in api.autocal_question({"method": "call", "mode": "offset"})

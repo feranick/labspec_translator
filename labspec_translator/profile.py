@@ -114,7 +114,8 @@ DEFAULT_PROFILE: dict = {
     "session": {"restore_config": False},
     # LabSpec's ICS (intensity correction) is turned off for these "<grating>@<laser nm>": no correction file there,
     # and with ICS on LabSpec stops each acquisition at a modal Error 2070 (2026-11-23: 2400 with 637.75 nm)
-    "ics": {"off_for": []},
+    # auto: off where LabSpec's Parameters\ACQUISITION\Responses holds no Response_*_<laser>_<grating>.l6s
+    "ics": {"off_for": [], "auto": True},
     "checks": {"min_snr": 10.0, "detect_snr": 5.0, "si_cm1": 520.7, "si_tol_cm1": 1.0, "saturation_frac": 0.98},
 }
 

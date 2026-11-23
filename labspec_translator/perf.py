@@ -72,9 +72,12 @@ def status() -> dict:
 
 
 def cutoff_for(laser_nm, grating) -> float | None:
-    """The lowest usable Raman shift measured for this laser and grating (90 % of full transmission), if any."""
-    rec = get("cutoff", key(laser_nm, grating))
-    try:
-        return float(rec["latest"]["usable_from_cm1"])
-    except (TypeError, KeyError, ValueError):
-        return None
+    """The lowest usable Raman shift measured for this laser and grating (90 % of full transmission), if any; else
+    the laser's own from HORIBA's QC report (key '<laser>@any', qc.import_dir)."""
+    for k in (key(laser_nm, grating), key(laser_nm, "any")):
+        rec = get("cutoff", k)
+        try:
+            return float(rec["latest"]["usable_from_cm1"])
+        except (TypeError, KeyError, ValueError):
+            continue
+    return None

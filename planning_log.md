@@ -796,3 +796,18 @@ What was done, found and decided, by date (oldest first). The current design is 
   refuses when none, runner stops if LabSpec's grating cannot; < 100 cm-1 without a measured cut-off warned.
   The default profile's window_nm stay generic (the simulator uses them); the XploRA's are set from the warnings.
   151 tests.
+- 2026-11-23, 2026.11.23.7: Nicola: no ICS for 785; shared the HORIBA service folder (Horiba Jobin Yvon: 1-QC
+  QC Auto reports, 2-Production Files, 3-Install, a LabSpec 6.7.1 backup). Found: ICS spectra in QC Auto\Spectro\ICS
+  for 532 (600/1200/1800/2400) and 638 (1200/1800); LabSpec's runtime corrections are
+  Parameters\ACQUISITION\Responses\Response_<CCD>_<laser label>_<grating label>.l6s (the 6.7.1 backup also had 638/600
+  and 785/600/1200/1800; the 6.8.1 install has none for 785, per Nicola) -> plan.ics_files / ics_off auto (profile
+  ics.auto, default on), `ls6t profile ics`. QC reports (key=value, UTF-16): cut-off 532 41.6-77.5, 638 35.3-58.7,
+  785 41.7-54.9 cm-1; laser power at sample 85 / 40 / 50 mW (QC), 96.6 / 33.8 / 86.6 mW (install, no objective);
+  axial FWHM 1.35 / 2.11 / 2.17 µm (hole 100); spectral resolution per grating x slit x hole at Ne lines -> qc.py
+  (parse, import_dir -> store qc.json + perf cutoff '<laser>@any' (cutoff_for falls back), summary in references),
+  `ls6t profile qc`. No HORIBA file or value is copied into the repository. LabSpec 6.7.1 help: AutoCalibration and
+  AutoCalibrationEx are script calls (Mode 0 full, 2 offset only, 1 status; result 0 ok, 1-3 failed; 'only with
+  HORIBA's script'); the 6.7.1 AutoCalibration is AutoCalibration.vbc + OLAutoCalibration.dll (why autocal_info
+  found no .vbs) -> bridge verb autocal (VAutoCal, polls status, beats, stop), sim v_autocal, api.autocal_call /
+  autocal_question used by autocal_run and run_calibration (method 'call'). To try once with the maintainer (T4.9).
+  155 tests.

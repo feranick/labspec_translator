@@ -121,9 +121,13 @@ def info(prof: dict, bridge_text: str = "") -> dict:
         if w and hv and not w.startswith(hv.group(0)):
             s["version_warning"] = (f"written for LabSpec {w}, LabSpec here is {here}: check with HORIBA (or the "
                                     "maintainer) that it still fits before enabling it")
+    out["labspec_call"] = ("LabSpec 6.7 and later run AutoCalibration from a compiled module (no .vbs to find); its "
+                           "help documents a script call, AutoCalibration(Mode, Status), that ls6t can use instead: "
+                           "ls6t profile set calibration.autocal '{\"enabled\": true, \"method\": \"call\", "
+                           "\"mode\": \"full\"}' (\"offset\": zero order only, no sample); then "
+                           "`ls6t instrument autocal-run` once with the maintainer (TESTING T4.9)")
     if not any(s.get("bytes") for s in out["scripts"]):
-        out["next"] = ("no AutoCalibration script found on this PC: look for an AutoCalibration folder in LabSpec's "
-                       "folder; LabSpec's own menu may still offer AutoCalibration (do it there, by hand)")
+        out["next"] = ("no AutoCalibration script found on this PC: " + out["labspec_call"])
     else:
         out["next"] = ("with the maintainer (TESTING T4.9): try the script from ls6t once, then a person enables it: "
                        "ls6t profile set calibration.autocal '{\"enabled\": true, \"script\": \"<path>\", "
