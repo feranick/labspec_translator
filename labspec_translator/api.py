@@ -646,7 +646,10 @@ def autocal_run() -> dict:
         S.ensure(b.dir)
     try:
         before = labspec_calibration(b)
-        r = b.call("confirm", timeout_s=3600, text=autocal_question(ac))
+        st = b.call("status", timeout_s=15, **runner.motor_args(prof))
+        pair = runner.combo(runner._f(st.get("laser_nm")), st.get("grating"))
+        r = b.call("confirm", timeout_s=3600, text=f"ls6t: AutoCalibration for {pair} (LabSpec calibrates the "
+                                                   "grating in use only). " + autocal_question(ac))
         if r.get("answer") != "yes":
             return {"ok": False, "error": "the operator declined in LabSpec"}
         t0 = time.time()
@@ -654,7 +657,8 @@ def autocal_run() -> dict:
         after = labspec_calibration(b)
     except BridgeError as exc:
         return {"ok": False, "error": str(exc)}
-    out = {"ok": bool(r.get("ok")), "error": r.get("error") or None, "seconds": round(time.time() - t0, 1)}
+    out = {"ok": bool(r.get("ok")), "error": r.get("error") or None, "seconds": round(time.time() - t0, 1),
+           "applies_to": pair}
     if before.get("ok") and after.get("ok"):
         out["changed"] = {g: {k: [v, after["gratings"].get(g, {}).get(k)] for k, v in vals.items()
                               if after["gratings"].get(g, {}).get(k) != v}

@@ -38,7 +38,7 @@ SERIES_KEYS = {"count", "interval_s"}
 PROCESS_KEYS = {"baseline", "peaks", "auto_peaks", "bands"}
 PEAK_KEYS = {"near_cm1", "window_cm1", "shape", "name"}
 SHAPES = ("pseudo_voigt", "lorentz", "gauss")
-SAMPLE_KEYS = {"name", "notes", "sensitive", "unevenness_um"}
+SAMPLE_KEYS = {"name", "notes", "sensitive", "unevenness_um", "site"}
 
 EXAMPLE = {
     "si_check": {"kind": "calibration", "sample": {"name": "Si wafer"},
@@ -99,7 +99,8 @@ def study_format(status: dict | None = None) -> dict:
                     "a small feature seen on the video (dust, a particle); snapshots then mark the beam there and "
                     "move.to_um aims with it"},
         "keys": {
-            "sample": "{name, notes, sensitive: true caps the filter at limits.sensitive_max_filter_pct}",
+            "sample": "{name, notes, sensitive: true caps the filter at limits.sensitive_max_filter_pct, site: LabSpec's "
+                      "Site field}",
             "setup": "{laser_nm, grating (gr/mm), filter (a label from the profile, e.g. '10%'), objective "
                      "(label), hole_um, slit_um, laser_pol, raman_pol (polariser positions, when the profile has "
                      "them)}; a key left out keeps what LabSpec has (recorded in the result)",

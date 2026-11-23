@@ -85,6 +85,15 @@ def test_profile_set(tmp_path):
     assert r["ok"] and P.load()["video"]["laser_offset_um"] == [1.4, -0.6]
     with pytest.raises(KeyError):
         api.profile_set("video.nonsense", "1")
+    # a laser named with a decimal point (2026-11-23: lasers.637.75.power_mw failed)
+    prof = P.load()
+    k = next(k for k in prof["lasers"] if "." in k) if any("." in k for k in prof["lasers"]) else None
+    if k is None:
+        prof["lasers"]["637.75"] = {"nm": 637.75, "power_mw": 35, "max_filter_pct": 100}
+        P.save(prof)
+        k = "637.75"
+    assert api.profile_set(f"lasers.{k}.power_mw", "40")["ok"] and P.load()["lasers"][k]["power_mw"] == 40
+    assert api.profile_set(f'lasers["{k}"].power_mw', "41")["ok"] and P.load()["lasers"][k]["power_mw"] == 41
 
 
 # --------------------------------------------------------------------------------------------- stage and focus
@@ -275,6 +284,7 @@ def test_calibration_offset_and_ls6t_correction():
                            "process": {"peaks": [{"name": "Si", "near_cm1": 520.7, "window_cm1": 30}]}}})
     cal = st["studies"]["c"]["calibration"]
     assert cal["offset_cm1"] == pytest.approx(1.5, abs=0.25) and cal["stored_correction"]
+    assert cal["corrected"] and cal["outcome"].startswith("out of tolerance before correction (+1.5")
     assert st["studies"]["s"]["peaks_by_name"]["Si"]["position_cm1"] == pytest.approx(520.7, abs=0.25)
     assert any("spectral correction applied" in w for w in st["studies"]["s"]["warnings"])
 
@@ -373,3 +383,38 @@ def test_native_map_validation_and_auto():
     big = {"kind": "map", "acquire": {"center_cm1": 520}, "map": {"x_um": [0, 19, 1], "y_um": [0, 19, 1]}}
     assert plan.map_engine(big, P.load()) == "native"
     assert plan.map_engine(dict(big, focus={"autofocus": "laser", "every": 10}), P.load()) == "points"
+
+
+def test_calibration_belongs_to_one_laser_and_grating():
+    """2026-11-23, 637.75 nm: after AutoCalibration Si was +0.3 cm-1 off with the 1200 grating and +3.1 with the
+    2400. A calibration check is kept per laser and grating; spectra say what the last check of their pair found;
+    the result and LabSpec's prompts name the pair. And each study says where its time went."""
+    bdir = config.active_bridge_dir()
+    S.ensure(bdir)
+    (bdir / "sim_xshift").write_text("3.0,1.0")
+    si = {"peaks": [{"name": "Si", "near_cm1": 520.7, "window_cm1": 30}]}
+    st = run_inline({"c": {"kind": "calibration", "sample": {"name": "Si"}, "setup": SETUP},
+                     "s": {"kind": "spectrum", "sample": {"name": "Si"}, "setup": SETUP,
+                           "acquire": {"center_cm1": 520}, "process": si},
+                     "o": {"kind": "spectrum", "sample": {"name": "Si"}, "setup": {**SETUP, "grating": 1200},
+                           "acquire": {"center_cm1": 520}, "process": si}})
+    c = st["studies"]["c"]
+    assert c["calibration"]["applies_to"]["key"] == "532@1800" and "1800 gr/mm grating with 532 nm" in \
+        c["calibration"]["applies_to"]["what"]
+    assert any("for the 1800 gr/mm grating with 532 nm" in u for u in c["unreliable_because"])
+    assert c["calibration"]["outcome"].startswith("out of tolerance (+3.0") and not c["calibration"].get("corrected")
+    s, o = st["studies"]["s"], st["studies"]["o"]
+    assert s["checks"]["zero"]["offset_cm1"] == pytest.approx(3.0, abs=0.3)
+    assert any("last calibration check for the 1800 gr/mm grating with 532 nm" in w for w in s["warnings"])
+    assert o["checks"]["zero"]["offset_cm1"] is None and "532@1800" in o["checks"]["zero"]["other_gratings"]
+    assert any("no calibration check yet for the 1200 gr/mm grating" in w for w in o["warnings"])
+    t = s["timing"]
+    assert t["bridge_commands"]["acquire"]["n"] == 1 and "t_until_data_s" in t["acquire_phases_s"]
+    assert t["overhead_s"] == pytest.approx(t["total_s"] - t["exposure_s"], abs=0.02)
+    assert t["operator_s"] == 0 and "operator" in s["seconds"]          # the simulator answers at once
+    from labspec_translator import runner
+    tm = runner.timing([{"verb": "confirm", "s": 6.0}, {"verb": "acquire", "s": 23.0, "t_acq_call_s": 0.1,
+                                                         "t_motors_after_s": 18.0, "t_acquire_total_s": 22.5}],
+                       [{"exposure_s": 1, "accumulations": 1}], 30.0)
+    assert tm["operator_s"] == 6.0 and tm["overhead_s"] == 23.0 and tm["acquire_handoff_s"] == 0.5
+    assert "until every motor reported idle (18.0 s)" in tm["note"]

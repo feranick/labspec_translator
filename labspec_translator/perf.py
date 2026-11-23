@@ -20,7 +20,7 @@ from pathlib import Path
 
 from . import store
 
-KINDS = ("filters", "axial", "resolution", "cutoff")
+KINDS = ("filters", "axial", "resolution", "cutoff", "zero")
 
 
 def path() -> Path:

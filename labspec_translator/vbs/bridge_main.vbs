@@ -1126,7 +1126,7 @@ Sub VAcquire(cmd, res)
 End Sub
 
 Sub VAcquireInner(cmd, res)
-    Dim mode, ex, acc, f, t, outPath, native, sample, id, t0, started, who, tmo, r, spm, waitedS
+    Dim mode, ex, acc, f, t, outPath, native, sample, id, t0, started, who, tmo, r, spm, waitedS, tp, tAll, cur
     mode = CLng(ParseNum(GetP(cmd, "mode", "10")))
     ex = ParseNum(GetP(cmd, "exposure_s", "1"))
     acc = CLng(ParseNum(GetP(cmd, "accumulations", "1")))
@@ -1144,6 +1144,9 @@ Sub VAcquireInner(cmd, res)
         Fail res, "acquire: only spectrum modes (0 or 2 plus options)"
         Exit Sub
     End If
+    ' where the time goes (2026-11-23: 42-64 s for 4 s of exposure): t_*_s in the result, one per phase
+    tAll = Timer
+    tp = Timer
     On Error Resume Next
     If ex = 0 Then
         LabSpec.SetAutoExposure ParseNum(GetP(cmd, "ae_test_s", "0.1")), ParseNum(GetP(cmd, "ae_min_s", "0.1")), _
@@ -1161,6 +1164,20 @@ Sub VAcquireInner(cmd, res)
     If f > 0 And f = t And GetP(cmd, "center_move", "1") = "1" Then
         spm = GetP(cmd, "m_spectro", "Spectro")
         waitedS = WaitMotor("", 0, 120, res)
+        res("t_motors_before_s") = Secs(Elapsed(tp))       ' e.g. a grating turret still turning
+        tp = Timer
+        cur = MotorValue(spm)
+        Err.Clear
+    End If
+    If f > 0 And f = t And GetP(cmd, "center_move", "1") = "1" And IsNumeric(cur) And cur <> "" Then
+        If Abs(CDbl(cur) - f) <= ParseNum(GetP(cmd, "spectro_tol_nm", "0.01")) Then
+            res("spectro_nm") = cur
+            res("spectro_asked_nm") = f
+            res("spectro_skipped") = 1                         ' already there: no move, no wait
+            f = -f
+        End If
+    End If
+    If f > 0 And f = t And GetP(cmd, "center_move", "1") = "1" Then
         gBlocking = spm
         Beat "busy", True
         r = LabSpec.MoveMotor(spm, f, "", LS_MOTOR_VALUE)
@@ -1171,12 +1188,19 @@ Sub VAcquireInner(cmd, res)
             Err.Clear
             Exit Sub
         End If
+        res("t_spectro_call_s") = Secs(Elapsed(tp))
+        tp = Timer
         waitedS = WaitMotor(spm, gNoId, 120, res)
+        res("t_spectro_wait_s") = Secs(Elapsed(tp))
+        tp = Timer
         waitedS = WaitMotor("", 0, 120, res)
+        res("t_motors_after_s") = Secs(Elapsed(tp))
         res("spectro_asked_nm") = f
         res("spectro_nm") = MotorValue(spm)
         Err.Clear
     End If
+    If f < 0 Then f = -f
+    tp = Timer
     ' collect earlier results (and a 'cancelled' state) until LabSpec reports none, so the next ID is ours
     For r = 1 To 50
         id = LabSpec.GetAcqID()
@@ -1185,6 +1209,8 @@ Sub VAcquireInner(cmd, res)
         LabSpec.Pause 20
     Next
     Err.Clear
+    res("t_flush_s") = Secs(Elapsed(tp))
+    tp = Timer
     ' LabSpec's Acq can hold the script until the spectrum is taken (an extended range: 2026-11-23, 532 nm 100-1000
     ' cm-1, 5 s: ls6t called the bridge stuck after 20 s while the detector was still collecting): the heartbeat says so
     ' first, with how long it may take
@@ -1192,6 +1218,8 @@ Sub VAcquireInner(cmd, res)
     gBlockingS = tmo
     Beat "busy", True
     LabSpec.Acq mode, ex, acc, f, t
+    res("t_acq_call_s") = Secs(Elapsed(tp))              ' Acq itself (it can hold the script)
+    tp = Timer
     gBlocking = ""
     gBlockingS = 0
     Beat "busy", True
@@ -1242,10 +1270,20 @@ Sub VAcquireInner(cmd, res)
     Loop
     Err.Clear
     On Error GoTo 0
+    res("t_until_data_s") = Secs(Elapsed(tp))            ' after Acq returned, until LabSpec had the spectrum
+    tp = Timer
     res("id") = id
     If Not WriteSpectrum(id, outPath, res) Then Exit Sub
+    res("t_write_s") = Secs(Elapsed(tp))
+    tp = Timer
     On Error Resume Next
     If sample <> "" Then LabSpec.PutDataInfo id, "Custom", "Sample", sample
+    ' traceable from LabSpec (2026-11-23: Title, Project and Site kept LabSpec's placeholders A, C, D): the study's
+    ' name, the ls6t request, and Site cleared unless given
+    If GetP(cmd, "title", "") <> "" Then LabSpec.PutDataInfo id, "Custom", "Title", GetP(cmd, "title", "")
+    If GetP(cmd, "project", "") <> "" Then LabSpec.PutDataInfo id, "Custom", "Project", GetP(cmd, "project", "")
+    If cmd.Exists("site") Then LabSpec.PutDataInfo id, "Custom", "Site", GetP(cmd, "site", "")
+    Err.Clear
     If GetP(cmd, "remark", "") <> "" Then
         LabSpec.PutDataInfo id, "Custom", "Remark", "ls6t " & gSeq & ": " & GetP(cmd, "remark", "")
     Else
@@ -1259,9 +1297,11 @@ Sub VAcquireInner(cmd, res)
         Err.Clear
     End If
     On Error GoTo 0
+    res("t_save_s") = Secs(Elapsed(tp))                  ' sample, remark and the .l6s
     If ex > 0 Then res("exposure_s") = ex       ' auto exposure: the time used is in the file's acq.* lines
     res("accumulations") = acc
     res("detector_temp_c") = DetectorTemp()
+    res("t_acquire_total_s") = Secs(Elapsed(tAll))
 End Sub
 
 Sub VView(cmd, res)

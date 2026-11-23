@@ -94,6 +94,7 @@ class Ctx:
         self.z_focus = None                 # the focus: the operator's, or the last autofocus / focus scan
         self.saved_config = None            # LabSpec's configuration saved at the start (session.restore_config)
         self.confirmed = False
+        self.calls: list = []                  # every bridge command: verb, seconds, the bridge's own t_*_s phases
         self.objective_by_operator = None      # the objective the operator confirmed in this request
         self.objective = None               # LabSpec's objective now (its record)
         self.focus_xy = (None, None)        # where the focus was found (the operator's spot, or the last focus)
@@ -131,8 +132,16 @@ class Ctx:
                                                                               "file exists for this pair)"
                                                                        if plan.ics_files(self.prof) is not None
                                                                        else "LabSpec's setting")
+        t0 = time.monotonic()
         try:
             r = self.bridge.call(verb, timeout_s=timeout_s, should_stop=self.cancelled, on_wait=self.beat, **params)
+            rec = {"verb": verb, "s": round(time.monotonic() - t0, 3)}
+            rec.update({k: _f(v) for k, v in r.items() if k.startswith("t_") and k.endswith("_s") and _f(v) is not None})
+            if verb == "move" and params.get("motor"):
+                rec["motor"] = params["motor"]
+            if str(r.get("spectro_skipped", "")) == "1":
+                rec["spectro_skipped"] = True
+            self.calls.append(rec)
         except BridgeGone as exc:
             raise Stop(str(exc), "bridge") from exc
         except BridgeTimeout as exc:
@@ -144,6 +153,54 @@ class Ctx:
             if r.get("stopped_by") == "request" or self.cancelled():
                 raise Stop("cancelled", "cancel")
         return r
+
+
+PHASES = (("t_motors_before_s", "waiting for motors before the spectrometer move (a grating turret still turning?)"),
+          ("t_spectro_call_s", "MoveMotor Spectro (to the window's centre)"),
+          ("t_spectro_wait_s", "until the spectrometer reported idle"),
+          ("t_motors_after_s", "until every motor reported idle"),
+          ("t_flush_s", "collecting earlier results from LabSpec"),
+          ("t_acq_call_s", "LabSpec's Acq call (it can hold the script)"),
+          ("t_until_data_s", "after Acq, until the spectrum was there (exposure, readout)"),
+          ("t_write_s", "writing the spectrum file"),
+          ("t_save_s", "sample, remark and the .l6s"))
+
+
+OPERATOR_VERBS = ("confirm", "notice")
+
+
+def timing(calls: list, per_point: list, total_s: float) -> dict:
+    """Where a study's time went (2026-11-23: 42-64 s for 4 s of exposure, 10-15 s on 2026.11.22.15): per bridge
+    command, the acquisition's phases inside the bridge (t_*_s), the time between the bridge and ls6t, and ls6t's
+    own work (set-up checks, analysis, plots)."""
+    exposure = sum((_f(r.get("exposure_s")) or 0) * (_f(r.get("accumulations")) or 1) for r in per_point)
+    by_verb: dict = {}
+    for c in calls:
+        v = by_verb.setdefault(c["verb"] + (f" {c['motor']}" if c.get("motor") else ""), {"n": 0, "s": 0.0})
+        v["n"] += 1
+        v["s"] = round(v["s"] + c["s"], 2)
+    acq = [c for c in calls if c["verb"] == "acquire"]
+    # the operator reading and answering LabSpec's questions (the laser's Yes, the objective, a notice): not overhead
+    operator = round(sum(c["s"] for c in calls if c["verb"] in OPERATOR_VERBS), 2)
+    phases = {k: round(sum(c.get(k) or 0 for c in acq), 2) for k, _ in PHASES if any(c.get(k) is not None for c in acq)}
+    inside = sum(c.get("t_acquire_total_s") or 0 for c in acq)
+    bridge_s = sum(c["s"] for c in calls)
+    out = {"total_s": round(total_s, 2), "exposure_s": round(exposure, 2), "operator_s": operator,
+           "overhead_s": round(total_s - exposure - operator, 2),
+           "acquire_s": round(sum(c["s"] for c in acq), 2), "bridge_commands": by_verb, "bridge_s": round(bridge_s, 2),
+           "ls6t_s": round(max(0.0, total_s - bridge_s), 2)}
+    if acq:
+        out["acquire_phases_s"] = phases
+        out["acquire_phases"] = {k: d for k, d in PHASES if k in phases}
+        if inside:
+            out["acquire_handoff_s"] = round(sum(c["s"] for c in acq) - inside, 2)   # files and polling, both ways
+        if any(c.get("spectro_skipped") for c in acq):
+            out["spectro_move_skipped"] = sum(1 for c in acq if c.get("spectro_skipped"))
+    big = max(((k, v) for k, v in phases.items() if k not in ("t_until_data_s",)), key=lambda kv: kv[1],
+              default=None)
+    if big and big[1] > max(5.0, 0.25 * max(0.0, total_s - operator)):
+        out["note"] = f"most of the overhead: {dict(PHASES)[big[0]]} ({big[1]:.1f} s)"
+    return out
 
 
 def _acquire_lock(folder: Path, ctx_beat) -> None:
@@ -462,6 +519,7 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
     sd = sd or ctx.folder / name
     (sd / "spectra").mkdir(parents=True, exist_ok=True)
     t_start = time.time()
+    n_calls = len(ctx.calls)
     kind = study.get("kind", "spectrum")
     pts = plan.positions(study)
     _progress(sd, state="running", stage="setup", point=0, points=len(pts), started=t_start,
@@ -589,6 +647,9 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
             params.pop("verb", None)
             params["out"] = str(out)
             params["sample"] = study.get("sample", {}).get("name", name)
+            # LabSpec's Title / Project / Site: the study, the request, the sample's site (or cleared)
+            params.update(title=name, project=f"ls6t {ctx.folder.name}",
+                          site=str(study.get("sample", {}).get("site", ""))[:100])
             if study.get("sample", {}).get("notes"):
                 params["remark"] = str(study["sample"]["notes"])[:200]     # LabSpec's Remark, after "ls6t <seq>"
             if native and kind not in ("map", "series"):
@@ -659,6 +720,7 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
             unreliable.append(f"stopped after {len(per_point)} of {len(pts)} points: {stop_exc.why}")
         else:
             unreliable.append(stop_exc.why)
+    tm = timing(ctx.calls[n_calls:], per_point, time.time() - t_start)
     result.update(
         ok=bool(per_point), complete=len(per_point) == len(pts) and stop_exc is None,
         reliable=bool(per_point) and not unreliable, unreliable_because=unreliable, warnings=warnings,
@@ -669,7 +731,8 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
                     "grating": _f(after.get("grating"))},
         range=rng, points_measured=len(per_point), points_planned=len(pts),
         seconds={"total": round(time.time() - t_start, 2), "acquisition": round(t_acq, 2),
-                 "analysis": round(time.time() - t_an, 2)},
+                 "operator": tm["operator_s"], "analysis": round(time.time() - t_an, 2)},
+        timing=tm,
         execution={"mode": config.mode(), "bridge": ctx.bridge_version, "translator": __version__,
                    "protocol": BRIDGE_PROTOCOL})
     if not per_point:
@@ -1461,7 +1524,10 @@ def run_calibration(name: str, study: dict, ctx: Ctx) -> dict:
         if auto and not autocal_runs and ac.get("enabled") and (ac.get("script") or ac.get("method") == "call"):
             # LabSpec's own AutoCalibration, once; then measure again
             from .api import autocal_call, autocal_question
-            txt = f"ls6t: the calibration is off ({cal.get('offset_cm1')} cm-1). " + autocal_question(ac)
+            inst0 = res.get("instrument") or {}
+            txt = (f"ls6t: the calibration of {combo(inst0.get('laser_nm'), inst0.get('grating'))} is off "
+                   f"({cal.get('offset_cm1')} cm-1); LabSpec calibrates the grating in use only. "
+                   + autocal_question(ac))
             ans = ctx.call("confirm", timeout_s=3600, text=txt)
             if ans.get("answer") == "yes":
                 t0 = time.time()
@@ -1486,8 +1552,10 @@ def run_calibration(name: str, study: dict, ctx: Ctx) -> dict:
         units = (f" On this instrument one step of LabSpec's Offset shift moves the line by about {float(step):+.3f} "
                  f"cm-1 here: about {-err / float(step):+.0f} steps (arrows)." if step else "")
         txt = (f"ls6t: the {'Si' if cal.get('reference') == 'si' else cal.get('reference')} line at {ref} cm-1 is measured at {meas:.2f} cm-1 "
-               f"({err:+.2f} cm-1).\n\nCorrect the spectral zero in LabSpec (Maintenance > Instrument calibration, "
-               f"for this grating): the line must move by {-err:+.2f} cm-1, about {dnm:+.4f} nm.{units}"
+               f"({err:+.2f} cm-1) with {combo(laser, inst.get('grating'))}.\n\nCorrect the spectral zero in "
+               f"LabSpec (Maintenance > Instrument calibration) for {combo(laser, inst.get('grating'))} only: the "
+               f"line must move by {-err:+.2f} cm-1, about {dnm:+.4f} nm.{units} The other gratings keep their own "
+               "zero: check each one you use."
                + (f" With several lines, the coefficient (dispersion) too: scale {cal['correction']['b']:.6f}."
                   if cal.get("correction") and abs(cal["correction"]["b"] - 1) > 1e-5 else "")
                + "\n\nPress OK to measure again, or Cancel to stop.")
@@ -1508,8 +1576,7 @@ def run_calibration(name: str, study: dict, ctx: Ctx) -> dict:
         inst = result.get("instrument") or {}
         n = xcal.clear(inst.get("laser_nm"), inst.get("grating"))
         if n:
-            result.setdefault("warnings", []).append("LabSpec is calibrated again: ls6t's own correction for this "
-                                                     "laser and grating was dropped")
+            result.setdefault("warnings", []).append(f"LabSpec is calibrated again for {combo(inst.get('laser_nm'), inst.get('grating'))}: ls6t's own correction for it was dropped")
     result["calibration"] = cal
     return _finish(sd, name, result)
 
@@ -2228,6 +2295,19 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
                              if len(ref_lines) > 1 else 30} for i, c in enumerate(ref_lines)]
     # ls6t's own spectral correction (from an earlier calibration), never on a calibration itself
     corr = xcal.get(laser, grating) if kind != "calibration" else None
+    if kind != "calibration" and laser:
+        zs = zero_state(laser, grating, prof)
+        checks["zero"] = zs
+        tol0 = float(prof["checks"]["si_tol_cm1"])
+        if not corr and zs.get("offset_cm1") is not None and abs(float(zs["offset_cm1"])) > tol0:
+            warnings.append(f"the last calibration check for {combo(laser, grating)} ({zs['time']}) found the "
+                            f"reference line {float(zs['offset_cm1']):+.2f} cm-1 off: the positions here carry it. "
+                            "Correct LabSpec's zero for this grating, or run a calibration with adjust 'ls6t'")
+        elif zs.get("offset_cm1") is None and zs.get("other_gratings"):
+            warnings.append(f"no calibration check yet for {combo(laser, grating)} (checked with this laser: "
+                            + ", ".join(f"{k} {v:+.2f} cm-1" for k, v in zs["other_gratings"].items()
+                                        if v is not None)
+                            + "); each grating has its own zero in LabSpec")
     if corr:
         age = xcal.age_h(corr)
         warnings.append(f"spectral correction applied: true = {corr['a']:+.3f} + {corr['b']:.6f} x measured "
@@ -2349,6 +2429,33 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
     return out
 
 
+def combo(laser, grating) -> str:
+    """'the 2400 gr/mm grating with 637.75 nm': what a calibration (LabSpec's zero, ls6t's correction) belongs to."""
+    g = _f(grating)
+    return (f"the {g:g} gr/mm grating" if g else "this grating") + (f" with {float(laser):g} nm" if laser else "")
+
+
+def zero_state(laser, grating, prof: dict) -> dict:
+    """The last calibration check for this laser and grating (perf 'zero'), and the others of this laser: each
+    grating has its own zero in LabSpec (2026-11-23, 637.75 nm: +0.3 cm-1 with 1200 after AutoCalibration, +3.1
+    with 2400)."""
+    from . import perf
+    k = perf.key(laser, grating)
+    rec = perf.get("zero", k)
+    out: dict = {"key": k}
+    if rec:
+        e = rec["latest"]
+        out.update(offset_cm1=e.get("offset_cm1"), reference=e.get("reference"), time=e.get("time"),
+                   checks=len(rec.get("history", [])))
+    else:
+        out["offset_cm1"] = None
+    others = {kk: v["latest"].get("offset_cm1") for kk, v in ((perf.load().get("zero")) or {}).items()
+              if kk != k and laser and kk.split("@")[0] == perf.key(laser)}
+    if others:
+        out["other_gratings"] = others
+    return out
+
+
 def _calibration_result(study, prof, rec, ref_lines, laser, grating, request, checks, unreliable, warnings) -> dict:
     """The reference lines measured against their true positions: the offset (the zero) and, with lines far enough
     apart, the scale (the dispersion coefficient): true = a + b x measured. adjust 'ls6t' remembers it and applies
@@ -2364,7 +2471,9 @@ def _calibration_result(study, prof, rec, ref_lines, laser, grating, request, ch
                       "fwhm_cm1": pk.get("fwhm_cm1"), "snr": pk.get("snr"), "why": pk.get("why"),
                       "warning": pk.get("warning")})
     ok = [l for l in lines if l["measured_cm1"] is not None]
-    res: dict = {"reference": refname, "lines": lines, "tol_cm1": tol, "adjust": cal.get("adjust", "none")}
+    res: dict = {"reference": refname, "lines": lines, "tol_cm1": tol, "adjust": cal.get("adjust", "none"),
+                 "applies_to": {"laser_nm": laser, "grating": _f(grating), "key": xcal.key(laser, grating),
+                                "what": combo(laser, grating) + " only: LabSpec keeps a zero per grating"}}
     if not ok:
         res.update(pass_=False, why="no reference line found: check the sample and its focus")
         res["pass"] = res.pop("pass_")
@@ -2400,6 +2509,23 @@ def _calibration_result(study, prof, rec, ref_lines, laser, grating, request, ch
                           + "): use a stronger filter or a longer exposure, check the focus, then measure again")
     checks["calibration"] = {"pass": res["pass"], "offset_cm1": res["offset_cm1"], "worst_error_cm1": res["worst_error_cm1"],
                              "tol_cm1": tol}
+    if res["trusted"]:
+        from . import perf
+        perf.record("zero", perf.key(laser, grating), {"offset_cm1": res["offset_cm1"], "reference": refname,
+                                                        "pass": res["pass"], "tol_cm1": tol}, request)
+    # in words, so that 'pass: false' with a correction stored does not read as a failure (2026-11-23)
+    if not res["trusted"]:
+        res["outcome"] = "not judged: the reference line was not measured well enough"
+    elif res["pass"]:
+        res["outcome"] = f"within tolerance ({res['offset_cm1']:+.2f} cm-1, tolerance {tol:g})"
+    elif res["adjust"] == "ls6t":
+        res["outcome"] = (f"out of tolerance before correction ({res['offset_cm1']:+.2f} cm-1); corrected: ls6t "
+                          f"corrects later spectra with {combo(laser, grating)}")
+        res["corrected"] = True
+    else:
+        res["outcome"] = (f"out of tolerance ({res['offset_cm1']:+.2f} cm-1, tolerance {tol:g}): correct LabSpec's "
+                          f"zero for {combo(laser, grating)}")
+    checks["calibration"]["outcome"] = res["outcome"]
     if res["adjust"] == "ls6t" and res["trusted"]:
         st = xcal.store(laser, grating, a, b, refname, lines, request)
         res["stored_correction"] = st
@@ -2408,8 +2534,8 @@ def _calibration_result(study, prof, rec, ref_lines, laser, grating, request, ch
     elif not res["pass"]:
         unreliable.append(f"the {'Si' if refname == 'si' else refname} line is at {first['measured_cm1']:.2f} cm-1, "
                           f"{first['measured_cm1'] - first['reference_cm1']:+.2f} from {first['reference_cm1']}: "
-                          "adjust the zero in LabSpec (calibration.adjust 'labspec' guides it), or let ls6t correct "
-                          "(adjust 'ls6t')")
+                          f"adjust the zero in LabSpec for {combo(laser, grating)} (calibration.adjust 'labspec' "
+                          "guides it), or let ls6t correct (adjust 'ls6t')")
     return res
 
 

@@ -203,3 +203,17 @@ def test_run_stops_when_labspecs_grating_cannot_reach_the_range():
                            "acquire": {"range_cm1": [100, 3400], "exposure_s": 1}}})
     s = st["studies"]["s"]
     assert not s["ok"] and "cannot reach" in json.dumps(s) and not s.get("spectra")
+
+
+def test_labspec_data_info_traces_the_request():
+    """2026-11-23: in LabSpec's .l6s, Sample and Remark were set but Title, Project and Site kept LabSpec's
+    placeholders. The study's name goes to Title, the request to Project, sample.site (or nothing) to Site."""
+    from labspec_translator import spectra
+    st = run_inline({"si_check": {"kind": "spectrum", "sample": {"name": "Si wafer", "site": "bench 2"},
+                                  "setup": SETUP, "acquire": {"center_cm1": 520}}})
+    s = st["studies"]["si_check"]
+    meta = spectra.read(s["spectra"][0]["file"] if "file" in s["spectra"][0] else s["files"]["spectra"][0])["meta"]
+    assert meta["info.Title"] == "si_check" and meta["info.Project"] == "ls6t " + Path(st["request"]).name
+    assert meta["info.Site"] == "bench 2" and meta["info.Sample"] == "Si wafer"
+    text = api.compose_vbs(config.active_bridge_dir(), config.home())["ls6t_bridge.vbs"]
+    assert '"Custom", "Title"' in text and '"Custom", "Project"' in text and '"Custom", "Site"' in text

@@ -113,7 +113,7 @@ ls6t instrument snapshot --extended          # LabSpec's extended video (the sta
 ls6t instrument config list | save NAME | load NAME   # LabSpec's whole configuration (maintainer)
 ls6t bridge call <verb> key=value ...        # one bridge command, for the maintainer (TESTING.md)
 ls6t profile show | default | import <dump>
-ls6t profile set <key> <JSON value>          # one profile value, e.g. video.laser_offset_um "[1.4, -0.6]"
+ls6t profile set <key> <JSON value>          # one profile value, e.g. video.laser_offset_um "[1.4, -0.6]", lasers.637.75.power_mw 40
 ls6t references show                         # spectral corrections, backgrounds, beam offsets, alignment
 ls6t references clear correction [LASER@GRATING] | background NAME | spot
 ls6t alignment status                        # per laser: baseline, last check, age
@@ -147,7 +147,7 @@ Studies are given as `{name: study}`; names use letters, digits, `_` and `-`. An
 | Key | Meaning |
 |---|---|
 | `kind` | `spectrum`, `map`, `series` or `calibration` |
-| `sample` | `{name, notes, sensitive}`; `sensitive: true` caps the filter at `limits.sensitive_max_filter_pct`. The name goes into the LabSpec file. |
+| `sample` | `{name, notes, sensitive, site}`; `sensitive: true` caps the filter at `limits.sensitive_max_filter_pct`. In the LabSpec file: the name as Sample, the notes in Remark (after `ls6t <seq>`), `site` as Site (else empty), the study's name as Title and `ls6t <request>` as Project. |
 | `setup` | `{laser_nm, grating (gr/mm), filter (a profile label, e.g. "10%"), objective (label), hole_um, slit_um}`. A key left out keeps what LabSpec has; the result records what it was. |
 | `acquire` | `range_cm1: [from, to]` (extended range: LabSpec stitches windows) or `center_cm1` (one window); `exposure_s` (per accumulation) or `"auto"` with `auto_exposure: {target_counts, min_s, max_s, test_s}`; `accumulations`; `spike`: `labspec`, `none`, `single`, `double`, `double_auto`; `dark`: `labspec`, `true`, `false`; `subtract_background`: a stored white-light background's name |
 | `focus` | `{autofocus: laser, raman or video (LabSpec's routines), or scan (ls6t's focus scan on the Raman line), before the first point and every N points with every; dz_um; scan: {range_um (10), step_um (1), line_cm1 (Si), window_cm1 (30), exposure_s (0.5)}}` |
@@ -200,6 +200,8 @@ a filter above the caps, exposures, accumulations or points above the limits, mo
 | `expect` | Each expected value: `got`, `pass` |
 | `video` | `before` / `after`: the PNG (`path`), the raw frame, LabSpec's own image files, the stage position, `marker_um`, the field of view; with the laser: `spot_um` and `measured_offset_um` |
 | `images`, `files`, `seconds`, `execution` | Pictures (including `video_before` / `video_after`), paths, timing, mode and bridge version |
+| `timing` | Where the time went: `exposure_s`, `operator_s` (waiting for the operator's answers), `overhead_s`, each bridge command's time, the acquisitions' phases inside the bridge (`acquire_phases_s`) and `note` naming the largest |
+| `checks.zero` | The last calibration check for this laser and grating (LabSpec keeps a zero per grating), and those of the other gratings with this laser |
 
 Spectrum files are written by the bridge (`spectra/p00000.txt`: `# key=value` header lines, including LabSpec's
 acquisition info as `acq.*`, then wavelength and counts). The Raman-shift version sits next to it (`.shift.txt`).

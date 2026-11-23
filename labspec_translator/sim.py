@@ -970,6 +970,7 @@ class SimLabSpec:
         else:
             acc_run = acc
         windows = max(1, int(math.ceil(nm.size / PIXELS)))
+        t_w = time.monotonic()
         who = self._wait(windows * acc_run * (exp + 0.5) + (2.0 * windows if windows > 1 else 0))
         if who:
             return {**self._stopped(who), "cancelled": 1}
@@ -994,6 +995,9 @@ class SimLabSpec:
             fh.write(f"# id={sid}\n# x_unit=nm\n# y_unit=cnt\n")
             fh.write(f"# acq.Exposition={exp:g} s\n# acq.Accumulation={acc}\n# acq.Laser={las:g} nm\n")
             fh.write(f"# acq.Grating={self._cur('Grating')[0]:g}\n# acq.Filter={self._cur('Filter')[1]}\n")
+            for k in ("sample", "title", "project", "site"):          # LabSpec's Custom data info, as the bridge sets it
+                if p.get(k) is not None:
+                    fh.write(f"# info.{k.capitalize()}={p[k]}\n")
             for a, b in zip(nm, y):
                 fh.write(f"{a:.5f}\t{b:.3f}\n")
         replace_retry(tmp, out)
@@ -1001,7 +1005,8 @@ class SimLabSpec:
             Path(p["native"]).write_text(f"simulated LabSpec spectrum {sid}\n", encoding="utf-8")
         return {"id": sid, "out": str(out), "points": int(nm.size), "x_unit": "nm", "y_unit": "cnt",
                 "max_counts": float(y.max()), "exposure_s": exp, "accumulations": acc,
-                "detector_temp_c": self.temp_c, "windows": windows,
+                "detector_temp_c": self.temp_c, "windows": windows, "t_acq_call_s": 0.01,
+                "t_until_data_s": round(time.monotonic() - t_w, 3),
                 **({"spectro_asked_nm": f_nm, "spectro_nm": f_nm} if abs(t_nm - f_nm) < 1e-9 else {})}
 
 

@@ -630,17 +630,25 @@ def import_discovery(text: str, base: dict | None = None) -> tuple[dict, list[st
 
 
 def set_key(prof: dict, dotted: str, value) -> dict:
-    """profile[a][b]... = value (for `ls6t profile set`, a person's edit); the key must exist already."""
-    parts = dotted.split(".")
-    cur = prof
-    for k in parts[:-1]:
-        if not isinstance(cur, dict) or k not in cur:
-            raise KeyError(f"{dotted}: no {k!r} in the profile")
-        cur = cur[k]
-    if not isinstance(cur, dict) or parts[-1] not in cur:
-        raise KeyError(f"{dotted}: no such key in the profile")
-    cur[parts[-1]] = value
-    return prof
+    """profile[a][b]... = value (for `ls6t profile set`, a person's edit); the key must exist already. Keys with a dot
+    of their own ('lasers.637.75.power_mw', 2026-11-23) are matched against the profile: at each level the longest
+    run of parts that is a key there wins; 'lasers["637.75"].power_mw' works too."""
+    import re
+    # a bracketed key is one part, dots and all
+    parts = [m.group(1) or m.group(2) for m in re.finditer(r"\[[\"']?([^\"'\]]+)[\"']?\]|([^.\[\]]+)", dotted)]
+    cur, i = prof, 0
+    while True:
+        if not isinstance(cur, dict):
+            raise KeyError(f"{dotted}: {'.'.join(parts[:i])} is not a group of keys")
+        hit = next((j for j in range(len(parts), i, -1) if ".".join(parts[i:j]) in cur), None)
+        if hit is None:
+            raise KeyError(f"{dotted}: no {parts[i]!r} in the profile" if i < len(parts) - 1 else
+                           f"{dotted}: no such key in the profile")
+        k = ".".join(parts[i:hit])
+        if hit == len(parts):
+            cur[k] = value
+            return prof
+        cur, i = cur[k], hit
 
 
 def summary(prof: dict) -> dict:
