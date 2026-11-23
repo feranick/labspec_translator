@@ -62,8 +62,9 @@ VIAddVersionKey "LegalCopyright" "MIT license"
 !define MUI_FINISHPAGE_RUN
 !define MUI_FINISHPAGE_RUN_TEXT "Open the LabSpec scripts folder"
 !define MUI_FINISHPAGE_RUN_FUNCTION OpenScripts
-!define MUI_FINISHPAGE_SHOWREADME "$INSTDIR\docs\INSTALL.html"
+!define MUI_FINISHPAGE_SHOWREADME ""
 !define MUI_FINISHPAGE_SHOWREADME_TEXT "Show the installation guide"
+!define MUI_FINISHPAGE_SHOWREADME_FUNCTION OpenGuide
 !define MUI_FINISHPAGE_SHOWREADME_NOTCHECKED
 
 !insertmacro MUI_PAGE_WELCOME
@@ -147,11 +148,22 @@ Function FinishLeave
   ${EndIf}
 FunctionEnd
 
+; Opens a file with its default program through Explorer, a process of its own: ExecShell from the installer, which
+; exits right after, showed nothing (2026-11-23: the prompts page "tried to open" and no browser appeared)
+!macro OpenWithExplorer path
+  ${If} ${FileExists} "${path}"
+    Exec '"$WINDIR\explorer.exe" "${path}"'
+  ${EndIf}
+!macroend
+
+Function OpenGuide
+  !insertmacro OpenWithExplorer "$INSTDIR\docs\INSTALL.html"
+FunctionEnd
+
 Function .onGUIEnd
   ${If} $InstallDone == "1"
   ${AndIf} $PromptsWanted == "1"
-  ${AndIf} ${FileExists} "$INSTDIR\docs\PROMPTS.html"
-    ExecShell "open" "$INSTDIR\docs\PROMPTS.html"
+    !insertmacro OpenWithExplorer "$INSTDIR\docs\PROMPTS.html"
   ${EndIf}
 FunctionEnd
 
@@ -173,7 +185,7 @@ FunctionEnd
 !macroend
 
 Function OpenScripts
-  ExecShell "open" "$PROFILE\ls6t\vbs"
+  Exec '"$WINDIR\explorer.exe" "$PROFILE\ls6t\vbs"'     ; a folder (FileExists wants a file)
 FunctionEnd
 
 ; ------------------------------------------------------------------------------------------------ sections

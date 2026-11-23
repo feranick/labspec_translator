@@ -1121,7 +1121,8 @@ def test_installer_files(tmp_path):
     for needle in ("labspec_translator.winsetup install", "labspec_translator.winsetup uninstall",
                    "RequestExecutionLevel user", "ls6t-shell.ps1", "INSTALL.html", "PROMPTS.html",
                    "MUI_PAGE_CUSTOMFUNCTION_SHOW FinishShow", "Function FinishLeave", "Function .onGUIEnd",
-                   'StrCpy $InstallDone "1"', "${NSD_OnClick} $PromptsBox PromptsClick"):
+                   'StrCpy $InstallDone "1"', "${NSD_OnClick} $PromptsBox PromptsClick",
+                   "MUI_FINISHPAGE_SHOWREADME_FUNCTION OpenGuide", '"$WINDIR\\explorer.exe"'):
         assert needle in nsi, needle
     # the finish page's third option opens the prompts, which the build renders with the other guides
     assert "PROMPTS.md" in B.DOCS and (ROOT / "PROMPTS.md").is_file()

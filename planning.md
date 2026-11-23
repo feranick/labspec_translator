@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.23.1)
+## Architecture (version 2026.11.23.2)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -777,6 +777,11 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   change, the restarted bridge's inventory sat in LabSpec > 76 s (LabSpec restarted). Installer: PROMPTS.html did not
   open from FinishLeave: state kept in $PromptsWanted (OnClick and leave), opened in .onGUIEnd after a completed
   install ($InstallDone); fixed fallback position when MUI's checkboxes cannot be measured. 148 tests.
+
+- 2026-11-23, 2026.11.23.2: Nicola: the prompts checkbox shows and something tries to open, but nothing appears.
+  ExecShell from .onGUIEnd (and from the finish page's leave) runs in the installer, which exits at once; the shell's
+  hand-off to the browser can die with it. OpenWithExplorer: Exec explorer.exe "<file>" (its own process) for the
+  prompts, the guide (MUI_FINISHPAGE_SHOWREADME_FUNCTION OpenGuide) and the scripts folder. 148 tests.
 
 ## To do next
 
