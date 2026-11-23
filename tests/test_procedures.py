@@ -488,7 +488,16 @@ def test_shutter_used_only_once_shown_to_block_on_si(tmp_path):
     b.call("discover", timeout_s=10, out=str(tmp_path / "dump.txt"))
     prof, _ = P.import_discovery(P.read_text(tmp_path / "dump.txt"))
     prof["motors"]["laser_shutter"] = prof["laser_shutter_candidate"]
+    prof["shutter"]["max_leak_frac"] = 0.05        # the simulator's Si line is too weak to see a 0.1 % leak
     P.save(prof)
+    # the rule, with the XploRA's numbers (2026-11-23): 0.04 % left, seen (SNR 14.8) but under the 0.1 % limit
+    v = api.leak_verdict({"si_signal_cps": 1185.4}, {"si_signal_cps": 0.494, "noise_cps": 0.033, "snr": 14.8}, 5.0, 0.001)
+    assert v["status"] == "blocked" and v["leak_detected"] and v["leak_frac"] == pytest.approx(0.000417, abs=1e-5)
+    assert api._pct(v["leak_frac"]) == "0.042 %"
+    assert api.leak_verdict({"si_signal_cps": 100}, {"si_signal_cps": 86, "noise_cps": 1, "snr": 86}, 5, 0.001)[
+        "status"] == "leak"
+    assert api.leak_verdict({"si_signal_cps": 50}, {"si_signal_cps": 0.1, "noise_cps": 1, "snr": 0.1}, 5, 0.001)[
+        "status"] == "not_conclusive"
     bg = {"kind": "background", "sample": {"name": "lamp"}, "setup": SETUP,
           "acquire": {"center_cm1": 520, "exposure_s": 1}, "background": {"name": "g", "laser_off": "shutter"}}
     v = api.validate({"b": bg})["b"]
@@ -508,6 +517,7 @@ def test_shutter_used_only_once_shown_to_block_on_si(tmp_path):
     (config.active_bridge_dir() / "sim_shutter_ignored").unlink()
     r = api.shutter_verify()
     assert r["ok"] and r["sensitivity"] <= 0.05 and r["record"]["laser_nm"] == 532, r.get("error")
+    assert r["record"]["leak_frac"] <= 0.05 and "reference_cps" in r["record"]
     assert r["shutter_closed"]["laser_shutter"]["during_checked"] is True
     assert api.validate({"b": bg})["b"]["ok"]
     assert SH.gate(P.load(), 637.75) and "637.75 nm" in SH.gate(P.load(), 637.75)     # per laser

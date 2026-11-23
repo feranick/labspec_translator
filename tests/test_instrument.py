@@ -18,6 +18,9 @@ def test_filter_transmission_check():
     assert steps["50%"]["measured_pct"] == pytest.approx(50, rel=0.08)
     assert steps["25%"]["measured_pct"] == pytest.approx(15, rel=0.1) and any("25%" in f for f in r["filters"]["flagged"])
     assert "ls6t profile set filters" in r["filters"]["profile_command"]
+    # the reference again at the end (drift), and each step's exposure as LabSpec used it (2026-11-23)
+    assert r["checks"]["reference_repeat"]["ratio_to_first"] == pytest.approx(1.0, abs=0.1)
+    assert steps["50%"]["exposure_used_s"] == pytest.approx(0.4) and steps["50%"]["filter_read_back"] == "50%"
     assert api.instrument("status")["status"]["filter"] == "1%"           # back to the operator's filter
     assert "532" in api.references()["performance"]["filters"]
     bad = F.validate({"f": {"kind": "filters", "setup": dict(SETUP)}})["f"]

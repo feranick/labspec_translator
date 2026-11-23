@@ -33,6 +33,7 @@ def _profile_with_shutter(tmp_path, **limits):
     prof, _ = P.import_discovery(P.read_text(tmp_path / "dump.txt"))
     assert prof["motors"]["laser_shutter"] is None                   # found, never set by discovery (2026-11-23)
     prof["motors"]["laser_shutter"] = prof["laser_shutter_candidate"]  # as the maintainer does once confirmed
+    prof["shutter"]["max_leak_frac"] = 0.05        # the simulator's Si line is too weak to see a 0.1 % leak
     P.save(prof)
     # the shutter is used only once shown to block on Si (shutter.py): verified for the simulator's laser, and the
     # same record for its other lasers; the test's own limits after

@@ -32,7 +32,7 @@ DEFAULT_PROFILE: dict = {
                "illumination_light": None},   # the light source's mode (XploRA: uLight), read only
     # the laser shutter's positions (OLConfig on the XploRA: Off / On); ls6t moves it by label and reads it back
     # (2026-11-23: moved by value 0, unchecked, it did not block the beam). by: label or value
-    "shutter": {"off": "Off", "on": "On", "by": "label", "verify_max_days": 30},
+    "shutter": {"off": "Off", "on": "On", "by": "label", "verify_max_days": 30, "max_leak_frac": 0.001},
     # the polarisers' positions by motor role (from discovery), e.g. {"laser_pol": ["Circular", "Horizontal", ...]}
     "polarizers": {},
     "lasers": {"532": {"nm": 532.0, "label": "532", "power_mw": None, "max_filter_pct": 100},

@@ -1716,6 +1716,11 @@ def _record_resolution(result: dict, after: dict, prof: dict, warnings: list, re
     cal["resolution"] = out
 
 
+def _move_seconds(r: dict) -> dict:
+    """A move's timing as the bridge reported it (seconds, wait, all motors idle, settle)."""
+    return {k: _f(r.get(k)) for k in ("seconds", "wait_s", "all_wait_s", "settle_s") if _f(r.get(k)) is not None}
+
+
 def run_filters(name: str, study: dict, ctx: Ctx) -> dict:
     """Kind 'filters': the real transmission of each filter, from one Raman line (Si 520.7 by default) measured
     through each, strongest transmission first (the reference) with the exposure scaled so the counts stay
@@ -1737,26 +1742,40 @@ def run_filters(name: str, study: dict, ctx: Ctx) -> dict:
     before_filter = su["before"].get("filter")
     nm = round(shift_to_nm(fp["line_cm1"], laser), 4)
     rows = []
+    repeat = None
+
+    def measure(i, s, tag):
+        r = ctx.call("move", timeout_s=120, motor=prof["motors"]["filter"], mode="label", value=s["label"])
+        if not r["ok"] or str(r.get("label")) != s["label"]:
+            raise Stop(f"filter {s['label']}: LabSpec did not move there ({r.get('error') or r.get('label')})",
+                       "study")
+        mv = _move_seconds(r)
+        moved_to = r.get("label")
+        out = sd / "spectra" / f"filter_{tag}.txt"
+        r = ctx.call("acquire", timeout_s=120 + 3 * s["exposure_s"], mode=110, exposure_s=s["exposure_s"],
+                     accumulations=1, from_nm=nm, to_nm=nm, out=str(out), sample=f"filter {s['label']}")
+        if not r["ok"]:
+            raise Stop(f"filter {s['label']}: acquisition failed: {r.get('error')}", "study")
+        used = _f(r.get("exposure_s")) or s["exposure_s"]         # LabSpec's own record (Ctx checks it)
+        sp = spectra.read(out)
+        x, _ = spectra.to_shift(sp["x"], sp["meta"].get("x_unit", "nm"), laser)
+        x, y = spectra.sort_xy(x, sp["y"])
+        sat = spectra.saturation(y, prof["detector"]["full_scale"], prof["checks"]["saturation_frac"])
+        sig = spectra.line_signal(x, y, fp["line_cm1"], fp["window_cm1"]) / used
+        noise = spectra.noise_sigma(y) / used
+        return {**s, "exposure_used_s": used, "signal_cps": round(float(sig), 3),
+                "snr": round(float(sig / max(noise, 1e-9)), 1), "max_counts": sat["max_counts"],
+                "saturated": sat["saturated"], "filter_read_back": moved_to, "move": mv,
+                "file": str(out)}
+
     try:
         for i, s in enumerate(steps):
             _progress(sd, stage=f"filter {s['label']}", point=i, points=len(steps))
-            r = ctx.call("move", timeout_s=120, motor=prof["motors"]["filter"], mode="label", value=s["label"])
-            if not r["ok"] or str(r.get("label")) != s["label"]:
-                raise Stop(f"filter {s['label']}: LabSpec did not move there ({r.get('error') or r.get('label')})",
-                           "study")
-            out = sd / "spectra" / f"filter_{i:02d}.txt"
-            r = ctx.call("acquire", timeout_s=120 + 3 * s["exposure_s"], mode=110, exposure_s=s["exposure_s"],
-                         accumulations=1, from_nm=nm, to_nm=nm, out=str(out), sample=f"filter {s['label']}")
-            if not r["ok"]:
-                raise Stop(f"filter {s['label']}: acquisition failed: {r.get('error')}", "study")
-            sp = spectra.read(out)
-            x, _ = spectra.to_shift(sp["x"], sp["meta"].get("x_unit", "nm"), laser)
-            x, y = spectra.sort_xy(x, sp["y"])
-            sat = spectra.saturation(y, prof["detector"]["full_scale"], prof["checks"]["saturation_frac"])
-            sig = spectra.line_signal(x, y, fp["line_cm1"], fp["window_cm1"]) / s["exposure_s"]
-            noise = spectra.noise_sigma(y) / s["exposure_s"]
-            rows.append({**s, "signal_cps": round(float(sig), 3), "snr": round(float(sig / max(noise, 1e-9)), 1),
-                         "saturated": sat["saturated"], "file": str(out)})
+            rows.append(measure(i, s, f"{i:02d}"))
+        if len(rows) >= 2:
+            # the reference again at the end: a change means drift (focus, laser power), not the filters
+            # (2026-11-23: the second step read about 3 x low; this tells drift from the filter)
+            repeat = measure(len(steps), steps[0], "ref_again")
     finally:
         if before_filter:
             try:
@@ -1767,6 +1786,17 @@ def run_filters(name: str, study: dict, ctx: Ctx) -> dict:
     ref = rows[0] if rows else None
     if ref and ref["saturated"]:
         unreliable.append(f"the reference filter {ref['label']} is saturated: a shorter filters.exposure_s")
+    for r_ in rows[1:]:
+        if r_["saturated"]:
+            unreliable.append(f"filter {r_['label']} is saturated ({r_['max_counts']:.0f} counts): its exposure is "
+                              "scaled up from the reference's; a shorter filters.exposure_s")
+    drift = None
+    if ref and repeat and ref["signal_cps"] > 0:
+        drift = round(repeat["signal_cps"] / ref["signal_cps"], 3)
+        if abs(drift - 1.0) > 0.1:
+            unreliable.append(f"the reference filter {ref['label']} read {drift:.2f} x its first value at the end: "
+                              "the signal drifted during the study (focus, laser power, sample), so the "
+                              "transmissions are uncertain; refocus and measure again")
     if ref and ref["signal_cps"] <= 0:
         unreliable.append("no line through the reference filter: check the sample and its focus")
     flagged = []
@@ -1791,6 +1821,9 @@ def run_filters(name: str, study: dict, ctx: Ctx) -> dict:
         new = dict(prof.get("filters", {}))
         new.update({k: round(v, 4) for k, v in measured.items()})
         proposal = ("ls6t profile set filters '" + json.dumps(new) + "'")
+    if repeat:
+        checks["reference_repeat"] = {"signal_cps": repeat["signal_cps"], "ratio_to_first": drift,
+                                      "file": repeat["file"]}
     result = {"ok": bool(rows), "complete": len(rows) == len(steps), "reliable": bool(rows) and not unreliable,
               "unreliable_because": unreliable, "warnings": warnings, "checks": checks, "kind": "filters",
               "sample": study.get("sample", {}),

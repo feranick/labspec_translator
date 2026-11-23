@@ -251,9 +251,12 @@ With the maintainer, go through:
   "<name>"`), restart the bridge, put silicon under the objective, in focus, with a filter within the caps, and run
   **`ls6t instrument shutter-verify [--seconds 2]`** for each laser you will use the shutter with. It takes a
   reference spectrum at 520 cm⁻¹ with the laser, then the same with the shutter closed (each 2 accumulations with
-  LabSpec's spike removal, so a cosmic ray is not taken for the line), and passes only when the Si line is gone (not
-  detectable), with a reference strong enough that a leak of 5 % of it would show (`sensitivity`; else "not
-  conclusive": a stronger filter such as 10 %, or longer). Only a
+  LabSpec's spike removal, so a cosmic ray is not taken for the line), and passes when what passes the closed
+  shutter is at most `shutter.max_leak_frac` of the open signal (default 0.001 = 0.1 %; `leak_frac` is recorded),
+  measured with a reference strong enough to see a leak of that size (`sensitivity`; else "not conclusive": a
+  stronger filter such as 10 %, or longer). From .23.16: on .23.15 a 99.96 % block (0.04 % left, seen at SNR 14.8
+  against 1185 cps) failed the earlier rule "undetectable", which any real shutter fails against a strong reference.
+  Only a
   pass writes the record (`shutter_verified.json`: date, laser, version, motor, how it is moved, the ratio,
   `during_checked`) without which ls6t refuses every use of the shutter: `laser_off: "shutter"` (background, cutoff;
   without it they default to `operator`), `laser_on`, snapshots with the laser and `spot` 'shutter'. A record is
@@ -607,6 +610,16 @@ remembering them per camera; the scale comes from the objective's field of view 
 
 **T3.18 LabSpec's data info (.23.10).** Open a spectrum's `.l6s` in LabSpec: Title is the study's name, Project `ls6t <request folder>`, Site `sample.site` or empty, Sample and Remark as before.
 
+**T3.20 Filters study and laser_on's question (.23.16).** (a) On .23.15 a `filters` study read its second step
+about 3 × low. From .23.16 each step records `exposure_used_s` (LabSpec's), `max_counts`, `saturated`,
+`filter_read_back` and its move's timing, and the reference filter is measured again at the end
+(`checks.reference_repeat.ratio_to_first`; off by more than 10 %: drift, unreliable). Repeat it on Si (637.75 nm,
+x100) and send the steps: a low step with `ratio_to_first` near 1 and the right `filter_read_back` points at the
+filter itself or its exposure; a drifting reference points at focus or power. (b) `laser_on` asks every time (the
+operator's Yes in LabSpec); a repeated laser_on that took 0.2 s in all cannot have been answered by a person. From
+.23.16 the answer is timed (`confirm_s`) and a Yes faster than 0.4 s is not taken: repeat `ls6t instrument
+laser-on --seconds 5` twice and note `confirm_s` and whether LabSpec showed the question both times.
+
 **T3.19 LabSpec's AutoExposure (2026-11-23, .23.13).** With AutoExposure On in LabSpec (status bar "AE"), a
 spectrum asking 2 s ran 15 s while ls6t reported 2 s (this explains most of the 23–64 s acquisitions of T3.17).
 From .23.13 the bridge switches AutoExposure off for a fixed exposure (and back after), and ls6t takes the exposure
@@ -628,6 +641,10 @@ with AE on and note it. Until one is found, switch AE off by hand: ls6t stops ra
 **The flush (`t_flush_s` 1.62 s) is shortened in .23.15**: it stops when GetAcqID answers the same three times
 (`flush_tries`, `flush_last_id` in the answer) and never takes that answer for the new spectrum. Check that
 `t_flush_s` drops below 0.2 s and spectra are still this acquisition's (the Remark's `ls6t <seq>`).
+**On .23.15:** `auto_exposure_name` stayed empty with AE on and off: none of the six names reads. LabSpec's
+GetValue name for AutoExposure is still unknown (to look for in LabSpec's ActiveX help under GetValue / PutValue,
+or with HORIBA); until then AE is switched off by hand, and ls6t stops a study whose exposure differs from the one
+asked.
 
 **T4.9b LabSpec's AutoCalibration from ls6t (maintainer; the laser fires on Si).** `ls6t profile set calibration.autocal '{"enabled": true, "method": "call", "mode": "full"}'`, Si wafer in focus, 532 nm, 1200, 10 %; `ls6t instrument autocal-run`: LabSpec asks, then runs its AutoCalibration. Pass: `ok`, `changed` lists the 1200's parameters (as by hand: offset 34 -> 44 on 2026-11-23), and a calibration check after it passes. If the answer says LabSpec does not offer the call to scripts, set `"enabled": false` and keep running it from LabSpec's menu.
 
