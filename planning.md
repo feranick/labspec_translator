@@ -755,6 +755,14 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   Bridge VMove and the sim refuse LaserSwitch. Proposal: laser_shutter never set (laser_shutter_candidate + note),
   caps matched by line (+-0.5 nm), a new laser at AUTO_MAX_FILTER_PCT. autocal.assess written_for_labspec;
   info version_warning against discovered.labspec_version (now recorded). 147 tests.
+- 2026-11-23 (note, no code change): Nicola: while the bridge runs, LabSpec's own grating control is blocked (the
+  operator cannot change the grating in LabSpec's interface). Possibly linked to T3.16 (grating `set` answered in
+  0.02-0.3 s while the turret moves for seconds; first grating status 0-51 s after some bridge starts): LabSpec may
+  treat a running script as holding the spectrometer, and carry out script-requested grating changes differently
+  (queued, deferred to the next acquisition, or reported before the motor moves). To find out (TESTING T3.16):
+  which controls are blocked (grating only, or laser / filter / slit / hole too); blocked from the bridge's start
+  or only after its first grating command; released at once by End bridge; and whether a grating changed in
+  LabSpec with the bridge ended, then the bridge started, gives a fast or slow first status.
 
 ## To do next
 
