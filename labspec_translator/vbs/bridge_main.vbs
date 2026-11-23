@@ -27,7 +27,12 @@ gBlocking = ""
 
 Dim gInbox, gOutbox, gHb, gStopFlag, gHalted, gQuit, gLastBeat, gLastPopup, gPopupOpen, gViews, gStoppedBy
 Dim gVerb, gSeq, gLastSeq, gChunk
-Dim gLaserOpen, gLaserT0, gLaserS, gLaserMotor, gLaserOldMode
+Dim gLaserOpen, gLaserT0, gLaserS, gLaserMotor, gLaserOldMode, gLaserOffLabel, gLaserBy
+Dim gShutterWatch, gShutterOff, gShutterSeen   ' a laser_off acquisition: the shutter read back while it runs
+gShutterWatch = ""
+gShutterSeen = ""
+gLaserOffLabel = "Off"
+gLaserBy = "label"
 gInbox = LS6T_BRIDGE_DIR & "\inbox"
 gOutbox = LS6T_BRIDGE_DIR & "\outbox"
 gHb = LS6T_BRIDGE_DIR & "\heartbeat.txt"
@@ -272,6 +277,134 @@ Function WaitMotor(motor, moveId, tmo, res)
     On Error GoTo 0
 End Function
 
+' ---------------------------------------------------------------- the laser shutter
+' Moved by its position's label (OLConfig: Off / On on the XploRA), then read back. Until 2026-11-23 it was moved by
+' value 0 and not checked: a laser_off 'shutter' background then kept 86 % of the Si signal (the beam was not
+' blocked). shutter_by 'value' moves it by value 0 / 1 instead (the diagnostic compares both).
+Function ShutterTo(shutter, wantOn, cmd, res, tag)
+    Dim lab, by, st, t0, v
+    ShutterTo = False
+    by = GetP(cmd, "shutter_by", "label")
+    If wantOn Then
+        lab = GetP(cmd, "shutter_on", "On")
+    Else
+        lab = GetP(cmd, "shutter_off", "Off")
+    End If
+    If LCase(Replace(shutter, " ", "")) = "laserswitch" Then
+        res(tag & "_error") = "ls6t never moves " & shutter
+        Exit Function
+    End If
+    On Error Resume Next
+    If by = "value" Then
+        If wantOn Then
+            LabSpec.MoveMotor shutter, 1, "", LS_MOTOR_VALUE
+        Else
+            LabSpec.MoveMotor shutter, 0, "", LS_MOTOR_VALUE
+        End If
+    Else
+        LabSpec.MoveMotor shutter, 0, lab, LS_MOTOR_STRING
+    End If
+    If Err.Number <> 0 Then
+        res(tag & "_error") = ErrText("MoveMotor " & shutter)
+        Err.Clear
+    End If
+    t0 = Timer
+    Do
+        st = LabSpec.GetMotorStatus(shutter, gNoId)
+        If Err.Number <> 0 Then
+            Err.Clear
+            Exit Do
+        End If
+        If st = 0 Or Elapsed(t0) > 5 Then Exit Do
+        LabSpec.Pause 50
+    Loop
+    Err.Clear
+    On Error GoTo 0
+    res(tag & "_label") = MotorLabel(shutter)
+    v = MotorValue(shutter)
+    res(tag & "_value") = v
+    res(tag & "_mode") = LSValue(0, "ShutterMode")
+    res(tag & "_by") = by
+    ShutterTo = (LCase(CStr(res(tag & "_label"))) = LCase(lab))
+    If by = "value" And CStr(res(tag & "_label")) = "" And IsNumeric(v) And CStr(v) <> "" Then
+        If wantOn Then
+            ShutterTo = (CDbl(v) = 1)
+        Else
+            ShutterTo = (CDbl(v) = 0)
+        End If
+    End If
+End Function
+
+' During a laser_off acquisition: True when the shutter reads back anything but Off (LabSpec opened it)
+Function ShutterOpened()
+    Dim lab
+    ShutterOpened = False
+    If gShutterWatch = "" Then Exit Function
+    lab = MotorLabel(gShutterWatch)
+    If InStr("," & gShutterSeen & ",", "," & lab & ",") = 0 Then
+        If gShutterSeen = "" Then
+            gShutterSeen = lab
+        Else
+            gShutterSeen = gShutterSeen & "," & lab
+        End If
+    End If
+    If lab <> "" And LCase(lab) <> LCase(gShutterOff) Then ShutterOpened = True
+End Function
+
+Sub RestoreShutterMode(oldMode)
+    Dim m
+    If CStr(oldMode) = "" Then Exit Sub
+    m = oldMode
+    On Error Resume Next
+    LabSpec.PutValue 0, "ShutterMode", m
+    Err.Clear
+    On Error GoTo 0
+End Sub
+
+' The diagnostic (ls6t instrument shutter-test): read, set (by label or value, in manual mode or not), or set
+' LabSpec's ShutterMode, with every read-back
+Sub VShutter(cmd, res)
+    Dim shutter, action, m
+    shutter = GetP(cmd, "motor", "")
+    If shutter = "" Then
+        Fail res, "shutter: give the motor"
+        Exit Sub
+    End If
+    If MotorSize(shutter) = -1 Then
+        Fail res, "motor " & shutter & " is not present"
+        Exit Sub
+    End If
+    action = GetP(cmd, "action", "read")
+    res("mode_before") = LSValue(0, "ShutterMode")
+    res("label_before") = MotorLabel(shutter)
+    res("value_before") = MotorValue(shutter)
+    If action = "set" Then
+        If GetP(cmd, "manual", "1") = "1" Then
+            m = LS_SHUTTER_MANUAL
+            On Error Resume Next
+            LabSpec.PutValue 0, "ShutterMode", m
+            Err.Clear
+            On Error GoTo 0
+        End If
+        res("matches") = Bit(ShutterTo(shutter, GetP(cmd, "state", "off") = "on", cmd, res, "after"))
+    ElseIf action = "mode" Then
+        m = CLng(ParseNum(GetP(cmd, "mode", "0")))
+        On Error Resume Next
+        LabSpec.PutValue 0, "ShutterMode", m
+        If Err.Number <> 0 Then
+            Fail res, ErrText("PutValue ShutterMode")
+            Err.Clear
+        End If
+        On Error GoTo 0
+    ElseIf action <> "read" Then
+        Fail res, "shutter action: read, set or mode"
+        Exit Sub
+    End If
+    res("mode_after") = LSValue(0, "ShutterMode")
+    res("label_after") = MotorLabel(shutter)
+    res("value_after") = MotorValue(shutter)
+End Sub
+
 ' ---------------------------------------------------------------- verbs
 Sub VPing(cmd, res)
     res("protocol") = LS6T_PROTOCOL
@@ -298,6 +431,8 @@ Sub VStatus(cmd, res)
     res("z_um") = MotorValue(GetP(cmd, "m_z", "Z"))
     res("exposure_s") = LSValue(0, "LabSpecExposureTime")
     res("accumulations") = LSValue(0, "LabSpecAccumulation")
+    res("auto_exposure") = LSValue(0, "AutoExposure")
+    If GetP(cmd, "m_laser_shutter", "") <> "" Then res("laser_shutter_label") = MotorLabel(GetP(cmd, "m_laser_shutter", ""))
     res("shutter_mode") = LSValue(0, "ShutterMode")
     res("last_error") = LabSpecError()
     If GetP(cmd, "m_laser_pol", "") <> "" Then res("laser_pol") = MotorLabel(GetP(cmd, "m_laser_pol", ""))
@@ -1089,7 +1224,37 @@ End Function
 
 ' With laser_off=1 the acquisition runs with the laser shutter (m_laser_shutter) closed in manual shutter mode, for
 ' a white-light background; the shutter mode is restored afterwards on every path.
+' LabSpec's AutoExposure (status bar 'AE') replaces the exposure asked (2026-11-23: 2 s asked, 15 s used, the
+' results said 2 s). For a fixed exposure the bridge switches it off for the acquisition and puts it back after;
+' ls6t checks the exposure LabSpec reports in the spectrum's acquisition info either way.
 Sub VAcquire(cmd, res)
+    Dim aeBefore, aeOff
+    aeBefore = ""
+    If ParseNum(GetP(cmd, "exposure_s", "1")) > 0 Then
+        aeBefore = LSValue(0, "AutoExposure")
+        res("auto_exposure_before") = aeBefore
+        aeOff = LCase(CStr(aeBefore))
+        If aeOff <> "" And aeOff <> "0" And aeOff <> "off" And aeOff <> "false" Then
+            aeOff = 0
+            On Error Resume Next
+            LabSpec.PutValue 0, "AutoExposure", aeOff
+            Err.Clear
+            On Error GoTo 0
+            res("auto_exposure_set") = LSValue(0, "AutoExposure")
+        Else
+            aeBefore = ""                     ' off already (or not readable): nothing to put back
+        End If
+    End If
+    VAcquireLaser cmd, res
+    If CStr(aeBefore) <> "" Then
+        On Error Resume Next
+        LabSpec.PutValue 0, "AutoExposure", aeBefore
+        Err.Clear
+        On Error GoTo 0
+    End If
+End Sub
+
+Sub VAcquireLaser(cmd, res)
     Dim shutter, oldMode, newMode
     If GetP(cmd, "laser_off", "0") <> "1" Then
         VAcquireInner cmd, res
@@ -1101,27 +1266,29 @@ Sub VAcquire(cmd, res)
         Exit Sub
     End If
     oldMode = LSValue(0, "ShutterMode")
+    res("shutter_mode_before") = oldMode
+    res("shutter_label_before") = MotorLabel(shutter)
     On Error Resume Next
     newMode = LS_SHUTTER_MANUAL
     LabSpec.PutValue 0, "ShutterMode", newMode
-    LabSpec.MoveMotor shutter, 0, "", LS_MOTOR_VALUE
-    If Err.Number <> 0 Then
-        Fail res, ErrText("closing the laser shutter")
-        Err.Clear
-        newMode = oldMode
-        LabSpec.PutValue 0, "ShutterMode", newMode
-        Err.Clear
-        Exit Sub
-    End If
-    On Error GoTo 0
-    VAcquireInner cmd, res
-    On Error Resume Next
-    If CStr(oldMode) <> "" Then
-        newMode = oldMode
-        LabSpec.PutValue 0, "ShutterMode", newMode
-    End If
     Err.Clear
     On Error GoTo 0
+    ' closed, and read back as closed, before anything is acquired
+    If Not ShutterTo(shutter, False, cmd, res, "shutter_closed") Then
+        RestoreShutterMode oldMode
+        Fail res, "the laser shutter " & shutter & " did not read back '" & GetP(cmd, "shutter_off", "Off") & _
+                  "' after closing it (read: '" & res("shutter_closed_label") & "', value " & _
+                  res("shutter_closed_value") & "): nothing acquired with the laser supposedly off"
+        Exit Sub
+    End If
+    gShutterWatch = shutter
+    gShutterOff = GetP(cmd, "shutter_off", "Off")
+    gShutterSeen = ""
+    VAcquireInner cmd, res
+    gShutterWatch = ""
+    res("shutter_during") = gShutterSeen
+    res("shutter_label_after") = MotorLabel(shutter)
+    RestoreShutterMode oldMode
     res("laser_off") = 1
 End Sub
 
@@ -1228,6 +1395,14 @@ Sub VAcquireInner(cmd, res)
         Err.Clear
         Exit Sub
     End If
+    If ShutterOpened() Then
+        LabSpec.Acq LS_ACQ_CANCEL, 0, 0, 0, 0
+        res("shutter_opened") = 1
+        Fail res, "the laser shutter read back '" & MotorLabel(gShutterWatch) & "' during the acquisition (LabSpec " & _
+                  "opened it): cancelled; laser_off 'shutter' does not block the laser on this instrument"
+        Err.Clear
+        Exit Sub
+    End If
     t0 = Timer
     started = False
     Do
@@ -1263,6 +1438,14 @@ Sub VAcquireInner(cmd, res)
         If Elapsed(t0) > tmo Then
             LabSpec.Acq LS_ACQ_CANCEL, 0, 0, 0, 0
             Fail res, "acquisition: no data after " & tmo & " s (cancelled)"
+            Exit Sub
+        End If
+        If ShutterOpened() Then
+            LabSpec.Acq LS_ACQ_CANCEL, 0, 0, 0, 0
+            res("shutter_opened") = 1
+            Fail res, "the laser shutter read back '" & MotorLabel(gShutterWatch) & "' during the acquisition " & _
+                      "(LabSpec opened it): cancelled; laser_off 'shutter' does not block the laser on this instrument"
+            Err.Clear
             Exit Sub
         End If
         BeatNow
@@ -1689,11 +1872,10 @@ Sub VVideo(cmd, res)
         oldMode = LSValue(0, "ShutterMode")
         newMode = LS_SHUTTER_MANUAL
         LabSpec.PutValue 0, "ShutterMode", newMode
-        LabSpec.MoveMotor shutter, 1, "", LS_MOTOR_VALUE
+        Err.Clear
         opened = True                     ' close it below, even if opening reported an error
-        If Err.Number <> 0 Then
-            Fail res, ErrText("opening the laser shutter (" & shutter & ")")
-            Err.Clear
+        If Not ShutterTo(shutter, True, cmd, res, "shutter_open") Then
+            Fail res, "opening the laser shutter (" & shutter & "): it reads back '" & res("shutter_open_label") & "'"
             ok = False
         End If
         If ok Then ok = WaitStoppable(laserS)
@@ -1729,12 +1911,8 @@ Sub VVideo(cmd, res)
     If ok And clone = 0 Then clone = GrabFrame(res)
     ' the laser off first, whatever happened
     If opened Then
-        LabSpec.MoveMotor shutter, 0, "", LS_MOTOR_VALUE
-        If CStr(oldMode) <> "" Then
-            newMode = oldMode
-            LabSpec.PutValue 0, "ShutterMode", newMode
-        End If
-        res("shutter_closed") = Bit(Err.Number = 0)
+        res("shutter_closed") = Bit(ShutterTo(shutter, False, cmd, res, "shutter_close"))
+        RestoreShutterMode oldMode
         Err.Clear
     End If
     res("laser_s") = laserS
@@ -2251,7 +2429,11 @@ Sub LaserClose(why)
     Dim m
     If Not gLaserOpen Then Exit Sub
     On Error Resume Next
-    LabSpec.MoveMotor gLaserMotor, 0, "", LS_MOTOR_VALUE
+    If gLaserBy = "value" Then
+        LabSpec.MoveMotor gLaserMotor, 0, "", LS_MOTOR_VALUE
+    Else
+        LabSpec.MoveMotor gLaserMotor, 0, gLaserOffLabel, LS_MOTOR_STRING
+    End If
     If CStr(gLaserOldMode) <> "" Then
         m = gLaserOldMode
         LabSpec.PutValue 0, "ShutterMode", m
@@ -2259,7 +2441,7 @@ Sub LaserClose(why)
     Err.Clear
     On Error GoTo 0
     gLaserOpen = False
-    LabSpec.Message "ls6t: laser shutter closed (" & why & ")", LS_MB_STATUS_BAR
+    LabSpec.Message "ls6t: laser shutter closed (" & why & "; reads '" & MotorLabel(gLaserMotor) & "')", LS_MB_STATUS_BAR
 End Sub
 
 Sub LaserGuard(verb)
@@ -2293,15 +2475,17 @@ Sub VLaser(cmd, res)
         newMode = LS_SHUTTER_MANUAL
         LabSpec.PutValue 0, "ShutterMode", newMode
         gLaserMotor = shutter
+        gLaserOffLabel = GetP(cmd, "shutter_off", "Off")
+        gLaserBy = GetP(cmd, "shutter_by", "label")
         gLaserOpen = True                     ' closed by LaserClose on every path, even if opening failed
-        LabSpec.MoveMotor shutter, 1, "", LS_MOTOR_VALUE
-        If Err.Number <> 0 Then
-            Fail res, ErrText("opening the laser shutter (" & shutter & ")")
-            Err.Clear
-            On Error GoTo 0
+        Err.Clear
+        On Error GoTo 0
+        If Not ShutterTo(shutter, True, cmd, res, "shutter") Then
+            Fail res, "opening the laser shutter (" & shutter & "): it reads back '" & res("shutter_label") & "'"
             LaserClose "error"
             Exit Sub
         End If
+        On Error Resume Next
     End If
     Err.Clear
     On Error GoTo 0
@@ -2405,6 +2589,7 @@ Sub HandleFile(path)
     Else
         Select Case verb
             Case "laser": VLaser cmd, res
+            Case "shutter": VShutter cmd, res
             Case "ping": VPing cmd, res
             Case "status": VStatus cmd, res
             Case "discover"

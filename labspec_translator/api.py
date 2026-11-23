@@ -497,6 +497,8 @@ def _instrument(action, camera, setup, seconds, um=None) -> dict:
             return autocal_info()
         if action == "autocal_run":
             return autocal_run()
+        if action == "shutter_test":
+            return shutter_test()
         if action in ("camera_on", "camera_off"):
             prof = P.load()
             num, err = P.camera_number(prof, camera)
@@ -522,7 +524,7 @@ def _instrument(action, camera, setup, seconds, um=None) -> dict:
     except BridgeError as exc:
         return {"ok": False, "error": str(exc)}
     raise ValueError(f"action {action!r}: status, set, laser_on, laser_off, camera_on, camera_off, calibration, "
-                     "autocal_info, autocal_run, discover, resume, end_bridge or last_error")
+                     "autocal_info, autocal_run, shutter_test, discover, resume, end_bridge or last_error")
 
 
 def profile_propose(dump=None) -> dict:
@@ -667,6 +669,95 @@ def autocal_run() -> dict:
     return out
 
 
+SHUTTER_STEPS = (("value", "off"), ("value", "on"), ("label", "off"), ("label", "on"), ("auto_mode", "off"))
+
+
+def shutter_test(motor: str | None = None) -> dict:
+    """Which way of moving the laser shutter blocks the beam (2026-11-23: a laser_off 'shutter' background kept 86 %
+    of the Si signal). With the operator watching LabSpec's real-time display on Si: the shutter by value 0 / 1, by
+    label Off / On (ShutterMode manual), and Off with ShutterMode back to automatic; after each move ls6t reads it
+    back and asks whether the Si line is there. Then LabSpec's ShutterMode and the shutter are put back. The laser is
+    as the operator set it; nothing is acquired by ls6t."""
+    prof = P.load()
+    gate = P.review_gate(prof) if config.mode() == "labspec" else None
+    if gate:
+        return {"ok": False, "error": gate}
+    motor = motor or prof["motors"].get("laser_shutter") or prof.get("laser_shutter_candidate")
+    if not motor:
+        return {"ok": False, "error": "no laser shutter motor: give it (--motor), from the discovery dump"}
+    if runner.read_json(runner.lock_path(), None):
+        return {"ok": False, "error": "a request holds the instrument: wait or cancel it"}
+    sa = runner.shutter_args(prof)
+    b = Bridge()
+    if config.mode() == "sim":
+        from . import sim as S
+        S.ensure(b.dir)
+    steps, out = [], {"ok": True, "motor": motor, "labels": [sa["shutter_off"], sa["shutter_on"]]}
+    try:
+        first = b.call("shutter", timeout_s=30, motor=motor, action="read")
+        if not first.get("ok"):
+            return {"ok": False, "error": first.get("error")}
+        out["before"] = {"mode": first.get("mode_before"), "label": first.get("label_before"),
+                         "value": first.get("value_before")}
+        intro = (f"ls6t shutter test ({motor}). Put silicon under the objective, in focus, low filter (1 %); start "
+                 "LabSpec's real-time display around 520 cm-1 with a short exposure and the laser On in the status "
+                 f"bar. ls6t will move {motor} {len(SHUTTER_STEPS)} times and ask each time whether the Si line is "
+                 "there. The beam reaches the sample whenever the shutter is open. Continue?")
+        if b.call("confirm", timeout_s=3600, text=intro).get("answer") != "yes":
+            return {"ok": False, "error": "the operator declined in LabSpec"}
+        for by, state in SHUTTER_STEPS:
+            if by == "auto_mode":
+                b.call("shutter", timeout_s=30, motor=motor, action="set", state=state, manual="1", **sa)
+                r = b.call("shutter", timeout_s=30, motor=motor, action="mode", mode=0)
+                what = f"{sa['shutter_off']} by label, then LabSpec's ShutterMode back to automatic (0)"
+                lab, val = r.get("label_after"), r.get("value_after")
+            else:
+                r = b.call("shutter", timeout_s=30, motor=motor, action="set", state=state, manual="1",
+                           **dict(sa, shutter_by=by))
+                what = (f"{'1' if state == 'on' else '0'} by value" if by == "value" else
+                        f"'{sa['shutter_on'] if state == 'on' else sa['shutter_off']}' by label") + " (ShutterMode manual)"
+                lab, val = r.get("after_label"), r.get("after_value")
+            q = (f"ls6t moved {motor} to {what}. It reads back '{lab}' (value {val}, ShutterMode {r.get('mode_after')})."
+                 "\n\nIn LabSpec's real-time display: is the Si line THERE now? (Yes: the line is there; No: gone)")
+            ans = b.call("confirm", timeout_s=3600, text=q).get("answer")
+            steps.append({"move": what, "asked": state, "read_label": lab, "read_value": val,
+                          "shutter_mode": r.get("mode_after"), "error": r.get("error") or None,
+                          "si_line_visible": ans == "yes"})
+    except BridgeError as exc:
+        out.update(ok=False, error=str(exc))
+    finally:
+        try:      # LabSpec's ShutterMode and the shutter as they were
+            bf = out.get("before") or {}
+            if str(bf.get("label") or "").lower() in (sa["shutter_on"].lower(), sa["shutter_off"].lower()):
+                b.call("shutter", timeout_s=30, motor=motor, action="set", manual="1", **sa,
+                       state="on" if str(bf["label"]).lower() == sa["shutter_on"].lower() else "off")
+            if bf.get("mode") not in (None, ""):
+                b.call("shutter", timeout_s=30, motor=motor, action="mode", mode=bf["mode"])
+        except BridgeError:
+            pass
+    out["steps"] = steps
+    verdict = {}
+    for by in ("value", "label"):
+        on = next((s for s in steps if s["move"].endswith("(ShutterMode manual)") and by in s["move"]
+                   and s["asked"] == "on"), None)
+        off = next((s for s in steps if s["move"].endswith("(ShutterMode manual)") and by in s["move"]
+                    and s["asked"] == "off"), None)
+        if on and off:
+            verdict[f"by_{by}_blocks"] = bool(on["si_line_visible"] and not off["si_line_visible"])
+    auto = next((s for s in steps if "automatic" in s["move"]), None)
+    if auto:
+        verdict["off_holds_in_automatic_mode"] = not auto["si_line_visible"]
+    out["verdict"] = verdict
+    if steps:
+        good = [k[3:-7] for k, v in verdict.items() if k.startswith("by_") and v]
+        out["next"] = (f"moving it by {' or '.join(good)} blocks the beam in manual mode: set profile shutter.by to "
+                       f"'{good[0]}' if needed, then TESTING T1.2 step 2 (a background with laser_off 'shutter' must "
+                       "show no Si line) before motors.laser_shutter is set" if good else
+                       "no move blocked the beam while the status bar's laser was On: ls6t cannot block the laser "
+                       "with this motor; keep motors.laser_shutter null and tell the ls6t maintainer")
+    return out
+
+
 def labspec_calibration(b: Bridge | None = None) -> dict:
     """LabSpec's own spectrometer calibration per grating, read only (OperVar ACT_INSTRUMENT[...], the names HORIBA's
     service scripts use): AF, BF, Diode, Focal, Angle, Gamma, SpMin, SpMax; the grating in use is marked. Which of
@@ -741,7 +832,7 @@ def laser(on: bool, seconds: float | None = None) -> dict:
                         "Close the ls6t window to stop it at any time. Continue?")
         if r.get("answer") != "yes":
             return {"ok": False, "error": "the operator declined in LabSpec"}
-        r = b.call("laser", timeout_s=30, state="on", seconds=secs, m_laser_shutter=shutter)
+        r = b.call("laser", timeout_s=30, state="on", seconds=secs, m_laser_shutter=shutter, **runner.shutter_args(prof))
         if r.get("ok"):
             r["note"] = (f"the shutter closes by itself after {secs:g} s, or with instrument laser_off, or when the "
                          "operator closes the ls6t window")

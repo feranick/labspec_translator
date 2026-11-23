@@ -74,8 +74,16 @@ def clean(v):
 
 
 def motor_args(prof: dict) -> dict:
-    """The profile's LabSpec motor names, as the bridge's status, move_xy, autofocus and safe verbs take them."""
-    return {f"m_{k}": v for k, v in prof["motors"].items()}
+    """The profile's LabSpec motor names, as the bridge's status, move_xy, autofocus and safe verbs take them, and
+    the laser shutter's positions."""
+    return {**{f"m_{k}": v for k, v in prof["motors"].items()}, **shutter_args(prof)}
+
+
+def shutter_args(prof: dict) -> dict:
+    """How the bridge moves the laser shutter: by its positions' labels (Off / On), read back."""
+    sh = prof.get("shutter") or {}
+    return {"shutter_off": str(sh.get("off", "Off")), "shutter_on": str(sh.get("on", "On")),
+            "shutter_by": str(sh.get("by", "label"))}
 
 
 def lock_path() -> Path:
@@ -147,12 +155,39 @@ class Ctx:
         except BridgeTimeout as exc:
             raise Stop(str(exc), "timeout") from exc
         self.beat()
+        if verb == "acquire" and r["ok"] and params.get("out"):
+            self._exposure_used(r, params)
         if not r["ok"]:
             if r.get("stopped_by") == "operator" or r.get("halted") == "1":
                 raise Stop("stopped by the operator in LabSpec", "operator")
             if r.get("stopped_by") == "request" or self.cancelled():
                 raise Stop("cancelled", "cancel")
         return r
+
+    def _exposure_used(self, r: dict, params: dict) -> None:
+        """The exposure LabSpec really used, from the spectrum's acquisition info. 2026-11-23: with LabSpec's
+        AutoExposure on (status bar 'AE'), studies asking 2 s ran 15 s while ls6t reported 2 s. The bridge now switches
+        AutoExposure off for a fixed exposure; if LabSpec still used another one, nothing measured this way is right
+        (counts per second, comparisons): the study stops."""
+        try:
+            meta = spectra.header(params["out"])
+        except OSError:
+            return
+        used = spectra.acq_exposure(meta)
+        asked = _f(params.get("exposure_s")) or 0.0
+        if meta.get("acq.AutoExposure"):
+            r["labspec_auto_exposure"] = meta["acq.AutoExposure"]
+        if used is None:
+            return
+        r["exposure_asked_s"] = asked if asked > 0 else "auto"
+        r["exposure_s"] = used
+        r["exposure_source"] = "LabSpec's acquisition info"
+        if asked > 0 and abs(used - asked) > EXPOSURE_TOL * asked:
+            r["exposure_mismatch"] = True
+            raise Stop(f"LabSpec used {used:g} s per accumulation instead of the {asked:g} s asked (its AutoExposure is "
+                       f"{meta.get('acq.AutoExposure', 'probably on')}; the bridge could not switch it off: "
+                       f"{r.get('auto_exposure_before', '?')} -> {r.get('auto_exposure_set', '?')}): switch AutoExposure "
+                       "off in LabSpec (the 'AE' in the status bar) and run again, or ask for exposure_s 'auto'", "study")
 
 
 PHASES = (("t_motors_before_s", "waiting for motors before the spectrometer move (a grating turret still turning?)"),
@@ -201,6 +236,9 @@ def timing(calls: list, per_point: list, total_s: float) -> dict:
     if big and big[1] > max(5.0, 0.25 * max(0.0, total_s - operator)):
         out["note"] = f"most of the overhead: {dict(PHASES)[big[0]]} ({big[1]:.1f} s)"
     return out
+
+
+EXPOSURE_TOL = 0.02     # LabSpec's exposure within 2 % of the one asked
 
 
 def _acquire_lock(folder: Path, ctx_beat) -> None:
@@ -1755,7 +1793,7 @@ def run_cutoff(name: str, study: dict, ctx: Ctx) -> dict:
     out = sd / "spectra" / "cutoff.txt"
     params = dict(acq, out=str(out), sample="edge filter cut-off")
     if white and cp["laser_off"] == "shutter":
-        params.update(laser_off=1, m_laser_shutter=prof["motors"]["laser_shutter"])
+        params.update(laser_off=1, m_laser_shutter=prof["motors"]["laser_shutter"], **shutter_args(prof))
     r = ctx.call("acquire", timeout_s=_acq_timeout(study, prof, rng), **params)
     if white and cp["laser_off"] == "operator":
         ctx.call("notice", timeout_s=3600, text="ls6t: done. Unblock the laser when you want to measure again. OK.")
@@ -1848,7 +1886,7 @@ def run_background(name: str, study: dict, ctx: Ctx) -> dict:
     params = dict(acq, out=str(out), sample=f"white-light background {bname}",
                   native=str(sd / "spectra" / "background.l6s") if study.get("save_native", True) else None)
     if off == "shutter":
-        params.update(laser_off=1, m_laser_shutter=prof["motors"]["laser_shutter"])
+        params.update(laser_off=1, m_laser_shutter=prof["motors"]["laser_shutter"], **shutter_args(prof))
     r = ctx.call("acquire", timeout_s=_acq_timeout(study, prof, rng), **params)
     if off == "operator":
         ctx.call("notice", timeout_s=3600, text="ls6t: the background is taken. Unblock the laser when you want "
@@ -1870,7 +1908,13 @@ def run_background(name: str, study: dict, ctx: Ctx) -> dict:
         xs, ysr = spectra.sort_xy(shift, sp["y"])
         yc = ysr - spectra.baseline(xs, ysr, 3)
         narrow = spectra.find_peaks(xs, yc, 3, None, 25.0)
-        if narrow:
+        if narrow and off == "shutter":
+            # 2026-11-23: a laser_off 'shutter' background kept 86 % of the Si signal: the beam was not blocked
+            unreliable.append(f"the background has narrow lines at {', '.join(f'{v:.0f}' for v in narrow)} cm-1 with "
+                              "the laser shutter supposedly closed: the laser was probably NOT blocked. Not stored. "
+                              "Do not rely on laser_off 'shutter' here (TESTING T1.2 step 2; motors.laser_shutter "
+                              "back to null) until ls6t instrument shutter-test shows how this shutter blocks")
+        elif narrow:
             warnings.append(f"the background has narrow lines at {', '.join(f'{v:.0f}' for v in narrow)} cm-1: was "
                             "the laser blocked? (a Raman line in the background would be subtracted from samples)")
     except ValueError:
@@ -1879,11 +1923,17 @@ def run_background(name: str, study: dict, ctx: Ctx) -> dict:
             "objective": su["after"].get("objective"), "exposure_s": ex,
             "accumulations": int(_f(r.get("accumulations")) or 1), "range": rng, "request": str(ctx.folder),
             "laser_off": off}
-    stored = BG.save(bname, sp["x"], cps, sp["meta"].get("x_unit", "nm"), meta)
+    shut = {k: r.get(k) for k in ("shutter_mode_before", "shutter_label_before", "shutter_closed_label",
+                                  "shutter_closed_value", "shutter_closed_mode", "shutter_closed_by", "shutter_during",
+                                  "shutter_label_after") if r.get(k) not in (None, "")} if off == "shutter" else {}
+    blocked_doubt = any("NOT blocked" in u for u in unreliable)
+    stored = (BG.save(bname, sp["x"], cps, sp["meta"].get("x_unit", "nm"), meta) if not blocked_doubt else
+              {"name": bname, "stored": False})
     result = {"ok": True, "complete": True, "reliable": not unreliable, "unreliable_because": unreliable,
               "warnings": warnings, "checks": checks, "kind": "background", "sample": study.get("sample", {}),
               "background": {**stored, "max_cps": round(float(np.max(cps)), 3), "mean_cps": round(float(np.mean(cps)), 3)},
               "spectra": [{"file": str(out), "exposure_s": ex, "max_counts": sat["max_counts"]}],
+              **({"laser_shutter": shut} if shut else {}),
               "instrument": {"laser_nm": laser, "grating": meta["grating"], "objective": meta["objective"]},
               "seconds": {"total": round(time.time() - t_start, 2),
                           # the acquisition alone (the bridge's call): two backgrounds in a row after a grating

@@ -183,7 +183,7 @@ a filter above the caps, exposures, accumulations or points above the limits, mo
 | `checks` | `saturation`, `detector_temp_c`, `setup` (each move asked and read back), `range`, `snr`, `spikes`, `calibration` |
 | `instrument` | Laser line, filter, objective, grating and detector temperature as read back after the set-up |
 | `setup` | Requested, and LabSpec's state before and after |
-| `spectra` | (spectrum, series, calibration) per point: offsets, absolute stage position, files, exposure, max counts, noise, spikes, `peaks`, `bands` |
+| `spectra` | (spectrum, series, calibration) per point: offsets, absolute stage position, files, exposure (the one LabSpec reports using: a fixed exposure switches LabSpec's AutoExposure off; a different one stops the study), max counts, noise, spikes, `peaks`, `bands` |
 | `peaks`, `peaks_by_name`, `bands` | Of the first spectrum: `position_cm1`, `fwhm_cm1`, `height`, `area`, `eta`, `stderr_position_cm1`, `r2`, `snr` |
 | `map` | `nx, ny, nz`, axes, `summary.<peak or band>.<quantity>: {n, mean, std, min, max}`, files: `<name>_map.json` (grids), `<name>_map.npz` (all spectra on one axis), the LabSpec `.l6s` |
 | `series` | `t_s` and each quantity over time, with a summary |

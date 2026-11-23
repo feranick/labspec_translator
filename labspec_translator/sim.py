@@ -72,7 +72,7 @@ class SimLabSpec:
                              "labels": list(DEFAULT_PROFILE["filters"]), "i": 4},
                   "Objective": {"values": [10.0, 50.0, 100.0], "labels": ["x10", "x50", "x100"], "i": 2},
                   "Hole": {"value": 300.0}, "Slit": {"value": 100.0}, "Spectro": {"value": 550.0},
-                  "Shutter": {"values": [0.0, 1.0], "labels": ["closed", "open"], "i": 0},
+                  "Shutter": {"values": [0.0, 1.0], "labels": ["Off", "On"], "i": 0},
                   "LaserPol": {"values": [0.0, 1.0, 2.0], "labels": ["Circular", "Horizontal", "Vertical"], "i": 1},
                   "RamanPol": {"values": [0.0, 1.0, 2.0], "labels": ["Horizontal", "Vertical", "None"], "i": 2},
                   "IlluminatorV": {"values": [0.0, 1.0], "labels": ["Dark field", "Bright field"], "i": 1},
@@ -254,11 +254,42 @@ class SimLabSpec:
                 "slit_um": self.m["Slit"]["value"], "x_um": self.m["X"]["value"], "y_um": self.m["Y"]["value"],
                 "z_um": self.m["Z"]["value"], "exposure_s": self.exposure, "accumulations": self.accumulations,
                 "shutter_mode": 0, "halted": int(self.halted), "last_error": self.last_error,
+                "auto_exposure": int((self.dir / "sim_autoexposure").exists()),
+                **({"laser_shutter_label": self.m["Shutter"]["labels"][self.m["Shutter"]["i"]]}
+                   if p.get("m_laser_shutter") in self.m else {}),
                 "live_video": int(self.live), "camera": self.camera,
                 **({"laser_pol": self._cur("LaserPol")[1]} if p.get("m_laser_pol") else {}),
                 **({"raman_pol": self._cur("RamanPol")[1]} if p.get("m_raman_pol") else {}),
                 **({"illumination": self._cur("IlluminatorV")[1]} if p.get("m_illumination") else {}),
                 **({"illumination_light": self._cur("uLight")[1]} if p.get("m_illumination_light") else {}), "laser_open": int(time.time() < self.laser_until)}
+
+    def _shutter_to(self, motor: str, want_on: bool, p: dict) -> str:
+        """The bridge's ShutterTo: by label (default) or by value; returns the label read back. sim_shutter_value_swap:
+        value 0 is 'On' on this simulated instrument (a move by value then fails the read-back)."""
+        m = self.m[motor]
+        if p.get("shutter_by", "label") == "value":
+            i = (1 if want_on else 0)
+            if (self.dir / "sim_shutter_value_swap").exists():
+                i = 1 - i
+        else:
+            lab = p.get("shutter_on" if want_on else "shutter_off", "On" if want_on else "Off")
+            i = m["labels"].index(lab) if lab in m["labels"] else m["i"]
+        m["i"] = i
+        return m["labels"][i]
+
+    def v_shutter(self, p):
+        motor = p.get("motor", "")
+        if motor not in self.m:
+            return {"ok": 0, "error": f"motor {motor} is not present"}
+        m = self.m[motor]
+        out = {"mode_before": 0, "label_before": m["labels"][m["i"]], "value_before": m["values"][m["i"]]}
+        if p.get("action") == "set":
+            lab = self._shutter_to(motor, p.get("state") == "on", p)
+            want = p.get("shutter_on" if p.get("state") == "on" else "shutter_off", "On" if p.get("state") == "on" else "Off")
+            out.update(after_label=lab, after_value=m["values"][m["i"]], matches=int(lab == want))
+        out.update(mode_after=int(p.get("mode", 0)) if p.get("action") == "mode" else 0,
+                   label_after=m["labels"][m["i"]], value_after=m["values"][m["i"]])
+        return out
 
     def v_laser(self, p):
         state = p.get("state")
@@ -941,7 +972,34 @@ class SimLabSpec:
         laser_off = str(p.get("laser_off", "0")) == "1"
         if laser_off and p.get("m_laser_shutter", "") not in self.m:
             return {"ok": 0, "error": "laser_off needs the laser shutter's motor name"}
+        extra: dict = {}
+        if laser_off:
+            # the bridge closes the shutter by label and reads it back; it cancels if LabSpec opens it meanwhile
+            sh = p["m_laser_shutter"]
+            lab = self._shutter_to(sh, False, p)
+            extra.update(shutter_closed_label=lab, shutter_closed_by=p.get("shutter_by", "label"))
+            if lab != p.get("shutter_off", "Off"):
+                return {"ok": 0, "error": f"the laser shutter {sh} did not read back '{p.get('shutter_off', 'Off')}' "
+                                          f"after closing it (read: '{lab}')", **extra}
+            if (self.dir / "sim_shutter_reopens").exists():     # LabSpec's acquisition opens it again
+                return {"ok": 0, "shutter_opened": 1, **extra,
+                        "error": "the laser shutter read back 'On' during the acquisition (LabSpec opened it): "
+                                 "cancelled; laser_off 'shutter' does not block the laser on this instrument"}
+            extra.update(shutter_during=lab, shutter_label_after=lab)
+            if (self.dir / "sim_shutter_ignored").exists():     # it reads Off, but the beam still passes
+                laser_off = False
         exp = float(p.get("exposure_s", 1.0))
+        # LabSpec's AutoExposure (sim_autoexposure): the bridge switches it off for a fixed exposure, unless it
+        # cannot (sim_ae_sticky): then LabSpec uses its own exposure
+        ae_on = (self.dir / "sim_autoexposure").exists()
+        if exp > 0 and ae_on:
+            extra["auto_exposure_before"] = 1
+            if (self.dir / "sim_ae_sticky").exists():
+                extra["auto_exposure_set"] = 1
+                exp = exp * 1.5
+            else:
+                extra["auto_exposure_set"] = 0
+                ae_on = False
         acc = max(1, int(float(p.get("accumulations", 1))))
         mode = int(float(p.get("mode", 10)))
         spike_mode = (mode % 1000) // 100 * 100
@@ -994,6 +1052,7 @@ class SimLabSpec:
         with open(tmp, "w", encoding="utf-8") as fh:
             fh.write(f"# id={sid}\n# x_unit=nm\n# y_unit=cnt\n")
             fh.write(f"# acq.Exposition={exp:g} s\n# acq.Accumulation={acc}\n# acq.Laser={las:g} nm\n")
+            fh.write(f"# acq.AutoExposure={'On' if ae_on else 'Off'}\n")
             fh.write(f"# acq.Grating={self._cur('Grating')[0]:g}\n# acq.Filter={self._cur('Filter')[1]}\n")
             for k in ("sample", "title", "project", "site"):          # LabSpec's Custom data info, as the bridge sets it
                 if p.get(k) is not None:
@@ -1004,7 +1063,8 @@ class SimLabSpec:
         if p.get("native"):
             Path(p["native"]).write_text(f"simulated LabSpec spectrum {sid}\n", encoding="utf-8")
         return {"id": sid, "out": str(out), "points": int(nm.size), "x_unit": "nm", "y_unit": "cnt",
-                "max_counts": float(y.max()), "exposure_s": exp, "accumulations": acc,
+                "max_counts": float(y.max()), "exposure_s": float(p.get("exposure_s", 1.0)) or exp, "accumulations": acc,
+                **extra,
                 "detector_temp_c": self.temp_c, "windows": windows, "t_acq_call_s": 0.01,
                 "t_until_data_s": round(time.monotonic() - t_w, 3),
                 **({"spectro_asked_nm": f_nm, "spectro_nm": f_nm} if abs(t_nm - f_nm) < 1e-9 else {})}

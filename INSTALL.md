@@ -249,7 +249,8 @@ every laser's `nm`, `max_filter_pct` and `power_mw` filled in. `ls6t status` sho
      is often not visible on the camera), in two steps (TESTING T1.2): LabSpec's real-time display on Si, then the
      status bar's Laser On / Off, the Si line must come and go; then, with the motor set and the bridge restarted, a
      `background` study with `laser_off: "shutter"` at the same spot must show no Si line. If it does, set
-     `motors.laser_shutter` back to `null`: ls6t cannot block the laser there. (On the XploRA the second step failed
+     `motors.laser_shutter` back to `null`: ls6t cannot block the laser there. Between the two, `ls6t instrument
+     shutter-test` shows which move of the motor blocks the beam (profile `shutter.by`). (On the XploRA the second step failed
      on 2026-11-23: keep it null until the bridge's shutter fix.)
    - `video.laser_offset_um`: where the beam really is relative to LabSpec's laser position. It is measured with a
      snapshot with the laser on (TESTING T5b).

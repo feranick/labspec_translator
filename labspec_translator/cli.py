@@ -96,7 +96,9 @@ def main(argv=None) -> int:
     s = sub.add_parser("instrument")
     s.add_argument("action", choices=["status", "set", "discover", "resume", "last-error", "snapshot", "config",
                                       "camera-on", "camera-off", "laser-on", "laser-off", "calibration",
-                                      "autocal-info", "autocal-run", "end-bridge", "video-scale"])
+                                      "autocal-info", "autocal-run", "end-bridge", "video-scale", "shutter-test"])
+    s.add_argument("--motor", help="shutter-test: the laser shutter's motor (default: the profile's, or discovery's "
+                                   "candidate)")
     s.add_argument("--seconds", type=float, help="laser-on: how long (at most limits.max_laser_on_s)")
     s.add_argument("--um", type=float, help="video-scale: the stage move in µm (default: 0.4 x the field's smaller side, "
                                             "~23 µm x100, ~240 µm x10)")
@@ -202,7 +204,10 @@ def main(argv=None) -> int:
             r = api.labspec_config(a.what, a.name, show=a.show)
             _print(r)
             return 0 if r.get("ok") else 1
-        _print(api.instrument(a.action.replace("-", "_"), camera=a.camera, seconds=a.seconds, um=a.um))
+        if a.action == "shutter-test":
+            _print(api.shutter_test(a.motor))
+        else:
+            _print(api.instrument(a.action.replace("-", "_"), camera=a.camera, seconds=a.seconds, um=a.um))
     elif a.cmd == "bridge":
         if a.action == "install":
             if not a.dest:                      # replacing the scripts in use: end a running bridge cleanly first

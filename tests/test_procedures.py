@@ -418,3 +418,49 @@ def test_calibration_belongs_to_one_laser_and_grating():
                        [{"exposure_s": 1, "accumulations": 1}], 30.0)
     assert tm["operator_s"] == 6.0 and tm["overhead_s"] == 23.0 and tm["acquire_handoff_s"] == 0.5
     assert "until every motor reported idle (18.0 s)" in tm["note"]
+
+
+def test_laser_off_shutter_is_read_back_and_checked(tmp_path):
+    """2026-11-23 (safety): a laser_off 'shutter' background kept 86 % of the Si signal. The bridge now moves the
+    shutter by its label (Off), reads it back before and during the acquisition, cancels if LabSpec opens it, and a
+    background with Raman lines while the shutter was trusted is not stored."""
+    _profile_with_shutter(tmp_path)
+    bdir = config.active_bridge_dir()
+    setup = dict(SETUP, grating=1800)
+    bg = {"kind": "background", "sample": {"name": "Si"}, "setup": setup,
+          "acquire": {"center_cm1": 520, "exposure_s": 1}, "background": {"name": "shut", "laser_off": "shutter"}}
+    st = run_inline({"b": bg})
+    r = st["studies"]["b"]
+    assert r["reliable"] and r["laser_shutter"]["shutter_closed_label"] == "Off" and r["background"].get("stored", True)
+    (bdir / "sim_shutter_ignored").write_text("1")            # reads Off, beam still passes: the Si line is there
+    st = run_inline({"b": dict(bg, background={"name": "shut2", "laser_off": "shutter"})})
+    r = st["studies"]["b"]
+    assert not r["reliable"] and any("NOT blocked" in u for u in r["unreliable_because"])
+    assert r["background"]["stored"] is False
+    (bdir / "sim_shutter_ignored").unlink()
+    (bdir / "sim_shutter_reopens").write_text("1")            # LabSpec opens it during the acquisition
+    st = run_inline({"b": dict(bg, background={"name": "shut3", "laser_off": "shutter"})})
+    assert "LabSpec opened it" in st["studies"]["b"]["why"]
+    (bdir / "sim_shutter_reopens").unlink()
+    # the diagnostic: five moves, each read back and asked; LabSpec's mode and the shutter put back
+    t = api.shutter_test()
+    assert t["ok"] and len(t["steps"]) == 5 and t["steps"][2]["read_label"] == "Off" and "verdict" in t
+    text = api.compose_vbs(bdir, config.home())["ls6t_bridge.vbs"]
+    assert "LabSpec.MoveMotor shutter, 0, lab, LS_MOTOR_STRING" in text and "ShutterOpened()" in text
+    assert 'LabSpec.MoveMotor shutter, 0, "", LS_MOTOR_VALUE' not in text.split("Function ShutterTo")[0]
+
+
+def test_labspec_auto_exposure_does_not_replace_the_exposure_asked():
+    """2026-11-23: with LabSpec's AutoExposure on, 2 s asked ran 15 s while ls6t reported 2 s. The bridge switches it
+    off for a fixed exposure; the exposure reported is LabSpec's own; if LabSpec still used another, the study stops."""
+    bdir = config.active_bridge_dir()
+    S.ensure(bdir)
+    (bdir / "sim_autoexposure").write_text("1")
+    sp = {"kind": "spectrum", "sample": {"name": "Si"}, "setup": SETUP, "acquire": {"center_cm1": 520, "exposure_s": 2}}
+    st = run_inline({"s": sp})
+    s = st["studies"]["s"]
+    assert s["reliable"] and s["spectra"][0]["exposure_s"] == 2
+    (bdir / "sim_ae_sticky").write_text("1")
+    st = run_inline({"s": sp})
+    s = st["studies"]["s"]
+    assert not s["ok"] and "instead of the 2 s asked" in s["why"] and "AutoExposure" in s["why"]

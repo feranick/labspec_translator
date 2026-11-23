@@ -7,6 +7,7 @@ band integrals. The analysis is ours and deterministic, so the same file always 
 from __future__ import annotations
 
 import math
+import re
 from pathlib import Path
 
 import numpy as np
@@ -42,6 +43,37 @@ def read(path: Path | str) -> dict:
         except ValueError:
             continue
     return {"x": np.asarray(xs, float), "y": np.asarray(ys, float), "meta": meta}
+
+
+def header(path: Path | str) -> dict:
+    """The '# key=value' lines at the top of a bridge spectrum file only."""
+    meta: dict = {}
+    from .profile import read_text
+    for line in read_text(path).splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if not line.startswith("#"):
+            break
+        body = line[1:].strip()
+        if "=" in body:
+            k, v = body.split("=", 1)
+            meta[k.strip()] = v.strip()
+    return meta
+
+
+EXPOSURE_KEYS = ("acq.Exposition", "acq.Exposure", "acq.Exposure time", "acq.Acq. time")
+
+
+def acq_exposure(meta: dict) -> float | None:
+    """The exposure LabSpec used (s per accumulation), from its acquisition info: 'Exposition=15 s'."""
+    for k in EXPOSURE_KEYS:
+        v = meta.get(k)
+        if v:
+            m = re.match(r"\s*([-+]?\d+(?:[.,]\d+)?(?:[eE][-+]?\d+)?)", str(v))
+            if m:
+                return float(m.group(1).replace(",", "."))
+    return None
 
 
 def write(path: Path | str, x, y, meta: dict | None = None):

@@ -94,7 +94,7 @@ files already showed.
 | Q12 | Does a request survive closing the LLM app (the runner process breaking away from the app's job)? | T9.1 |
 | Q13 | Video: does `Video(2)` return the live frame's id from a script, and does `Exec(id, 3)` clone it? Which image formats does `Save` write for a frame? **Known: the active camera is read** (`video.active_camera`); with the video off, `id_now` was 0. | T5b.1 |
 | Q14 | Video pixels: which axis varies fastest, how are colours packed (COLORREF 0x00BBGGRR or RGB), and are the axes stage coordinates in µm? | T5b.2 |
-| Q15 | Is `LaserShutter` the laser shutter, and do `PutValue(0, "ShutterMode", 1)` (manual) plus moving it On / Off open and close it? **Known: a motor `LaserShutter` with Off/On. On the XploRA (2026-11-23, 637.75 nm, Si): LabSpec's own Laser On / Off blocks the beam (the Si line comes and goes in the real-time display; the beam is not visible on the top camera, even at 100 %), but ls6t's use of the motor did not (the Si line stayed in a `laser_off: "shutter"` background). Open until the bridge's shutter fix passes T1.2 step 2; keep `motors.laser_shutter` null.** | T1.2, T5b.3 |
+| Q15 | Is `LaserShutter` the laser shutter, and do `PutValue(0, "ShutterMode", 1)` (manual) plus moving it On / Off open and close it? **Known: a motor `LaserShutter` with Off/On. On the XploRA (2026-11-23, 637.75 nm, Si): LabSpec's own Laser On / Off blocks the beam (the Si line comes and goes in the real-time display; the beam is not visible on the top camera, even at 100 %), but ls6t's use of the motor did not (the Si line stayed in a `laser_off: "shutter"` background). Open until the bridge's shutter fix passes T1.2 step 2; keep `motors.laser_shutter` null. From .23.13: `ls6t instrument shutter-test` tells which move blocks.** | T1.2, T5b.3 |
 | Q16 | How far is the beam from LabSpec's laser position, per objective, and how repeatable is the measurement? | T5b.4, T5e |
 | Q17 | Does this XploRA have HORIBA's AutoAlignment module (Maintenance tab)? Can its *Current status* be read from outside (Windows UI automation, read-only)? | T5c.1 |
 | Q18 | Does `Message(text, 1)` (OK/Cancel) return 0 for OK and wait while the operator runs AutoAlignment in the same LabSpec? | T5c.2 |
@@ -257,7 +257,19 @@ With the maintainer, go through:
   **XploRA, 2026-11-23:** step 1 passed (637.75 nm: the Si line came and went with LabSpec's Laser On / Off; the beam
   is not visible on the top camera even at 100 %); step 2 failed (ls6t's own use of `LaserShutter` did not block
   the beam). Keep `motors.laser_shutter` null on this instrument until the bridge's shutter fix is in and step 2
-  passes.
+  passes. Details: request `run_20261123_154736_fbb6e8`, study `shutter_test` (background, `laser_off: "shutter"`,
+  637.75 nm, 2400, 1 %, x100, 520 cm⁻¹; LabSpec's Laser On set by hand before; AutoExposure on, 15 s): 2870 counts
+  against 3319 in the reference 17 min earlier (86 %). The .23.12 bridge moved the shutter by value 0 and never read
+  it back.
+  **From .23.13, between step 1 and step 2: `ls6t instrument shutter-test` (`--motor LaserShutter` while the profile
+  has none).** With the real-time display running on Si and the status bar's laser On, ls6t moves the shutter five
+  times (value 0, value 1, label Off, label On in manual ShutterMode, then Off with ShutterMode back to automatic),
+  reads each back and asks whether the Si line is there; then it puts LabSpec's ShutterMode and the shutter back.
+  Note `steps` (read-backs and answers) and `verdict`: which move blocks the beam, and whether Off holds in automatic
+  mode. Then step 2 with `shutter.by` as found. From .23.13 the bridge moves the shutter by label (profile `shutter`:
+  `{"off": "Off", "on": "On", "by": "label"}`), refuses to acquire unless it reads back Off, watches it during the
+  acquisition (cancels if LabSpec opens it) and records it (`laser_shutter` in the background's result); a background
+  with Raman lines while the shutter was trusted is not stored and is unreliable.
 
 Then import the edited file, which checks it and marks it reviewed:
 
@@ -575,6 +587,16 @@ remembering them per camera; the scale comes from the objective's field of view 
 **T4.4c Calibration per grating (2026-11-23, .23.10).** Si calibration check with 1200 and then 2400 at 637.75 nm (adjust none). Pass: each result's `calibration.applies_to` names its grating; a 2400 spectrum afterwards has `checks.zero.offset_cm1` near +3.1 and a warning; a 1800 spectrum warns that only 1200 and 2400 were checked; the guided prompt (adjust labspec) names the grating and laser.
 
 **T3.18 LabSpec's data info (.23.10).** Open a spectrum's `.l6s` in LabSpec: Title is the study's name, Project `ls6t <request folder>`, Site `sample.site` or empty, Sample and Remark as before.
+
+**T3.19 LabSpec's AutoExposure (2026-11-23, .23.13).** With AutoExposure On in LabSpec (status bar "AE"), a
+spectrum asking 2 s ran 15 s while ls6t reported 2 s (this explains most of the 23–64 s acquisitions of T3.17).
+From .23.13 the bridge switches AutoExposure off for a fixed exposure (and back after), and ls6t takes the exposure
+from LabSpec's acquisition info: with AE On in LabSpec, run a 1 × 2 s spectrum. Pass: it takes about 2 s of exposure,
+`spectra[].exposure_s` is 2 with `exposure_source` LabSpec's, and `auto_exposure_before` / `auto_exposure_set` in
+the bridge's answer show the switch; LabSpec shows AE again afterwards. If LabSpec still used another exposure, the
+study stops and says so (then AutoExposure is not a value the bridge can set: switch it off by hand and tell the
+maintainer). Today's results from studies with AE on carry the wrong exposure: their counts per second are off by
+the ratio (15 / 2).
 
 **T4.9b LabSpec's AutoCalibration from ls6t (maintainer; the laser fires on Si).** `ls6t profile set calibration.autocal '{"enabled": true, "method": "call", "mode": "full"}'`, Si wafer in focus, 532 nm, 1200, 10 %; `ls6t instrument autocal-run`: LabSpec asks, then runs its AutoCalibration. Pass: `ok`, `changed` lists the 1200's parameters (as by hand: offset 34 -> 44 on 2026-11-23), and a calibration check after it passes. If the answer says LabSpec does not offer the call to scripts, set `"enabled": false` and keep running it from LabSpec's menu.
 
