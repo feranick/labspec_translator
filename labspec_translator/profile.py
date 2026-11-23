@@ -121,9 +121,13 @@ DEFAULT_PROFILE: dict = {
 
 
 # how a person confirms the laser shutter motor: the beam is often not visible on the camera (XploRA top camera, even
-# at 100 %), so on the spectrum (2026-11-23, 637.75 nm on Si: the line came and went with LabSpec's Laser On / Off)
-HOW = ("confirm it on the spectrum (TESTING T1.2: LabSpec's real-time display on Si, then the status bar's Laser "
-       "On / Off: the Si line must come and go)")
+# at 100 %), so on the spectrum, in two steps: LabSpec's own toggle blocks the beam (2026-11-23, 637.75 nm on Si: the
+# line came and went), and ls6t's use of the motor blocks it too (the same day it did not: the Si line stayed in a
+# laser_off 'shutter' background). The first alone is not enough.
+HOW = ("confirm it on the spectrum, in two steps (TESTING T1.2): 1. LabSpec's real-time display on Si, then the status "
+       "bar's Laser On / Off: the Si line must come and go; 2. with the motor set and the bridge restarted, a "
+       "'background' study with laser_off 'shutter' at the same spot must show no Si line, otherwise set it back to "
+       "null: ls6t cannot block the laser on that instrument")
 
 
 def _merge(base: dict, over: dict) -> dict:

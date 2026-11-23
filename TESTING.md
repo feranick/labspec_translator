@@ -94,7 +94,7 @@ files already showed.
 | Q12 | Does a request survive closing the LLM app (the runner process breaking away from the app's job)? | T9.1 |
 | Q13 | Video: does `Video(2)` return the live frame's id from a script, and does `Exec(id, 3)` clone it? Which image formats does `Save` write for a frame? **Known: the active camera is read** (`video.active_camera`); with the video off, `id_now` was 0. | T5b.1 |
 | Q14 | Video pixels: which axis varies fastest, how are colours packed (COLORREF 0x00BBGGRR or RGB), and are the axes stage coordinates in µm? | T5b.2 |
-| Q15 | Is `LaserShutter` the laser shutter, and do `PutValue(0, "ShutterMode", 1)` (manual) plus moving it On / Off open and close it? **Known: a motor `LaserShutter` with Off/On. Confirmed on the XploRA (2026-11-23, 637.75 nm, Si): with LabSpec's real-time display running, the status bar's Laser On / Off makes the Si line appear and disappear** (the beam is not visible on the top camera, even at 100 %). | T1.2, T5b.3 |
+| Q15 | Is `LaserShutter` the laser shutter, and do `PutValue(0, "ShutterMode", 1)` (manual) plus moving it On / Off open and close it? **Known: a motor `LaserShutter` with Off/On. On the XploRA (2026-11-23, 637.75 nm, Si): LabSpec's own Laser On / Off blocks the beam (the Si line comes and goes in the real-time display; the beam is not visible on the top camera, even at 100 %), but ls6t's use of the motor did not (the Si line stayed in a `laser_off: "shutter"` background). Open until the bridge's shutter fix passes T1.2 step 2; keep `motors.laser_shutter` null.** | T1.2, T5b.3 |
 | Q16 | How far is the beam from LabSpec's laser position, per objective, and how repeatable is the measurement? | T5b.4, T5e |
 | Q17 | Does this XploRA have HORIBA's AutoAlignment module (Maintenance tab)? Can its *Current status* be read from outside (Windows UI automation, read-only)? | T5c.1 |
 | Q18 | Does `Message(text, 1)` (OK/Cancel) return 0 for OK and wait while the operator runs AutoAlignment in the same LabSpec? | T5c.2 |
@@ -245,7 +245,19 @@ With the maintainer, go through:
   status bar's Laser On / Off (or move the candidate motor On / Off in LabSpec) a few times. Pass: the Si line
   appears with On and disappears with Off, each time; nothing else changes (no grating or filter move). If the
   line does not come and go, that motor is not the laser's shutter: leave `motors.laser_shutter` empty and tell the
-  ls6t maintainer. Confirmed this way on the XploRA (2026-11-23, 637.75 nm).
+  ls6t maintainer.
+  **This first step only shows that LabSpec's toggle blocks the beam, not that ls6t can.** Second step, required
+  before `motors.laser_shutter` stays set: set it (`ls6t profile set motors.laser_shutter "<name>"`), restart the
+  bridge, and at the same spot run a `background` study with `laser_off: "shutter"` (e.g. `{"kind": "background",
+  "sample": {"name": "Si"}, "setup": {...the same laser, grating, filter...}, "background": {"name": "shutter test",
+  "laser_off": "shutter"}, "acquire": {"center_cm1": 520, "exposure_s": 1}}`). Pass only if its spectrum shows **no
+  Si line**. If the line is there, set `motors.laser_shutter` back to `null` (`ls6t profile set motors.laser_shutter
+  null`): ls6t cannot block the laser on this instrument yet, and `laser_off: "shutter"` and `laser_on` must not rely
+  on it. Tell the ls6t maintainer.
+  **XploRA, 2026-11-23:** step 1 passed (637.75 nm: the Si line came and went with LabSpec's Laser On / Off; the beam
+  is not visible on the top camera even at 100 %); step 2 failed (ls6t's own use of `LaserShutter` did not block
+  the beam). Keep `motors.laser_shutter` null on this instrument until the bridge's shutter fix is in and step 2
+  passes.
 
 Then import the edited file, which checks it and marks it reviewed:
 
