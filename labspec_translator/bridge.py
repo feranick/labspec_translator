@@ -1,5 +1,5 @@
 """bridge.py — the Python side of the LabSpec bridge: commands as files in a folder the bridge script watches.
-Version: 2026.11.23.2
+Version: 2026.11.23.3
 
 Protocol 1 (the same for ls6t_bridge.vbs inside LabSpec and for sim.py):
 
@@ -129,6 +129,16 @@ def labspec_hint(verb: str | None = None) -> str:
             "the operator closes it (scripts wait while one is open); if there is none, " + STUCK_ADVICE)
 
 
+def blocking_allowance(hb: dict) -> float:
+    """How long a heartbeat may stay silent while LabSpec holds the bridge: the bridge's own blocking_s (an
+    acquisition: its timeout) plus a margin, else the blocking-move allowance."""
+    try:
+        s = float(hb.get("blocking_s") or 0)
+    except (TypeError, ValueError):
+        s = 0.0
+    return s + 30.0 if s > 0 else config.blocking_move_s()
+
+
 def diagnose(hb: dict | None, folder=None) -> str:
     """One explanation of a bridge that does not answer, from its heartbeat, the same whether a call was about to be
     sent or was waiting: never started, ended normally, ended by LabSpec (last heartbeat idle), or stuck in a
@@ -140,6 +150,14 @@ def diagnose(hb: dict | None, folder=None) -> str:
     state, verb = hb.get("state"), hb.get("verb") or None
     if state == "stopped":
         return f"the LabSpec bridge was stopped ({age}): start ls6t_bridge.vbs in LabSpec (Processing > Scripts)"
+    if state == "halted":
+        # 2026-11-23: a bridge halted 67 h earlier; LabSpec still listed the script as running
+        return (f"the LabSpec bridge was halted by the operator and has not run since (last heartbeat {age}): start "
+                "ls6t_bridge.vbs in LabSpec (Processing > Scripts); if LabSpec says a script is already running, "
+                "save your work and start LabSpec again first")
+    if state == "busy" and hb.get("blocking") == "acquire":
+        return (f"LabSpec's acquisition has held the bridge for {age[:-4]} (longer than the "
+                f"{blocking_allowance(hb):.0f} s it may take). " + labspec_hint("acquire"))
     if state == "busy" and hb.get("blocking"):
         return (f"LabSpec's blocking move of the {hb['blocking']} has not returned for {age[:-4]} (longer than "
                 f"{config.blocking_move_s():.0f} s; such a move usually takes seconds). "
@@ -250,7 +268,9 @@ class Bridge:
         if hb.get("state") == "busy" and hb.get("verb") in ("confirm", "resume", "notice", "guide", "run_vbs"):
             return True             # a modal question in LabSpec, or LabSpec's own script running: no beats
         if hb.get("state") == "busy" and hb.get("blocking"):
-            return hb["age_s"] <= config.blocking_move_s()     # a blocking move (the grating): no beats until it returns
+            # a blocking move (the grating), or LabSpec's Acq holding the script (an extended range: blocking_s is
+            # how long the bridge allows it, 2026-11-23): no beats until it returns
+            return hb["age_s"] <= blocking_allowance(hb)
         return hb["age_s"] <= config.heartbeat_s()
 
     def request_stop(self, seq: str = ""):

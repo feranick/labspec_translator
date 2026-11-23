@@ -1694,8 +1694,11 @@ def test_every_video_call_respects_the_bridges_own_stop(tmp_path):
                "SelectCamera",             # opt-in switching: VidSettle, then SET only (no read-back while off)
                "StopVideoHoriba",          # only with the video running (not gVidOff)
                "VCamera", "VVideo",        # START after VidSettle; GET_VIDEO_ID after the start (gVidOff cleared)
-               "GrabFrame"}                # only once the video runs
+               "GrabFrame",                # only once the video runs
+               "VidKeep"}                  # gated by gVidOff and gVidOwn (a video the bridge started)
     assert set(where) <= allowed, set(where) - allowed
+    vk = br[br.index("Sub VidKeep("):]
+    assert "If Not gVidOwn Or gVidOff Then Exit Sub" in vk[:vk.index("End Sub")]
     for proc in ("VCamera", "VVideo"):
         body = br[br.index(f"Sub {proc}("):]
         body = body[:body.index("End Sub")]
@@ -2629,3 +2632,45 @@ def test_spectrometer_centre_moved_and_the_window_checked(tmp_path):
         assert s["checks"]["grating_window"]["pass"] and s["checks"]["grating_window"]["spectro_nm"]
     assert list(config.out_dir().rglob("p00000.l6s"))           # LabSpec's own file saved (save_native)
     assert json.loads((config.home() / "last_grating_set.json").read_text())["by"].startswith("study")
+
+
+def test_maintainer_session_2026_11_23(tmp_path, monkeypatch):
+    """From the maintainer's Codex session at the XploRA (2026-11-23): an acquisition holding the bridge inside
+    LabSpec was called stuck after 20 s; the live video ls6t started froze (GET_VIDEO_ID must be asked all along);
+    LabSpec switched to dark field when the video started; video-scale returned NaN when the Y move left the view;
+    a reviewed profile lacked OLConfig's fields, camera names and illumination motor; a halted bridge was described
+    as ended by LabSpec."""
+    from labspec_translator import video as V, profile as PR, labspec_ini
+    br = Path(api.install_bridge(tmp_path / "vbs")["files"]["ls6t_bridge.vbs"]).read_text()
+    vi = br[br.index("Sub VAcquireInner("):]
+    vi = vi[:vi.index("End Sub")]
+    assert vi.index('gBlocking = "acquire"') < vi.index("LabSpec.Acq mode, ex, acc, f, t") < vi.rindex('gBlocking = ""')
+    assert "Sub VidKeep()" in br and br.count("VidKeep") >= 4 and br.count("IllumRestore cmd, illum0, res") == 2
+    hb = {"state": "busy", "verb": "acquire", "blocking": "acquire", "blocking_s": "120", "age_s": 60}
+    assert bridge.blocking_allowance(hb) == 150 and "acquisition has held" in bridge.diagnose(dict(hb, age_s=200))
+    assert "halted by the operator" in bridge.diagnose({"state": "halted", "age_s": 242614})
+    # video-scale: a move that leaves the view gives NaN, not a wrong number; frac never makes NaN of a fit
+    a = np.random.default_rng(3).normal(size=(60, 80))
+    r, c = V.image_shift(a, np.random.default_rng(4).normal(size=(60, 80)), axis="y")
+    assert all(isinstance(v, float) for v in (r, c))
+    # OLConfig's descriptions fill a reviewed profile's gaps, never a person's values
+    def fake_enrich(probe, lp, notes):
+        probe["objectives_info"] = {"x10_VIS": {"field_um": [862.9, 590.0]}}
+        probe.setdefault("video", {})["cameras"] = {"top": 0, "internal": 1}
+        probe["motors"].update(illumination="IlluminatorV", illumination_light="uLight")
+        return probe
+    ini = tmp_path / "OLConfig.ini"
+    ini.write_text("[x]\n")
+    monkeypatch.setattr(labspec_ini, "find", lambda lp=None, name="OLConfig.ini": ini)
+    monkeypatch.setattr(labspec_ini, "enrich", fake_enrich)
+    PR._INI_CACHE.clear()
+    prof = P.load()
+    P.save({k: v for k, v in prof.items() if k not in ("objectives_info", "facts_from_ini", "path", "measured")})
+    PR._INI_CACHE.clear()
+    prof = P.load()
+    assert prof["objectives_info"]["x10_VIS"]["field_um"] == [862.9, 590.0]
+    assert prof["video"]["cameras"] == {"top": 0, "internal": 1} and prof["motors"]["illumination"] == "IlluminatorV"
+    assert "objectives_info" in prof["facts_from_ini"]["added"]
+    P.save(dict(prof, video=dict(prof["video"], cameras={"top": 2})))
+    PR._INI_CACHE.clear()
+    assert P.load()["video"]["cameras"] == {"top": 2}                  # a person's value stays

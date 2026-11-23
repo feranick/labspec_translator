@@ -1,5 +1,5 @@
 """api.py — the functions behind the command line and the MCP server (JSON in, JSON out).
-Version: 2026.11.23.2
+Version: 2026.11.23.3
 """
 from __future__ import annotations
 
@@ -493,7 +493,7 @@ def _instrument(action, camera, setup, seconds, um=None) -> dict:
             r = b.call("camera", timeout_s=30, action=action[7:],
                        switch_camera=int(bool(prof.get("video", {}).get("switch_camera"))),
                        stop_video=int(bool(prof.get("video", {}).get("stop_from_script"))),
-                       **({"camera": num} if num is not None else {}))
+                       **({"camera": num} if num is not None else {}), **runner.motor_args(prof))
             if r.get("ok") and str(r.get("camera_restart", "")) == "1" and shown:
                 # after a video restart LabSpec has shown bright field with the light in dark field (2026-11-23)
                 r["illumination"] = dict(illumination_set(b, prof, shown, shown),

@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.23.2)
+## Architecture (version 2026.11.23.3)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -782,6 +782,21 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   ExecShell from .onGUIEnd (and from the finish page's leave) runs in the installer, which exits at once; the shell's
   hand-off to the browser can die with it. OpenWithExplorer: Exec explorer.exe "<file>" (its own process) for the
   prompts, the guide (MUI_FINISHPAGE_SHOWREADME_FUNCTION OpenGuide) and the scripts folder. 148 tests.
+
+- 2026-11-23, 2026.11.23.3: the maintainer's Codex session (.22.16, rollout log): connect (old halted heartbeat 67 h:
+  diagnose now says halted); profile reviewed and imported (powers 532/638/785: 100/35/100 mW) from the Nov 20
+  proposal, so no objectives_info, cameras or illumination motor (profile._ini_facts: OLConfig descriptions added
+  at load when missing, cached by file mtime, never replacing a person's value; facts_from_ini). video_scale x10 on
+  the internal camera (1): X -213 px for 240 µm (1.126 µm/px), Y NaN (move out of view: image_shift returns NaN only
+  when nothing overlaps; frac guards inf); with ls6t's live video on, no shift at all: the live image froze (LabSpec
+  help: in ActiveX mode GET_VIDEO_ID must be called during the entire video) -> common.VidKeep (gVidOwn, every 0.2 s
+  from the main loop, WaitStoppable, WaitMotor). Illumination fell to dark field after video starts -> IllumBefore /
+  IllumRestore around the bridge's video starts (VCamera on, VVideo), camera verb now gets motor_args. Top camera = 0
+  confirmed (camera 1 internal); x10@0: 0.977 / 0.982 µm/px with 50 µm (repeats Nicola's). Silicon 532 nm 100-1000
+  cm-1 5 s: ls6t declared the bridge stuck after 20 s inside 'acquire' while LabSpec was still collecting (Acq holds
+  the script for an extended range) -> gBlocking 'acquire' + blocking_s (the command's timeout) in the heartbeat,
+  bridge.blocking_allowance. Seen once: a snapshot read Y -81.1 µm right after status read -0.2 (unexplained).
+  149 tests.
 
 ## To do next
 

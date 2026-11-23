@@ -1,5 +1,5 @@
 """profile.py — the machine profile: what the instrument has (from the discovery script) and the limits a person sets.
-Version: 2026.11.23.2
+Version: 2026.11.23.3
 
 The profile is a JSON file (LS6T_PROFILE, default ~/ls6t/profile.json). Studies never change it: an LLM can only
 ask for what the profile allows. Without a file, the built-in XploRA defaults below apply and every result says so
@@ -220,6 +220,50 @@ def _inventory_facts(prof: dict) -> None:
         prof["facts_from_inventory"] = {"spectro_nm": added, "from": str(dump)}
 
 
+_INI_CACHE: dict = {}
+
+
+def _ini_facts(prof: dict) -> None:
+    """What LabSpec's OLConfig.ini describes and a reviewed profile may lack, added when missing (never replacing a
+    person's value): the objectives' field of view, the camera names, the illumination motors. 2026-11-23: a
+    profile reviewed from an older proposal had none, so video-scale had no field for the x10, camera 'top' was
+    unknown and bright field could not be set. None of them widens a limit. Marked in prof['facts_from_ini']."""
+    if prof.get("auto"):
+        return
+    try:
+        from . import labspec_ini
+        lp = (prof.get("discovered") or {}).get("labspec_path")
+        p = labspec_ini.find(lp)
+        if p is None:
+            return
+        key = (str(p), p.stat().st_mtime)
+        if key not in _INI_CACHE:
+            probe = {"objectives": list(prof.get("objectives") or []), "motors": {}, "video": {}}
+            labspec_ini.enrich(probe, lp, [])
+            _INI_CACHE.clear()
+            _INI_CACHE[key] = probe
+        probe = _INI_CACHE[key]
+    except Exception:  # noqa: BLE001 - a description only: the profile works without it
+        return
+    added = []
+    if probe.get("objectives_info") and not prof.get("objectives_info"):
+        prof["objectives_info"] = copy.deepcopy(probe["objectives_info"])
+        added.append("objectives_info")
+    cams = (probe.get("video") or {}).get("cameras")
+    if cams and not (prof.get("video") or {}).get("cameras"):
+        prof.setdefault("video", {})["cameras"] = dict(cams)
+        added.append("video.cameras")
+    for role in ("illumination", "illumination_light"):
+        m = (probe.get("motors") or {}).get(role)
+        if m and not (prof.get("motors") or {}).get(role):
+            prof["motors"][role] = m
+            added.append(f"motors.{role}")
+    if probe.get("illumination_labels") and not prof.get("illumination_labels"):
+        prof["illumination_labels"] = list(probe["illumination_labels"])
+    if added:
+        prof["facts_from_ini"] = {"added": added, "from": str(p)}
+
+
 def load(path: Path | None = None) -> dict:
     """The profile in use: the file merged over the defaults ('measured': false when there is no file). With no
     file but an inventory from the bridge, a profile is made from it automatically (auto_profile); an automatic
@@ -243,6 +287,7 @@ def load(path: Path | None = None) -> dict:
         prof["path"] = str(p)
         if path is None:
             _inventory_facts(prof)
+            _ini_facts(prof)
     else:
         prof = copy.deepcopy(DEFAULT_PROFILE)
         prof["measured"] = False

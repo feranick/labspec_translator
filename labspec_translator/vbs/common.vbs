@@ -273,8 +273,10 @@ End Function
 ' asked Video(GET_VIDEO_ID) and Video(GET_ACTIVE_CAMERA)) hung inside LabSpec. After such a stop the bridge knows the
 ' video is off and which camera was selected; it asks LabSpec again only after it has started the video itself
 ' (the operator starting it by hand ends the bridge anyway).
-Dim gVidOff, gVidCam, gVidStopT
+Dim gVidOff, gVidCam, gVidStopT, gVidOwn, gVidKeepT
 gVidOff = False
+gVidOwn = False             ' the bridge started the live video: it keeps it alive (VidKeep)
+gVidKeepT = 0
 gVidCam = ""
 gVidStopT = 0
 Const LS6T_VIDEO_SETTLE_S = 5           ' after the bridge's own stop, before it starts the video again
@@ -285,6 +287,21 @@ Sub VidSettle()
     If Not gVidOff Then Exit Sub
     left = LS6T_VIDEO_SETTLE_S - Elapsed(gVidStopT)
     If left > 0 Then LabSpec.Pause CLng(left * 1000)
+End Sub
+
+' A live video started from a script needs GET_VIDEO_ID asked all along (LabSpec's help, Video: "ActiveX mode:
+' You need to call that function during the entire video process"): otherwise the image freezes. 2026-11-23: after
+' ls6t's camera_on the live view stood still and video_scale found no shift; with the video stopped (each frame
+' started by the bridge) the shift was found. Called from the bridge's loops, at most every 0.2 s.
+Sub VidKeep()
+    Dim v
+    If Not gVidOwn Or gVidOff Then Exit Sub
+    If Elapsed(gVidKeepT) < 0.2 Then Exit Sub
+    gVidKeepT = Timer
+    On Error Resume Next
+    v = LabSpec.Video(LS_GET_VIDEO_ID)
+    Err.Clear
+    On Error GoTo 0
 End Sub
 
 Function VidId()

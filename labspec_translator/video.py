@@ -1,5 +1,5 @@
 """video.py — video snapshots: decoding the bridge's frame file and drawing it with the laser position marked.
-Version: 2026.11.23.2
+Version: 2026.11.23.3
 
 The bridge writes a cloned video frame as '# key=value' header lines (axis types, sizes, units, values) and the
 pixel values in LabSpec's order. LabSpec's video axes are taken to be stage coordinates in µm ('mkm'), so the laser
@@ -331,6 +331,8 @@ def image_shift(a: np.ndarray, b: np.ndarray, axis: str | None = None) -> tuple[
     rr = range(-int(0.75 * hs), int(0.75 * hs) + 1) if axis != "x" else range(-int(0.1 * hs) - 1, int(0.1 * hs) + 2)
     cc = range(-int(0.75 * ws), int(0.75 * ws) + 1) if axis != "y" else range(-int(0.1 * ws) - 1, int(0.1 * ws) + 2)
     m, (sr, sc) = min((_mismatch(As, Bs, r, c), (r, c)) for r in rr for c in cc)
+    if not np.isfinite(m):                  # no overlap anywhere: the move took the view out of the frame
+        return float("nan"), float("nan")
     sr, sc = sr * f, sc * f
     if best <= 1.15 * _mismatch(A, B, sr, sc):
         return pr, pcol                     # phase correlation agrees with the frames: its sub-pixel value
@@ -338,6 +340,8 @@ def image_shift(a: np.ndarray, b: np.ndarray, axis: str | None = None) -> tuple[
     (br, bc) = min(near, key=near.get)
 
     def frac(y0, y1, y2):
+        if not all(np.isfinite((y0, y1, y2))):      # an edge of the overlap: no fraction (it gave NaN, 2026-11-23)
+            return 0.0
         den = y0 - 2 * y1 + y2
         return 0.5 * (y0 - y2) / den if den > 0 else 0.0
     get = (lambda r, c: near.get((r, c), _mismatch(A, B, r, c)))

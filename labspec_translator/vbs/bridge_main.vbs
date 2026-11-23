@@ -19,6 +19,7 @@ Dim gHaltPopup            ' the window open is the halted one (closing it ends t
 Dim gCmdT0                ' when the bridge took up the current command (Timer)
 gHaltPopup = False
 Dim gBlocking             ' the motor while a blocking MoveMotor runs (written in the heartbeat beforehand)
+Dim gBlockingS            ' the longest it may take, s (0: the default for a blocking move)
 Dim gMoveN                ' MoveMotor calls since this bridge started (1: its first; TESTING T3.16, a slow first move)
 gMoveN = 0
 gBlocking = ""
@@ -55,6 +56,7 @@ Sub Beat(state, force)
     ts.WriteLine "state=" & state
     ts.WriteLine "verb=" & gVerb
     ts.WriteLine "blocking=" & gBlocking        ' the motor of a blocking LabSpec move in progress: no beats meanwhile
+    If gBlockingS > 0 Then ts.WriteLine "blocking_s=" & gBlockingS    ' how long it may hold the script
     ts.WriteLine "seq=" & gSeq
     ts.WriteLine "protocol=" & LS6T_PROTOCOL
     ts.WriteLine "version=" & LS6T_VERSION
@@ -241,6 +243,7 @@ Function WaitMotor(motor, moveId, tmo, res)
             Exit Do
         End If
         If st = 0 Then Exit Do
+        VidKeep
         who = StopRequested()
         If who <> "" Then
             If motor <> "" Then LabSpec.MoveMotor motor, 0, "", LS_MOTOR_STOP
@@ -399,6 +402,28 @@ Sub VLabels(cmd, res)
     On Error GoTo 0
 End Sub
 
+' The illumination (IlluminatorV) across a video start: LabSpec has put it in dark field when the video started
+' (2026-11-23: bright field set, snapshot and video_scale frames dark, LabSpec then reporting dark field). Read before
+' the start, set back after it when it changed (only with m_illumination: the profile's illumination motor).
+Function IllumBefore(cmd)
+    IllumBefore = ""
+    If GetP(cmd, "m_illumination", "") <> "" Then IllumBefore = MotorLabel(GetP(cmd, "m_illumination", ""))
+End Function
+
+Sub IllumRestore(cmd, before, res)
+    Dim m, now, w
+    m = GetP(cmd, "m_illumination", "")
+    If m = "" Or before = "" Then Exit Sub
+    On Error Resume Next
+    now = MotorLabel(m)
+    If now <> "" And now <> before Then
+        LabSpec.MoveMotor m, 0, before, LS_MOTOR_STRING
+        w = WaitMotor(m, gNoId, 30, res)
+        res("illumination_restored") = before & " (was " & now & " after the video start)"
+    End If
+    Err.Clear
+End Sub
+
 ' The camera's live view in LabSpec: on, off, or its state (camera: the active camera's number, optional)
 ' The camera. On this XploRA (2026-11-20) ls6t cannot switch cameras reliably: what LabSpec reports
 ' (Video(GET_ACTIVE_CAMERA)) is the camera selected, not the one shown; a switch to camera 0 was ignored; a switch to
@@ -515,12 +540,13 @@ Function StopVideoHoriba(res)
     StopVideoHoriba = (CStr(st) = "0")
     If StopVideoHoriba Then
         gVidOff = True
+        gVidOwn = False
         gVidStopT = Timer
     End If
 End Function
 
 Sub VCamera(cmd, res)
-    Dim action, cam, vid, t0, live0, e
+    Dim action, cam, vid, t0, live0, e, illum0
     action = GetP(cmd, "action", "status")
     cam = GetP(cmd, "camera", "")
     If action <> "on" And action <> "off" And action <> "status" Then
@@ -564,6 +590,7 @@ Sub VCamera(cmd, res)
         End If
     End If
     If action = "on" And Not live0 Then
+        illum0 = IllumBefore(cmd)
         VidSettle
         LabSpec.Video LS_START_VIDEO
         If Err.Number <> 0 Then
@@ -572,6 +599,7 @@ Sub VCamera(cmd, res)
             Exit Sub
         End If
         gVidOff = False                 ' started by the bridge: LabSpec is asked again (GET_VIDEO_ID, as HORIBA)
+        gVidOwn = True                  ' and kept alive by VidKeep
         t0 = Timer
         Do
             LabSpec.Pause 100
@@ -582,6 +610,7 @@ Sub VCamera(cmd, res)
             End If
             If vid > 0 Or Elapsed(t0) > 5 Then Exit Do
         Loop
+        IllumRestore cmd, illum0, res
         e = CameraCheck(res)
         If e <> "" Then
             res("live") = Bit(vid > 0)
@@ -1079,7 +1108,16 @@ Sub VAcquireInner(cmd, res)
         LabSpec.Pause 20
     Next
     Err.Clear
+    ' LabSpec's Acq can hold the script until the spectrum is taken (an extended range: 2026-11-23, 532 nm 100-1000
+    ' cm-1, 5 s: ls6t called the bridge stuck after 20 s while the detector was still collecting): the heartbeat says so
+    ' first, with how long it may take
+    gBlocking = "acquire"
+    gBlockingS = tmo
+    Beat "busy", True
     LabSpec.Acq mode, ex, acc, f, t
+    gBlocking = ""
+    gBlockingS = 0
+    Beat "busy", True
     If Err.Number <> 0 Then
         Fail res, ErrText("Acq")
         Err.Clear
@@ -1405,6 +1443,7 @@ Function WaitStoppable(seconds)
             Exit Function
         End If
         BeatNow
+        VidKeep
         LabSpec.Pause 50
     Loop
 End Function
@@ -1437,7 +1476,7 @@ End Function
 ' shutter mode restored on every path out (frames are written to disk only after it is closed).
 Sub VVideo(cmd, res)
     Dim outBase, cam, vid, wasOn, clone, clone0, p, shutter, laserS, oldMode, newMode, fmts, i, r, settle
-    Dim opened, ok, acqS, aid, tA, keepOn, t0v
+    Dim opened, ok, acqS, aid, tA, keepOn, t0v, illum0
     outBase = GetP(cmd, "out", "")
     acqS = ParseNum(GetP(cmd, "during_acq_s", "0"))
     cam = GetP(cmd, "camera", "")
@@ -1497,6 +1536,7 @@ Sub VVideo(cmd, res)
         End If
         wasOn = True
     ElseIf Not wasOn Then
+        illum0 = IllumBefore(cmd)
         VidSettle
         LabSpec.Video LS_START_VIDEO
         If Err.Number <> 0 Then
@@ -1505,6 +1545,7 @@ Sub VVideo(cmd, res)
             Exit Sub
         End If
         gVidOff = False
+        gVidOwn = True                      ' started here: VidKeep keeps the live image going
         t0v = Timer
         Do                                  ' as HORIBA: GET_VIDEO_ID polled after the start until > 0
             LabSpec.Pause 100
@@ -1515,6 +1556,7 @@ Sub VVideo(cmd, res)
             End If
             If vid > 0 Or Elapsed(t0v) > 5 Then Exit Do
         Loop
+        IllumRestore cmd, illum0, res
         r = CameraCheck(res)
         If r <> "" Then
             Fail res, r
@@ -2431,6 +2473,7 @@ Sub BridgeMain()
             End If
         End If
         If gQuit Then Exit Do
+        VidKeep
         p = NextCommand()
         If p <> "" Then
             HandleFile p

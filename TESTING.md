@@ -12,7 +12,7 @@ stops and cancel on the simulator, and `ls6t bench` gives known answers. What re
 LabSpec and hardware. The plan goes from no laser and no motion to an LLM app driving a full map, in stages. Each
 stage starts only when the previous one passed.
 
-Version under test: 2026.11.23.2 (bridge protocol 1).
+Version under test: 2026.11.23.3 (bridge protocol 1).
 
 **Already known** (2026-11-20, from the instrument's discovery dump, its `NFActiveX.ocx`, `OLConfig.ini`,
 `OLSetup.ini` and LabSpec 6.7.1's service scripts): the motors and their positions (lasers 532, 637.75, 785.04 nm;
@@ -540,6 +540,8 @@ remembering them per camera; the scale comes from the objective's field of view 
   mode=label value=Off` answers "ls6t never moves LaserSwitch").
 - If the colours or the way up still differ (no JPEG saved, or a view without structure: `score` low), set
   `video.packing` to `rgb`, or keep `raw` (the `.video.txt` file) for analysis.
+
+**T5b.2b From the maintainer's session (2026-11-23, .22.16, Codex).** Internal camera (1), x10: a 240 µm move gave X -213 px (1.126 µm/px) and lost Y (out of view); with the live video started by ls6t the image froze and no shift was found; LabSpec fell back to dark field after video starts; top camera = 0 confirmed, x10@0 0.977 / 0.982 µm/px with 50 µm. From 2026.11.23.3 the bridge keeps a video it started alive (GET_VIDEO_ID asked all along) and sets the illumination back after a video start. Check: `camera-on`, then watch LabSpec's live view for a minute (it must keep moving); `video-scale` with the live video on finds the shift; after `camera-on` and a snapshot, `illumination` still says bright field (`illumination_restored` when the bridge had to set it back). A spectrum over an extended range (532 nm, 100-1000 cm-1, 5 s) must not be called stuck while LabSpec collects (the heartbeat shows `blocking: acquire`).
 
 **T5b.3 The beam (LASER, Q15).** Only after T1.2 confirmed the laser shutter motor. Use silicon, the lowest filter
 that shows a spot on the camera (typically 1 %), and the maintainer at the instrument. Run
