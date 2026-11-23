@@ -670,6 +670,14 @@ large in later studies?).
 an AutoExposure read, and reports both in `ls6t instrument status` (`ping.template_test`, e.g. `return=…, value=…,
 autoexposure=1`). Note what it says on this XploRA, with AE on and off: if a return value tells a loaded plugin
 apart, ls6t can then refuse to rely on SET / GET when it is missing.
+**Passed on .23.18 (2026-11-23), with the default `switch_off: true`:** AE on in LabSpec, a 1 × 2 s spectrum ran at
+2 s; the result showed `before` 1, `switched_off`, `while_acquiring` 0, `off_during`, `after` 1, `restored`,
+`all_restored`. Total 8.85 s (operator 2.55, `t_acq_call_s` 3.80, `t_flush_s` 0.08, spectrometer move skipped), against
+23–64 s this afternoon. `template_test`: `return=0, value=, autoexposure=1`: with no template name the 0 does not tell
+a loaded plugin from a missing template, so it stays a record, not a gate. The AutoExposure read itself is the
+working evidence (a value 0 / 1 that follows the status bar); if it ever comes back empty or as an error, the bridge
+leaves AE alone and the header check stops a study whose exposure differs. Deploying .23.18 ended the running bridge
+cleanly (`bridge_was: idle`, `ended: cleanly`).
 
 **T4.9b LabSpec's AutoCalibration from ls6t (maintainer; the laser fires on Si).** `ls6t profile set calibration.autocal '{"enabled": true, "method": "call", "mode": "full"}'`, Si wafer in focus, 532 nm, 1200, 10 %; `ls6t instrument autocal-run`: LabSpec asks, then runs its AutoCalibration. Pass: `ok`, `changed` lists the 1200's parameters (as by hand: offset 34 -> 44 on 2026-11-23), and a calibration check after it passes. If the answer says LabSpec does not offer the call to scripts, set `"enabled": false` and keep running it from LabSpec's menu.
 
