@@ -245,7 +245,9 @@ every laser's `nm`, `max_filter_pct` and `power_mw` filled in. `ls6t status` sho
    - `stage.x_um` / `stage.y_um`: absolute stage limits `[min, max]`, if wanted.
    - `detector.max_temp_c`: warmer than this, results are unreliable (the CCD is not cooled down).
    - `motors.laser_shutter`: the laser shutter's motor name, needed only for video snapshots with the laser on.
-     The import proposes one if it finds a shutter motor; confirm it with the maintainer.
+     The import proposes one if it finds a shutter motor; confirm it with the maintainer on the spectrum (the beam
+     is often not visible on the camera): LabSpec's real-time display on Si, then the status bar's Laser On / Off;
+     the Si line must come and go (TESTING T1.2).
    - `video.laser_offset_um`: where the beam really is relative to LabSpec's laser position. It is measured with a
      snapshot with the laser on (TESTING T5b).
    - `alignment`: the alignment baselines and settings per laser are recorded later, with

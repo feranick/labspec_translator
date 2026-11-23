@@ -718,7 +718,7 @@ def laser(on: bool, seconds: float | None = None) -> dict:
             return {"ok": False, "error": gate}
         if not shutter:
             return {"ok": False, "error": "no laser shutter motor in the profile: a person confirms it with the "
-                                          "maintainer and sets it (ls6t profile set motors.laser_shutter "
+                                          f"maintainer ({P.HOW}) and sets it (ls6t profile set motors.laser_shutter "
                                           "\"<name from discovery>\")"}
         mx = float(prof["limits"].get("max_laser_on_s", 60.0))
         secs = float(seconds or min(30.0, mx))
@@ -1318,7 +1318,7 @@ def snapshot(with_laser: bool = False, extended: bool = False) -> dict:
         if with_laser:
             if not prof["motors"].get("laser_shutter"):
                 return {"ok": False, "error": "no laser shutter motor in the profile (motors.laser_shutter): a person "
-                                              "sets it from the discovery dump"}
+                                              f"sets it from the discovery dump once confirmed ({P.HOW})"}
             from .profile import filter_pct, laser_key
             pct = prof.get("filters", {}).get(st.get("filter"))
             pct = pct if pct is not None else filter_pct(st.get("filter", ""))

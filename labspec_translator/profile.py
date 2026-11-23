@@ -120,6 +120,12 @@ DEFAULT_PROFILE: dict = {
 }
 
 
+# how a person confirms the laser shutter motor: the beam is often not visible on the camera (XploRA top camera, even
+# at 100 %), so on the spectrum (2026-11-23, 637.75 nm on Si: the line came and went with LabSpec's Laser On / Off)
+HOW = ("confirm it on the spectrum (TESTING T1.2: LabSpec's real-time display on Si, then the status bar's Laser "
+       "On / Off: the Si line must come and go)")
+
+
 def _merge(base: dict, over: dict) -> dict:
     out = copy.deepcopy(base)
     for k, v in (over or {}).items():
@@ -451,7 +457,7 @@ def import_reviewed(path: Path) -> tuple[dict, list[str]]:
     notes = []
     if not (data.get("motors") or {}).get("laser_shutter"):
         notes.append("motors.laser_shutter not set: laser_on and snapshots with the laser stay off (set it once the "
-                     "maintainer confirmed which motor is the laser shutter)")
+                     f"maintainer confirmed which motor is the laser shutter: {HOW})")
     for k in ("auto", "measured", "path"):
         data.pop(k, None)
     data["source"] = f"reviewed {Path(path).name} {time.strftime('%Y-%m-%d %H:%M')}"
@@ -554,7 +560,7 @@ def import_discovery(text: str, base: dict | None = None) -> tuple[dict, list[st
                 notes.append(f"laser shutter motor: {name!r} (already set in the current profile)")
             else:
                 notes.append(f"laser shutter motor found: {name!r}, not set: once the maintainer confirms it is the "
-                             f"laser shutter, set motors.laser_shutter to \"{name}\" (ls6t profile set "
+                             f"laser shutter ({HOW}), set motors.laser_shutter to \"{name}\" (ls6t profile set "
                              f"motors.laser_shutter \"{name}\")")
             break
     for role, cands in (("laser_pol", ("LaserPol", "Laser Polarizer", "Laser pol")),

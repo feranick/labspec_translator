@@ -94,7 +94,7 @@ files already showed.
 | Q12 | Does a request survive closing the LLM app (the runner process breaking away from the app's job)? | T9.1 |
 | Q13 | Video: does `Video(2)` return the live frame's id from a script, and does `Exec(id, 3)` clone it? Which image formats does `Save` write for a frame? **Known: the active camera is read** (`video.active_camera`); with the video off, `id_now` was 0. | T5b.1 |
 | Q14 | Video pixels: which axis varies fastest, how are colours packed (COLORREF 0x00BBGGRR or RGB), and are the axes stage coordinates in µm? | T5b.2 |
-| Q15 | Is `LaserShutter` the laser shutter, and do `PutValue(0, "ShutterMode", 1)` (manual) plus moving it On / Off open and close it? **Known: a motor `LaserShutter` with Off/On**; that it is the laser's is for the maintainer to confirm. | T1.2, T5b.3 |
+| Q15 | Is `LaserShutter` the laser shutter, and do `PutValue(0, "ShutterMode", 1)` (manual) plus moving it On / Off open and close it? **Known: a motor `LaserShutter` with Off/On. Confirmed on the XploRA (2026-11-23, 637.75 nm, Si): with LabSpec's real-time display running, the status bar's Laser On / Off makes the Si line appear and disappear** (the beam is not visible on the top camera, even at 100 %). | T1.2, T5b.3 |
 | Q16 | How far is the beam from LabSpec's laser position, per objective, and how repeatable is the measurement? | T5b.4, T5e |
 | Q17 | Does this XploRA have HORIBA's AutoAlignment module (Maintenance tab)? Can its *Current status* be read from outside (Windows UI automation, read-only)? | T5c.1 |
 | Q18 | Does `Message(text, 1)` (OK/Cancel) return 0 for OK and wait while the operator runs AutoAlignment in the same LabSpec? | T5c.2 |
@@ -239,6 +239,13 @@ With the maintainer, go through:
 - `manual_objective`: true on this XploRA (manual turret, the default): ls6t then asks the operator to change the lens by hand and confirm, and records the objective as operator-confirmed or as LabSpec's unchecked setting; `objectives`: keep only the lenses really mounted (discovery lists what LabSpec is configured for);
 - `motors.laser_shutter` (**Q15**): only once the maintainer has confirmed that `LaserShutter` is the **laser**
   shutter, set it to `"LaserShutter"`. Until then snapshots with the laser and `laser_on` are refused.
+  **How to confirm it (any instrument): on the spectrum, not on the camera.** The beam is often invisible on the
+  video (the XploRA's top camera shows nothing even at 100 %). Put silicon under the objective, in focus, with a low
+  filter (1 %); start LabSpec's real-time display (RTD) around 520 cm⁻¹ with a short exposure; then switch the
+  status bar's Laser On / Off (or move the candidate motor On / Off in LabSpec) a few times. Pass: the Si line
+  appears with On and disappears with Off, each time; nothing else changes (no grating or filter move). If the
+  line does not come and go, that motor is not the laser's shutter: leave `motors.laser_shutter` empty and tell the
+  ls6t maintainer. Confirmed this way on the XploRA (2026-11-23, 637.75 nm).
 
 Then import the edited file, which checks it and marks it reviewed:
 
