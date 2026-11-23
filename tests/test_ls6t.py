@@ -1278,6 +1278,10 @@ def test_claude_desktop_config_folders(tmp_path, monkeypatch):
     assert C.read_json(new / "claude_desktop_config.json")["mcpServers"]["ls6t"]["command"] == py
     assert C.read_json(old / "claude_desktop_config.json")["mcpServers"] == {}   # the stale entry taken out
     assert any("no longer reads" in " ".join(r.get("notes", [])) for r in reps)
+    (old / "claude_desktop_config.json").unlink()                           # 2026-11-22: only the marker left
+    reps = C.connect(["claude"], py)
+    assert any("no config file here" in " ".join(r.get("notes", [])) for r in reps)
+    assert not (old / "claude_desktop_config.json").exists() and C.claude_stale_files() == []
     monkeypatch.setattr(C, "claude_running_dirs", lambda: (tmp_path / "custom",))
     assert C.claude_dirs()[0] == tmp_path / "custom"                        # the running app's --user-data-dir
 
@@ -2458,7 +2462,7 @@ def test_install_says_whether_a_bridge_ran_and_cleans_stale_claude_files(tmp_pat
     stale.write_text(json.dumps({"mcpServers": {
         "ls6t": {"command": r"C:\old\python.exe", "args": ["-m", "labspec_translator.mcp_server"]},
         "ls6t-sim": {"command": "other.exe", "args": ["serve"]}, "fs": {"command": "x"}}}))
-    monkeypatch.setattr(C, "claude_stale_files", lambda: [stale])
+    monkeypatch.setattr(C, "claude_stale_files", lambda existing_only=True: [stale])
     reps = C.clean_stale(sys.executable)
     cfg = json.loads(stale.read_text())
     assert set(cfg["mcpServers"]) == {"ls6t-sim", "fs"}

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "labspec-translator"
-version = "2026.11.22.14"
+version = "2026.11.22.15"
 description = "Raman studies (JSON) -> HORIBA LabSpec 6 through a VBS bridge the operator watches; checked results, CLI and MCP server"
 readme = "README.md"
 requires-python = ">=3.10"

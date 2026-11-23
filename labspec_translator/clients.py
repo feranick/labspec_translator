@@ -1,5 +1,5 @@
 """clients.py — connecting ls6t's MCP server to the LLM apps on this computer (`ls6t connect`, and the installer).
-Version: 2026.11.22.14
+Version: 2026.11.22.15
 
 Each app keeps its MCP servers in its own file. ls6t knows eight that start local (stdio) servers:
 
@@ -180,9 +180,10 @@ def claude_dirs(create: bool = False, running: bool = True) -> list[Path]:
     return uniq
 
 
-def claude_stale_files() -> list[Path]:
-    """Configuration files the app no longer reads (Store builds that moved to Claude-Data): ls6t removes its entries
-    there so they do not mislead."""
+def claude_stale_files(existing_only: bool = True) -> list[Path]:
+    """Configuration files the app no longer reads (Store builds that moved to Claude-Data, by the app's own marker):
+    ls6t removes its entries there so they do not mislead. existing_only False: also the places where the file is
+    gone (the install log then says so)."""
     local = os.environ.get("LOCALAPPDATA")
     if not _windows() or not local:
         return []
@@ -190,7 +191,7 @@ def claude_stale_files() -> list[Path]:
     out = []
     for pkg in sorted((Path(local) / "Packages").glob("*Claude_*")):
         old = pkg / "LocalCache" / "Roaming" / "Claude"
-        if _norm(old) not in active and (old / "claude_desktop_config.json").exists():
+        if old.is_dir() and _norm(old) not in active and (not existing_only or (old / "claude_desktop_config.json").exists()):
             out.append(old / "claude_desktop_config.json")
     return out
 
@@ -561,8 +562,12 @@ def clean_stale(python: str) -> list[dict]:
     since nothing reads the file (2026-11-22: the Packages copy kept an old entry from .24 on, silently). Each file
     gets a report: removed, or why not."""
     reports = []
-    for stale in claude_stale_files():
+    for stale in claude_stale_files(existing_only=False):
         rep = {"client": "claude", "app": LABELS["claude"], "file": str(stale)}
+        if not stale.exists():          # said anyway, so the log shows the old copy was checked (2026-11-22)
+            reports.append(dict(rep, ok=True, notes=["no config file here: the Claude app has moved to Claude-Data "
+                                                     "(its .user-data-left marker); nothing to clean"]))
+            continue
         try:
             cfg = read_json(stale)
             gone, kept = [], []

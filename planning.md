@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.22.14)
+## Architecture (version 2026.11.22.15)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -728,6 +728,9 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   restart; marker .user-data-left.claude_pzs8sxrjxfjjc present (122 bytes, 21:17, the install and restart minute:
   written by the app; ls6t only reads it: clients.claude_dirs iterdir, ls6t_diagnose.ps1 lists it). Deploy: bridge
   stopped, not running; warm-up 0 s, bridge 20 s after LabSpec (a fourth early start at 0 s).
+- 2026-11-22, 2026.11.22.15: Nicola: the old Packages folder holds only the marker (no config file): the install log
+  now says so (claude_stale_files(existing_only=False) in clean_stale: 'no config file here: ... moved to Claude-Data').
+  142 tests.
 
 ## To do next
 
