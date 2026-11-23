@@ -1,5 +1,5 @@
 """build_installer.py — builds the Windows installer of labspec-translator: dist/ls6t-setup-<version>.exe.
-Version: 2026.11.22.11
+Version: 2026.11.22.12
 
   python installer/build_installer.py                 # everything (needs network and NSIS)
   python installer/build_installer.py --no-nsis       # stage the files only (build/installer/stage)
@@ -39,7 +39,7 @@ EXTRAS = "mcp,render,windows"
 # dependencies that are Windows-only by their markers: pip evaluates markers for the computer it runs on, so a build
 # on macOS or Linux would leave them out
 WINDOWS_ONLY = ["comtypes>=1.2", "pywin32>=306", "colorama"]
-DOCS = ["README.md", "INSTALL.md", "FUNCTIONALITY.md", "TESTING.md"]
+DOCS = ["README.md", "INSTALL.md", "FUNCTIONALITY.md", "TESTING.md", "PROMPTS.md"]
 
 CSS = """body{font-family:Segoe UI,system-ui,sans-serif;max-width:1000px;margin:2em auto;padding:0 1em;line-height:1.5;
 color:#1d1d1f}code,pre{font-family:Consolas,monospace;background:#f3f3f3}pre{padding:.8em;overflow-x:auto}

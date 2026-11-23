@@ -1111,8 +1111,12 @@ def test_installer_files(tmp_path):
     assert B.version() == __import__("labspec_translator").__version__
     nsi = (ROOT / "installer" / "ls6t.nsi").read_text()
     for needle in ("labspec_translator.winsetup install", "labspec_translator.winsetup uninstall",
-                   "RequestExecutionLevel user", "ls6t-shell.ps1", "INSTALL.html"):
+                   "RequestExecutionLevel user", "ls6t-shell.ps1", "INSTALL.html", "PROMPTS.html",
+                   "MUI_PAGE_CUSTOMFUNCTION_SHOW FinishShow", "Function FinishLeave"):
         assert needle in nsi, needle
+    # the finish page's third option opens the prompts, which the build renders with the other guides
+    assert "PROMPTS.md" in B.DOCS and (ROOT / "PROMPTS.md").is_file()
+    assert nsi.index("MUI_PAGE_CUSTOMFUNCTION_SHOW FinishShow") < nsi.index("!insertmacro MUI_PAGE_FINISH")
     for f in ("ls6t.cmd", "ls6t-mcp.cmd", "ls6t-typelib.cmd", "ls6t-shell.ps1"):
         raw = (ROOT / "installer" / "bin" / f).read_bytes()
         assert all(b < 128 for b in raw), f

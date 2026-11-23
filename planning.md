@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.22.11)
+## Architecture (version 2026.11.22.12)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -699,6 +699,12 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   claude / copilot / windsurf / lms on PATH. Installer: four sections, /CLAUDECODE /COPILOT /WINDSURF /LMSTUDIO,
   welcome text 910 chars (< 1024). CI installs all and checks each file. INSTALL step 8 notes and approval settings.
   None tried at the instrument yet. 141 tests.
+- 2026-11-22, 2026.11.22.12: Nicola: a third option on the installer's finish page, prompts to try. PROMPTS.md
+  (first steps, first measurements, advanced, tips; rendered to docs\PROMPTS.html by build_installer DOCS). NSIS:
+  MUI2's finish page has two options only: MUI_PAGE_CUSTOMFUNCTION_SHOW FinishShow adds an nsDialogs checkbox under
+  ShowReadme at the Run-to-ShowReadme spacing (GetWindowRect + MapWindowPoints), their font and MUI_BGCOLOR,
+  checked; FinishLeave opens PROMPTS.html. Start menu 'Prompts to try'. CI checks docs\PROMPTS.html. The page's
+  look to be checked on the built installer (makensis not available here). 141 tests.
 
 ## To do next
 

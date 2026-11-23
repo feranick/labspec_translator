@@ -70,12 +70,49 @@ VIAddVersionKey "LegalCopyright" "MIT license"
 !insertmacro MUI_PAGE_COMPONENTS
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
+; the finish page's third option (FinishShow / FinishLeave below): prompts to try
+!define MUI_PAGE_CUSTOMFUNCTION_SHOW FinishShow
+!define MUI_PAGE_CUSTOMFUNCTION_LEAVE FinishLeave
 !insertmacro MUI_PAGE_FINISH
 !insertmacro MUI_UNPAGE_CONFIRM
 !insertmacro MUI_UNPAGE_INSTFILES
 !insertmacro MUI_LANGUAGE "English"
 
 ; ------------------------------------------------------------------------------------------------ helpers
+
+; The finish page has room for MUI's two options only: a third checkbox goes under them at the same spacing, with
+; their font and background ("Show prompts to try"), checked; Finish opens docs\PROMPTS.html when it stays checked.
+Var PromptsBox
+
+Function FinishShow
+  System::Call '*(i 0, i 0, i 0, i 0) p .r1'
+  System::Call '*(i 0, i 0, i 0, i 0) p .r2'
+  System::Call 'user32::GetWindowRect(p $mui.FinishPage.Run, p r1)'
+  System::Call 'user32::GetWindowRect(p $mui.FinishPage.ShowReadme, p r2)'
+  System::Call 'user32::MapWindowPoints(p 0, p $mui.FinishPage, p r1, i 2)'
+  System::Call 'user32::MapWindowPoints(p 0, p $mui.FinishPage, p r2, i 2)'
+  System::Call '*$1(i .r3, i .r4, i, i)'
+  System::Call '*$2(i .r5, i .r6, i .r7, i .r8)'
+  System::Free $1
+  System::Free $2
+  IntOp $9 $6 - $4                ; the spacing between MUI's two checkboxes
+  IntOp $9 $6 + $9                ; the top of the third
+  IntOp $7 $7 - $5                ; its width
+  IntOp $8 $8 - $6                ; its height
+  ${NSD_CreateCheckbox} $5 $9 $7 $8 "Show prompts to try (first steps and advanced)"
+  Pop $PromptsBox
+  SetCtlColors $PromptsBox "" "${MUI_BGCOLOR}"
+  SendMessage $mui.FinishPage.ShowReadme ${WM_GETFONT} 0 0 $0
+  SendMessage $PromptsBox ${WM_SETFONT} $0 1
+  ${NSD_Check} $PromptsBox
+FunctionEnd
+
+Function FinishLeave
+  ${NSD_GetState} $PromptsBox $0
+  ${If} $0 == ${BST_CHECKED}
+    ExecShell "open" "$INSTDIR\docs\PROMPTS.html"
+  ${EndIf}
+FunctionEnd
 
 ; Python (or a measurement started by ls6t) still running from this folder: its files cannot be replaced
 !macro WaitUnlocked
@@ -157,6 +194,7 @@ Section "Start menu shortcuts" SecMenu
     '-NoExit -NoLogo -ExecutionPolicy Bypass -File "$INSTDIR\bin\ls6t-shell.ps1"' "$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" 0
   CreateShortcut "$SMPROGRAMS\ls6t\LabSpec scripts (ls6t).lnk" "$PROFILE\ls6t\vbs"
   CreateShortcut "$SMPROGRAMS\ls6t\ls6t guides.lnk" "$INSTDIR\docs"
+  CreateShortcut "$SMPROGRAMS\ls6t\Prompts to try.lnk" "$INSTDIR\docs\PROMPTS.html"
   CreateShortcut "$SMPROGRAMS\ls6t\Uninstall ls6t.lnk" "$INSTDIR\uninstall.exe"
 SectionEnd
 

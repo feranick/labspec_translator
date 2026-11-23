@@ -30,11 +30,13 @@ network: it carries its own Python with every package. Use it unless you develop
    | ls6t | always | The commands, the MCP server, a private Python, the guides; writes the LabSpec scripts to `%USERPROFILE%\ls6t\vbs` |
    | Connect ls6t to the LLM apps found | the apps found are ticked | Adds the `ls6t` MCP server to the Claude desktop app, Claude Code, the ChatGPT desktop app / Codex, Gemini CLI, Cursor, GitHub Copilot, Windsurf and LM Studio: each one ticked (see [step 8](#8-connect-an-llm-app); files backed up first) |
    | Add ls6t to PATH | on | `ls6t`, `ls6t-mcp`, `ls6t-typelib` in any new PowerShell window |
-   | Start menu shortcuts | on | *ls6t PowerShell*, *LabSpec scripts (ls6t)*, *ls6t guides*, *Uninstall ls6t* |
+   | Start menu shortcuts | on | *ls6t PowerShell*, *LabSpec scripts (ls6t)*, *ls6t guides*, *Prompts to try*, *Uninstall ls6t* |
    | Also the simulator | off | Also adds `ls6t-sim`, the same tools on the built-in simulator, to those apps |
 
    It checks that everything loads and precompiles the packages (a minute or two). An app installed after ls6t:
-   `ls6t connect auto` ([step 8](#8-connect-an-llm-app)).
+   `ls6t connect auto` ([step 8](#8-connect-an-llm-app)). Its last page offers to open the LabSpec scripts folder,
+   this guide, and **prompts to try** ([PROMPTS.md](PROMPTS.md): first steps without the laser, first measurements,
+   advanced requests; also *Start > ls6t > Prompts to try*).
 4. **Then** start `ls6t_bridge.vbs` in LabSpec (step [6](#6-install-the-labspec-scripts), from *"In LabSpec 6"*).
    An update ends a running bridge cleanly first (its window closes; `deploy_log.jsonl` records it): start it again.
    LabSpec need not be restarted for an update. The grating's first status after a start has sometimes taken

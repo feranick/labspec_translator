@@ -1,6 +1,6 @@
 # labspec-translator (ls6t): what it can do
 
-This is the complete list of functions in version 2026.11.22.11. It covers:
+This is the complete list of functions in version 2026.11.22.12. It covers:
 
 - what a study can ask for;
 - the tools an LLM sees;
@@ -8,7 +8,8 @@ This is the complete list of functions in version 2026.11.22.11. It covers:
 - what the LabSpec bridge does;
 - what ls6t checks and remembers.
 
-How it all fits together: [README.md](README.md). Installation: [INSTALL.md](INSTALL.md). Tests on the instrument:
+How it all fits together: [README.md](README.md). Installation: [INSTALL.md](INSTALL.md). Prompts to try:
+[PROMPTS.md](PROMPTS.md). Tests on the instrument:
 [TESTING.md](TESTING.md).
 
 Everything below runs on the built-in simulator and is covered by tests and benchmarks. Nothing has run on the
@@ -108,7 +109,7 @@ trusting numbers, the safety rules and the polling etiquette.
 | `ls6t sim [--seconds S]` | Run the simulator by hand |
 | `ls6t-typelib [--path F] [--format text/markdown/json] [--out F] [--list]` | (a separate program, any OS) Read LabSpec's ActiveX type library straight from the file and list every method and property of the installed version; `NEW` marks those not in the 2018 manual, and words of interest are flagged. Read-only: nothing starts or moves |
 | `ls6t run-request FOLDER` | What the detached runner runs (internal) |
-| `ls6t-setup-<version>.exe` | The Windows installer: per user, offline, with its own Python; the LabSpec scripts, PATH, Start menu and the LLM apps found (Claude, Claude Code, ChatGPT / Codex, Gemini CLI, Cursor, GitHub Copilot, Windsurf, LM Studio); updates in place; uninstalls keeping the data (INSTALL.md) |
+| `ls6t-setup-<version>.exe` | The Windows installer: per user, offline, with its own Python; the LabSpec scripts, PATH, Start menu and the LLM apps found (Claude, Claude Code, ChatGPT / Codex, Gemini CLI, Cursor, GitHub Copilot, Windsurf, LM Studio); its last page can open prompts to try ([PROMPTS.md](PROMPTS.md)); updates in place; uninstalls keeping the data (INSTALL.md) |
 
 Only the command line can record alignment baselines, change the profile, or clear what is remembered. An LLM can
 read them, not change them.

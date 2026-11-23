@@ -39,6 +39,7 @@ jobs:
           if (Test-Path "$dir\install.log") { Get-Content "$dir\install.log" }
           if ($p.ExitCode -ne 0) { throw "installer exit code $($p.ExitCode)" }
           & "$dir\bin\ls6t.cmd" --version
+          if (-not (Test-Path "$dir\docs\PROMPTS.html")) { throw "docs\PROMPTS.html missing (the finish page's prompts)" }
           & "$dir\python\python.exe" -m labspec_translator.winsetup check
           if ($LASTEXITCODE -ne 0) { throw "winsetup check failed" }
           $env:LS6T_MODE = "sim"
