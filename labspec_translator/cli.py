@@ -24,7 +24,7 @@
   ls6t profile propose [DUMP]        profile.proposed.json from the bridge's inventory, to edit with the maintainer
   ls6t profile import FILE           the edited profile.proposed.json: checked, marked reviewed (the laser may fire)
   ls6t profile show|default
-  ls6t profile qc [FOLDER]           HORIBA's QC reports (default C:\Horiba Jobin Yvon\1-QC\QC Auto) as references
+  ls6t profile qc [FOLDER]           HORIBA's QC reports (found on the fixed drives: '1-QC\QC Auto') as references
   ls6t profile ics                   where LabSpec has an ICS correction (grating@laser); ls6t turns ICS off elsewhere
   ls6t profile set KEY VALUE         one value (JSON), e.g. video.laser_offset_um "[1.4, -0.6]"
   ls6t profile ini [OLConfig.ini]    what LabSpec's own configuration says (cameras, objectives, motors)

@@ -200,7 +200,7 @@ def report() -> dict:
         if e.get("kind") == "call":
             calls[e.get("step") or "-"] = calls.get(e.get("step") or "-", 0) + 1
     ids = sorted(plan["steps"], key=_id_key)
-    lines = [f"# ls6t instrument tests: report", "",
+    lines = ["# ls6t instrument tests: report", "",
              f"Written {time.strftime('%Y-%m-%d %H:%M')} by ls6t {__version__} from {log_path()} "
              f"({sum(calls.values())} bridge commands logged). Plan: {plan['file']}.", "",
              "| ID | Date | Tester / maintainer | Result | Notes and values | Commands |", "|---|---|---|---|---|---|"]

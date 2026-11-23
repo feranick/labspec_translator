@@ -20,6 +20,7 @@ Dim gCmdT0                ' when the bridge took up the current command (Timer)
 gHaltPopup = False
 Dim gBlocking             ' the motor while a blocking MoveMotor runs (written in the heartbeat beforehand)
 Dim gBlockingS            ' the longest it may take, s (0: the default for a blocking move)
+Dim gAccountVersion       ' the ls6t version installed for the account running the bridge, when it differs
 Dim gMoveN                ' MoveMotor calls since this bridge started (1: its first; TESTING T3.16, a slow first move)
 gMoveN = 0
 gBlocking = ""
@@ -60,6 +61,9 @@ Sub Beat(state, force)
     ts.WriteLine "seq=" & gSeq
     ts.WriteLine "protocol=" & LS6T_PROTOCOL
     ts.WriteLine "version=" & LS6T_VERSION
+    ts.WriteLine "account=" & LS6T_ACCOUNT
+    If gAccountVersion <> "" Then ts.WriteLine "account_version=" & gAccountVersion
+    If LS6T_DIR_NOTE <> "" Then ts.WriteLine "note=" & LS6T_DIR_NOTE
     ts.Close
     Err.Clear
     On Error GoTo 0
@@ -272,6 +276,9 @@ End Function
 Sub VPing(cmd, res)
     res("protocol") = LS6T_PROTOCOL
     res("version") = LS6T_VERSION
+    res("account") = LS6T_ACCOUNT
+    If gAccountVersion <> "" Then res("account_version") = gAccountVersion
+    If LS6T_DIR_NOTE <> "" Then res("dir_note") = LS6T_DIR_NOTE
     res("warmup") = gWarm                     ' each motor's first status at start (s): TESTING T3.16
     res("system") = LSValue(0, "SystemName")
 End Sub
@@ -2512,8 +2519,22 @@ Sub BridgeMain()
     EnsureFolder gInbox
     EnsureFolder gOutbox
     If fso.FileExists(gStopFlag) Then fso.DeleteFile gStopFlag, True
+    ' the version installed for the account running it: another account's copy may be older or newer
+    gAccountVersion = ""
+    On Error Resume Next
+    If fso.FileExists(LS6T_HOME_DIR & "\installed_version.txt") Then
+        gAccountVersion = Trim(fso.OpenTextFile(LS6T_HOME_DIR & "\installed_version.txt", 1).ReadAll)
+        If gAccountVersion = LS6T_VERSION Then gAccountVersion = ""
+    End If
+    Err.Clear
+    On Error GoTo 0
     OpenPopup
     LabSpec.Message "ls6t bridge " & LS6T_VERSION & " running (" & LS6T_BRIDGE_DIR & ")", LS_MB_STATUS_BAR
+    If gAccountVersion <> "" Then
+        LabSpec.Message "ls6t bridge " & LS6T_VERSION & " started, but this Windows account's ls6t is " & _
+            gAccountVersion & ": start this account's own ls6t_bridge.vbs (" & LS6T_HOME_DIR & "\vbs) instead " & _
+            "(" & LS6T_DIR_NOTE & ")", LS_MB_STATUS_BAR
+    End If
     ' the instrument's inventory (motors, positions, detector; no probes, nothing moves): ls6t builds or checks its
     ' machine profile from it
     On Error Resume Next

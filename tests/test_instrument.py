@@ -1363,3 +1363,34 @@ def test_each_spectrum_records_its_ics_state():
     assert on["ics"] == "on (asked)"
     shift = Path(off["spectra"][0]["file"]).with_suffix(".shift.txt").read_text()
     assert "# ics=off (no correction file" in shift
+
+
+def test_qc_folder_found_on_any_fixed_drive(tmp_path, monkeypatch):
+    """2026-11-23: on the instrument PC the QC folder is D:\\Horiba Jobin Yvon\\1-QC\\QC Auto, with a copy under
+    D:\\LabSpec Software & Drivers\\QC; ls6t looked only on C:. Every fixed drive is looked at, and the import says
+    which folder it used."""
+    import os
+    from labspec_translator import qc
+    c_drive, d_drive = tmp_path / "C", tmp_path / "D"
+    main = d_drive / "Horiba Jobin Yvon" / "1-QC" / "QC Auto"
+    copy = d_drive / "LabSpec Software & Drivers" / "QC" / "1-QC" / "QC Auto"
+    for q, age in ((main, 0), (copy, 86400)):
+        r = q / "Laser 638nm_Edge" / "Cut-Off" / "06_09_2023_14_21_27"
+        r.mkdir(parents=True)
+        f = r / "r.txt"
+        f.write_text("info=test=Cut-Off\nmoteur=Laser Filtering=638nm_Edge\nvalue=High_Cut-Off=58.7\n")
+        os.utime(f, (f.stat().st_mtime - age,) * 2)
+    c_drive.mkdir()
+    monkeypatch.delenv("LS6T_QC_DIR", raising=False)
+    monkeypatch.setattr(qc, "_drive_roots", lambda: [c_drive, d_drive])
+    found: list = []
+    assert qc.find_dir(None, found) == main and len(found) == 2
+    r = qc.import_dir(P.load())
+    assert r["ok"] and r["from"] == str(main) and r["chosen"] == "the folder with the newest report"
+    # elsewhere on a drive: found by the short search
+    other = tmp_path / "E" / "Service" / "1-QC" / "QC Auto"
+    other.mkdir(parents=True)
+    monkeypatch.setattr(qc, "_drive_roots", lambda: [c_drive, tmp_path / "E"])
+    assert qc.find_dir() == other
+    monkeypatch.setattr(qc, "_drive_roots", lambda: [c_drive])
+    assert "give its path" in qc.import_dir(P.load())["error"]

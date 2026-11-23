@@ -133,7 +133,7 @@ def test_vbs_scripts(tmp_path):
         assert all(b < 128 for b in raw), name
         assert b"\r\n" in raw and b"\n" not in raw.replace(b"\r\n", b"")
         text = raw.decode()
-        assert "@@" not in text and 'Const LS6T_BRIDGE_DIR = "' in text
+        assert "@@" not in text and 'Const LS6T_BRIDGE_DIR_INSTALLED = "' in text
         # blocks balance
         stack = []
         for n, line in enumerate(text.split("\r\n"), 1):

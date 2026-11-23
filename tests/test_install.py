@@ -158,3 +158,30 @@ def test_installer_files(tmp_path):
     for f, mod in (("ls6t.cmd", "cli"), ("ls6t-mcp.cmd", "mcp_server"), ("ls6t-typelib.cmd", "typelib")):
         raw = (ROOT / "installer" / "bin" / f).read_bytes()
         assert f"-m labspec_translator.{mod} %*".encode() in raw and b"\r\n" in raw
+
+
+def test_bridge_folders_follow_the_account_that_runs_it(tmp_path):
+    """2026-11-23: LabSpec's script list is shared by every Windows account; ferralis started jalavall's
+    ls6t_bridge.vbs, whose heartbeat went to jalavall's folder while ferralis's ls6t said 'stopped'. The script now
+    takes the folders of the account that runs it, reports both versions, and ls6t names the other account."""
+    text = api.compose_vbs(tmp_path / "bridge", tmp_path)["ls6t_bridge.vbs"]
+    head = text[:text.index("Option Explicit") if "Option Explicit" in text else 3000]
+    assert 'ExpandEnvironmentStrings("%USERPROFILE%")' in text and "Const LS6T_ACCOUNT_INSTALLED" in text
+    assert "Dim LS6T_BRIDGE_DIR, LS6T_HOME_DIR" in text and "Const LS6T_BRIDGE_DIR =" not in text
+    assert 'ts.WriteLine "account=" & LS6T_ACCOUNT' in text and "installed_version.txt" in text
+    api.install_bridge(tmp_path / "vbs")
+    assert (config.home() / "installed_version.txt").read_text() == api.__version__
+    # a bridge of another version answers: status says so
+    assert "start this account's own ls6t_bridge.vbs" in api.bridge_mismatch({"ok": True, "version": "2000.1.1.1"})
+    assert api.bridge_mismatch({"ok": True, "version": api.__version__}) is None
+    # another account's bridge beating while ours is silent
+    users = tmp_path / "Users"
+    mine, other = users / "ferralis" / "ls6t" / "bridge", users / "jalavall" / "ls6t" / "bridge"
+    for d in (mine, other):
+        d.mkdir(parents=True)
+    (mine / "heartbeat.txt").write_text("state=stopped\nversion=2026.11.22.16\n")
+    (other / "heartbeat.txt").write_text("state=idle\nversion=2026.11.23.6\n")
+    found = bridge.other_accounts(mine)
+    assert [o["account"] for o in found] == ["jalavall"]
+    msg = bridge.diagnose({"state": "stopped", "age_s": 600}, mine)
+    assert "'jalavall'" in msg and "this account's own copy" in msg

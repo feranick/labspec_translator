@@ -1,6 +1,6 @@
 """qc.py — HORIBA's factory / installation QC reports for this instrument, read once and kept as references.
 
-HORIBA's QC scripts leave one small text report per test under `C:\\Horiba Jobin Yvon\\1-QC\\QC Auto` (per laser:
+HORIBA's QC scripts leave one small text report per test under `<drive>:\\Horiba Jobin Yvon\\1-QC\\QC Auto` (per laser:
 Cut-Off, Laser Power, Axial Resolution, Sensitivity, Confocality...; per grating: Spectral Resolution, Detector
 Calibration, Grating Linearity; Noise, Neon Repeatability). Each report is `key=value` lines (`info=`, `moteur=`,
 `value=`, `graph=`, `unite=`, `point=y=x`), UTF-16 or plain text. ls6t reads the values (not HORIBA's scripts or
@@ -17,7 +17,6 @@ from pathlib import Path
 
 from . import store
 
-DEFAULT_DIR = Path("C:/Horiba Jobin Yvon/1-QC/QC Auto")
 
 
 def read_text(p: Path) -> str:
@@ -79,14 +78,80 @@ def _date(path: Path) -> str | None:
     return None
 
 
-def find_dir(path=None) -> Path | None:
+KNOWN = ("Horiba Jobin Yvon/1-QC/QC Auto", "LabSpec Software & Drivers/QC/1-QC/QC Auto")
+SKIP = {"windows", "$recycle.bin", "system volume information", "programdata", "users", "program files",
+        "program files (x86)", "recovery", "perflogs"}
+
+
+def _drive_roots() -> list[Path]:
+    """The fixed drives' roots (C:\\, D:\\ ...) on Windows; none elsewhere."""
+    if os.name != "nt":
+        return []
+    try:
+        import ctypes
+        mask, k32 = ctypes.windll.kernel32.GetLogicalDrives(), ctypes.windll.kernel32
+        return [Path(f"{chr(65 + i)}:/") for i in range(26)
+                if mask >> i & 1 and k32.GetDriveTypeW(f"{chr(65 + i)}:\\") == 3]
+    except (AttributeError, OSError):
+        return [Path(f"{c}:/") for c in "CDEF" if Path(f"{c}:/").is_dir()]
+
+
+def _search(root: Path, depth: int = 3) -> list[Path]:
+    """Folders '1-QC/QC Auto' up to `depth` levels below a drive's root, skipping the system's folders."""
+    found, todo = [], [(root, 0)]
+    while todo:
+        d, n = todo.pop()
+        try:
+            entries = [e for e in os.scandir(d) if e.is_dir(follow_symlinks=False)]
+        except OSError:
+            continue
+        for e in entries:
+            if e.name.lower() == "1-qc" and Path(e.path, "QC Auto").is_dir():
+                found.append(Path(e.path, "QC Auto"))
+            elif n + 1 < depth and not (n == 0 and e.name.lower() in SKIP) and not e.name.startswith("."):
+                todo.append((Path(e.path), n + 1))
+    return found
+
+
+def _newest(d: Path) -> float:
+    return max((f.stat().st_mtime for f in d.rglob("*.txt")), default=0.0)
+
+
+def candidates() -> list[Path]:
+    """Every QC folder on the fixed drives: LS6T_QC_DIR, the known places on each drive, then a short search."""
+    out: list[Path] = []
+    env = os.environ.get("LS6T_QC_DIR")
+    if env and Path(env).is_dir():
+        out.append(Path(env))
+    roots = _drive_roots()
+    for r in roots:
+        out += [r / k for k in KNOWN if (r / k).is_dir()]
+    if not out:
+        for r in roots:
+            out += _search(r)
+    seen, uniq = set(), []
+    for p in out:
+        k = str(p).lower()
+        if k not in seen:
+            seen.add(k)
+            uniq.append(p)
+    return uniq
+
+
+def find_dir(path=None, found: list | None = None) -> Path | None:
+    """The QC folder given, else LS6T_QC_DIR, else the one with the newest report among those found on the fixed
+    drives (HORIBA installs it on C: or D:, with a copy under 'LabSpec Software & Drivers'). `found` gets them all."""
     if path:
         p = Path(path)
         return p if p.is_dir() else None
-    for p in (DEFAULT_DIR, Path(os.environ.get("LS6T_QC_DIR", "") or DEFAULT_DIR)):
-        if p.is_dir():
-            return p
-    return None
+    c = candidates()
+    if found is not None:
+        found.extend(str(p) for p in c)
+    if not c:
+        return None
+    if os.environ.get("LS6T_QC_DIR") and c[0] == Path(os.environ["LS6T_QC_DIR"]):
+        return c[0]
+    return max(c, key=lambda p: (_newest(p), -c.index(p)))
 
 
 def laser_for(prof: dict, label) -> float | None:
@@ -107,9 +172,11 @@ def import_dir(prof: dict, path=None) -> dict:
     """Reads every report under the QC folder; keeps the newest of each test (per laser / grating) in qc.json and
     the cut-offs in the performance store. Returns what was found."""
     from . import perf
-    d = find_dir(path)
+    found: list = []
+    d = find_dir(path, found)
     if d is None:
-        return {"ok": False, "error": f"no QC folder at {path or DEFAULT_DIR}: give its path"}
+        where = path or "the fixed drives (" + ", ".join(KNOWN) + ", or '1-QC\\QC Auto' up to 3 folders deep)"
+        return {"ok": False, "error": f"no QC folder in {where}: give its path"}
     reports = []
     for f in sorted(d.rglob("*.txt")):
         try:
@@ -140,7 +207,10 @@ def import_dir(prof: dict, path=None) -> dict:
                         {"usable_from_cm1": r["values"]["High_Cut-Off"], "low_cm1": r["values"].get("Low_Cut-Off"),
                          "source": "HORIBA QC", "date": r.get("date")}, str(d))
             cut[r["laser_label"]] = r["values"]["High_Cut-Off"]
-    return {"ok": True, "from": str(d), "reports": len(kept), "tests": sorted({r["test"] for r in kept}),
+    return {"ok": True, "from": str(d), **({"found": found} if len(found) > 1 else {}),
+            "chosen": "as given" if path else ("LS6T_QC_DIR" if os.environ.get("LS6T_QC_DIR") == str(d) else
+                                                "the folder with the newest report" if len(found) > 1 else "found"),
+            "reports": len(kept), "tests": sorted({r["test"] for r in kept}),
             "cutoff_cm1": cut, "summary": summary(prof)}
 
 

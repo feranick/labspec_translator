@@ -128,6 +128,35 @@ def labspec_hint(verb: str | None = None) -> str:
             "the operator closes it (scripts wait while one is open); if there is none, " + STUCK_ADVICE)
 
 
+def other_accounts(folder) -> list:
+    """Bridges of other Windows accounts on this PC beating now (their heartbeat under C:\\Users\\<other>\\ls6t\\bridge,
+    when readable): LabSpec ran that account's ls6t_bridge.vbs (its script list is shared by all accounts)."""
+    out = []
+    try:
+        here = Path(folder).resolve()
+        users = here.parents[2] if len(here.parents) > 2 else None   # ...\Users\<me>\ls6t\bridge -> ...\Users
+    except (OSError, IndexError):
+        return out
+    if users is None or not users.is_dir():
+        return out
+    try:
+        candidates = list(users.glob("*/ls6t/bridge/heartbeat.txt"))
+    except OSError:
+        return out
+    for hb in candidates:
+        try:
+            if hb.parent.resolve() == here:
+                continue
+            age = time.time() - hb.stat().st_mtime
+            if age <= 30:
+                d = decode(read_text(hb))
+                out.append({"account": hb.parents[2].name, "heartbeat": str(hb), "age_s": round(age, 1),
+                            "version": d.get("version"), "state": d.get("state")})
+        except OSError:
+            continue
+    return out
+
+
 def blocking_allowance(hb: dict) -> float:
     """How long a heartbeat may stay silent while LabSpec holds the bridge: the bridge's own blocking_s (an
     acquisition: its timeout) plus a margin, else the blocking-move allowance."""
@@ -142,6 +171,13 @@ def diagnose(hb: dict | None, folder=None) -> str:
     """One explanation of a bridge that does not answer, from its heartbeat, the same whether a call was about to be
     sent or was waiting: never started, ended normally, ended by LabSpec (last heartbeat idle), or stuck in a
     command (last heartbeat busy)."""
+    others = other_accounts(folder) if folder else []
+    if others and (not hb or hb.get("state") == "stopped" or hb.get("age_s", 0) > 30):
+        o = others[0]
+        return (f"a bridge is running in LabSpec for the Windows account '{o['account']}' (version {o['version']}, "
+                f"heartbeat {o['age_s']:.0f} s ago in {o['heartbeat']}), not for this one: LabSpec started that "
+                "account's ls6t_bridge.vbs. Stop it in LabSpec, then start this account's own copy (Processing > "
+                f"Scripts, {Path(folder).parent / 'vbs' / 'ls6t_bridge.vbs'})")
     if not hb:
         return (f"the LabSpec bridge has not run here (no heartbeat in {folder}): start ls6t_bridge.vbs in LabSpec "
                 "(Processing > Scripts)")

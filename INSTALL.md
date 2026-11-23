@@ -190,6 +190,8 @@ It also creates the bridge folder `C:\Users\<you>\ls6t\bridge\` (with `inbox` an
 In **LabSpec 6**: *Processing > Scripts*. Add the discovery and bridge scripts (the manual's script manager allows adding, configuring and
 starting scripts). Run the scripts again after every `ls6t bridge install`, for example after an update.
 
+**Several Windows accounts on the instrument PC.** LabSpec's script list is the same for every account. Add the bridge from **your own** folder (`C:\Users\<you>\ls6t\vbs\ls6t_bridge.vbs`), not from the entry another account added. From 2026.11.23.9 the script uses the folders of the account that runs it whichever copy is started, and says so in LabSpec's status bar when that copy's version differs from your ls6t; `ls6t status` names another account's bridge when it is the one running.
+
 **What does this LabSpec offer?** `ls6t-typelib` reads LabSpec's ActiveX type library (`NFActiveX.ocx`). It lists
 every command and property of the installed version, and marks:
 
