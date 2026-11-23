@@ -657,6 +657,19 @@ values of "AutoExposure", whether SET_VALUE changes the live settings or a store
 (3) Only if SET_VALUE acts on the live settings: `ls6t profile set autoexposure.switch_off true`, AE on in LabSpec, a
 1 × 2 s spectrum. Pass: `exposure_s` 2 from LabSpec's header and LabSpec shows AE again afterwards. Until then AE is
 switched off by hand; ls6t stops a study whose exposure differs from the one asked.
+**Passed on .23.17 (2026-11-23, Si, 637.75 nm, 2400, 1 %, x100):** GET returns the value in the third argument
+(`ae_status_param` 0 with AE off, 1 with AE on; `ae_status_return` 0 both times), following the status bar. With
+`autoexposure.switch_off: true` and AE on, a 1 × 2 s spectrum ran at 2 s (LabSpec's header; Si 244.9, as earlier
+2 s spectra) and AE read 1 again afterwards: SET_VALUE acts on the live settings. From .23.18 `switch_off` is true
+by default, and each spectrum (`spectra[].auto_exposure`) and the study (`auto_exposure`: `before`, `switched_off`,
+`while_acquiring`, `off_during`, `after`, `restored`, `all_restored`) show it in the result. Flush: `t_flush_s` 0.05
+s (was 1.62). Largest overhead now `t_spectro_call_s` 6.0 s, just after a LabSpec restart (to watch: does it stay
+large in later studies?).
+**TEST_TEMPLATE at start (.23.18):** LabSpec's help documents no return values for SET / GET and no value list for
+"AutoExposure" (0 / 1 observed). The bridge calls `Template(TEST_TEMPLATE = 8, "", v)` once when it starts, with
+an AutoExposure read, and reports both in `ls6t instrument status` (`ping.template_test`, e.g. `return=…, value=…,
+autoexposure=1`). Note what it says on this XploRA, with AE on and off: if a return value tells a loaded plugin
+apart, ls6t can then refuse to rely on SET / GET when it is missing.
 
 **T4.9b LabSpec's AutoCalibration from ls6t (maintainer; the laser fires on Si).** `ls6t profile set calibration.autocal '{"enabled": true, "method": "call", "mode": "full"}'`, Si wafer in focus, 532 nm, 1200, 10 %; `ls6t instrument autocal-run`: LabSpec asks, then runs its AutoCalibration. Pass: `ok`, `changed` lists the 1200's parameters (as by hand: offset 34 -> 44 on 2026-11-23), and a calibration check after it passes. If the answer says LabSpec does not offer the call to scripts, set `"enabled": false` and keep running it from LabSpec's menu.
 

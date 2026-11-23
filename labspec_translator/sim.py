@@ -242,7 +242,8 @@ class SimLabSpec:
             self.warm = (f"started={time.strftime('%Y-%m-%dT%H:%M:%S')};grating_at={self._cur('Grating')[0]};"
                          "Grating=0;Filter=0;Laser=0;Hole=0;Slit=0;Spectro=0;")
         return {"protocol": BRIDGE_PROTOCOL, "version": f"sim {__version__}", "system": "XploRA",
-                "labspec_version": "6.6 (simulated)", "halted": int(self.halted), "warmup": self.warm}
+                "labspec_version": "6.6 (simulated)", "halted": int(self.halted), "warmup": self.warm,
+                "template_test": f"return=1, value=, autoexposure={int((self.dir / 'sim_autoexposure').exists())}"}
 
     def v_status(self, p):
         las, _ = self._cur("Laser")
@@ -1001,7 +1002,7 @@ class SimLabSpec:
                 extra["auto_exposure_set"] = 1
                 exp = exp * 1.5
             else:
-                extra["auto_exposure_set"] = 0
+                extra.update(auto_exposure_set=0, auto_exposure_after=1)
                 ae_on = False
         acc = max(1, int(float(p.get("accumulations", 1))))
         mode = int(float(p.get("mode", 10)))

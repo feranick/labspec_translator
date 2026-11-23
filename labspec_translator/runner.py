@@ -80,6 +80,26 @@ def motor_args(prof: dict) -> dict:
     return {**{f"m_{k}": v for k, v in prof["motors"].items()}, **shutter_args(prof)}
 
 
+def ae_record(r: dict) -> dict | None:
+    """LabSpec's AutoExposure around one acquisition, from the bridge's answer (read through its Template): the value
+    before, whether ls6t switched it off, the value read after switching and after putting it back."""
+    if r.get("auto_exposure_before") in (None, ""):
+        return None
+    before = _f(r.get("auto_exposure_before"))
+    out = {"before": before, "on_before": bool(before)}
+    if r.get("auto_exposure_set") not in (None, ""):
+        out.update(switched_off=True, while_acquiring=_f(r.get("auto_exposure_set")))
+        out["off_during"] = out["while_acquiring"] == 0
+    else:
+        out["switched_off"] = False
+    if r.get("auto_exposure_after") not in (None, ""):
+        out["after"] = _f(r.get("auto_exposure_after"))
+        out["restored"] = out["after"] == before
+    elif out["switched_off"]:
+        out["restored"] = None
+    return out
+
+
 def ae_off(prof: dict) -> int:
     """1 when the bridge may switch LabSpec's AutoExposure off through its template for a fixed exposure."""
     return int(bool((prof.get("autoexposure") or {}).get("switch_off")))
@@ -755,7 +775,8 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
                    "stage": {"x_um": ax, "y_um": ay, "z_um": zcur}, "file": str(out),
                    "native": params.get("native"), "id": r.get("id"), "t": round(time.time() - t_start, 3),
                    "exposure_s": _f(r.get("exposure_s")), "accumulations": _f(r.get("accumulations")),
-                   "detector_temp_c": _f(r.get("detector_temp_c")), "ics": ctx.last_ics}
+                   "detector_temp_c": _f(r.get("detector_temp_c")), "ics": ctx.last_ics,
+                   "auto_exposure": ae_record(r)}
             per_point.append(rec)
             # live view in LabSpec: the map or the series grows as it is measured
             if kind in ("map", "series") and r.get("id"):
@@ -2544,6 +2565,10 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
         warnings.append(f"a requested peak was not detected in {len(set(undetected))} spectra (see peaks[].why)")
 
     out: dict = {"files": {"folder": str(sd)}}
+    aes = [rec["auto_exposure"] for rec in per_point if rec.get("auto_exposure")]
+    if aes:             # LabSpec's AutoExposure around the acquisitions (2026-11-23: a pass visible in the result)
+        out["auto_exposure"] = dict(aes[0], spectra=len(aes),
+                                    all_restored=all(a.get("restored") is not False for a in aes))
     if ics_states:      # the ICS state of the spectra: intensities with and without ICS are not comparable
         out["ics"] = ics_states[0] if len(ics_states) == 1 else ics_states
     if kind == "map":
@@ -2795,8 +2820,8 @@ def parse_native_map(path, study: dict, prof: dict, x0, y0, zref) -> list:
 def _point_summary(r: dict) -> dict:
     keys = ("point", "offset", "stage", "file", "native", "t", "exposure_s", "accumulations", "max_counts",
             "saturated", "noise_sigma", "spikes", "from_cm1", "to_cm1", "peaks", "bands", "x_correction", "background",
-            "ics")
-    return {k: r.get(k) for k in keys}
+            "ics", "auto_exposure")
+    return {k: r.get(k) for k in keys if k != "auto_exposure" or r.get(k)}
 
 
 def _quantities(per_point, process) -> dict:

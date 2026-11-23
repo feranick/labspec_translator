@@ -21,6 +21,7 @@ gHaltPopup = False
 Dim gBlocking             ' the motor while a blocking MoveMotor runs (written in the heartbeat beforehand)
 Dim gBlockingS            ' the longest it may take, s (0: the default for a blocking move)
 Dim gAccountVersion       ' the ls6t version installed for the account running the bridge, when it differs
+Dim gTplTest              ' LabSpec's Template TEST_TEMPLATE at start: is the template plugin there (AutoExposure)
 Dim gMoveN                ' MoveMotor calls since this bridge started (1: its first; TESTING T3.16, a slow first move)
 gMoveN = 0
 gBlocking = ""
@@ -419,6 +420,7 @@ Sub VPing(cmd, res)
     If gAccountVersion <> "" Then res("account_version") = gAccountVersion
     If LS6T_DIR_NOTE <> "" Then res("dir_note") = LS6T_DIR_NOTE
     res("warmup") = gWarm                     ' each motor's first status at start (s): TESTING T3.16
+    res("template_test") = gTplTest
     res("system") = LSValue(0, "SystemName")
 End Sub
 
@@ -1270,6 +1272,31 @@ Function TplSet(name, value, res, tag)
     Else
         res(tag & "_return") = r
         TplSet = True
+    End If
+    On Error GoTo 0
+End Function
+
+' TEST_TEMPLATE (8): "test if the template plugin is loaded and if the specified template is available" (6.8.1
+' help; no return values documented): called once at start with no template name, its answer and the AutoExposure
+' read are recorded, so ls6t can tell a missing plugin from AE being off (TESTING T3.19)
+Function TplTest()
+    Dim r, v
+    v = ""
+    On Error Resume Next
+    r = LabSpec.Template(LS_TEMPLATE_TEST, "", v)
+    If Err.Number <> 0 Then
+        TplTest = "error: " & Err.Description
+        Err.Clear
+    Else
+        TplTest = "return=" & r & ", value=" & v
+    End If
+    v = ""
+    r = LabSpec.Template(LS_TEMPLATE_GET_VALUE, "AutoExposure", v)
+    If Err.Number <> 0 Then
+        TplTest = TplTest & ", autoexposure=error"
+        Err.Clear
+    Else
+        TplTest = TplTest & ", autoexposure=" & v
     End If
     On Error GoTo 0
 End Function
@@ -2834,6 +2861,7 @@ Sub BridgeMain()
     End If
     Err.Clear
     On Error GoTo 0
+    gTplTest = TplTest()
     OpenPopup
     LabSpec.Message "ls6t bridge " & LS6T_VERSION & " running (" & LS6T_BRIDGE_DIR & ")", LS_MB_STATUS_BAR
     If gAccountVersion <> "" Then

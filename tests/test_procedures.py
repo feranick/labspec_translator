@@ -468,13 +468,17 @@ def test_labspec_auto_exposure_does_not_replace_the_exposure_asked():
     S.ensure(bdir)
     (bdir / "sim_autoexposure").write_text("1")
     sp = {"kind": "spectrum", "sample": {"name": "Si"}, "setup": SETUP, "acquire": {"center_cm1": 520, "exposure_s": 2}}
-    # by default the bridge only reads AE (the template's write is not confirmed yet): LabSpec's AE wins, ls6t stops
+    # with switch_off false the bridge only reads AE: LabSpec's AE wins, ls6t stops
+    P.save(dict(P.load(), autoexposure={"switch_off": False}))
     st = run_inline({"s": sp})
     assert not st["studies"]["s"]["ok"] and "instead of the 2 s asked" in st["studies"]["s"]["why"]
-    P.save(dict(P.load(), autoexposure={"switch_off": True}))
+    P.save(dict(P.load(), autoexposure={"switch_off": True}))      # the default since T3.19 passed
     st = run_inline({"s": sp})
     s = st["studies"]["s"]
     assert s["reliable"] and s["spectra"][0]["exposure_s"] == 2
+    ae = s["auto_exposure"]                                          # the pass, visible in the result
+    assert ae["on_before"] and ae["switched_off"] and ae["off_during"] and ae["restored"] and ae["all_restored"]
+    assert s["spectra"][0]["auto_exposure"]["after"] == 1
     (bdir / "sim_ae_sticky").write_text("1")
     st = run_inline({"s": sp})
     s = st["studies"]["s"]
@@ -483,6 +487,8 @@ def test_labspec_auto_exposure_does_not_replace_the_exposure_asked():
     text = api.compose_vbs(bdir, config.home())["ls6t_bridge.vbs"]
     assert 'LabSpec.Template(LS_TEMPLATE_GET_VALUE, name, v)' in text and "Const LS_TEMPLATE_SET_VALUE = 3" in text
     assert 'TplSet("AutoExposure", aeOff, res, "ae_set")' in text and "PutValue 0, aeN" not in text
+    assert "gTplTest = TplTest()" in text and "Const LS_TEMPLATE_TEST = 8" in text      # the plugin, at start
+    assert "autoexposure=1" in api.instrument("status")["ping"]["template_test"]
 
 
 def test_shutter_used_only_once_shown_to_block_on_si(tmp_path):
