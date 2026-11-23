@@ -1077,6 +1077,12 @@ def test_connect_detect_and_disconnect(tmp_path, monkeypatch, capsys):
     cc = json.loads((u / ".claude.json").read_text())
     assert cc["numStartups"] == 7 and cc["projects"] == {"C:/x": {"mcpServers": {}}}
     assert cc["mcpServers"]["ls6t"]["type"] == "stdio" and cc["mcpServers"]["ls6t"]["command"] == sys.executable
+    # 2026-11-22: the install warned every time; only a running Claude Code session warns (not the desktop app)
+    assert C.is_claudecode_process("claude.exe", r"C:\Users\f\.local\bin\claude.exe", "")
+    assert C.is_claudecode_process("node.exe", r"C:\nodejs\node.exe", r"node C:\npm\@anthropic-ai\claude-code\cli.js")
+    assert not C.is_claudecode_process("claude.exe", r"C:\Program Files\WindowsApps\Claude_1_x64__p\app\claude.exe", "")
+    assert not C.is_claudecode_process("claude.exe", r"C:\Users\f\AppData\Local\AnthropicClaude\app-1\claude.exe", "")
+    assert not C.is_claudecode_process("claude.exe", "", "") and not C.is_claudecode_process("node.exe", "", "x.js")
     co = json.loads((u / ".copilot" / "mcp-config.json").read_text())["mcpServers"]["ls6t"]
     assert co["type"] == "stdio" and co["command"] == sys.executable and co["tools"] == ["status"]
     for d in ("windsurf", "windsurf-next"):
@@ -2411,3 +2417,44 @@ def test_orientation_kept_from_dark_frames_scale_step_marker_assumed(tmp_path):
     # CLI flag
     from labspec_translator import cli
     assert "--um" in Path(cli.__file__).read_text()
+
+
+def test_install_says_whether_a_bridge_ran_and_cleans_stale_claude_files(tmp_path, monkeypatch):
+    """2026-11-22, install.log: installs with no running bridge logged nothing (they could not be told from a missed
+    bridge), and from .24 the Store build's old Packages copy of the Claude configuration kept an ls6t entry."""
+    from labspec_translator import clients as C
+    from labspec_translator import winsetup as W
+
+    class Log:
+        def __init__(self):
+            self.lines, self.warnings = [], []
+
+        def __call__(self, m):
+            self.lines.append(m)
+
+        def warn(self, m):
+            self.warnings.append(m)
+    monkeypatch.setenv("LS6T_HOME", str(tmp_path / "home"))
+    log = Log()
+    rec = W.end_running_bridge(log)
+    assert rec["ended"] == "not running" and any(m.startswith("no running bridge found") for m in log.lines)
+    S.ensure(config.active_bridge_dir())
+    log = Log()
+    rec = W.end_running_bridge(log)
+    assert rec["ended"] == "cleanly" and rec["bridge_version"] and any("ended (cleanly)" in m for m in log.lines)
+    log = Log()
+    rec = W.end_running_bridge(log)            # now stopped
+    assert rec["bridge_was"] == "stopped" and any("stopped" in m and "no running bridge" in m for m in log.lines)
+    assert len((tmp_path / "home" / "deploy_log.jsonl").read_text().splitlines()) == 3
+    # the stale copy: any ls6t server there goes (an older Python's too); other servers stay
+    stale = tmp_path / "Packages" / "Claude_x" / "LocalCache" / "Roaming" / "Claude" / "claude_desktop_config.json"
+    stale.parent.mkdir(parents=True)
+    stale.write_text(json.dumps({"mcpServers": {
+        "ls6t": {"command": r"C:\old\python.exe", "args": ["-m", "labspec_translator.mcp_server"]},
+        "ls6t-sim": {"command": "other.exe", "args": ["serve"]}, "fs": {"command": "x"}}}))
+    monkeypatch.setattr(C, "claude_stale_files", lambda: [stale])
+    reps = C.clean_stale(sys.executable)
+    cfg = json.loads(stale.read_text())
+    assert set(cfg["mcpServers"]) == {"ls6t-sim", "fs"}
+    assert reps[0]["ok"] and "removed ls6t" in reps[0]["notes"][0] and reps[0]["backup"]
+    assert "no ls6t entry" not in C.clean_stale(sys.executable)[0]["notes"][0]      # ls6t-sim left: not ls6t's

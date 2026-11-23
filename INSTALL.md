@@ -39,6 +39,7 @@ network: it carries its own Python with every package. Use it unless you develop
    advanced requests; also *Start > ls6t > Prompts to try*).
 4. **Then** start `ls6t_bridge.vbs` in LabSpec (step [6](#6-install-the-labspec-scripts), from *"In LabSpec 6"*).
    An update ends a running bridge cleanly first (its window closes; `deploy_log.jsonl` records it): start it again.
+   `install.log` says which: "the running ls6t bridge was ended (cleanly)" or "no running bridge found" (with why).
    LabSpec need not be restarted for an update. The grating's first status after a start has sometimes taken
    30–50 s (cause under observation, `warmup_log.jsonl`); the bridge's start-up warm-up waits for it. When
    it starts, it reads the instrument's inventory and ls6t builds the machine profile from it by itself (cautious
@@ -307,7 +308,7 @@ ls6t tools appear in a new chat or session (Claude: the tools / connectors menu)
   its MCP settings; enable it there if it shows as off. Not yet tried on the instrument PC.
 - **Claude Code**: user scope, so every project sees ls6t. ls6t edits `.claude.json` itself (backed up first) rather
   than through `claude mcp add --scope user`, which some versions wrote under one project. Claude Code rewrites
-  this file while it runs: end its sessions first. Its tool timeout is Claude Code's `MCP_TOOL_TIMEOUT` (one
+  this file while it runs: end its sessions first (the installer warns only when it finds one running). Its tool timeout is Claude Code's `MCP_TOOL_TIMEOUT` (one
   setting for every server); ls6t's long calls report progress meanwhile.
 - **GitHub Copilot**: Copilot's own user file (`"type": "stdio"`, `"tools": ["*"]`), the one Microsoft recommends for
   new servers; the Copilot agent in VS Code and Visual Studio and Copilot CLI read it. A tool list you narrowed

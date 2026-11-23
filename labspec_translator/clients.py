@@ -1,5 +1,5 @@
 """clients.py — connecting ls6t's MCP server to the LLM apps on this computer (`ls6t connect`, and the installer).
-Version: 2026.11.22.12
+Version: 2026.11.22.13
 
 Each app keeps its MCP servers in its own file. ls6t knows eight that start local (stdio) servers:
 
@@ -95,6 +95,40 @@ def claude_is_running() -> bool:
     except (OSError, subprocess.SubprocessError):
         return False
     return "claude.exe" in (out or "").lower()
+
+
+def is_claudecode_process(name: str, path: str, cmdline: str) -> bool:
+    """A process of Claude Code, not of the Claude desktop app (both can be claude.exe): Claude Code's native
+    claude.exe lives outside the desktop app's folders (WindowsApps, AnthropicClaude), and its npm install runs as
+    node.exe with @anthropic-ai/claude-code on the command line."""
+    name, path, cmd = (name or "").lower(), (path or "").lower().replace("/", "\\"), (cmdline or "").lower()
+    if name == "node.exe":
+        return "claude-code" in cmd
+    if name == "claude.exe":
+        return bool(path) and not any(k in path for k in ("\\windowsapps\\", "\\anthropicclaude\\", "\\claude-3p\\"))
+    return False
+
+
+def claudecode_running() -> bool:
+    """Is a Claude Code session running now (Windows)? It rewrites .claude.json while it runs, so a change made
+    meanwhile can be lost: only then does connecting it warn (2026-11-22: a warning every time, with no session open,
+    made each install end 'with warnings')."""
+    if os.name != "nt":
+        return False
+    import subprocess
+    try:
+        out = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                              "Get-CimInstance Win32_Process -Filter \"Name='claude.exe' OR Name='node.exe'\" | "
+                              "ForEach-Object { $_.Name + [char]9 + $_.ExecutablePath + [char]9 + $_.CommandLine }"],
+                             capture_output=True, text=True, timeout=20,
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
+    except (OSError, subprocess.SubprocessError):
+        return False
+    for line in (out or "").splitlines():
+        parts = (line.split("\t") + ["", "", ""])[:3]
+        if is_claudecode_process(*parts):
+            return True
+    return False
 
 
 def claude_dirs(create: bool = False, running: bool = True) -> list[Path]:
@@ -310,11 +344,17 @@ def merge_server(cfg: dict, name: str, python: str, defaults: dict, forced: dict
     return cfg, note
 
 
-def remove_server(cfg: dict, name: str, python: str) -> tuple[dict, bool]:
+def is_ls6t_entry(e) -> bool:
+    """An entry that runs ls6t's MCP server, whichever Python (this install, an older one, a source checkout)."""
+    return isinstance(e, dict) and "labspec_translator.mcp_server" in " ".join(str(a) for a in e.get("args") or [])
+
+
+def remove_server(cfg: dict, name: str, python: str, any_ls6t: bool = False) -> tuple[dict, bool]:
+    """cfg without mcpServers[name] when it runs this Python (any_ls6t: any ls6t server, for files no app reads)."""
     cfg = dict(cfg or {})
     servers = dict(cfg.get("mcpServers") or {})
     old = servers.get(name)
-    if isinstance(old, dict) and _norm(old.get("command", "")) == _norm(python):
+    if isinstance(old, dict) and (_norm(old.get("command", "")) == _norm(python) or (any_ls6t and is_ls6t_entry(old))):
         servers.pop(name)
         cfg["mcpServers"] = servers
         return cfg, True
@@ -499,9 +539,10 @@ def connect(clients: list, python: str, sim: bool = False, main: bool = True, te
                         notes.append(n)
                     rep["backup"] = _str(write_json(path, cfg))
                 rep.update(ok=True, notes=notes)
-                if client == "claudecode":
-                    rep["warning"] = ("Claude Code rewrites this file while it runs: if a Claude Code session was "
-                                      "open, end it and check with `ls6t connect check claudecode`")
+                if client == "claudecode" and claudecode_running():
+                    rep["warning"] = ("a Claude Code session is running, and Claude Code rewrites this file while it "
+                                      "runs: end it, then check with `ls6t connect check claudecode` (if the entry "
+                                      "is gone: `ls6t connect claudecode`)")
                 if client == "claude" and claude_is_running():
                     rep["warning"] = ("the Claude app is running and rewrites this file when it quits: quit it fully "
                                       "(tray icon > Quit), then run `ls6t connect claude` again")
@@ -509,20 +550,36 @@ def connect(clients: list, python: str, sim: bool = False, main: bool = True, te
                 rep.update(ok=False, error=f"{type(exc).__name__}: {exc}: left unchanged; add ls6t by hand (INSTALL.md)")
             reports.append(rep)
         if client == "claude":
-            for stale in claude_stale_files():          # a folder the app no longer reads: take ours out
-                try:
-                    cfg = read_json(stale)
-                    gone = []
-                    for name in (ENTRY, SIM_ENTRY):
-                        cfg, g = remove_server(cfg, name, python)
-                        if g:
-                            gone.append(name)
-                    if gone:
-                        write_json(stale, cfg)
-                        reports.append({"client": client, "app": LABELS[client], "file": str(stale), "ok": True,
-                                        "notes": [f"removed {', '.join(gone)}: Claude no longer reads this file"]})
-                except (OSError, ValueError):
-                    pass
+            reports += clean_stale(python)
+    return reports
+
+
+def clean_stale(python: str) -> list[dict]:
+    """ls6t's entries out of the Claude configuration files the app no longer reads (a Store build that moved to
+    Claude-Data leaves its Packages\\...\\LocalCache copy behind): any ls6t server there, whichever Python wrote it,
+    since nothing reads the file (2026-11-22: the Packages copy kept an old entry from .24 on, silently). Each file
+    gets a report: removed, or why not."""
+    reports = []
+    for stale in claude_stale_files():
+        rep = {"client": "claude", "app": LABELS["claude"], "file": str(stale)}
+        try:
+            cfg = read_json(stale)
+            gone, kept = [], []
+            for name in (ENTRY, SIM_ENTRY):
+                cfg, g = remove_server(cfg, name, python, any_ls6t=True)
+                if g:
+                    gone.append(name)
+                elif name in (cfg.get("mcpServers") or {}):
+                    kept.append(name)
+            if gone:
+                rep["backup"] = _str(write_json(stale, cfg))
+            rep.update(ok=True, notes=[f"removed {', '.join(gone)}: the Claude app no longer reads this file"] if gone
+                       else [f"left {', '.join(kept)}: not an ls6t server"] if kept
+                       else ["no ls6t entry (the Claude app no longer reads this file)"])
+        except (OSError, ValueError) as exc:
+            rep.update(ok=False, error=f"{type(exc).__name__}: {exc}: the Claude app no longer reads this file; "
+                                       "remove its 'ls6t' entry by hand")
+        reports.append(rep)
     return reports
 
 

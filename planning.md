@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.22.12)
+## Architecture (version 2026.11.22.13)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -705,6 +705,19 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   ShowReadme at the Run-to-ShowReadme spacing (GetWindowRect + MapWindowPoints), their font and MUI_BGCOLOR,
   checked; FinishLeave opens PROMPTS.html. Start menu 'Prompts to try'. CI checks docs\PROMPTS.html. The page's
   look to be checked on the built installer (makensis not available here). 141 tests.
+- 2026-11-22, 2026.11.22.13: Nicola installed .12: it ended 'with warnings' because connect always set the
+  Claude Code warning (no session was open). clients.claudecode_running (Win32_Process claude.exe / node.exe:
+  is_claudecode_process: claude.exe outside WindowsApps / AnthropicClaude / Claude-3p, or node with claude-code on
+  the command line; an unreadable path counts as not Claude Code) gates the warning.
+  install.log (Nov 20-22): 'ended (cleanly)' only for .21.1 / .21.4. Sim check: end_running_bridge ends a running
+  bridge cleanly; the .12 20:23 install found it stopped (Nicola: deploy_log bridge_was stopped, ended not running),
+  so not a proven regression; .22.4 / .22.6 to be checked in deploy_log. Now: 'no running bridge found' logged either
+  way (no heartbeat / stopped N s ago / stale heartbeat state, verb, age, with what to do), a failed check warns
+  (was silent), deploy_log adds heartbeat_age_s, verb, bridge_version. Store Packages copy kept an old ls6t entry
+  from .24: clients.clean_stale removes any ls6t server (is_ls6t_entry: args name labspec_translator.mcp_server)
+  from files Claude no longer reads, reports each (removed / not ls6t's / no entry / error). Warm-up: LabSpec
+  20:29:56, bridge 24 s later, grating 0 s (with 18 s and 26 s also 0 s today): LabSpec-start explanation weak;
+  Nov 20-21 slow cases unexplained. 142 tests.
 
 ## To do next
 
