@@ -12,7 +12,7 @@ stops and cancel on the simulator, and `ls6t bench` gives known answers. What re
 LabSpec and hardware. The plan goes from no laser and no motion to an LLM app driving a full map, in stages. Each
 stage starts only when the previous one passed.
 
-Version under test: 2026.11.22.13 (bridge protocol 1).
+Version under test: 2026.11.22.14 (bridge protocol 1).
 
 **Already known** (2026-11-20, from the instrument's discovery dump, its `NFActiveX.ocx`, `OLConfig.ini`,
 `OLSetup.ini` and LabSpec 6.7.1's service scripts): the motors and their positions (lasers 532, 637.75, 785.04 nm;
@@ -195,7 +195,7 @@ Use *Start > ls6t PowerShell* (installer), or a PowerShell with the venv active 
 |---|---|---|
 | T0.1 | `ls6t status` | versions listed; `settings.LS6T_MODE` is `labspec`; `bridge.running` false |
 | T0.2 | `ls6t bench` | `"failed": []` (all 14 benchmarks pass on this PC) |
-| T0.3 | `ls6t connect check` | each connected app's ls6t entry starts and lists the tools (from source: also `pytest -q`). **After installing .22.13 or later:** quit the Claude app completely (tray icon > Quit), start it again, and check that the ls6t tools are there in a new chat; record `running_app_reads` from `ls6t connect check claude`, and whether `%LOCALAPPDATA%\Packages\Claude_<id>\LocalCache\Roaming\Claude` holds a `.user-data-left.<id>` file (the app's own sign that it moved to `Claude-Data`). If the tools are missing, Claude still read the `Packages` copy: `ls6t connect claude` and report it |
+| T0.3 | `ls6t connect check` | each connected app's ls6t entry starts and lists the tools (from source: also `pytest -q`). **After installing .22.14 or later:** quit the Claude app completely (tray icon > Quit), start it again, and check that the ls6t tools are there in a new chat; record `running_app_reads` from `ls6t connect check claude`, and whether `%LOCALAPPDATA%\Packages\Claude_<id>\LocalCache\Roaming\Claude` holds a `.user-data-left.<id>` file (the app's own sign that it moved to `Claude-Data`). If the tools are missing, Claude still read the `Packages` copy: `ls6t connect claude` and report it |
 | T0.4 | `dir $HOME\ls6t\vbs` | three scripts (bridge, discovery, the optional script-motor logger) and the bridge folder exist (the installer wrote them; from source: `ls6t bridge install`) |
 
 ## T1. Discovery (no laser, no motion)
