@@ -270,6 +270,16 @@ With the maintainer, go through:
   `{"off": "Off", "on": "On", "by": "label"}`), refuses to acquire unless it reads back Off, watches it during the
   acquisition (cancels if LabSpec opens it) and records it (`laser_shutter` in the background's result); a background
   with Raman lines while the shutter was trusted is not stored and is unreliable.
+  **Can the bridge read the shutter during an acquisition? (.23.14)** LabSpec's Acq has held the script until the
+  spectrum was taken (the extended-range acquisitions that looked stuck). Then the "during" reads start only
+  afterwards, and LabSpec could open the shutter for the acquisition and close it again unseen. In step 2, note in
+  `laser_shutter`: `acq_call_held_s` (how long Acq kept the bridge), `after_acq_until_data_s`, `reads`,
+  `first_read_s`, `watched_fraction` and `during_checked`. Pass for the read-backs to count as a check during the
+  acquisition: `during_checked` true (at least one read while LabSpec was still acquiring, `after_acq_until_data_s`
+  ≥ 0.5 s). If false, ls6t says so in `warnings`, and only the spectral test protects.
+  **What protects, in order:** the spectral test (step 2, on Si), `shutter-test`, and the read-backs. The
+  background's narrow-line check is only a backstop: it caught the XploRA failure because Si has a strong, narrow
+  line; on a sample with only broad features or fluorescence an unblocked laser would go unnoticed.
 
 Then import the edited file, which checks it and marks it reviewed:
 

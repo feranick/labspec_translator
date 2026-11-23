@@ -241,6 +241,36 @@ def timing(calls: list, per_point: list, total_s: float) -> dict:
 EXPOSURE_TOL = 0.02     # LabSpec's exposure within 2 % of the one asked
 
 
+WATCH_MIN_S = 0.5      # the bridge read the shutter while LabSpec was still acquiring for at least this long
+
+
+def shutter_report(r: dict, warnings: list) -> dict:
+    """What the bridge read of the laser shutter around a laser_off acquisition, and whether it could read it during
+    the acquisition at all: LabSpec's Acq can hold the script until the spectrum is taken (2026-11-23), and then the
+    reads start only afterwards; LabSpec could have opened and closed the shutter unseen. The spectral test (TESTING
+    T1.2 step 2) is the real check; the background's narrow-line check only catches samples with sharp lines (Si)."""
+    out = {k: r.get(k) for k in ("shutter_mode_before", "shutter_label_before", "shutter_closed_label",
+                                 "shutter_closed_value", "shutter_closed_mode", "shutter_closed_by", "shutter_during",
+                                 "shutter_label_after") if r.get(k) not in (None, "")}
+    held, after = _f(r.get("t_acq_call_s")), _f(r.get("t_until_data_s"))
+    reads = int(_f(r.get("shutter_reads")) or 0)
+    out.update(reads=reads, first_read_s=_f(r.get("shutter_first_read_s")), acq_call_held_s=held,
+               after_acq_until_data_s=after)
+    if held is not None and after is not None and held + after > 0:
+        out["watched_fraction"] = round(after / (held + after), 3)
+        out["during_checked"] = bool(reads and after >= WATCH_MIN_S)
+        if not out["during_checked"]:
+            warnings.append(f"the bridge could not read the laser shutter during the acquisition: LabSpec's Acq held it "
+                            f"for {held:.1f} s and the data came {after:.1f} s later, so only the reads before and "
+                            "after count; LabSpec could have opened and closed the shutter unseen. Only the spectral "
+                            "test (TESTING T1.2 step 2) shows that the beam was blocked")
+    else:
+        out["during_checked"] = None
+    out["note"] = ("read-backs and the shutter test are the protection; the narrow-line check on the background "
+                   "only catches samples with sharp Raman lines (Si), not broad features or fluorescence")
+    return out
+
+
 def _acquire_lock(folder: Path, ctx_beat) -> None:
     lp = lock_path()
     lp.parent.mkdir(parents=True, exist_ok=True)
@@ -1923,9 +1953,7 @@ def run_background(name: str, study: dict, ctx: Ctx) -> dict:
             "objective": su["after"].get("objective"), "exposure_s": ex,
             "accumulations": int(_f(r.get("accumulations")) or 1), "range": rng, "request": str(ctx.folder),
             "laser_off": off}
-    shut = {k: r.get(k) for k in ("shutter_mode_before", "shutter_label_before", "shutter_closed_label",
-                                  "shutter_closed_value", "shutter_closed_mode", "shutter_closed_by", "shutter_during",
-                                  "shutter_label_after") if r.get(k) not in (None, "")} if off == "shutter" else {}
+    shut = shutter_report(r, warnings) if off == "shutter" else {}
     blocked_doubt = any("NOT blocked" in u for u in unreliable)
     stored = (BG.save(bname, sp["x"], cps, sp["meta"].get("x_unit", "nm"), meta) if not blocked_doubt else
               {"name": bname, "stored": False})

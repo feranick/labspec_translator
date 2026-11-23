@@ -432,6 +432,14 @@ def test_laser_off_shutter_is_read_back_and_checked(tmp_path):
     st = run_inline({"b": bg})
     r = st["studies"]["b"]
     assert r["reliable"] and r["laser_shutter"]["shutter_closed_label"] == "Off" and r["background"].get("stored", True)
+    assert r["laser_shutter"]["during_checked"] is True and r["laser_shutter"]["reads"] > 1
+    # LabSpec's Acq holds the bridge until the spectrum is taken: no read during it, and the result says so
+    (bdir / "sim_acq_holds").write_text("1")
+    st = run_inline({"b": dict(bg, background={"name": "shut1", "laser_off": "shutter"})})
+    r = st["studies"]["b"]
+    assert r["laser_shutter"]["during_checked"] is False
+    assert any("could not read the laser shutter during the acquisition" in w for w in r["warnings"])
+    (bdir / "sim_acq_holds").unlink()
     (bdir / "sim_shutter_ignored").write_text("1")            # reads Off, beam still passes: the Si line is there
     st = run_inline({"b": dict(bg, background={"name": "shut2", "laser_off": "shutter"})})
     r = st["studies"]["b"]

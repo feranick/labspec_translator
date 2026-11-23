@@ -29,7 +29,9 @@ Dim gInbox, gOutbox, gHb, gStopFlag, gHalted, gQuit, gLastBeat, gLastPopup, gPop
 Dim gVerb, gSeq, gLastSeq, gChunk
 Dim gLaserOpen, gLaserT0, gLaserS, gLaserMotor, gLaserOldMode, gLaserOffLabel, gLaserBy
 Dim gShutterWatch, gShutterOff, gShutterSeen   ' a laser_off acquisition: the shutter read back while it runs
+Dim gShutterReads, gShutterT0, gShutterFirstS  ' how many reads, and when (s after Acq was called)
 gShutterWatch = ""
+gShutterReads = 0
 gShutterSeen = ""
 gLaserOffLabel = "Off"
 gLaserBy = "label"
@@ -341,6 +343,10 @@ Function ShutterOpened()
     ShutterOpened = False
     If gShutterWatch = "" Then Exit Function
     lab = MotorLabel(gShutterWatch)
+    ' LabSpec's Acq can hold the script until the spectrum is taken: then these reads only start afterwards (ls6t
+    ' compares their times with the acquisition's, TESTING T1.2)
+    gShutterReads = gShutterReads + 1
+    If gShutterReads = 1 Then gShutterFirstS = Elapsed(gShutterT0)
     If InStr("," & gShutterSeen & ",", "," & lab & ",") = 0 Then
         If gShutterSeen = "" Then
             gShutterSeen = lab
@@ -1284,9 +1290,14 @@ Sub VAcquireLaser(cmd, res)
     gShutterWatch = shutter
     gShutterOff = GetP(cmd, "shutter_off", "Off")
     gShutterSeen = ""
+    gShutterReads = 0
+    gShutterFirstS = -1
+    gShutterT0 = Timer
     VAcquireInner cmd, res
     gShutterWatch = ""
     res("shutter_during") = gShutterSeen
+    res("shutter_reads") = gShutterReads
+    If gShutterReads > 0 Then res("shutter_first_read_s") = Secs(gShutterFirstS)
     res("shutter_label_after") = MotorLabel(shutter)
     RestoreShutterMode oldMode
     res("laser_off") = 1
@@ -1384,6 +1395,7 @@ Sub VAcquireInner(cmd, res)
     gBlocking = "acquire"
     gBlockingS = tmo
     Beat "busy", True
+    gShutterT0 = Timer
     LabSpec.Acq mode, ex, acc, f, t
     res("t_acq_call_s") = Secs(Elapsed(tp))              ' Acq itself (it can hold the script)
     tp = Timer

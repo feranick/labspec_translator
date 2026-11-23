@@ -973,6 +973,7 @@ class SimLabSpec:
         if laser_off and p.get("m_laser_shutter", "") not in self.m:
             return {"ok": 0, "error": "laser_off needs the laser shutter's motor name"}
         extra: dict = {}
+        laser_off_asked, holds = laser_off, False
         if laser_off:
             # the bridge closes the shutter by label and reads it back; it cancels if LabSpec opens it meanwhile
             sh = p["m_laser_shutter"]
@@ -986,6 +987,8 @@ class SimLabSpec:
                         "error": "the laser shutter read back 'On' during the acquisition (LabSpec opened it): "
                                  "cancelled; laser_off 'shutter' does not block the laser on this instrument"}
             extra.update(shutter_during=lab, shutter_label_after=lab)
+            # sim_acq_holds: LabSpec's Acq keeps the script until the spectrum is taken (no reads during it)
+            holds = (self.dir / "sim_acq_holds").exists()
             if (self.dir / "sim_shutter_ignored").exists():     # it reads Off, but the beam still passes
                 laser_off = False
         exp = float(p.get("exposure_s", 1.0))
@@ -1065,8 +1068,12 @@ class SimLabSpec:
         return {"id": sid, "out": str(out), "points": int(nm.size), "x_unit": "nm", "y_unit": "cnt",
                 "max_counts": float(y.max()), "exposure_s": float(p.get("exposure_s", 1.0)) or exp, "accumulations": acc,
                 **extra,
-                "detector_temp_c": self.temp_c, "windows": windows, "t_acq_call_s": 0.01,
-                "t_until_data_s": round(time.monotonic() - t_w, 3),
+                "detector_temp_c": self.temp_c, "windows": windows,
+                **({"t_acq_call_s": round(time.monotonic() - t_w, 3), "t_until_data_s": 0.02} if laser_off_asked and holds
+                   else {"t_acq_call_s": 0.01, "t_until_data_s": max(round(time.monotonic() - t_w, 3), 0.6)}),
+                **({"shutter_reads": 1 if holds else 12,
+                    "shutter_first_read_s": round(time.monotonic() - t_w, 3) if holds else 0.01}
+                   if laser_off_asked else {}),
                 **({"spectro_asked_nm": f_nm, "spectro_nm": f_nm} if abs(t_nm - f_nm) < 1e-9 else {})}
 
 
