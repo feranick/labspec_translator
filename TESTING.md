@@ -12,7 +12,7 @@ stops and cancel on the simulator, and `ls6t bench` gives known answers. What re
 LabSpec and hardware. The plan goes from no laser and no motion to an LLM app driving a full map, in stages. Each
 stage starts only when the previous one passed.
 
-Version under test: 2026.11.22.9 (bridge protocol 1).
+Version under test: 2026.11.22.10 (bridge protocol 1).
 
 **Already known** (2026-11-20, from the instrument's discovery dump, its `NFActiveX.ocx`, `OLConfig.ini`,
 `OLSetup.ini` and LabSpec 6.7.1's service scripts): the motors and their positions (lasers 532, 637.75, 785.04 nm;
@@ -51,7 +51,7 @@ manual, and where LabSpec keeps its calibration. The open questions below say wh
    `laser_off: operator` rely on a physical beam block (LabSpec opens its shutter as usual). From a Remote Desktop
    session ls6t refuses them (`LS6T_HAND_BLOCK_REMOTE_OK=1` only with someone in the room blocking the beam).
 8. **The LLM reaches the instrument only through ls6t's tools.** An app that can also run commands on the PC
-   (ChatGPT desktop / Codex, Gemini CLI, Claude with a terminal) must not drive LabSpec by scripts, COM/ActiveX or
+   (ChatGPT desktop / Codex, Gemini CLI, Cursor, Claude with a terminal) must not drive LabSpec by scripts, COM/ActiveX or
    the bridge's files: that bypasses every check above and can freeze LabSpec (a 2026-11-20 session opened LabSpec's
    *About NFActiveX Control* dialog this way and the bridge stopped). Set the app to ask before each command
    (INSTALL.md, step 8) and refuse commands that touch LabSpec.
@@ -150,7 +150,7 @@ Q1–Q45, and the measured times, and lists anything to change.
 
 ## Running the tests from the chat (test mode)
 
-The tests can also be run by talking to the LLM app (Claude, ChatGPT / Codex, Gemini CLI) instead of typing the
+The tests can also be run by talking to the LLM app (Claude, ChatGPT / Codex, Gemini CLI, Cursor) instead of typing the
 commands. The LLM reads each test from this file, tells the maintainer what to do in LabSpec, checks what it can
 itself (the bridge's state, read-backs, spectra, snapshots), asks about what only a person can see, runs the
 commands, and records the result and the answers to the open questions in the same log and report.
@@ -158,7 +158,7 @@ commands, and records the result and the answers to the open questions in the sa
 1. Turn test mode on for the app (it is off by default; normal use never offers these commands):
 
    ```powershell
-   ls6t connect claude --test         # or codex / gemini; add --sim to practise on the simulator first
+   ls6t connect claude --test         # or codex / gemini / cursor; add --sim to practise on the simulator first
    ```
 
    Restart the app. A new tool, `hardware_test`, appears. `ls6t connect claude --no-test` turns it off again.

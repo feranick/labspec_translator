@@ -55,7 +55,7 @@ VIAddVersionKey "LegalCopyright" "MIT license"
 
 !define MUI_ABORTWARNING
 !define MUI_WELCOMEPAGE_TITLE "${APPNAME} ${VERSION}"
-!define MUI_WELCOMEPAGE_TEXT "This installs ls6t, which lets an LLM app (the Claude desktop app, the ChatGPT desktop app / Codex, or Gemini CLI) run Raman measurements on a HORIBA instrument through LabSpec 6, while the operator watches and can stop it at any time.$\r$\n$\r$\nEverything is installed for your Windows account only (no administrator rights): a private Python, the ls6t commands, and the LabSpec scripts in $PROFILE\ls6t\vbs.$\r$\n$\r$\nInstall it with the Windows account that runs LabSpec.$\r$\n$\r$\nBefore continuing: QUIT the LLM apps that use ls6t (Claude: right-click its tray icon, Quit; closing its window is not enough): the installation cannot go on while they run. LabSpec can stay open: a running ls6t bridge is ended cleanly, and you start ls6t_bridge.vbs again in LabSpec yourself after the installation (the installer cannot start it). LabSpec need not be restarted."
+!define MUI_WELCOMEPAGE_TEXT "This installs ls6t, which lets an LLM app (the Claude desktop app, the ChatGPT desktop app / Codex, Gemini CLI or Cursor) run Raman measurements on a HORIBA instrument through LabSpec 6, while the operator watches and can stop it at any time.$\r$\n$\r$\nEverything is installed for your Windows account only (no administrator rights): a private Python, the ls6t commands, and the LabSpec scripts in $PROFILE\ls6t\vbs.$\r$\n$\r$\nInstall it with the Windows account that runs LabSpec.$\r$\n$\r$\nBefore continuing: QUIT the LLM apps that use ls6t (Claude: right-click its tray icon, Quit; closing its window is not enough): the installation cannot go on while they run. LabSpec can stay open: a running ls6t bridge is ended cleanly, and you start ls6t_bridge.vbs again in LabSpec yourself after the installation (the installer cannot start it). LabSpec need not be restarted."
 !define MUI_COMPONENTSPAGE_SMALLDESC
 !define MUI_FINISHPAGE_TITLE "ls6t is installed"
 !define MUI_FINISHPAGE_TEXT "Next steps (INSTALL.md, 'The installer'):$\r$\n$\r$\n1. In LabSpec 6: Processing > Scripts, start ls6t_bridge.vbs from $PROFILE\ls6t\vbs (add it first if it is not listed). If an ls6t bridge was running, the installer has ended it (its window closed): start it again now. It reads the instrument (lasers, gratings, filters, objectives) and ls6t builds its machine profile from that by itself (cautious: lasers capped at 10 %).$\r$\n2. Quit and restart the LLM apps connected: the ls6t tools appear in a new chat. (An app installed later: ls6t connect auto.)$\r$\n3. With the maintainer, review the profile and set the limits (INSTALL.md step 7, TESTING.md T1)."
@@ -89,7 +89,7 @@ VIAddVersionKey "LegalCopyright" "MIT license"
       FileClose $0
       ${ExitDo}
     ${EndIf}
-    MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "ls6t is running from $INSTDIR: an LLM app using it (Claude, ChatGPT, Codex, Gemini CLI), an ls6t window, or a measurement in progress.$\r$\n$\r$\nQuit those apps (Claude: right-click its tray icon, Quit), close ls6t windows, let any measurement finish, then press Retry." /SD IDCANCEL IDRETRY +2
+    MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "ls6t is running from $INSTDIR: an LLM app using it (Claude, ChatGPT, Codex, Gemini CLI, Cursor), an ls6t window, or a measurement in progress.$\r$\n$\r$\nQuit those apps (Claude: right-click its tray icon, Quit), close ls6t windows, let any measurement finish, then press Retry." /SD IDCANCEL IDRETRY +2
     Abort "ls6t is still running: nothing was changed."
   ${Loop}
 !macroend
@@ -134,6 +134,8 @@ SectionGroup /e "Connect ls6t to the LLM apps found" SecApps
   SectionEnd
   Section /o "Gemini CLI" SecGemini
   SectionEnd
+  Section /o "Cursor" SecCursor
+  SectionEnd
   Section /o "Also the simulator (ls6t-sim, to practise)" SecSim
   SectionEnd
 SectionGroupEnd
@@ -161,6 +163,9 @@ Section "-setup" SecSetup
   ${If} ${SectionIsSelected} ${SecGemini}
     StrCpy $1 "$1 --gemini"
   ${EndIf}
+  ${If} ${SectionIsSelected} ${SecCursor}
+    StrCpy $1 "$1 --cursor"
+  ${EndIf}
   ${If} ${SectionIsSelected} ${SecSim}
     StrCpy $1 "$1 --sim"
   ${EndIf}
@@ -186,6 +191,7 @@ SectionEnd
   !insertmacro MUI_DESCRIPTION_TEXT ${SecApps} "Adds the 'ls6t' MCP server to the apps ticked (each file is backed up first; your other servers and ls6t settings are kept). The apps found on this PC are ticked. Later: ls6t connect."
   !insertmacro MUI_DESCRIPTION_TEXT ${SecClaude} "Claude desktop app: claude_desktop_config.json, where the app reads it (Microsoft Store builds: %LOCALAPPDATA%\Claude-Data\claude_...). Quit Claude (tray icon > Quit) before installing: it rewrites the file when it quits."
   !insertmacro MUI_DESCRIPTION_TEXT ${SecCodex} "ChatGPT desktop app, Codex CLI and Codex IDE extension (they share %USERPROFILE%\.codex\config.toml)."
+  !insertmacro MUI_DESCRIPTION_TEXT ${SecCursor} "Cursor (its agent and chat, every project): %USERPROFILE%\.cursor\mcp.json."
   !insertmacro MUI_DESCRIPTION_TEXT ${SecGemini} "Gemini CLI: %USERPROFILE%\.gemini\settings.json. (The Gemini app and ChatGPT on the web take only internet servers and cannot use ls6t.)"
   !insertmacro MUI_DESCRIPTION_TEXT ${SecPath} "Lets any new PowerShell window run ls6t, ls6t-mcp and ls6t-typelib."
   !insertmacro MUI_DESCRIPTION_TEXT ${SecMenu} "Start menu: ls6t PowerShell, the LabSpec scripts folder, the guides, Uninstall."
@@ -195,7 +201,7 @@ SectionEnd
 ;------------------------------------------------------------------------------------------------- choosing the apps
 
 ; ticks the apps found on this PC (the same checks as labspec_translator.clients.detect). From the command line
-; (/S installs), /CLAUDE /CODEX /GEMINI /SIM choose instead, and /NOAPPS connects none.
+; (/S installs), /CLAUDE /CODEX /GEMINI /CURSOR /SIM choose instead, and /NOAPPS connects none.
 !macro TickIf sec
   ${If} $R9 == "1"
     !insertmacro SelectSection ${sec}
@@ -244,6 +250,12 @@ Function .onInit
     !insertmacro SelectSection ${SecGemini}
   ${EndIf}
   ClearErrors
+  ${GetOptions} $R0 "/CURSOR" $R2
+  ${IfNot} ${Errors}
+    StrCpy $R1 "1"
+    !insertmacro SelectSection ${SecCursor}
+  ${EndIf}
+  ClearErrors
   ${GetOptions} $R0 "/NOAPPS" $R2
   ${IfNot} ${Errors}
     StrCpy $R1 "1"
@@ -284,6 +296,14 @@ Function .onInit
   !insertmacro FoundExe "gemini.cmd"
   !insertmacro FoundExe "gemini.exe"
   !insertmacro TickIf ${SecGemini}
+  ; Cursor
+  StrCpy $R9 "0"
+  ${If} ${FileExists} "$PROFILE\.cursor\*.*"
+  ${OrIf} ${FileExists} "$LOCALAPPDATA\Programs\cursor\Cursor.exe"
+    StrCpy $R9 "1"
+  ${EndIf}
+  !insertmacro FoundExe "cursor.cmd"
+  !insertmacro TickIf ${SecCursor}
 FunctionEnd
 
 ; ------------------------------------------------------------------------------------------------ uninstall

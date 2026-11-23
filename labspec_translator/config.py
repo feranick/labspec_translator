@@ -1,5 +1,5 @@
 """config.py — settings (environment variables only) and the folders ls6t writes to.
-Version: 2026.11.22.9
+Version: 2026.11.22.10
 
 | Variable | Meaning | Default |
 |---|---|---|

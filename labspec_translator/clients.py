@@ -1,13 +1,14 @@
 """clients.py — connecting ls6t's MCP server to the LLM apps on this computer (`ls6t connect`, and the installer).
-Version: 2026.11.22.9
+Version: 2026.11.22.10
 
-Each app keeps its MCP servers in its own file. ls6t knows three that start local (stdio) servers:
+Each app keeps its MCP servers in its own file. ls6t knows four that start local (stdio) servers:
 
 | client  | app                                                     | file                                             |
 |---------|---------------------------------------------------------|--------------------------------------------------|
 | claude  | Claude desktop app                                      | %APPDATA%\\Claude\\claude_desktop_config.json (and the Microsoft Store copy's folder; macOS ~/Library/Application Support/Claude) |
 | codex   | ChatGPT desktop app, Codex CLI and IDE extension (they share it) | %CODEX_HOME% or ~/.codex/config.toml (TOML) |
 | gemini  | Gemini CLI                                              | ~/.gemini/settings.json                          |
+| cursor  | Cursor (the editor; its agent and chat)                 | ~/.cursor/mcp.json (global: every project)       |
 
 The Gemini app and ChatGPT on the web take only remote servers (an internet address): ls6t does not offer the
 instrument to the internet, so they cannot use it.
@@ -41,8 +42,9 @@ ENTRY = "ls6t"
 SIM_ENTRY = "ls6t-sim"
 MODULE_ARGS = ["-m", "labspec_translator.mcp_server"]
 TOOL_TIMEOUT_S = 3600          # a tool may wait for the operator's answer in LabSpec
-CLIENTS = ("claude", "codex", "gemini")
-LABELS = {"claude": "Claude desktop app", "codex": "ChatGPT desktop app / Codex", "gemini": "Gemini CLI"}
+CLIENTS = ("claude", "codex", "gemini", "cursor")
+LABELS = {"claude": "Claude desktop app", "codex": "ChatGPT desktop app / Codex", "gemini": "Gemini CLI",
+          "cursor": "Cursor"}
 
 
 def _norm(p) -> str:
@@ -164,6 +166,11 @@ def gemini_file() -> Path:
     return _home() / ".gemini" / "settings.json"
 
 
+def cursor_file() -> Path:
+    """Cursor's global MCP file (every project; a project's own .cursor/mcp.json can add more)."""
+    return _home() / ".cursor" / "mcp.json"
+
+
 def files(client: str, create: bool = False) -> list[Path]:
     if client == "claude":
         return claude_files(create)
@@ -171,6 +178,8 @@ def files(client: str, create: bool = False) -> list[Path]:
         return [codex_file()]
     if client == "gemini":
         return [gemini_file()]
+    if client == "cursor":
+        return [cursor_file()]
     raise ValueError(f"client {client!r}: {', '.join(CLIENTS)}")
 
 
@@ -190,7 +199,13 @@ def detect() -> dict:
         found["codex"].append(str(codex_file().parent))
     if gemini_file().parent.is_dir():
         found["gemini"].append(str(gemini_file().parent))
-    for client in ("codex", "gemini"):         # the CLIs, installed with npm or winget
+    if cursor_file().parent.is_dir():
+        found["cursor"].append(str(cursor_file().parent))
+    if os.name == "nt" and local and (Path(local) / "Programs" / "cursor" / "Cursor.exe").exists():
+        found["cursor"].append(str(Path(local) / "Programs" / "cursor"))
+    if sys.platform == "darwin" and Path("/Applications/Cursor.app").is_dir():
+        found["cursor"].append("/Applications/Cursor.app")
+    for client in ("codex", "gemini", "cursor"):   # the CLIs (npm, winget) and Cursor's `cursor` command
         w = shutil.which(client)
         if w:
             found[client].append(w)
@@ -203,6 +218,8 @@ def _entry(client: str, python: str, env: dict) -> dict:
     e = {"command": str(python), "args": list(MODULE_ARGS), "env": dict(env)}
     if client == "gemini":
         e.update(timeout=TOOL_TIMEOUT_S * 1000, trust=False)    # trust false: Gemini CLI asks before each tool
+    if client == "cursor":
+        e = {"type": "stdio", **e}            # Cursor's documented form for a local server
     return e
 
 

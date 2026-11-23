@@ -19,7 +19,7 @@ network: it carries its own Python with every package. Use it unless you develop
 1. **Get it**: from the repository's *Releases* page (it is built for every version, see
    [Building the installer](#building-the-installer)), or build it yourself. Copy it to the instrument PC.
 2. **Log in with the Windows account that runs LabSpec**, and quit the LLM apps (Claude: right-click its icon in the
-   taskbar's notification area, *Quit*; closing its window is not enough; ChatGPT; Codex; Gemini CLI): the
+   taskbar's notification area, *Quit*; closing its window is not enough; ChatGPT; Codex; Gemini CLI; Cursor): the
    installation cannot go on while they run. LabSpec can stay open.
 3. **Run it.** The installer is not code-signed, so Windows SmartScreen may say *"Windows protected your PC"*: *More
    info > Run anyway*. Choose the components:
@@ -27,7 +27,7 @@ network: it carries its own Python with every package. Use it unless you develop
    | Component | Default | What it does |
    |---|---|---|
    | ls6t | always | The commands, the MCP server, a private Python, the guides; writes the LabSpec scripts to `%USERPROFILE%\ls6t\vbs` |
-   | Connect ls6t to the LLM apps found | the apps found are ticked | Adds the `ls6t` MCP server to the Claude desktop app, the ChatGPT desktop app / Codex, and Gemini CLI: each one ticked (see [step 8](#8-connect-an-llm-app); files backed up first) |
+   | Connect ls6t to the LLM apps found | the apps found are ticked | Adds the `ls6t` MCP server to the Claude desktop app, the ChatGPT desktop app / Codex, Gemini CLI and Cursor: each one ticked (see [step 8](#8-connect-an-llm-app); files backed up first) |
    | Add ls6t to PATH | on | `ls6t`, `ls6t-mcp`, `ls6t-typelib` in any new PowerShell window |
    | Start menu shortcuts | on | *ls6t PowerShell*, *LabSpec scripts (ls6t)*, *ls6t guides*, *Uninstall ls6t* |
    | Also the simulator | off | Also adds `ls6t-sim`, the same tools on the built-in simulator, to those apps |
@@ -61,7 +61,7 @@ waits.)
 Uninstall ls6t*. It removes the program, the PATH entry and the `ls6t` entries it finds in the LLM apps; your data stays.
 
 **Silent install** (for IT): `ls6t-setup-<version>.exe /S` installs with the defaults (the apps found are connected);
-`/CLAUDE /CODEX /GEMINI` choose the apps instead, `/NOAPPS` none, `/SIM` adds the simulator entries; `/D=C:\path\ls6t`
+`/CLAUDE /CODEX /GEMINI /CURSOR` choose the apps instead, `/NOAPPS` none, `/SIM` adds the simulator entries; `/D=C:\path\ls6t`
 (last on the line) changes the folder.
 
 ### Building the installer
@@ -266,6 +266,7 @@ ls6t's MCP server works with every app that starts local (stdio) MCP servers. On
 | `claude` | Claude desktop app | `claude_desktop_config.json` in the folder the app reads: Microsoft Store builds (current) `%LOCALAPPDATA%\Claude-Data\claude_<id>\`; older Store builds `%LOCALAPPDATA%\Packages\Claude_<id>\LocalCache\Roaming\Claude\`; the installer from claude.ai `%APPDATA%\Claude\` |
 | `codex` | ChatGPT desktop app, Codex CLI and Codex IDE extension: they share one file | `%USERPROFILE%\.codex\config.toml` (or `%CODEX_HOME%`) |
 | `gemini` | Gemini CLI | `%USERPROFILE%\.gemini\settings.json` |
+| `cursor` | Cursor (its agent and chat, in every project) | `%USERPROFILE%\.cursor\mcp.json` (global; a project's own `.cursor\mcp.json` can add servers) |
 
 The Gemini app and ChatGPT on the web take only remote servers (an internet address). ls6t does not put the
 instrument on the internet, so they cannot use it; use Gemini CLI or the ChatGPT desktop app on the instrument PC.
@@ -294,9 +295,12 @@ ls6t tools appear in a new chat or session (Claude: the tools / connectors menu)
   sets `tool_timeout_sec = 3600` (and `startup_timeout_sec = 60`). A report from 2026 says local servers' tools may
   not reach ordinary chats in the Windows desktop app; Codex tasks do get them.
 - **Gemini CLI**: the entry keeps `trust: false`, so Gemini CLI asks before each tool call; `timeout` is one hour.
+- **Cursor**: the entry is `"type": "stdio"` with the same command and settings; Cursor's file has no timeout
+  setting, and ls6t's long calls report progress while they wait for the operator. Cursor lists the server under
+  its MCP settings; enable it there if it shows as off. Not yet tried on the instrument PC.
 
-**Apps that can also run commands on the PC.** The ChatGPT desktop app / Codex and Gemini CLI (and Claude with a
-terminal extension) can run shell commands. An LLM that cannot find what it wants in ls6t's tools may then try to
+**Apps that can also run commands on the PC.** The ChatGPT desktop app / Codex, Gemini CLI and Cursor (and Claude
+with a terminal extension) can run shell commands. An LLM that cannot find what it wants in ls6t's tools may then try to
 drive LabSpec directly, with scripts, its ActiveX control or the bridge's files. That bypasses the operator's
 confirmations and ls6t's limits, and can freeze LabSpec: a modal dialog stops LabSpec's scripts, the bridge with
 them. ls6t's instructions forbid it, but on the instrument PC also make the app ask before every command:
@@ -305,6 +309,7 @@ them. ls6t's instructions forbid it, but on the instrument PC also make the app 
   `sandbox_mode = "read-only"` (or choose the read-only, ask-first mode in the app's settings);
 - Gemini CLI: in `%USERPROFILE%\.gemini\settings.json`, `"tools": {"exclude": ["run_shell_command"]}` (no shell), or
   at least `"tools": {"confirmationRequired": ["run_shell_command"]}`; never start it with `--yolo`;
+- Cursor: keep its agent asking before every terminal command and tool call (do not turn on auto-run);
 - Claude desktop app: do not add terminal or computer-control extensions on the instrument PC, or approve each
   command.
 

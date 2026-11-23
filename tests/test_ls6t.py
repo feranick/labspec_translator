@@ -1052,12 +1052,23 @@ def test_connect_detect_and_disconnect(tmp_path, monkeypatch, capsys):
     assert cli.main(["connect", "codex", "claude"]) == 0
     toml = C.tomllib.loads((tmp_path / "u" / ".codex" / "config.toml").read_text())
     assert toml["mcp_servers"]["ls6t"]["command"] == sys.executable
+    # Cursor: ~/.cursor/mcp.json, found by its folder; the person's other servers kept
+    (tmp_path / "u" / ".cursor").mkdir()
+    (tmp_path / "u" / ".cursor" / "mcp.json").write_text('{"mcpServers": {"other": {"command": "x"}}}')
+    assert C.detect()["cursor"]
+    assert cli.main(["connect", "cursor"]) == 0
+    cu = json.loads((tmp_path / "u" / ".cursor" / "mcp.json").read_text())
+    assert cu["mcpServers"]["other"] == {"command": "x"}
+    e = cu["mcpServers"]["ls6t"]
+    assert e["type"] == "stdio" and e["command"] == sys.executable and e["args"] == C.MODULE_ARGS
+    assert e["env"]["LS6T_HOME"] == g["mcpServers"]["ls6t"]["env"]["LS6T_HOME"]          # one lock for all apps
     st = C.status()
     assert all(st[c]["files"] and any("ls6t" in v for v in st[c]["files"].values()) for c in C.CLIENTS)
     capsys.readouterr()
-    assert cli.main(["connect", "gemini", "codex", "claude", "--remove"]) == 0
+    assert cli.main(["connect", "gemini", "codex", "claude", "cursor", "--remove"]) == 0
     out = json.loads(capsys.readouterr().out)
-    assert sorted(sum((r["removed"] for r in out["files"]), [])) == ["ls6t", "ls6t", "ls6t", "ls6t-sim"]
+    assert sorted(sum((r["removed"] for r in out["files"]), [])) == ["ls6t", "ls6t", "ls6t", "ls6t", "ls6t-sim"]
+    assert set(json.loads((tmp_path / "u" / ".cursor" / "mcp.json").read_text())["mcpServers"]) == {"other"}
     assert json.loads((tmp_path / "u" / ".gemini" / "settings.json").read_text())["mcpServers"] == {}
 
 

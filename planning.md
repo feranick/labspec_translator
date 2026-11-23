@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.22.9)
+## Architecture (version 2026.11.22.10)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -684,6 +684,11 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   first frame refused; nothing moves before the checks. (3) move_extra(confirmed_now): only the objective
   motor, only right after the Yes (runner move study: local confirmed_now, not objective_by_operator).
   (4) marker_measured / marker_source ('ASSUMED ...'), plot label 'assumed'. 141 tests.
+- 2026-11-22, 2026.11.22.10: Nicola asked for Codex and Cursor at install. Codex was there (SecCodex,
+  ~/.codex/config.toml). Cursor added: clients 'cursor' (~/.cursor/mcp.json, JSON mcpServers, entry type 'stdio';
+  detect: ~/.cursor, %LOCALAPPDATA%\Programs\cursor\Cursor.exe, /Applications/Cursor.app, `cursor` on PATH);
+  winsetup --cursor; installer SecCursor, /CURSOR, ticked when found; CI installs /CURSOR and checks the entry.
+  No timeout key in Cursor's file (progress keepalive covers long waits): to be tried on the instrument PC. 141 tests.
 
 ## To do next
 

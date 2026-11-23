@@ -1,5 +1,5 @@
 """bridge.py — the Python side of the LabSpec bridge: commands as files in a folder the bridge script watches.
-Version: 2026.11.22.9
+Version: 2026.11.22.10
 
 Protocol 1 (the same for ls6t_bridge.vbs inside LabSpec and for sim.py):
 
