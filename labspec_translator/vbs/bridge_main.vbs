@@ -291,6 +291,8 @@ Sub VStatus(cmd, res)
     res("shutter_mode") = LSValue(0, "ShutterMode")
     res("last_error") = LabSpecError()
     If GetP(cmd, "m_laser_pol", "") <> "" Then res("laser_pol") = MotorLabel(GetP(cmd, "m_laser_pol", ""))
+    If GetP(cmd, "m_illumination", "") <> "" Then res("illumination") = MotorLabel(GetP(cmd, "m_illumination", ""))
+    If GetP(cmd, "m_illumination_light", "") <> "" Then res("illumination_light") = MotorLabel(GetP(cmd, "m_illumination_light", ""))
     If GetP(cmd, "m_raman_pol", "") <> "" Then res("raman_pol") = MotorLabel(GetP(cmd, "m_raman_pol", ""))
     res("laser_open") = Bit(gLaserOpen)
     If gLaserOpen Then res("laser_left_s") = Fmt(gLaserS - Elapsed(gLaserT0))
@@ -643,6 +645,11 @@ Sub VMove(cmd, res)
     Else
         mc = LS_MOTOR_VALUE
         posVal = ParseNum(v)
+    End If
+    ' LaserSwitch turns a laser on or off: never from a script (2026-11-23, the maintainer)
+    If LCase(Replace(motor, " ", "")) = "laserswitch" Then
+        Fail res, "ls6t never moves " & motor & " (it switches a laser on or off): do it in LabSpec"
+        Exit Sub
     End If
     If MotorSize(motor) = -1 Then
         Fail res, "motor " & motor & " is not present"
@@ -1582,6 +1589,9 @@ Sub VVideo(cmd, res)
     res("y_um") = MotorValue(GetP(cmd, "m_y", "Y"))
     res("objective") = MotorLabel(GetP(cmd, "m_objective", "Objective"))
     res("camera") = VidCam()                     ' the orientation found is remembered per camera
+    ' the illumination as LabSpec shows it: IlluminatorV and uLight (two controls; they may disagree, 2026-11-23)
+    If GetP(cmd, "m_illumination", "") <> "" Then res("illumination") = MotorLabel(GetP(cmd, "m_illumination", ""))
+    If GetP(cmd, "m_illumination_light", "") <> "" Then res("illumination_light") = MotorLabel(GetP(cmd, "m_illumination_light", ""))
 End Sub
 
 ' ---------------------------------------------------------------- guided adjustment

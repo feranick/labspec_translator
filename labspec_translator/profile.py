@@ -1,5 +1,5 @@
 """profile.py — the machine profile: what the instrument has (from the discovery script) and the limits a person sets.
-Version: 2026.11.22.15
+Version: 2026.11.22.16
 
 The profile is a JSON file (LS6T_PROFILE, default ~/ls6t/profile.json). Studies never change it: an LLM can only
 ask for what the profile allows. Without a file, the built-in XploRA defaults below apply and every result says so
@@ -29,7 +29,9 @@ DEFAULT_PROFILE: dict = {
     "motors": {"laser": "Laser", "grating": "Grating", "filter": "Filter", "objective": "Objective",
                "hole": "Hole", "slit": "Slit", "x": "X", "y": "Y", "z": "Z",
                "laser_shutter": None,     # needed only for video snapshots with the laser on (from discovery)
-               "laser_pol": None, "raman_pol": None},   # the polarisers, when the instrument has them (discovery)
+               "laser_pol": None, "raman_pol": None,    # the polarisers, when the instrument has them (discovery)
+               "illumination": None,      # bright / dark field (XploRA: IlluminatorV), from discovery
+               "illumination_light": None},   # the light source's mode (XploRA: uLight), read only
     # the polarisers' positions by motor role (from discovery), e.g. {"laser_pol": ["Circular", "Horizontal", ...]}
     "polarizers": {},
     "lasers": {"532": {"nm": 532.0, "label": "532", "power_mw": None, "max_filter_pct": 100},
@@ -437,9 +439,16 @@ def import_discovery(text: str, base: dict | None = None) -> tuple[dict, list[st
             if nm is None or nm <= 0:
                 continue
             key = f"{nm:g}"
-            old = (base or {}).get("lasers", {}).get(key, {})
+            # the current profile's laser by its line (not its key: 638 vs 637.75), so its cap and power are kept
+            # (2026-11-23: a proposal reset the 10 % caps to 100); a laser it does not know gets the cautious cap
+            olds = [v for v in (prof.get("lasers") or {}).values() if _num(v.get("nm")) is not None
+                    and abs(_num(v.get("nm")) - nm) <= 0.5]
+            old = olds[0] if olds else {}
             lasers[key] = {"nm": nm, "label": lab or key, "power_mw": old.get("power_mw"),
-                           "max_filter_pct": old.get("max_filter_pct", 100)}
+                           "max_filter_pct": old.get("max_filter_pct", AUTO_MAX_FILTER_PCT)}
+            if not olds:
+                notes.append(f"laser {nm:g} nm is new to this profile: capped at {AUTO_MAX_FILTER_PCT:g} % until a "
+                             "person sets lasers." + key + ".max_filter_pct")
         if lasers:
             prof["lasers"] = lasers
             notes.append("lasers: " + ", ".join(f"{v['nm']:g} nm" for v in lasers.values())
@@ -490,9 +499,14 @@ def import_discovery(text: str, base: dict | None = None) -> tuple[dict, list[st
 
     for name in ("Shutter", "LaserShutter", "Laser Shutter", "Laser shutter"):
         if name in names:
-            prof["motors"]["laser_shutter"] = name
-            notes.append(f"laser shutter motor: {name!r} (check with the maintainer that it is the laser shutter "
-                         "before using video snapshots with the laser)")
+            # found, not set: a person confirms it is the laser's shutter first (2026-11-23: a proposal pre-filled it)
+            prof["laser_shutter_candidate"] = name
+            if prof["motors"].get("laser_shutter") == name:
+                notes.append(f"laser shutter motor: {name!r} (already set in the current profile)")
+            else:
+                notes.append(f"laser shutter motor found: {name!r}, not set: once the maintainer confirms it is the "
+                             f"laser shutter, set motors.laser_shutter to \"{name}\" (ls6t profile set "
+                             f"motors.laser_shutter \"{name}\")")
             break
     for role, cands in (("laser_pol", ("LaserPol", "Laser Polarizer", "Laser pol")),
                         ("raman_pol", ("RamanPol", "Raman Polarizer", "Raman pol"))):
@@ -503,6 +517,17 @@ def import_discovery(text: str, base: dict | None = None) -> tuple[dict, list[st
                 prof.setdefault("polarizers", {})[role] = [lab for lab in m["labels"] if lab]
                 notes.append(f"{role.replace('_', ' ')}arizer ({name}): " + ", ".join(prof["polarizers"][role]))
                 break
+    m = _motor(d, "uLight") if "uLight" in names else None
+    if m and m["size"] > 0:
+        prof["motors"]["illumination_light"] = "uLight"         # read and compared, never set
+        notes.append("illumination light (uLight, read only): " + ", ".join(x for x in m["labels"] if x))
+    for name in ("IlluminatorV",):
+        m = _motor(d, name) if name in names else None
+        if m and m["size"] > 0 and any("field" in str(lab).lower() for lab in m["labels"]):
+            prof["motors"]["illumination"] = name
+            prof["illumination_labels"] = [lab for lab in m["labels"] if lab]
+            notes.append(f"illumination ({name}): " + ", ".join(prof["illumination_labels"]))
+            break
     for role, key in (("hole", "holes_um"), ("slit", "slits_um")):
         m = _motor(d, prof["motors"][role])
         if m and m["size"] > 0:
@@ -550,6 +575,7 @@ def import_discovery(text: str, base: dict | None = None) -> tuple[dict, list[st
     from . import labspec_ini
     labspec_ini.enrich(prof, d.get("labspec_path"), notes)
     prof["discovered"] = {"time": d.get("time"), "labspec_path": d.get("labspec_path"),
+                          "labspec_version": d.get("labspec_version"),
                           "motors": sorted(names), "methods": methods, "config_params": config_params}
     return prof, notes
 

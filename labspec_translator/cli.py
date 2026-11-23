@@ -1,5 +1,5 @@
 """cli.py — the command line. Every command prints JSON; '-' reads the studies from stdin.
-Version: 2026.11.22.15
+Version: 2026.11.22.16
 
   ls6t status [REQUEST] [--wait S]   versions, the bridge, the profile; or a request's studies
   ls6t format                        the study format
@@ -12,6 +12,7 @@ Version: 2026.11.22.15
   ls6t instrument status|discover|resume|last-error|end-bridge|camera-on|camera-off [--camera N] | laser-on [--seconds S] | laser-off
   ls6t instrument video-scale [--um 15]   measure the video's µm per pixel (the stage moves +X, +Y and back)
   ls6t instrument set [--laser-nm 532] [--grating 1800] [--filter 10%] [--objective x100] [--hole 300] [--slit 100]
+                     [--illumination bright|dark]
                                      change the set-up now (no laser; the objective asks the operator)
   ls6t instrument snapshot [--laser | --extended]
                                      a video frame with the laser position marked (--laser: the beam shows;
@@ -96,8 +97,8 @@ def main(argv=None) -> int:
                                       "camera-on", "camera-off", "laser-on", "laser-off", "calibration",
                                       "autocal-info", "autocal-run", "end-bridge", "video-scale"])
     s.add_argument("--seconds", type=float, help="laser-on: how long (at most limits.max_laser_on_s)")
-    s.add_argument("--um", type=float, help="video-scale: the stage move in µm (default: a fifth of the objective's "
-                                            "field, ~17 µm x100, ~170 µm x10)")
+    s.add_argument("--um", type=float, help="video-scale: the stage move in µm (default: 0.4 x the field's smaller side, "
+                                            "~23 µm x100, ~240 µm x10)")
     s.add_argument("--camera", help="camera-on/off: a number or a name from the profile's video.cameras")
     s.add_argument("what", nargs="?", help="config: list, save or load")
     s.add_argument("name", nargs="?", help="config save/load: the configuration's name")
@@ -105,7 +106,7 @@ def main(argv=None) -> int:
     s.add_argument("--extended", action="store_true", help="snapshot: LabSpec's extended video (the stage moves)")
     s.add_argument("--show", action="store_true", help="config: open LabSpec's own dialog")
     for opt, key in (("--laser", None), ("--grating", "grating"), ("--filter", "filter"), ("--objective", "objective"),
-                     ("--hole", "hole_um"), ("--slit", "slit_um")):
+                     ("--hole", "hole_um"), ("--slit", "slit_um"), ("--illumination", "illumination")):
         if opt != "--laser":
             s.add_argument(opt, dest=f"set_{key}", help=f"set: {key}")
     s.add_argument("--laser-nm", dest="set_laser_nm", help="set: the laser line (nm)")

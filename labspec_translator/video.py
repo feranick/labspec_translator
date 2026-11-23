@@ -1,5 +1,5 @@
 """video.py — video snapshots: decoding the bridge's frame file and drawing it with the laser position marked.
-Version: 2026.11.22.15
+Version: 2026.11.22.16
 
 The bridge writes a cloned video frame as '# key=value' header lines (axis types, sizes, units, values) and the
 pixel values in LabSpec's order. LabSpec's video axes are taken to be stage coordinates in µm ('mkm'), so the laser
@@ -188,6 +188,73 @@ def apply_orientation(dec: dict, ori: dict | None) -> dict:
     return d
 
 
+BRIGHTNESS_RATIO = 2.5      # a frame this much darker (or brighter) than the last one with the same objective: warn
+
+
+def _brightness_store(new: dict | None = None) -> dict:
+    """The mean grey level of the last frame without the laser, per objective and camera
+    (LS6T_HOME/video_brightness.json)."""
+    import json
+    from . import config
+    p = config.home() / "video_brightness.json"
+    if new is not None:
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(json.dumps(new, indent=1), encoding="utf-8")
+        except OSError:
+            pass
+        return new
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def brightness_check(dec: dict, objective, camera) -> tuple[dict, str | None]:
+    """The frame's mean grey level against the last one with the same objective and camera, and a warning when it is
+    BRIGHTNESS_RATIO times darker or brighter. 2026-11-23: twice after a video restart or an objective change,
+    LabSpec's indicator said bright field while the light was dark field (toggling it in LabSpec fixed it); LabSpec's
+    own reading cannot catch that, the picture can."""
+    import time
+    mean = float(np.mean(_lum(dec["img"])))
+    key = f"{objective}@{camera}"
+    store = _brightness_store()
+    last = store.get(key)
+    store[key] = {"mean": round(mean, 2), "time": time.strftime("%Y-%m-%d %H:%M:%S")}
+    _brightness_store(store)
+    info = {"mean": round(mean, 2), "last_mean": last.get("mean") if last else None,
+            "last_time": last.get("time") if last else None}
+    if not last or not last.get("mean"):
+        return info, None
+    r = mean / max(float(last["mean"]), 0.5)
+    if r < 1 / BRIGHTNESS_RATIO or r > BRIGHTNESS_RATIO:
+        way = "darker" if r < 1 else "brighter"
+        return info, (f"this frame is {1 / r if r < 1 else r:.1f}x {way} than the last one with objective "
+                      f"{objective!r} (mean grey {mean:.0f} vs {float(last['mean']):.0f}, {last.get('time')}): the "
+                      "illumination may not be what LabSpec shows (after a video restart or an objective change "
+                      "LabSpec has shown bright field with the light in dark field: `ls6t instrument set --illumination "
+                      "bright` (or dark) sets it even when LabSpec shows it already, or toggle it in LabSpec), or the "
+                      "light or exposure changed. If that was on purpose, ignore this")
+    return info, None
+
+
+def _field_mode(label) -> str | None:
+    s = str(label or "").lower().replace(" ", "")
+    return "dark" if "darkfield" in s else "bright" if "brightfield" in s else None
+
+
+def illumination_mismatch(illum, light) -> str | None:
+    """A warning when LabSpec's two illumination controls disagree (IlluminatorV: Dark / Bright field; uLight: Off,
+    BrightField, DarkField1-4, Full). 2026-11-23: twice the indicator showed bright field with the light in dark field
+    after a video restart or an objective change."""
+    a, b = _field_mode(illum), _field_mode(light)
+    if a and b and a != b:
+        return (f"LabSpec's illumination controls disagree: IlluminatorV says {illum!r}, uLight {light!r}: the view may "
+                "not be lit as LabSpec shows (`ls6t instrument set --illumination bright` or dark sets it again, or "
+                "toggle it in LabSpec)")
+    return None
+
+
 def scale_store(new: dict | None = None) -> dict:
     """µm per pixel and the axis signs measured per objective and camera (instrument video_scale):
     LS6T_HOME/video_scale.json {"<objective>@<camera>": {"sx": µm/px along +image x, "ty": µm/px along -image y}}."""
@@ -207,9 +274,9 @@ def scale_store(new: dict | None = None) -> dict:
         return {}
 
 
-def image_shift(a: np.ndarray, b: np.ndarray) -> tuple[float, float]:
+def _phase_shift(a: np.ndarray, b: np.ndarray) -> tuple[float, float]:
     """(drow, dcol): how far the content of image a moved to appear in b (phase correlation, a parabola through the
-    peak for sub-pixel)."""
+    peak for sub-pixel). On the XploRA (2026-11-23) it gave 0.05-0.9 px cross-talk over 170-260 px moves."""
     def g(i):
         i = i.astype(float)
         i = i.mean(axis=2) if i.ndim == 3 else i
@@ -235,6 +302,87 @@ def image_shift(a: np.ndarray, b: np.ndarray) -> tuple[float, float]:
     return float(di), float(dj)
 
 
+def _mismatch(A: np.ndarray, B: np.ndarray, dr: int, dc: int) -> float:
+    """How unlike the parts of A and B are that show the same patch if B is A moved by (dr, dc): the mean squared
+    difference with each part's mean removed (inf when they overlap on less than a quarter of the frame)."""
+    h, w = A.shape
+    a = A[max(0, -dr):h - max(0, dr), max(0, -dc):w - max(0, dc)]
+    b = B[max(0, dr):h + min(0, dr), max(0, dc):w + min(0, dc)]
+    if a.size < 0.25 * A.size:
+        return float("inf")
+    return float(np.mean(((a - a.mean()) - (b - b.mean())) ** 2))
+
+
+def image_shift(a: np.ndarray, b: np.ndarray, axis: str | None = None) -> tuple[float, float]:
+    """(drow, dcol): how far the content of image a moved to appear in b. Phase correlation first; checked against
+    the frames themselves (the mean squared difference over their overlap), and when that finds a clearly better
+    match, a search for it: on a 4x smaller copy over the whole range along `axis` ('x': columns, 'y': rows; +-10 %
+    across it), then to the pixel and a parabola for the fraction. 2026-11-23: phase correlation alone lost a 19 µm
+    move of the simulator's x100 (47 of 160 px) and returned a false peak."""
+    from scipy.ndimage import zoom
+    g = (lambda i: (i.astype(float).mean(axis=2) if i.ndim == 3 else i.astype(float)))
+    A, B = g(a), g(b)
+    h, w = A.shape
+    pr, pcol = _phase_shift(a, b)
+    best = _mismatch(A, B, int(round(pr)), int(round(pcol)))
+    f = max(1, min(h, w) // 150)
+    As, Bs = (zoom(A, 1 / f, order=1), zoom(B, 1 / f, order=1)) if f > 1 else (A, B)
+    hs, ws = As.shape
+    rr = range(-int(0.75 * hs), int(0.75 * hs) + 1) if axis != "x" else range(-int(0.1 * hs) - 1, int(0.1 * hs) + 2)
+    cc = range(-int(0.75 * ws), int(0.75 * ws) + 1) if axis != "y" else range(-int(0.1 * ws) - 1, int(0.1 * ws) + 2)
+    m, (sr, sc) = min((_mismatch(As, Bs, r, c), (r, c)) for r in rr for c in cc)
+    sr, sc = sr * f, sc * f
+    if best <= 1.15 * _mismatch(A, B, sr, sc):
+        return pr, pcol                     # phase correlation agrees with the frames: its sub-pixel value
+    near = {(r, c): _mismatch(A, B, r, c) for r in range(sr - f - 1, sr + f + 2) for c in range(sc - f - 1, sc + f + 2)}
+    (br, bc) = min(near, key=near.get)
+
+    def frac(y0, y1, y2):
+        den = y0 - 2 * y1 + y2
+        return 0.5 * (y0 - y2) / den if den > 0 else 0.0
+    get = (lambda r, c: near.get((r, c), _mismatch(A, B, r, c)))
+    dr = br + frac(get(br - 1, bc), get(br, bc), get(br + 1, bc))
+    dc = bc + frac(get(br, bc - 1), get(br, bc), get(br, bc + 1))
+    return float(dr), float(dc)
+
+
+def field_um(prof: dict, objective):
+    """The objective's field of view [w, h] in µm from OLConfig.ini (profile objectives_info), or None."""
+    info = (prof.get("objectives_info") or {}).get(objective) or {}
+    field = info.get("field_um")
+    if not field:
+        from .profile import match_label
+        lab, _ = match_label(str(objective or ""), list((prof.get("objectives_info") or {})))
+        field = ((prof.get("objectives_info") or {}).get(lab) or {}).get("field_um") if lab else None
+    return field or None
+
+
+def _same_camera(key: str, camera) -> bool:
+    cam = key.rsplit("@", 1)[-1]
+    return camera in (None, "") or cam == str(camera)
+
+
+def axes_directions(prof: dict, objective, camera) -> tuple[int, int, str]:
+    """(sign of X, sign of Y, where they come from) for the video's axes: +1 X when image x grows with stage X, +1 Y
+    when image up is stage +Y. Measured for this objective and camera (video_scale), else learned from another
+    objective's measurement on the same camera (the directions belong to the camera, not the lens), else the profile's
+    video.image_x_right / image_y_up when a person set them, else assumed (X right, Y up). On the XploRA's top camera
+    image up is stage -Y (2026-11-23): the assumption put a particle at y = +153 µm instead of -155."""
+    store = scale_store()
+    sgn = lambda v: 1 if float(v) > 0 else -1      # noqa: E731
+    cal = store.get(f"{objective}@{camera}")
+    if cal and cal.get("sx") and cal.get("ty"):
+        return sgn(cal["sx"]), sgn(cal["ty"]), "measured"
+    for k, c in sorted(store.items()):
+        if _same_camera(k, camera) and c.get("sx") and c.get("ty"):
+            return sgn(c["sx"]), sgn(c["ty"]), f"learned from {k} (same camera)"
+    v = prof.get("video", {}) or {}
+    if "image_x_right" in v and "image_y_up" in v:
+        return (1 if v["image_x_right"] else -1), (1 if v["image_y_up"] else -1), \
+            "profile video.image_x_right / image_y_up"
+    return (1 if v.get("image_x_right", True) else -1), (1 if v.get("image_y_up", True) else -1), "assumed"
+
+
 def stage_axes(dec: dict, prof: dict, objective, x, y, camera=None) -> dict | None:
     """Axes in stage µm from the objective's field of view (OLConfig.ini, objectives_info) around the stage
     position: LabSpec's own video axes on the XploRA were one 'µm' per pixel from 0 (887 x 605 for an 862.9 x 590.0
@@ -251,23 +399,19 @@ def stage_axes(dec: dict, prof: dict, objective, x, y, camera=None) -> dict | No
         d["um"] = True
         d["axes_from"] = "measured (instrument video_scale)"
         return d
-    info = (prof.get("objectives_info") or {}).get(objective) or {}
-    field = info.get("field_um")
-    if not field:
-        from .profile import match_label
-        lab, _ = match_label(str(objective or ""), list((prof.get("objectives_info") or {})))
-        field = ((prof.get("objectives_info") or {}).get(lab) or {}).get("field_um") if lab else None
+    field = field_um(prof, objective)
     if not field:
         return None
     w, h = dec["width"], dec["height"]
-    v = prof.get("video", {})
-    sx = float(field[0]) / w * (1 if v.get("image_x_right", True) else -1)
-    sy = float(field[1]) / h * (1 if v.get("image_y_up", True) else -1)
+    gx, gy, src = axes_directions(prof, objective, camera)
+    sx = float(field[0]) / w * gx
+    sy = float(field[1]) / h * gy
     d = dict(dec)
     d["xs"] = x + (np.arange(w) - (w - 1) / 2) * sx
     d["ys"] = y - (np.arange(h) - (h - 1) / 2) * sy        # row 0 at the top: the largest Y when Y grows upward
     d["um"] = True
     d["axes_from"] = "the objective's field of view (OLConfig.ini) around the stage position"
+    d["directions_from"] = src
     return d
 
 
@@ -494,13 +638,28 @@ def snapshot(res: dict, prof: dict, base: Path, title: str, laser_nm=None) -> di
         out["warnings"].append(why)
     out["orientation"] = ori
     dec = apply_orientation(dec, ori)
+    if res.get("illumination") or res.get("illumination_light"):
+        out["illumination"] = {"illuminator": res.get("illumination"), "light": res.get("illumination_light")}
+        why = illumination_mismatch(res.get("illumination"), res.get("illumination_light"))
+        if why:
+            out["warnings"].append(why)
+    if not (float(res.get("laser_s") or 0) > 0 or float(res.get("during_acq_s") or 0) > 0):
+        out["brightness"], why = brightness_check(dec, res.get("objective"), res.get("camera"))
+        if why:
+            out["warnings"].append(why)
     labspec_span = [float(abs(dec["xs"][-1] - dec["xs"][0])), float(abs(dec["ys"][-1] - dec["ys"][0]))] \
         if len(dec["xs"]) > 1 else None
     sa = stage_axes(dec, prof, res.get("objective"), x, y, res.get("camera"))
     if sa is not None:
         dec = sa
         out["axes_from"] = sa["axes_from"]
+        out["directions_from"] = sa.get("directions_from", "measured")
         out["labspec_axes_span"] = labspec_span
+        if out["directions_from"] == "assumed":
+            out["warnings"].append(
+                f"the X and Y directions are assumed (X right, Y up): no video-scale has run for this camera, and on "
+                f"the XploRA's top camera image up is stage -Y. Positions may be mirrored; move.to_um from this "
+                f"snapshot is refused. Run `ls6t instrument video-scale` with objective {res.get('objective')!r}")
     else:
         out["axes_from"] = "LabSpec's video axes"
         per_px = labspec_span and abs(labspec_span[0] / max(dec["width"] - 1, 1) - 1) < 0.01

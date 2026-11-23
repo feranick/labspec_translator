@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.22.15)
+## Architecture (version 2026.11.22.16)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -731,6 +731,30 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
 - 2026-11-22, 2026.11.22.15: Nicola: the old Packages folder holds only the marker (no config file): the install log
   now says so (claude_stale_files(existing_only=False) in clean_stale: 'no config file here: ... moved to Claude-Data').
   142 tests.
+- 2026-11-23, 2026.11.22.16: Nicola on .22.15 (Si, x10, top camera): orientation learnt (flip_y, score 0.996, no
+  swap); video-scale x10 0.977 / 0.982 µm/px, cross-talk 0.05 px, image up = stage -Y, stored x10_VIS@0; bright field
+  0.981 / 0.979, cross-talk 0.84 px (about 0.4 % repeatable; features dark spots); move test within ~0.6 µm over
+  100 µm. Fallback axes had Y reversed (+153 vs -155 µm). video.axes_directions: measured > learned from the same
+  camera (any objective in video_scale.json) > profile video.image_x_right / image_y_up when set > assumed;
+  field_um helper; snapshot directions_from + warning when assumed; runner move.to_um raises Stop when the
+  objective has a field and the directions are assumed. Nicola: twice LabSpec showed bright field with dark-field
+  light after a video restart / objective change (toggling fixed it). LabSpec's own reading would repeat its error,
+  so video.brightness_check (video_brightness.json, mean grey per objective@camera, warn at 2.5x either way) on
+  every snapshot without the laser. Re-asserting the mode needs the illumination motor: IlluminatorV appears among
+  LabSpec's configured motors (labspec_ini); its positions and role to be confirmed (TESTING T5b.2).
+  Nicola (x100 video-scale table): 17 µm 4 % mismatch, 35 µm Y left the 58 µm field, 25 µm consistent. Now:
+  SCALE_STEP_FRACTION 0.4 of the smaller side, X / Y limits against width / height, aspect and rotation_deg stored and
+  compared per camera (SCALE_AGREE 1 %, SCALE_ROT_DEG 0.5; 'disagrees' kept in video_scale.json, warning). Sim: the
+  periodic texture made phase correlation pick false peaks: specks added (seeded, 1500 within 600 µm), sinusoid
+  weakened; image_shift checks the phase-correlation result against the frames' overlap mismatch and otherwise
+  searches (4x reduced, along the moved axis, +-10 % across), integer then parabola. Nicola: IlluminatorV (Dark field,
+  Bright field) and uLight (Off, BrightField, DarkField1-4, Full) are the illumination controls; LaserSwitch (Off, On)
+  switches a laser. motors.illumination / illumination_light from discovery and labspec_ini; status and the video
+  verb read both; illumination_mismatch warns; api.illumination_set (through the other position when LabSpec
+  already shows it) for set --illumination, after an objective change in set and after a camera_on restart.
+  Bridge VMove and the sim refuse LaserSwitch. Proposal: laser_shutter never set (laser_shutter_candidate + note),
+  caps matched by line (+-0.5 nm), a new laser at AUTO_MAX_FILTER_PCT. autocal.assess written_for_labspec;
+  info version_warning against discovered.labspec_version (now recorded). 147 tests.
 
 ## To do next
 

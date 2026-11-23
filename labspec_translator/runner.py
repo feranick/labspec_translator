@@ -1,5 +1,5 @@
 """runner.py — runs a request's studies on the instrument, one command at a time, and checks every result.
-Version: 2026.11.22.15
+Version: 2026.11.22.16
 
 A request runs in its own process (`ls6t run-request FOLDER`, started detached by api.start), so it outlives the
 MCP call that started it. One request at a time holds the instrument (a lock file under LS6T_HOME); others wait
@@ -1152,6 +1152,13 @@ def run_move(name: str, study: dict, ctx: Ctx) -> dict:
     if m.get("to_um") is not None:
         # put the beam (not LabSpec's marker) on a point picked in a snapshot: stage = point - the beam's offset
         objective = obj if obj is not None else before.get("objective")
+        from . import video as V
+        if V.field_um(prof, objective) and V.axes_directions(prof, objective, before.get("camera"))[2] == "assumed":
+            # 2026-11-23: with the assumed directions a particle at y = -155 µm showed at +153 µm
+            raise Stop(f"{name}: the snapshot's X / Y directions for objective {objective} are assumed, not measured "
+                       "(they can be mirrored: on the XploRA's top camera image up is stage -Y): run `ls6t "
+                       "instrument video-scale` with this objective (no laser), take the snapshot again, then pick "
+                       "the point", "study")
         off, src = SP.offset_for(prof, objective, _f(before.get("laser_nm")))
         beam = {"to_um": [float(v) for v in m["to_um"]], "offset_um": off, "offset_source": src}
         tx, ty = beam["to_um"][0] - off[0], beam["to_um"][1] - off[1]

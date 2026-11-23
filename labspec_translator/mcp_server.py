@@ -1,5 +1,5 @@
 """mcp_server.py — MCP server: lets LLM-based tools run Raman measurements on a HORIBA instrument through LabSpec 6.
-Version: 2026.11.22.15
+Version: 2026.11.22.16
 
 Tools (all JSON):
   study_format      the study format, the profile's choices and limits, the bridge's state. Read it first.
@@ -182,8 +182,10 @@ async def instrument(ctx: Context, action: str = "status", camera: str | int | N
                      setup: dict | None = None, seconds: float | None = None, um: float | None = None) -> dict:
     """status: the bridge's version and the instrument's state now (laser, grating, filter, objective, stage,
     detector temperature, live_video, the active camera, laser_open). set: change the set-up now without
-    measuring, setup {laser_nm, grating, filter, objective, hole_um, slit_um} (any of them, named as people say
-    them: objective "x100", filter "10%"); the filter stays within the caps; the objective turret is manual on
+    measuring, setup {laser_nm, grating, filter, objective, hole_um, slit_um, illumination} (any of them, named as
+    people say them: objective "x100", filter "10%", illumination "bright" or "dark": set even when LabSpec already
+    shows it, since LabSpec has shown bright field with the light in dark field; it is set again by itself after an
+    objective change or a video restart); the filter stays within the caps; the objective turret is manual on
     this instrument: LabSpec asks the operator to change the lens by hand and confirm (LabSpec's objective is a
     record, not a reading: say so when it matters); a refused request changes nothing; each move waits for its motor;
     nothing fires the laser; returns what LabSpec read back. laser_on (seconds, up to the
@@ -194,8 +196,9 @@ async def instrument(ctx: Context, action: str = "status", camera: str | int | N
     active one is switched only where the profile allows it (a video restart, checked); otherwise, and whenever an
     answer refuses, it says what the operator does: relay it, do not retry. end_bridge: ends the bridge cleanly
     (before the operator uses LabSpec's video buttons, which end a running script); a person starts it again.
-    video_scale (um = the stage move in µm; default a fifth of the objective's field, ~17 µm with the x100, ~170
-    with the x10; no laser; a lit view with visible structure): measures the video's µm per pixel and axis
+    video_scale (um = the stage move in µm; default 0.4 x the field's smaller side, ~23 µm with the x100, ~240
+    with the x10; over half the field's width or height refused; a result whose pixel aspect or rotation disagrees
+    with another objective on the same camera is stored but flagged in 'warnings'; no laser; a lit view with visible structure): measures the video's µm per pixel and axis
     directions for the objective and camera in use, used by every snapshot after.
     discover: runs the discovery
     and proposes a machine profile (a person applies it). resume: asks the operator to lift a halt. last_error:

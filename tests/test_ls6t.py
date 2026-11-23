@@ -400,6 +400,8 @@ def _profile_with_shutter(tmp_path, **limits):
     r = b.call("discover", timeout_s=10, out=str(tmp_path / "dump.txt"))
     assert r["ok"]
     prof, _ = P.import_discovery(P.read_text(tmp_path / "dump.txt"))
+    assert prof["motors"]["laser_shutter"] is None                   # found, never set by discovery (2026-11-23)
+    prof["motors"]["laser_shutter"] = prof["laser_shutter_candidate"]  # as the maintainer does once confirmed
     prof["limits"].update(limits)
     P.save(prof)
     return prof
@@ -2416,7 +2418,7 @@ def test_orientation_kept_from_dark_frames_scale_step_marker_assumed(tmp_path):
     S.ensure(config.active_bridge_dir())
     st0 = api.instrument("status")["status"]
     r = api.instrument("video_scale")
-    assert r["ok"] and r["step_from"].startswith("a fifth of the field"), r
+    assert r["ok"] and r["step_from"].startswith("0.4 x the field's smaller side"), r
     r2 = api.instrument("video_scale", um=400)
     assert not r2["ok"] and ("over half the field" in r2["error"] or "1 to" in r2["error"])
     st1 = api.instrument("status")["status"]
@@ -2468,3 +2470,121 @@ def test_install_says_whether_a_bridge_ran_and_cleans_stale_claude_files(tmp_pat
     assert set(cfg["mcpServers"]) == {"ls6t-sim", "fs"}
     assert reps[0]["ok"] and "removed ls6t" in reps[0]["notes"][0] and reps[0]["backup"]
     assert "no ls6t entry" not in C.clean_stale(sys.executable)[0]["notes"][0]      # ls6t-sim left: not ls6t's
+
+
+def test_assumed_axis_directions_learned_from_the_camera_or_to_um_refused():
+    """2026-11-23 at the instrument: without a video-scale for the objective the fallback axes put a particle at
+    y = +153 µm instead of -155 (image up is stage -Y on the XploRA's top camera). The directions now come from a
+    measurement on the same camera; with none, the snapshot says they are assumed and move.to_um is refused."""
+    from labspec_translator import video as V
+    S.ensure(config.active_bridge_dir())
+    prof = P.load()
+    cur = api.instrument("status")["status"]
+    obj, cam = cur.get("objective"), cur.get("camera")
+    P.save(dict(prof, objectives_info={obj: {"field_um": [355.2, 242.4]}}))
+    prof = P.load()
+    V.scale_store({})
+    assert V.axes_directions(prof, obj, cam)[2] == "assumed"
+    snap = api.snapshot()
+    assert snap["directions_from"] == "assumed" and any("assumed" in w for w in snap["warnings"])
+    st = run_inline({"m": {"kind": "move", "move": {"to_um": [1219.5, -557.8], "stay": False}}})
+    assert not st["studies"]["m"]["ok"] and "assumed" in json.dumps(st)
+    # a measurement with another objective on the same camera gives the directions (image up = stage -Y here)
+    V.scale_store({f"other_obj@{cam}": {"sx": 0.977, "ty": -0.982}})
+    gx, gy, src = V.axes_directions(prof, obj, cam)
+    assert (gx, gy) == (1, -1) and src.startswith("learned from other_obj")
+    dec = {"img": np.zeros((11, 21)), "xs": np.arange(21.0), "ys": np.arange(11.0), "um": True, "width": 21,
+           "height": 11, "channels": 1, "meta": {}}
+    d = V.stage_axes(dec, prof, obj, 100.0, 50.0, cam)
+    assert d["directions_from"].startswith("learned") and d["ys"][0] < 50.0 < d["ys"][-1]     # row 0: lower Y
+    assert d["xs"][0] < 100.0 < d["xs"][-1]
+    st = run_inline({"m2": {"kind": "move", "move": {"to_um": [1219.5, -557.8], "stay": False}}})
+    assert st["studies"]["m2"]["ok"], st["studies"]["m2"]
+
+
+def test_snapshot_warns_when_much_darker_than_the_last_with_the_objective():
+    """2026-11-23: after a video restart or objective change LabSpec showed bright field with the light in dark
+    field; the frame's brightness against the last one with the same objective and camera catches it."""
+    from labspec_translator import video as V
+    V._brightness_store({})
+    lit = {"img": np.full((20, 30), 120.0)}
+    info, why = V.brightness_check(lit, "x10_VIS", 0)
+    assert why is None and info["last_mean"] is None
+    info, why = V.brightness_check({"img": np.full((20, 30), 110.0)}, "x10_VIS", 0)
+    assert why is None and info["last_mean"] == 120.0
+    info, why = V.brightness_check({"img": np.full((20, 30), 20.0)}, "x10_VIS", 0)
+    assert why and "darker" in why and "dark field" in why
+    assert V.brightness_check({"img": np.full((20, 30), 20.0)}, "x100_VIS", 0)[1] is None     # another objective
+    assert "brighter" in V.brightness_check({"img": np.full((20, 30), 200.0)}, "x10_VIS", 0)[1]
+
+
+def test_illumination_set_again_laserswitch_never_and_proposal_keeps_caps(tmp_path):
+    """2026-11-23 at the instrument: LabSpec showed bright field with the light in dark field after a video restart or
+    an objective change (IlluminatorV and uLight are its two controls); LaserSwitch turns a laser on or off; a profile
+    proposal pre-filled the laser shutter and reset the 10 % caps to 100; the AutoCalibration script is from 6.1.174."""
+    from labspec_translator import autocal, video as V
+    sim = S.ensure(config.active_bridge_dir())
+    prof = P.load()
+    P.save(dict(prof, motors=dict(prof["motors"], illumination="IlluminatorV", illumination_light="uLight")))
+    st = api.instrument("status")["status"]
+    assert st["illumination"] == "Bright field" and st["illumination_light"] == "BrightField"
+    n0 = sim.illumination_moves
+    r = api.instrument("set", setup={"illumination": "bright"})       # already shown: through dark field and back
+    assert r["ok"] and r["illumination"]["reasserted"] and r["illumination"]["via"] == ["Dark field", "Bright field"]
+    assert sim.illumination_moves == n0 + 2
+    r = api.instrument("set", setup={"illumination": "dark"})
+    assert r["ok"] and r["illumination"]["got"] == "Dark field" and not r["illumination"]["reasserted"]
+    r = api.instrument("set", setup={"objective": "x50"})              # an objective change sets it again
+    assert r["ok"] and r["illumination"]["why"].startswith("set again") and r["illumination"]["got"] == "Dark field"
+    assert "disagree" in V.illumination_mismatch("Dark field", "BrightField")
+    assert V.illumination_mismatch("Bright field", "BrightField") is None and V.illumination_mismatch("Off", "x") is None
+    # LaserSwitch: refused by the bridge (and the simulator)
+    br = Path(api.install_bridge(tmp_path / "vbs")["files"]["ls6t_bridge.vbs"]).read_text()
+    mv = br[br.index("Sub VMove("):]
+    assert 'If LCase(Replace(motor, " ", "")) = "laserswitch" Then' in mv[:mv.index("End Sub")]
+    r = bridge.Bridge(config.active_bridge_dir()).call("move", motor="LaserSwitch", mode="label", value="On")
+    assert not r["ok"] and "never moves" in r["error"]
+    # the proposal: laser shutter found, not set; caps kept by line (10 %), a new laser capped
+    cur = P.load()
+    cur["lasers"] = {"532": dict(cur["lasers"]["532"], max_filter_pct=10), "638": dict(cur["lasers"]["638"], nm=637.75,
+                                                                                         max_filter_pct=10)}
+    cur["motors"]["laser_shutter"] = None
+    dump = ("time=t\nmotor.Laser.present=1\nmotor.Laser.size=3\nmotor.Laser.value.0=532\nmotor.Laser.label.0=532\n"
+            "motor.Laser.value.1=637.75\nmotor.Laser.label.1=638\nmotor.Laser.value.2=785\nmotor.Laser.label.2=785\n"
+            "motor.LaserShutter.present=1\nmotor.LaserShutter.size=2\nmotor.LaserShutter.label.0=Off\n"
+            "motor.LaserShutter.label.1=On\n")
+    prop, notes = P.import_discovery(dump, base=cur)
+    assert prop["motors"]["laser_shutter"] is None and prop["laser_shutter_candidate"] == "LaserShutter"
+    assert {k: v["max_filter_pct"] for k, v in prop["lasers"].items()} == {"532": 10, "637.75": 10, "785": 10.0}
+    assert any("785 nm is new" in n for n in notes) and any("not set" in n for n in notes)
+    # an AutoCalibration script written for another LabSpec
+    s = tmp_path / "AutoCalibration.vbs"
+    s.write_text("' AutoCalibration for LabSpec 6.1.174\nLabSpec.Acq 0, 1, 1, 0\n")
+    assert autocal.assess(s)["written_for_labspec"] == "6.1.174"
+    info = autocal.info(dict(cur, discovered={"labspec_version": "6.8.1"},
+                             labspec_config={"autocalibration_script": str(s)}))
+    assert "6.8.1" in info["scripts"][0]["version_warning"]
+
+
+def test_video_scale_step_from_the_smaller_side_height_limit_and_camera_agreement():
+    """2026-11-23, x100 (85 x 58 µm): 17 µm gave a 4 % X / Y mismatch, 25 µm agreed; 35 µm was accepted and the Y
+    move left the 58 µm-tall field. The default is now 0.4 x the smaller side, the limit checks the height for Y, and
+    a result that disagrees with the same camera's other objectives is flagged."""
+    from labspec_translator import video as V
+    S.ensure(config.active_bridge_dir())
+    V.scale_store({})
+    r = api.instrument("video_scale")
+    assert r["ok"] and r["step_from"].startswith("0.4 x the field's smaller side"), r
+    assert abs(r["aspect"] - 1) < 0.02 and "warnings" not in r
+    side = float(r["step_from"].split("(")[1].split()[0])
+    assert r["step_um"] == pytest.approx(0.4 * side, rel=0.06)
+    r2 = api.instrument("video_scale", um=round(0.55 * side, 1))
+    assert not r2["ok"] and "in Y" in r2["error"] and "tall" in r2["error"]
+    # another objective on the same camera with another pixel aspect: stored, but flagged
+    store = V.scale_store()
+    cam = r["camera"]
+    store[f"other@{cam}"] = {"sx": 0.0949, "ty": 0.0990, "rotation_deg": 0.0}
+    V.scale_store(store)
+    r3 = api.instrument("video_scale")
+    assert r3["ok"] and r3["warnings"] and "disagrees" in r3["warnings"][0] and "pixel aspect" in r3["warnings"][0]
+    assert V.scale_store()[r3["stored"]]["disagrees"]

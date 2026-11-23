@@ -1,5 +1,5 @@
 """winsetup.py — what the Windows installer does beyond copying files (installer/ls6t.nsi calls it).
-Version: 2026.11.22.15
+Version: 2026.11.22.16
 
 The installer puts a private Python (python.org's embeddable build, with every dependency already in its
 Lib/site-packages) in <install>/python and the launchers in <install>/bin. Then it runs, with that Python:

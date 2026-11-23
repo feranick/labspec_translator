@@ -1,5 +1,5 @@
 """autocal.py — LabSpec's own AutoCalibration: where its script is, and whether the bridge can run it.
-Version: 2026.11.22.15
+Version: 2026.11.22.16
 
 ls6t checks the spectral calibration itself (calibration studies). To correct LabSpec's own calibration, the best
 tool is HORIBA's: LabSpec's AutoCalibration, a VBS script (OLSetup.ini names it, e.g. ...\\AutoCalibration\\
@@ -90,12 +90,15 @@ def assess(path: Path, bridge_text: str = "") -> dict:
                if re.search(pat, low)]
     includes = sorted(set(re.findall(r'(?:includefile|executeglobal)[^\n"]*"([^"]+)"', code, re.I)))
     clashes = sorted(_top_names(code) & _top_names(bridge_text)) if bridge_text else []
+    # the LabSpec version it was written for, when its text says (2026-11-23: a 6.1.174 script with 6.8.1 installed)
+    vm = re.search(r"labspec\s*v?\s*(\d+\.\d+(?:\.\d+)*)", code, re.I) or \
+        re.search(r"\bv(?:ersion)?\s*[:=]?\s*(6\.\d+\.\d+)", code, re.I)
     st = Path(path).stat()
     return {"file": str(path), "bytes": st.st_size,
             "modified": time.strftime("%Y-%m-%d %H:%M", time.localtime(st.st_mtime)),
             "lines": code.count("\n") + 1, "labspec_calls": dict(sorted(calls.items(), key=lambda kv: -kv[1])),
             "asks_the_operator": asks, "changes": changes, "includes": includes,
-            "names_shared_with_the_bridge": clashes,
+            "names_shared_with_the_bridge": clashes, "written_for_labspec": vm.group(1) if vm else None,
             "runs_inside_the_bridge": not clashes,
             "unattended": not clashes and not asks}
 
@@ -112,6 +115,13 @@ def info(prof: dict, bridge_text: str = "") -> dict:
                 out["scripts"].append({"file": str(p), "error": str(exc)})
         else:
             out["scripts"].append({"file": str(p), "missing": True})
+    here = str((prof.get("discovered") or {}).get("labspec_version") or "")
+    hv = re.match(r"\d+\.\d+", here)
+    for s in out["scripts"]:
+        w = s.get("written_for_labspec")
+        if w and hv and not w.startswith(hv.group(0)):
+            s["version_warning"] = (f"written for LabSpec {w}, LabSpec here is {here}: check with HORIBA (or the "
+                                    "maintainer) that it still fits before enabling it")
     if not any(s.get("bytes") for s in out["scripts"]):
         out["next"] = ("no AutoCalibration script found on this PC: look for an AutoCalibration folder in LabSpec's "
                        "folder; LabSpec's own menu may still offer AutoCalibration (do it there, by hand)")

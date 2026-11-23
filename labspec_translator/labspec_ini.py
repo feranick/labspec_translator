@@ -1,5 +1,5 @@
 """labspec_ini.py — what LabSpec's own hardware configuration file (OLConfig.ini) says about the instrument.
-Version: 2026.11.22.15
+Version: 2026.11.22.16
 
 LabSpec 6 keeps its hardware set-up in Parameters\\ACQUISITION\\OLConfig.ini and its software set-up in
 Parameters\\COMMON\\OLSetup.ini, under its installation folder (e.g. C:\\HORIBA\\LabSpec_6_8_1).
@@ -251,7 +251,16 @@ def enrich(prof: dict, labspec_path: str | None = None, notes: list | None = Non
         notes.append("objectives from LabSpec's configuration: " +
                      ", ".join(f"{o} NA {v.get('na')}" + (f", field {v['field_um'][0]:g} x {v['field_um'][1]:g} µm"
                                                          if v.get("field_um") else "") for o, v in info.items()))
-    extra = [m for m in ("LaserPol", "RamanPol", "LaserFilter", "FilterV", "DuoPos", "Output", "IlluminatorV",
+    ill = (s.get("motors") or {}).get("IlluminatorV")
+    if ill and any("field" in str(x).lower() for x in ill) and not (prof.get("motors") or {}).get("illumination"):
+        prof.setdefault("motors", {})["illumination"] = "IlluminatorV"
+        prof["illumination_labels"] = [str(x) for x in ill]
+        notes.append("illumination: IlluminatorV (" + ", ".join(str(x) for x in ill) + "): ls6t sets it again after "
+                     "restarting the video or changing the objective (LabSpec has shown bright field with the light in "
+                     "dark field, 2026-11-23)")
+    if (s.get("motors") or {}).get("uLight") and not (prof.get("motors") or {}).get("illumination_light"):
+        prof.setdefault("motors", {})["illumination_light"] = "uLight"
+    extra = [m for m in ("LaserPol", "RamanPol", "LaserFilter", "FilterV", "DuoPos", "Output", "IlluminatorV", "uLight",
                          "Microscope", "LaserSwitch") if m in s.get("motors", {})]
     if extra:
         notes.append("other motors in LabSpec's configuration: " +

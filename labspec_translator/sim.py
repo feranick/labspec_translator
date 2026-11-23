@@ -1,5 +1,5 @@
 """sim.py — a simulated LabSpec + XploRA behind the same bridge protocol as ls6t_bridge.vbs.
-Version: 2026.11.22.15
+Version: 2026.11.22.16
 
 It answers every verb of the bridge with the same keys, so the runner, the checks and the MCP server are tested
 without the instrument (LS6T_MODE=sim, and the tests). The simulated sample is a silicon wafer with a graphene
@@ -75,11 +75,19 @@ class SimLabSpec:
                   "Shutter": {"values": [0.0, 1.0], "labels": ["closed", "open"], "i": 0},
                   "LaserPol": {"values": [0.0, 1.0, 2.0], "labels": ["Circular", "Horizontal", "Vertical"], "i": 1},
                   "RamanPol": {"values": [0.0, 1.0, 2.0], "labels": ["Horizontal", "Vertical", "None"], "i": 2},
+                  "IlluminatorV": {"values": [0.0, 1.0], "labels": ["Dark field", "Bright field"], "i": 1},
+                  "uLight": {"values": [0.0, 1.0, 2.0], "labels": ["Off", "BrightField", "DarkField1"], "i": 1},
                   "X": {"value": self.x0}, "Y": {"value": self.y0}, "Z": {"value": self.zf}}
+        self.illumination_moves = 0
         self.exposure, self.accumulations = 1.0, 1
         self.temp_c = -60.0
         self.laser_offset = (1.5, -0.8)     # where the beam really is, relative to LabSpec's laser position (µm)
         self.particle = (self.x0 - 15.0, self.y0 + 10.0, 1.5)   # a dust particle on the Si: dark, blocks Raman
+        # faint specks scattered over the sample (not periodic, so image shifts are unambiguous at any step)
+        srng = np.random.default_rng(7)
+        n = 1500
+        self.specks = np.column_stack([self.x0 + srng.uniform(-600, 600, n), self.y0 + srng.uniform(-600, 600, n),
+                                       srng.uniform(0.6, 2.5, n), srng.uniform(15, 35, n)])
         self.laser_blocked = False
         self.moves = 0
         self.acquisitions = 0
@@ -248,7 +256,9 @@ class SimLabSpec:
                 "shutter_mode": 0, "halted": int(self.halted), "last_error": self.last_error,
                 "live_video": int(self.live), "camera": self.camera,
                 **({"laser_pol": self._cur("LaserPol")[1]} if p.get("m_laser_pol") else {}),
-                **({"raman_pol": self._cur("RamanPol")[1]} if p.get("m_raman_pol") else {}), "laser_open": int(time.time() < self.laser_until)}
+                **({"raman_pol": self._cur("RamanPol")[1]} if p.get("m_raman_pol") else {}),
+                **({"illumination": self._cur("IlluminatorV")[1]} if p.get("m_illumination") else {}),
+                **({"illumination_light": self._cur("uLight")[1]} if p.get("m_illumination_light") else {}), "laser_open": int(time.time() < self.laser_until)}
 
     def v_laser(self, p):
         state = p.get("state")
@@ -440,6 +450,10 @@ class SimLabSpec:
 
     def v_move(self, p):
         name = p.get("motor")
+        if str(name).replace(" ", "").lower() == "laserswitch":
+            return {"ok": 0, "error": f"ls6t never moves {name} (it switches a laser on or off): do it in LabSpec"}
+        if name == "IlluminatorV":
+            self.illumination_moves += 1
         if name not in self.m:
             return {"ok": 0, "error": f"motor {name!r} not present"}
         m = self.m[name]
@@ -541,7 +555,11 @@ class SimLabSpec:
         xs = x + (np.arange(W) - (W - 1) / 2) * w_um / W
         ys = y + (np.arange(H) - (H - 1) / 2) * w_um / W
         X, Y = np.meshgrid(xs, ys)          # rows: Y, columns: X (X varies fastest in the flat data)
-        base = 150 + 6 * np.sin(X / 3.0) * np.cos(Y / 4.0) + self.rng.normal(0, 3, X.shape)
+        base = 150 + 3 * np.sin(X / 9.7) * np.cos(Y / 12.3) + self.rng.normal(0, 3, X.shape)
+        sp = self.specks
+        near = sp[(np.abs(sp[:, 0] - x) < w_um) & (np.abs(sp[:, 1] - y) < w_um)]
+        for sxk, syk, srk, sck in near:
+            base = base - sck * np.exp(-((X - sxk) ** 2 + (Y - syk) ** 2) / (2 * srk ** 2))
         flake = X >= self.x0
         r = np.where(flake, base - 35, base)
         g = np.where(flake, base - 25, base)
@@ -578,7 +596,9 @@ class SimLabSpec:
         path = Path(out + ".video.txt")
         npix = write(path, r, g, b)
         res = {"id": 900, "out": str(path), "pixels": npix, "laser_s": laser_s or acq_s, **extra,
-               "x_um": x, "y_um": y, "objective": self.m["Objective"]["labels"][self.m["Objective"]["i"]]}
+               "x_um": x, "y_um": y, "objective": self.m["Objective"]["labels"][self.m["Objective"]["i"]],
+               **({"illumination": self._cur("IlluminatorV")[1]} if p.get("m_illumination") else {}),
+               **({"illumination_light": self._cur("uLight")[1]} if p.get("m_illumination_light") else {})}
         for f in str(p.get("formats", "")).split(","):
             if f:
                 res[f"saved_{f}"] = 0           # the simulator writes no LabSpec image files

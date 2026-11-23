@@ -1,8 +1,9 @@
 """api.py — the functions behind the command line and the MCP server (JSON in, JSON out).
-Version: 2026.11.22.15
+Version: 2026.11.22.16
 """
 from __future__ import annotations
 
+import math
 import base64
 import json
 import os
@@ -479,10 +480,17 @@ def _instrument(action, camera, setup, seconds, um=None) -> dict:
             num, err = P.camera_number(prof, camera)
             if err:
                 return {"ok": False, "error": err}
+            shown = None
+            if (prof.get("motors") or {}).get("illumination") and action == "camera_on":
+                shown = b.call("status", timeout_s=15, **runner.motor_args(prof)).get("illumination")
             r = b.call("camera", timeout_s=30, action=action[7:],
                        switch_camera=int(bool(prof.get("video", {}).get("switch_camera"))),
                        stop_video=int(bool(prof.get("video", {}).get("stop_from_script"))),
                        **({"camera": num} if num is not None else {}))
+            if r.get("ok") and str(r.get("camera_restart", "")) == "1" and shown:
+                # after a video restart LabSpec has shown bright field with the light in dark field (2026-11-23)
+                r["illumination"] = dict(illumination_set(b, prof, shown, shown),
+                                         why="set again after the video restart")
             names = {int(v): k for k, v in (prof.get("video", {}).get("cameras") or {}).items()}
             try:
                 r["camera_name"] = names.get(int(float(r.get("camera"))))
@@ -526,7 +534,48 @@ def _discover_failed(error) -> dict:
     return out
 
 
-SET_KEYS = ("filter", "laser_nm", "grating", "objective", "hole_um", "slit_um", "laser_pol", "raman_pol")
+SET_KEYS = ("filter", "laser_nm", "grating", "objective", "hole_um", "slit_um", "laser_pol", "raman_pol",
+            "illumination")
+
+
+def _illumination_label(want: str, labels: list) -> str | None:
+    """'bright' / 'dark' (or a label as LabSpec names it) -> the illumination motor's label."""
+    w = str(want).strip().lower()
+    for lab in labels:
+        if str(lab).strip().lower() == w:
+            return lab
+    hits = [lab for lab in labels if w.split()[0] in str(lab).lower()] if w else []
+    return hits[0] if len(hits) == 1 else None
+
+
+def illumination_set(b: Bridge, prof: dict, want: str, shown) -> dict:
+    """Bright or dark field on the illumination motor (profile motors.illumination; the XploRA's IlluminatorV). When
+    LabSpec already shows the mode asked, it goes through the other one and back: twice on 2026-11-23, after a video
+    restart or an objective change, LabSpec showed bright field with the light in dark field, and only a real change
+    put them in agreement. Never LaserSwitch (the bridge refuses it)."""
+    mot = (prof.get("motors") or {}).get("illumination")
+    if not mot:
+        return {"ok": False, "error": "no illumination motor in the profile (motors.illumination; the XploRA's is "
+                                      "IlluminatorV: ls6t profile set motors.illumination IlluminatorV)"}
+    labs, _ = _labels(b, mot)
+    labs = [x for x in labs if x] or list(prof.get("illumination_labels") or [])
+    lab = _illumination_label(want, labs)
+    if not lab:
+        return {"ok": False, "error": f"illumination {want!r}: one of {', '.join(labs) or 'bright, dark'}"}
+    steps = []
+    if shown not in (None, "") and P.same_position(shown, lab):
+        other = next((x for x in labs if x != lab), None)
+        if other:
+            steps.append(other)
+    steps.append(lab)
+    r: dict = {}
+    for v in steps:
+        r = b.call("move", timeout_s=60, motor=mot, mode="label", value=v)
+        if not r.get("ok"):
+            return {"ok": False, "asked": lab, "error": r.get("error")}
+    got = r.get("label")
+    return {"ok": P.same_position(got, lab), "asked": lab, "got": got, "shown_before": shown,
+            "reasserted": len(steps) > 1, "via": steps}
 
 
 def autocal_info() -> dict:
@@ -708,7 +757,10 @@ def _move_timing(r: dict) -> dict:
     return out
 
 
-SCALE_STEP_FRACTION = 0.2      # video_scale's default move: a fifth of the field (x100 ~17 µm, x10 ~170 µm)
+SCALE_STEP_FRACTION = 0.4      # video_scale's default move: 0.4 x the field's smaller side (x100 ~23 µm, x10 ~240 µm)
+SCALE_MAX_FRACTION = 0.5       # a move over half the field's width (X) or height (Y) is refused
+SCALE_AGREE = 0.01             # pixel aspect (X / Y µm per px) within 1 % of other objectives on the same camera
+SCALE_ROT_DEG = 0.5            # and the image's rotation within 0.5 degrees
 
 
 def _sig2(v: float) -> float:
@@ -718,9 +770,12 @@ def _sig2(v: float) -> float:
 
 def video_scale(b: Bridge, step_um=None) -> dict:
     """The video's µm per pixel and axis directions, measured: a frame, the stage moved step_um in +X (no laser,
-    nothing else moves), a frame, back; the same in +Y; the image shift by phase correlation. The default move is a
-    fifth of the objective's field (its measured scale, else OLConfig's field: x100 ~17 µm, x10 ~170 µm), so the
-    features stay in view; a move over half the field is refused. Stored per objective and camera
+    nothing else moves), a frame, back; the same in +Y; the image shift by phase correlation. The default move is 0.4
+    x the field's smaller side (its measured scale, else OLConfig's field: x100 85 x 58 µm -> 23 µm, x10 -> 240 µm):
+    on 2026-11-23 the x100's 17 µm gave a 4 % X / Y mismatch (stage positioning error) that 25 µm removed. A move over
+    half the field's width or height is refused (35 µm left the x100's 58 µm-tall field in Y). The pixel aspect and
+    the image's rotation belong to the camera: a result that disagrees with another objective's on the same camera
+    (1 %, 0.5 degrees) is stored but flagged. Stored per objective and camera
     (video_scale.json) and used for every snapshot's axes from then on. On the XploRA (2026-11-22, by hand): x10
     0.98-0.99 µm/px (field 0.972), x100 0.096 (0.0963); LabSpec's axes 1.00 for both."""
     from . import video as V
@@ -751,29 +806,33 @@ def video_scale(b: Bridge, step_um=None) -> dict:
         if V.frame_too_dark(V._lum(f0["img"])):
             return {"ok": False, "error": "the frame is black or without contrast: turn the white light up and focus "
                                           "on a view with visible structure; nothing moved", "folder": str(folder)}
-        width = None                    # the field's width in µm: the measured scale, else OLConfig's field
+        width = height = None           # the field in µm: the measured scale, else OLConfig's field
         sa = V.stage_axes(f0, prof, r0.get("objective"), x0, y0, r0.get("camera"))
         if sa is not None:
-            width = float(abs(sa["xs"][-1] - sa["xs"][0]))
+            width, height = float(abs(sa["xs"][-1] - sa["xs"][0])), float(abs(sa["ys"][-1] - sa["ys"][0]))
         elif f0["um"] and len(f0["xs"]) > 1:
             span = float(abs(f0["xs"][-1] - f0["xs"][0]))
             if abs(span / (f0["width"] - 1) - 1) > 0.01:      # LabSpec's axes, when not its one-per-pixel ones
-                width = span
+                width, height = span, float(abs(f0["ys"][-1] - f0["ys"][0]))
+        side = min(x for x in (width, height) if x) if (width or height) else None
+        good = _sig2(SCALE_STEP_FRACTION * side) if side else None
         if step_um:
             step = float(step_um)
-        elif width:
-            step = _sig2(SCALE_STEP_FRACTION * width)
+        elif good:
+            step = good
         else:
             return {"ok": False, "error": f"no field of view known for objective {r0.get('objective')!r}: give the "
-                                          "move (--um), about a fifth of the field's width; nothing moved"}
+                                          "move (--um), about 0.4 x the field's smaller side; nothing moved"}
         if not 1 <= step <= cap:
             return {"ok": False, "error": f"move: 1 to {cap:g} µm; nothing moved"}
-        if width and step > 0.5 * width:
-            return {"ok": False, "error": f"{step:g} µm is over half the field ({width:.0f} µm wide): the features "
-                                          f"would leave the view; about {_sig2(SCALE_STEP_FRACTION * width):g} µm "
-                                          "works; nothing moved"}
+        for size, axis, word in ((width, "X", "wide"), (height, "Y", "tall")):
+            if size and step > SCALE_MAX_FRACTION * size:
+                return {"ok": False, "error": f"{step:g} µm is over half the field in {axis} ({size:.0f} µm {word}): "
+                                              f"the features would leave the view; about {good:g} µm works; "
+                                              "nothing moved"}
         out = {"ok": True, "objective": r0.get("objective"), "camera": r0.get("camera"), "step_um": step,
-               "step_from": "asked" if step_um else f"a fifth of the field ({width:.0f} µm)", "folder": str(folder)}
+               "step_from": "asked" if step_um else f"0.4 x the field's smaller side ({side:.0f} µm)",
+               "folder": str(folder)}
         res = {}
         for axis, dx, dy in (("x", step, 0.0), ("y", 0.0, step)):
             m = b.call("move_xy", timeout_s=120, x_um=round(x0 + dx, 3), y_um=round(y0 + dy, 3),
@@ -782,7 +841,7 @@ def video_scale(b: Bridge, step_um=None) -> dict:
                 raise BridgeError(f"move in {axis}: {m.get('error')}")
             f1, _ = frame(f"plus_{axis}")
             b.call("move_xy", timeout_s=120, x_um=round(x0, 3), y_um=round(y0, 3), **runner.motor_args(prof))
-            drow, dcol = V.image_shift(f0["img"], f1["img"])
+            drow, dcol = V.image_shift(f0["img"], f1["img"], axis=axis)
             res[axis] = {"shift_px": [round(dcol, 2), round(drow, 2)]}
         # x_um(col) = X + (col - c) * sx, y_um(row) = Y - (row - r) * ty: a stage move +d shifts the content by
         # -d/sx columns and +d/ty rows
@@ -795,11 +854,32 @@ def video_scale(b: Bridge, step_um=None) -> dict:
             out.update(ok=False, error="no clear shift (a featureless view, or the stage did not move as asked): "
                                        "nothing stored; use a sample with visible structure")
             return out
+        # the camera's own properties: pixel aspect and rotation, the same whatever the objective
+        aspect = abs(sx) / abs(ty)
+        rot = math.degrees(math.atan2(res["x"]["shift_px"][1], abs(res["x"]["shift_px"][0])))
+        out.update(aspect=round(aspect, 4), rotation_deg=round(rot, 2))
         store = V.scale_store()
-        store[f"{r0.get('objective')}@{r0.get('camera')}"] = {"sx": sx, "ty": ty, "measured": time.strftime(
-            "%Y-%m-%d %H:%M:%S"), "step_um": step}
+        key = f"{r0.get('objective')}@{r0.get('camera')}"
+        disagree = []
+        for k, c in sorted(store.items()):
+            if k == key or not V._same_camera(k, r0.get("camera")) or not (c.get("sx") and c.get("ty")):
+                continue
+            a2 = abs(float(c["sx"])) / abs(float(c["ty"]))
+            if abs(aspect / a2 - 1) > SCALE_AGREE:
+                disagree.append(f"pixel aspect {aspect:.4f} vs {a2:.4f} with {k} ({abs(aspect / a2 - 1) * 100:.1f} %)")
+            if c.get("rotation_deg") is not None and abs(rot - float(c["rotation_deg"])) > SCALE_ROT_DEG:
+                disagree.append(f"rotation {rot:.2f} vs {float(c['rotation_deg']):.2f} degrees with {k}")
+        store[key] = {"sx": sx, "ty": ty, "aspect": round(aspect, 5), "rotation_deg": round(rot, 3),
+                      "measured": time.strftime("%Y-%m-%d %H:%M:%S"), "step_um": step,
+                      **({"disagrees": disagree} if disagree else {})}
         V.scale_store(store)
-        out["stored"] = f"{r0.get('objective')}@{r0.get('camera')}"
+        out["stored"] = key
+        if disagree:
+            out["warnings"] = [("stored, but it disagrees with the same camera's other measurements: "
+                                + "; ".join(disagree) + f". These belong to the camera, not the lens: repeat with a "
+                                "larger move (--um, up to half the field) on a view with clear structure; the stage's "
+                                "positioning error weighs more on small moves (2026-11-23: x100 17 µm gave 4 %, 25 µm "
+                                "agreed)")]
         out["note"] = ("image x grows with stage X" if sx > 0 else "image x runs against stage X") + "; " + \
                       ("image up is stage +Y" if ty > 0 else "image up is stage -Y")
         return out
@@ -959,6 +1039,15 @@ def set_instrument(setup: dict) -> dict:
                 if r.get("stopped_by"):
                     done[-1]["error"] = f"stopped by the {r.get('stopped_by')}"
                 break
+        # the illumination: as asked, or, after an objective change, set again to what LabSpec showed before (it has
+        # shown bright field with the light in dark field after such a change, 2026-11-23)
+        illum = None
+        obj_changed = any(d["set"] == "objective" and d["ok"] and not d.get("already_set") for d in done)
+        if "illumination" in s:
+            illum = illumination_set(b, prof, s["illumination"], before.get("illumination"))
+        elif obj_changed and mot.get("illumination") and before.get("illumination"):
+            illum = illumination_set(b, prof, before["illumination"], before.get("illumination"))
+            illum["why"] = "set again after the objective change"
         t_after0 = time.time()
         after = b.call("status", timeout_s=15, **runner.motor_args(prof))
         if prof.get("manual_objective", True) and after.get("objective"):
@@ -974,6 +1063,9 @@ def set_instrument(setup: dict) -> dict:
                "after": {k: after.get(k) for k in SET_KEYS if after.get(k) is not None}}
         if done_obj:
             out["objective"] = done_obj
+        if illum is not None:
+            out["illumination"] = illum
+            out["ok"] = out["ok"] and bool(illum.get("ok"))
         notes = []
         if reach:
             out["reach"] = reach
@@ -996,7 +1088,7 @@ def set_instrument(setup: dict) -> dict:
         if hb0.get("state") == "busy" and hb0.get("verb") == "inventory":
             out["timing"]["note"] = ("the bridge was still taking its start-up inventory: the set waited for it "
                                      "(status_before_s)")
-        if not moves:
+        if not moves and illum is None:
             out.update(ok=True, note=(out.get("note") + "; " if out.get("note") else "") + "already set")
         return out
     except BridgeError as exc:

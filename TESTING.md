@@ -12,7 +12,7 @@ stops and cancel on the simulator, and `ls6t bench` gives known answers. What re
 LabSpec and hardware. The plan goes from no laser and no motion to an LLM app driving a full map, in stages. Each
 stage starts only when the previous one passed.
 
-Version under test: 2026.11.22.15 (bridge protocol 1).
+Version under test: 2026.11.22.16 (bridge protocol 1).
 
 **Already known** (2026-11-20, from the instrument's discovery dump, its `NFActiveX.ocx`, `OLConfig.ini`,
 `OLSetup.ini` and LabSpec 6.7.1's service scripts): the motors and their positions (lasers 532, 637.75, 785.04 nm;
@@ -494,20 +494,50 @@ remembering them per camera; the scale comes from the objective's field of view 
 - Take a snapshot with the same view as on 2026-11-22. Pass: `frame.marked.png` looks like LabSpec's image (same
   way up, same colours); `orientation` shows `flip_y` true, `swap_rb` true and a `score` above 0.8; `axes_from` names
   the objective's field; the laser marker is inside the image (at its centre, the stage position). With the x5 the field is about 1713 x 1170 µm, not 887 x 605 (2026-11-22). A black frame (too little light) gives `frame_dark`, a warning and no features (2026-11-22: five 'features' of strength 1e9).
-- `ls6t instrument video-scale` (x10, no laser, a lit view with visible structure; the stage moves a fifth of the
-  field, ~170 µm, in +X and +Y and comes back; `--um 100` for 100 µm; over half the field is refused). Pass: `ok`; `um_per_px_x` and `um_per_px_y` about 0.97-0.99 in size
+- `ls6t instrument video-scale` (x10, no laser, a lit view with visible structure; the stage moves 0.4 x the field's
+  smaller side, ~240 µm, in +X and +Y and comes back; `--um 100` for 100 µm; over half the field's width or height is
+  refused). Pass: `ok`; `um_per_px_x` and `um_per_px_y` about 0.97-0.99 in size
   (field / pixels: 862.89 / 888 = 0.972; measured by hand 2026-11-22: x10 0.98-0.99, x100 0.096); `cross_talk_px` small; `note` names the axis directions; the stage back
   where it started. Record the values and the note.
 - Repeat the 2026-11-22 move test (snapshot, `move_xy` +100 µm in X, snapshot; then Y). Pass: `axes_from` says
   "measured"; the features move by about -100 µm in X and -100 µm in Y in ls6t's plot, in µm (the stage moved
   under the view: the features go the other way), and the same way as in LabSpec's video window.
-- Repeat `video-scale` for the x100 (default move ~17 µm; `step_from` says so) and the x5 (~340 µm); each is stored
-  separately.
+- Repeat `video-scale` for the x100 (default move ~23 µm; `step_from` says so) and the x5; each is stored separately.
+  **Seen on .22.15 (2026-11-23):** x100 17 µm: 0.0949 / 0.0990 µm/px, cross-talk 2.34 px (a 4 % X / Y mismatch); 35 µm:
+  X 0.0966, Y failed (features left the 58 µm-tall field); 25 µm: 0.0963 / 0.0968, 0.91 px. From .22.16: default 0.4 x
+  the smaller side (23 µm), the Y move checked against the height, and `aspect` / `rotation_deg` compared with the
+  same camera's other objectives (1 %, 0.5 degrees): a disagreeing result is stored with a warning. Check: x100
+  default gives `aspect` within 1 % of the x10's and no warning; `--um 35` is refused before the stage moves.
 - Orientation from a black frame: with the x5 and the light off (black frame), take a snapshot. Pass: `orientation`
   says "remembered for this camera (the frame is dark or flat)" and keeps `flip_y` / `swap_rb` from the lit view;
   a grey Si view keeps the stored colour swap (`swap_from` "kept").
 - The marker: until a `spot` study measured the beam for this objective and laser, `marker_measured` is false,
   `marker_source` starts with "ASSUMED" and the plot labels the marker "assumed".
+- **Seen on .22.15 (2026-11-23, Si, x10, top camera):** orientation learnt from the first snapshot (`flip_y` true,
+  score 0.996, no red/blue swap); `video-scale` x10 0.977 / 0.982 µm/px (X / Y), cross-talk 0.05 px, "image up is
+  stage -Y", stored as `x10_VIS@0`; repeated in bright field 0.981 / 0.979, cross-talk 0.84 px: repeatable to about
+  0.4 % (features found as dark spots in bright field). Move test with the measured axes: features keep their stage
+  coordinates within about 0.6 µm over +100 µm moves in X and in Y. Without a measurement the fallback (OLConfig
+  field) had Y reversed (a particle at +153 µm instead of -155): from .22.16 the directions come from a measurement
+  on the same camera (`directions_from` "learned from x10_VIS@0"); with none, the snapshot warns that they are
+  assumed and `move.to_um` is refused. Check: with the x100 (no video-scale for it yet), a snapshot says
+  `directions_from` "learned from x10_VIS@0 (same camera)" and the particle's Y has the right sign.
+- **Illumination (2026-11-23):** twice, after a video restart (`camera_off` / `camera_on`) or an objective change,
+  LabSpec's indicator showed bright field while the light was dark field; toggling dark → bright in LabSpec fixed it.
+  From .22.16 a snapshot without the laser compares its mean grey level with the last one for the same objective and
+  camera (`brightness`) and warns when it is 2.5x darker or brighter. Check: after such a restart, a snapshot in the
+  wrong mode carries the warning. Also record which motor LabSpec uses for the illumination (the profile notes list
+  `IlluminatorV` among "other motors in LabSpec's configuration" when present) and its positions: if it is the
+  bright / dark field selector, ls6t could set it again after restarting the video. **From .22.16:** discovery and
+  OLConfig.ini set `motors.illumination` to `IlluminatorV` (Dark field, Bright field) and `motors.illumination_light`
+  to `uLight` (Off, BrightField, DarkField1-4, Full; read only); an existing profile needs `ls6t profile set
+  motors.illumination IlluminatorV` and `ls6t profile set motors.illumination_light uLight`. Snapshots carry both
+  (`illumination`) and warn when they disagree. `ls6t instrument set --illumination bright` (or dark) moves
+  IlluminatorV, through the other position when LabSpec already shows the one asked; after an objective change
+  (`set`) or a video restart (`camera_on`), ls6t sets again what LabSpec showed before. Check: after the next
+  restart in dark field, the answer's `illumination` (`why`: "set again ...") and the view agree, and a snapshot
+  shows no disagreement warning. `LaserSwitch` is refused by the bridge (`ls6t bridge call move motor=LaserSwitch
+  mode=label value=Off` answers "ls6t never moves LaserSwitch").
 - If the colours or the way up still differ (no JPEG saved, or a view without structure: `score` low), set
   `video.packing` to `rgb`, or keep `raw` (the `.video.txt` file) for analysis.
 

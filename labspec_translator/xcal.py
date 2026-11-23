@@ -1,5 +1,5 @@
 """xcal.py — the spectral (Raman shift) calibration: reference lines, and the correction ls6t may apply itself.
-Version: 2026.11.22.15
+Version: 2026.11.22.16
 
 At the start of a session the zero of the spectral scale is checked on a sample with strong, well-known lines
 (silicon, polystyrene...). LabSpec's own correction (the spectrometer's zero and its dispersion coefficient, in
