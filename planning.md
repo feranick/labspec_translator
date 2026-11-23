@@ -717,7 +717,12 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   from .24: clients.clean_stale removes any ls6t server (is_ls6t_entry: args name labspec_translator.mcp_server)
   from files Claude no longer reads, reports each (removed / not ls6t's / no entry / error). Warm-up: LabSpec
   20:29:56, bridge 24 s later, grating 0 s (with 18 s and 26 s also 0 s today): LabSpec-start explanation weak;
-  Nov 20-21 slow cases unexplained. 142 tests.
+  Nov 20-21 slow cases unexplained. Nicola: the Store build read the Packages copy on Nov 20 (the placeholder error
+  came from it), so a Claude-Data folder is no proof: claude_dirs' 'moved' now needs the app's .user-data-left marker;
+  without it both the Packages copy and Claude-Data are written and nothing is removed. TESTING T0.3: after .13, quit
+  and restart Claude, tools present? running_app_reads, marker present? deploy_log for .22.4 / .22.6: bridge_was
+  stopped, ended not running: only the bridge's own exit writes 'stopped' (a running one beats every second), so no
+  regression. 142 tests.
 
 ## To do next
 

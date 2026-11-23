@@ -134,9 +134,10 @@ def claudecode_running() -> bool:
 def claude_dirs(create: bool = False, running: bool = True) -> list[Path]:
     """The folders the Claude desktop app reads claude_desktop_config.json from (Windows, in this order):
     the running app's --user-data-dir; CLAUDE_USER_DATA_DIR; for each Microsoft Store package (Claude_*,
-    AnthropicPBC.Claude_*) %LOCALAPPDATA%\\Claude-Data\\<package family name, lower case> once the app moved its data
-    there (current builds; the old folder then holds a .user-data-left.<name> marker), else the package's
-    LocalCache\\Roaming\\Claude (older builds); %LOCALAPPDATA%\\Claude-3p (the variant on a third-party cloud);
+    AnthropicPBC.Claude_*) %LOCALAPPDATA%\\Claude-Data\\<package family name, lower case> once the app has said it moved
+    its data there (the old folder holds its .user-data-left.<name> marker), else the package's LocalCache\\Roaming\\Claude
+    (older builds) and also any Claude-Data folder: without the marker both are written, since the Store build did
+    read the Packages copy on 2026-11-20 and a Claude-Data folder alone does not prove it stopped; %LOCALAPPDATA%\\Claude-3p (the variant on a third-party cloud);
     %APPDATA%\\Claude (the installer from claude.ai, or when nothing else is found and `create`)."""
     if sys.platform == "darwin" and not _windows():
         d = Path.home() / "Library" / "Application Support" / "Claude"
@@ -157,8 +158,8 @@ def claude_dirs(create: bool = False, running: bool = True) -> list[Path]:
         for pkg in pkgs:
             name = pkg.name.lower()
             old = pkg / "LocalCache" / "Roaming" / "Claude"
-            moved = (data / name).is_dir() or any(f.name.lower() == f".user-data-left.{name}"
-                                                  for f in (old.iterdir() if old.is_dir() else []))
+            # only the app's own marker says it left the old folder (a Claude-Data folder existing is not enough)
+            moved = any(f.name.lower() == f".user-data-left.{name}" for f in (old.iterdir() if old.is_dir() else []))
             out.append(data / name if moved else old)
         if data.is_dir():
             out += [d for d in sorted(data.iterdir()) if d.is_dir() and d.name.lower().startswith(("claude_",
@@ -555,8 +556,8 @@ def connect(clients: list, python: str, sim: bool = False, main: bool = True, te
 
 
 def clean_stale(python: str) -> list[dict]:
-    """ls6t's entries out of the Claude configuration files the app no longer reads (a Store build that moved to
-    Claude-Data leaves its Packages\\...\\LocalCache copy behind): any ls6t server there, whichever Python wrote it,
+    """ls6t's entries out of the Claude configuration files the app no longer reads: a Store build's Packages\\...\\LocalCache
+    copy only once the app's own .user-data-left marker is there (claude_dirs); then any ls6t server there, whichever Python wrote it,
     since nothing reads the file (2026-11-22: the Packages copy kept an old entry from .24 on, silently). Each file
     gets a report: removed, or why not."""
     reports = []

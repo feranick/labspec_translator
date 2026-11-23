@@ -1265,8 +1265,14 @@ def test_claude_desktop_config_folders(tmp_path, monkeypatch):
     assert C.claude_dirs(create=True) == [old]                              # a Store build that has not moved
     py = str(tmp_path / "python.exe")
     (old / "claude_desktop_config.json").write_text(json.dumps({"mcpServers": {"ls6t": {"command": py}}}))
-    (old / ".user-data-left.claude_pzs8sxrjxfjjc").write_text("")
     new = local / "Claude-Data" / "claude_pzs8sxrjxfjjc"
+    # 2026-11-22: a Claude-Data folder without the app's marker does not prove the Packages copy is unread (the Store
+    # build read it on Nov 20): both are written, nothing removed
+    new.mkdir(parents=True)
+    assert C.claude_dirs(create=True) == [old, new] and C.claude_stale_files() == []
+    C.connect(["claude"], py)
+    assert all(C.read_json(d / "claude_desktop_config.json")["mcpServers"]["ls6t"]["command"] == py for d in (old, new))
+    (old / ".user-data-left.claude_pzs8sxrjxfjjc").write_text("")
     assert C.claude_dirs(create=True) == [new]                              # moved: Claude-Data
     reps = C.connect(["claude"], py)
     assert C.read_json(new / "claude_desktop_config.json")["mcpServers"]["ls6t"]["command"] == py

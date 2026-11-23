@@ -296,7 +296,9 @@ one profile: two apps cannot drive the instrument at the same time. The entry ru
 **Quit the Claude app before** `ls6t connect claude` (or the installer): it rewrites its configuration file when it
 quits, which would undo the change (right-click its icon in the taskbar's notification area, *Quit*). The running
 app's `--user-data-dir` says which folder it reads; `ls6t connect` finds it (and the Store builds' newer
-`Claude-Data` folder) and removes ls6t's entries from folders the app no longer reads. Then start the app again; the
+`Claude-Data` folder). A Store build's older `Packages\Claude_<id>\LocalCache\Roaming\Claude` copy is written too,
+unless the app has left its own `.user-data-left.<id>` marker there: only then are ls6t's entries taken out of it
+(the Store build read that copy on 2026-11-20). Then start the app again; the
 ls6t tools appear in a new chat or session (Claude: the tools / connectors menu). Notes per app:
 
 - **ChatGPT desktop app / Codex**: tool calls may wait up to an hour for the operator's answer in LabSpec, so the entry
