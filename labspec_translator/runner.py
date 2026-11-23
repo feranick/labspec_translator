@@ -1444,14 +1444,23 @@ def run_calibration(name: str, study: dict, ctx: Ctx) -> dict:
                     continue                       # measure again
             else:
                 autocal_runs.append({"ok": False, "error": "the operator declined"})
+        if not cal.get("trusted", True):
+            # no correction from a line measured badly: the operator would move the zero by a wrong amount
+            res.setdefault("warnings", []).append("no correction asked: " + "; ".join(cal.get("not_trusted_because", [])))
+            break
         laser = (res.get("instrument") or {}).get("laser_nm") or 532.0
         ref, meas = cal["reference_cm1"], cal["measured_cm1"]
         err = meas - ref
         nm = shift_to_nm(ref, laser)
         dnm = -err * nm * nm / 1e7
+        inst = res.get("instrument") or {}
+        step = ((prof.get("calibration") or {}).get("offset_step_cm1") or {}).get(
+            f"{_f(inst.get('grating')) or 0:g}@{float(laser):g}")
+        units = (f" On this instrument one step of LabSpec's Offset shift moves the line by about {float(step):+.3f} "
+                 f"cm-1 here: about {-err / float(step):+.0f} steps (arrows)." if step else "")
         txt = (f"ls6t: the {'Si' if cal.get('reference') == 'si' else cal.get('reference')} line at {ref} cm-1 is measured at {meas:.2f} cm-1 "
                f"({err:+.2f} cm-1).\n\nCorrect the spectral zero in LabSpec (Maintenance > Instrument calibration, "
-               f"for this grating): the line must move by {-err:+.2f} cm-1, about {dnm:+.4f} nm."
+               f"for this grating): the line must move by {-err:+.2f} cm-1, about {dnm:+.4f} nm.{units}"
                + (f" With several lines, the coefficient (dispersion) too: scale {cal['correction']['b']:.6f}."
                   if cal.get("correction") and abs(cal["correction"]["b"] - 1) > 1e-5 else "")
                + "\n\nPress OK to measure again, or Cancel to stop.")
@@ -2249,7 +2258,8 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
             spike_points.append(rec["point"])
         lo, hi = rng.get("from_cm1"), rng.get("to_cm1")
         if lo is not None and hi is not None and not rng.get("single"):
-            if a["from_cm1"] > lo + 2 or a["to_cm1"] < hi - 2:
+            tol_r = max(3.0, 0.005 * (hi - lo))      # a pixel or two short is not a gap (997.6 for 1000, 2026-11-23)
+            if a["from_cm1"] > lo + tol_r or a["to_cm1"] < hi - tol_r:
                 cover_short.append(rec["point"])
         axes.append(a["_x"])
         ys.append(a["_y"])
@@ -2316,7 +2326,8 @@ def _calibration_result(study, prof, rec, ref_lines, laser, grating, request, ch
     for ref, pk in zip(ref_lines, rec.get("peaks") or []):
         lines.append({"reference_cm1": ref, "measured_cm1": pk.get("position_cm1") if pk.get("ok") else None,
                       "error_cm1": round(pk["position_cm1"] - ref, 4) if pk.get("ok") else None,
-                      "fwhm_cm1": pk.get("fwhm_cm1"), "snr": pk.get("snr"), "why": pk.get("why")})
+                      "fwhm_cm1": pk.get("fwhm_cm1"), "snr": pk.get("snr"), "why": pk.get("why"),
+                      "warning": pk.get("warning")})
     ok = [l for l in lines if l["measured_cm1"] is not None]
     res: dict = {"reference": refname, "lines": lines, "tol_cm1": tol, "adjust": cal.get("adjust", "none")}
     if not ok:
@@ -2341,9 +2352,20 @@ def _calibration_result(study, prof, rec, ref_lines, laser, grating, request, ch
                worst_error_cm1=round(worst, 4), correction={"a": round(float(a), 5), "b": round(float(b), 7)},
                residual_cm1=round(float(np.max(np.abs(resid))), 4), lines_used=len(ok), **{"pass": worst <= tol})
     res["zero_shift_cm1"] = round(float(a + (b - 1.0) * float(np.mean(refs))), 4)   # the shift at the lines' centre
+    # good enough to correct the zero by? 2026-11-23: at 1 %, 1 s the Si line was weak and its fit sat at the edge of
+    # the window (525.12 cm-1); ls6t still asked for a -4.42 cm-1 correction; AutoCalibration then found 520.64
+    min_snr = float(prof["checks"].get("min_snr", 10.0))
+    doubts = [f"{l['reference_cm1']:g} cm-1: " + ("the fit sits at the edge of its window" if "edge" in str(l.get("warning") or "")
+                                                  else f"signal-to-noise {l['snr']:.0f} (below {min_snr:g})")
+              for l in ok if "edge" in str(l.get("warning") or "") or (l.get("snr") is not None and l["snr"] < min_snr)]
+    res["trusted"] = not doubts
+    if doubts:
+        res["not_trusted_because"] = doubts
+        unreliable.append("the reference line was not measured well enough to judge the zero (" + "; ".join(doubts)
+                          + "): use a stronger filter or a longer exposure, check the focus, then measure again")
     checks["calibration"] = {"pass": res["pass"], "offset_cm1": res["offset_cm1"], "worst_error_cm1": res["worst_error_cm1"],
                              "tol_cm1": tol}
-    if res["adjust"] == "ls6t":
+    if res["adjust"] == "ls6t" and res["trusted"]:
         st = xcal.store(laser, grating, a, b, refname, lines, request)
         res["stored_correction"] = st
         warnings.append(f"ls6t now corrects later spectra ({xcal.key(laser, grating)}): true = {a:+.3f} + "

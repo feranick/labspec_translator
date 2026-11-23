@@ -920,7 +920,9 @@ def objective_question(prof: dict, now, want) -> str:
     if prof.get("manual_objective", True):
         return (f"Change the objective BY HAND to {want} (LabSpec has {now}): check the clearance between the objective "
                 f"and the sample, turn the turret to {want}, then press OK. ls6t then sets LabSpec's objective to "
-                f"{want}. Cancel: nothing changes.")
+                f"{want}. Bring the sample into focus by eye with {want} before any focus scan: a scan starts from "
+                f"the old focus and searches only a few µm (2026-11-23: x10 -> x100, no focus found). Cancel: "
+                f"nothing changes.")
     return (f"ls6t asks to turn the objective turret from {now} to {want}. Is there clearance between the objective "
             "and the sample? Continue?")
 

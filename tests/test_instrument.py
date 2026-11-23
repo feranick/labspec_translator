@@ -1234,3 +1234,31 @@ def test_maintainer_session_2026_11_23(tmp_path, monkeypatch):
     P.save(dict(prof, video=dict(prof["video"], cameras={"top": 2})))
     PR._INI_CACHE.clear()
     assert P.load()["video"]["cameras"] == {"top": 2}                  # a person's value stays
+
+
+def test_maintainer_session_2026_11_23_afternoon(tmp_path):
+    """The maintainer's second session: a calibration check at 1 %, 1 s fitted a weak Si line at the edge of its
+    window (525.12 cm-1) and asked for a -4.42 cm-1 correction that AutoCalibration then showed was wrong (520.64); a
+    spectrum 100.3-997.6 cm-1 for 100-1000 was called short; the start-up inventory hung inside LabSpec right after
+    AutoCalibration was run by hand; after x10 -> x100 the focus scan started from the old focus."""
+    prof = P.load()
+    study = {"kind": "calibration", "calibration": {"reference": "si", "tol_cm1": 1, "adjust": "ls6t"}}
+    checks, unreliable, warnings = {}, [], []
+    rec = {"peaks": [{"ok": True, "position_cm1": 525.12, "fwhm_cm1": 9.0, "snr": 4.0,
+                      "warning": "the fitted peak sits at the edge of its window: widen window_cm1 or move near_cm1"}]}
+    cal = runner._calibration_result(study, prof, rec, [520.7], 532.0, 1200, "r", checks, unreliable, warnings)
+    assert cal["trusted"] is False and len(cal["not_trusted_because"]) == 1 and "stored_correction" not in cal
+    assert any("not measured well enough" in u for u in unreliable)
+    good = {"peaks": [{"ok": True, "position_cm1": 520.33, "fwhm_cm1": 5.0, "snr": 80.0}]}
+    cal = runner._calibration_result(study, prof, good, [520.7], 532.0, 1200, "r", {}, [], [])
+    assert cal["trusted"] and cal["pass"] and cal["stored_correction"]
+    # the bridge's start-up inventory only when needed
+    br = Path(api.install_bridge(tmp_path / "vbs")["files"]["ls6t_bridge.vbs"]).read_text()
+    assert "Function InventoryNeeded()" in br and "If InventoryNeeded() Then" in br
+    # the objective question says to focus by eye after a manual change
+    assert "into focus by eye" in api.objective_question(prof, "x10_VIS", "x100_VIS")
+    # a spectrum a pixel or two short of the range asked is not reported as short
+    S.ensure(config.active_bridge_dir())
+    st = run_inline({"s": {"kind": "spectrum", "sample": {"name": "Si"}, "setup": SETUP,
+                           "acquire": {"range_cm1": [100, 1000], "exposure_s": 1}}})
+    assert st["studies"]["s"]["checks"]["range"]["pass"], st["studies"]["s"]["checks"]["range"]

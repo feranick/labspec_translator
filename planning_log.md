@@ -774,3 +774,14 @@ What was done, found and decided, by date (oldest first). The current design is 
   Not done, with reason: typelib.py stays (the installed ls6t-typelib command); testmode.py and
   script_motor_main.vbs stay during bring-up. Release routine from now on: bump __init__.py, a CHANGELOG.md row, a
   planning_log.md entry.
+- 2026-11-23, 2026.11.23.5: the maintainer's afternoon session (Codex rollout, on .23.3): status, snapshot, set,
+  video-scale x10@0 (0.9798 / 0.9802 µm/px, 240 µm default move, aspect 0.9996, rotation -0.12 deg), get_inputs,
+  map validation and jobs all as expected. Si 532 nm 1 %, 5 s: 520.94 cm-1, FWHM 8.31. Calibration at 1 %, 1 s: weak
+  line fitted at the window edge, 525.12 cm-1, notice asked -4.42 cm-1; the operator ran LabSpec's AutoCalibration
+  (bridge ended): PASS, 520.64, Offset shift 34 -> 44 (not a reliable unit estimate: the 525.12 was a bad fit).
+  Restarted bridge stuck in 'inventory' (LabSpec froze, restarted). Calibration at 10 %: 520.327 (-0.373), pass.
+  Alignment: no baseline / settings for 532 (expected). x10 -> x100 + focus scan: best at the edge (old focus),
+  kept; spectrum off. Fixes: _calibration_result 'trusted' (edge warning or snr < checks.min_snr) -> unreliable, no
+  notice, no xcal store; notice adds Offset-shift steps from calibration.offset_step_cm1 when set; range check
+  tolerance max(3, 0.5 % of span); bridge InventoryNeeded (missing, >= 7 days, inventory.flag); objective question
+  says focus by eye. AutoCalibration script still not found by autocal_info (LabSpec's menu has it). 149 tests.

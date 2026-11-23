@@ -402,6 +402,24 @@ Sub VLabels(cmd, res)
     On Error GoTo 0
 End Sub
 
+Const LS6T_INVENTORY_DAYS = 7
+
+Function InventoryNeeded()
+    Dim f, flag
+    InventoryNeeded = True
+    On Error Resume Next
+    flag = LS6T_BRIDGE_DIR & "\inventory.flag"
+    If fso.FileExists(flag) Then
+        fso.DeleteFile flag, True
+        Exit Function
+    End If
+    f = LS6T_HOME_DIR & "\discovery_latest.txt"
+    If Not fso.FileExists(f) Then Exit Function
+    If DateDiff("d", fso.GetFile(f).DateLastModified, Now) >= LS6T_INVENTORY_DAYS Then Exit Function
+    InventoryNeeded = False
+    Err.Clear
+End Function
+
 ' The illumination (IlluminatorV) across a video start: LabSpec has put it in dark field when the video started
 ' (2026-11-23: bright field set, snapshot and video_scale frames dark, LabSpec then reporting dark field). Read before
 ' the start, set back after it when it changed (only with m_illumination: the profile's illumination motor).
@@ -2448,7 +2466,15 @@ Sub BridgeMain()
     On Error Resume Next
     gVerb = "inventory"                 ' in the heartbeat: a bridge stuck here is told apart from one in a command
     Beat "busy", True
-    DiscoverTo LS6T_HOME_DIR & "\discovery_latest.txt", False
+    ' Only when needed: none yet, older than LS6T_INVENTORY_DAYS, or asked for (inventory.flag in the bridge folder,
+    ' written by `ls6t instrument discover`). Twice a start-up inventory hung inside LabSpec right after work done by
+    ' hand (a grating changed, AutoCalibration run: 2026-11-23), and LabSpec had to be restarted.
+    If InventoryNeeded() Then
+        DiscoverTo LS6T_HOME_DIR & "\discovery_latest.txt", False
+    Else
+        LabSpec.Message "ls6t: the instrument's inventory from " & _
+            fso.GetFile(LS6T_HOME_DIR & "\discovery_latest.txt").DateLastModified & " is used", LS_MB_STATUS_BAR
+    End If
     Err.Clear
     On Error GoTo 0
     WarmUp
