@@ -96,7 +96,8 @@ def main(argv=None) -> int:
     s = sub.add_parser("instrument")
     s.add_argument("action", choices=["status", "set", "discover", "resume", "last-error", "snapshot", "config",
                                       "camera-on", "camera-off", "laser-on", "laser-off", "calibration",
-                                      "autocal-info", "autocal-run", "end-bridge", "video-scale", "shutter-test"])
+                                      "autocal-info", "autocal-run", "end-bridge", "video-scale", "shutter-test",
+                                      "shutter-verify"])
     s.add_argument("--motor", help="shutter-test: the laser shutter's motor (default: the profile's, or discovery's "
                                    "candidate)")
     s.add_argument("--seconds", type=float, help="laser-on: how long (at most limits.max_laser_on_s)")
@@ -206,6 +207,8 @@ def main(argv=None) -> int:
             return 0 if r.get("ok") else 1
         if a.action == "shutter-test":
             _print(api.shutter_test(a.motor))
+        elif a.action == "shutter-verify":
+            _print(api.shutter_verify(a.seconds or 5.0))
         else:
             _print(api.instrument(a.action.replace("-", "_"), camera=a.camera, seconds=a.seconds, um=a.um))
     elif a.cmd == "bridge":

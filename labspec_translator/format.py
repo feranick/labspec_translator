@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import os
 
+from . import shutter as SH
 from . import config, plan
 from .profile import filter_pct, laser_key, match_label, review_gate
 
@@ -350,9 +351,10 @@ def validate_study(name: str, study: dict, prof: dict) -> dict:
         _unknown(cp, CUTOFF_KEYS, "cutoff", errors)
         if cp.get("light", "white") not in ("white", "laser"):
             errors.append("cutoff.light: white (the white light, laser off) or laser (the sample's own background)")
-        lo = cp.get("laser_off", "shutter" if prof["motors"].get("laser_shutter") else "operator")
-        if cp.get("light", "white") == "white" and lo == "shutter" and not prof["motors"].get("laser_shutter"):
-            errors.append("cutoff.laser_off 'shutter': no laser shutter motor in the profile; use 'operator'")
+        lo = cp.get("laser_off", SH.default_laser_off(prof, (study.get("setup") or {}).get("laser_nm")))
+        g = SH.gate(prof, (study.get("setup") or {}).get("laser_nm")) if lo == "shutter" else None
+        if cp.get("light", "white") == "white" and g:
+            errors.append(f"cutoff.laser_off 'shutter': {g}; or use 'operator' (the operator blocks the laser)")
         if lo not in ("shutter", "operator"):
             errors.append("cutoff.laser_off: shutter or operator")
         elif cp.get("light", "white") == "white" and lo == "operator":
@@ -366,12 +368,12 @@ def validate_study(name: str, study: dict, prof: dict) -> dict:
         from . import background as BG
         if not BG.valid_name(bgk.get("name", "")):
             errors.append("background.name: letters, digits, _ and - (up to 60)")
-        lo = bgk.get("laser_off", "shutter" if prof["motors"].get("laser_shutter") else "operator")
+        lo = bgk.get("laser_off", SH.default_laser_off(prof, (study.get("setup") or {}).get("laser_nm")))
+        g = SH.gate(prof, (study.get("setup") or {}).get("laser_nm")) if lo == "shutter" else None
         if lo not in ("shutter", "operator"):
             errors.append("background.laser_off: shutter or operator")
-        elif lo == "shutter" and not prof["motors"].get("laser_shutter"):
-            errors.append("background.laser_off 'shutter': no laser shutter motor in the profile; use 'operator' "
-                          "(the operator blocks the laser)")
+        elif g:
+            errors.append(f"background.laser_off 'shutter': {g}; or use 'operator' (the operator blocks the laser)")
         if lo == "operator":
             _blocked_by_hand(study, prof, errors, warnings, "background")
         for k in ("points", "map", "series", "process", "video", "focus"):
@@ -652,9 +654,9 @@ def validate_study(name: str, study: dict, prof: dict) -> dict:
             if vd.get("with_laser"):
                 if not (vd.get("before", kind == "calibration") or vd.get("after")):
                     errors.append("video.with_laser: also give before or after (when to take the frame)")
-                if not prof["motors"].get("laser_shutter"):
-                    errors.append("video.with_laser: the profile has no laser shutter motor (motors.laser_shutter, "
-                                  "from the discovery script; set by a person)")
+                g = SH.gate(prof, s.get("laser_nm"))
+                if g:
+                    errors.append(f"video.with_laser: {g}")
                 if s.get("filter") is None:
                     errors.append("video.with_laser: give setup.filter (the laser shines during the snapshot)")
                 v = prof.get("video", {})
@@ -861,8 +863,8 @@ def _validate_spot(name, study, prof, errors, warnings) -> dict:
     f = sp.get("feature_um")
     if f is not None and f != "auto" and not (isinstance(f, (list, tuple)) and len(f) == 2 and all(_num(v) for v in f)):
         errors.append("spot.feature_um: [x, y] in µm (from a snapshot) or 'auto'")
-    if method == "shutter" and not prof["motors"].get("laser_shutter"):
-        errors.append("spot.method 'shutter': the profile has no laser shutter motor (motors.laser_shutter); use "
+    if method == "shutter" and SH.gate(prof, (study.get("setup") or {}).get("laser_nm")):
+        errors.append(f"spot.method 'shutter': {SH.gate(prof, (study.get('setup') or {}).get('laser_nm'))}; use "
                       "'acquisition' or 'raman'")
     s = study.get("setup") or {}
     for k in ("laser_nm", "objective"):

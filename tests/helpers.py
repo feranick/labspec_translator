@@ -33,6 +33,15 @@ def _profile_with_shutter(tmp_path, **limits):
     prof, _ = P.import_discovery(P.read_text(tmp_path / "dump.txt"))
     assert prof["motors"]["laser_shutter"] is None                   # found, never set by discovery (2026-11-23)
     prof["motors"]["laser_shutter"] = prof["laser_shutter_candidate"]  # as the maintainer does once confirmed
+    P.save(prof)
+    # the shutter is used only once shown to block on Si (shutter.py): verified for the simulator's laser, and the
+    # same record for its other lasers; the test's own limits after
+    api.bridge_call("move", {"motor": "Filter", "mode": "label", "value": "10%"})   # a line strong enough to judge
+    v = api.shutter_verify()
+    assert v["ok"] and v["blocked"], v
+    from labspec_translator import shutter as SH
+    for k, las in prof["lasers"].items():
+        SH.record(dict(v["record"], laser_nm=las["nm"]))
     prof["limits"].update(limits)
     P.save(prof)
     return prof

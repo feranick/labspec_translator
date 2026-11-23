@@ -94,7 +94,7 @@ files already showed.
 | Q12 | Does a request survive closing the LLM app (the runner process breaking away from the app's job)? | T9.1 |
 | Q13 | Video: does `Video(2)` return the live frame's id from a script, and does `Exec(id, 3)` clone it? Which image formats does `Save` write for a frame? **Known: the active camera is read** (`video.active_camera`); with the video off, `id_now` was 0. | T5b.1 |
 | Q14 | Video pixels: which axis varies fastest, how are colours packed (COLORREF 0x00BBGGRR or RGB), and are the axes stage coordinates in µm? | T5b.2 |
-| Q15 | Is `LaserShutter` the laser shutter, and do `PutValue(0, "ShutterMode", 1)` (manual) plus moving it On / Off open and close it? **Known: a motor `LaserShutter` with Off/On. On the XploRA (2026-11-23, 637.75 nm, Si): LabSpec's own Laser On / Off blocks the beam (the Si line comes and goes in the real-time display; the beam is not visible on the top camera, even at 100 %), but ls6t's use of the motor did not (the Si line stayed in a `laser_off: "shutter"` background). Open until the bridge's shutter fix passes T1.2 step 2; keep `motors.laser_shutter` null. From .23.13: `ls6t instrument shutter-test` tells which move blocks.** | T1.2, T5b.3 |
+| Q15 | Is `LaserShutter` the laser shutter, and do `PutValue(0, "ShutterMode", 1)` (manual) plus moving it On / Off open and close it? **Known: a motor `LaserShutter` with Off/On. On the XploRA (2026-11-23, 637.75 nm, Si): LabSpec's own Laser On / Off blocks the beam (the Si line comes and goes in the real-time display; the beam is not visible on the top camera, even at 100 %), but ls6t's use of the motor did not (the Si line stayed in a `laser_off: "shutter"` background). Open until the bridge's shutter fix passes T1.2 step 2; keep `motors.laser_shutter` null. From .23.13: `ls6t instrument shutter-test` tells which move blocks.** **Answered on .23.14 (2026-11-23, 10 % filter, display zoomed on the line): `LaserShutter` blocks by value and by label, and Off holds with ShutterMode back to automatic (verdict all true). The morning's failure (Si at 86 % with the shutter "closed", .23.9) was most likely LabSpec's acquisition reopening the shutter in automatic mode, which the manual mode used since .23.13 prevents. Two laser_off 'shutter' backgrounds then showed no Si line (8.5 counts at most against 257 open). Remaining: `ls6t instrument shutter-verify` per laser (.23.15) to let ls6t use it.** | T1.2, T5b.3 |
 | Q16 | How far is the beam from LabSpec's laser position, per objective, and how repeatable is the measurement? | T5b.4, T5e |
 | Q17 | Does this XploRA have HORIBA's AutoAlignment module (Maintenance tab)? Can its *Current status* be read from outside (Windows UI automation, read-only)? | T5c.1 |
 | Q18 | Does `Message(text, 1)` (OK/Cancel) return 0 for OK and wait while the operator runs AutoAlignment in the same LabSpec? | T5c.2 |
@@ -247,13 +247,19 @@ With the maintainer, go through:
   line does not come and go, that motor is not the laser's shutter: leave `motors.laser_shutter` empty and tell the
   ls6t maintainer.
   **This first step only shows that LabSpec's toggle blocks the beam, not that ls6t can.** Second step, required
-  before `motors.laser_shutter` stays set: set it (`ls6t profile set motors.laser_shutter "<name>"`), restart the
-  bridge, and at the same spot run a `background` study with `laser_off: "shutter"` (e.g. `{"kind": "background",
-  "sample": {"name": "Si"}, "setup": {...the same laser, grating, filter...}, "background": {"name": "shutter test",
-  "laser_off": "shutter"}, "acquire": {"center_cm1": 520, "exposure_s": 1}}`). Pass only if its spectrum shows **no
-  Si line**. If the line is there, set `motors.laser_shutter` back to `null` (`ls6t profile set motors.laser_shutter
-  null`): ls6t cannot block the laser on this instrument yet, and `laser_off: "shutter"` and `laser_on` must not rely
-  on it. Tell the ls6t maintainer.
+  before ls6t uses the shutter (from .23.15 ls6t enforces it): set the motor (`ls6t profile set motors.laser_shutter
+  "<name>"`), restart the bridge, put silicon under the objective, in focus, with a filter within the caps, and run
+  **`ls6t instrument shutter-verify [--seconds 2]`** for each laser you will use the shutter with. It takes a
+  reference spectrum at 520 cm⁻¹ with the laser, then the same with the shutter closed (each 2 accumulations with
+  LabSpec's spike removal, so a cosmic ray is not taken for the line), and passes only when the Si line is gone (not
+  detectable), with a reference strong enough that a leak of 5 % of it would show (`sensitivity`; else "not
+  conclusive": a stronger filter such as 10 %, or longer). Only a
+  pass writes the record (`shutter_verified.json`: date, laser, version, motor, how it is moved, the ratio,
+  `during_checked`) without which ls6t refuses every use of the shutter: `laser_off: "shutter"` (background, cutoff;
+  without it they default to `operator`), `laser_on`, snapshots with the laser and `spot` 'shutter'. A record is
+  per laser, and lapses after `shutter.verify_max_days` (30), when the motor or `shutter.by` changes, or when a
+  release changes the bridge's shutter handling. If it fails ("NOT BLOCKED"), set `motors.laser_shutter` back to
+  `null` and run `shutter-test`; tell the ls6t maintainer.
   **XploRA, 2026-11-23:** step 1 passed (637.75 nm: the Si line came and went with LabSpec's Laser On / Off; the beam
   is not visible on the top camera even at 100 %); step 2 failed (ls6t's own use of `LaserShutter` did not block
   the beam). Keep `motors.laser_shutter` null on this instrument until the bridge's shutter fix is in and step 2
@@ -262,7 +268,10 @@ With the maintainer, go through:
   against 3319 in the reference 17 min earlier (86 %). The .23.12 bridge moved the shutter by value 0 and never read
   it back.
   **From .23.13, between step 1 and step 2: `ls6t instrument shutter-test` (`--motor LaserShutter` while the profile
-  has none).** With the real-time display running on Si and the status bar's laser On, ls6t moves the shutter five
+  has none).** Use a filter that makes the Si line unmistakable (10 % on the XploRA) and **zoom LabSpec's display onto
+  the line** before answering, waiting two or three refreshes: on 2026-11-23 a first run at 1 % on a zoomed-out
+  display had the line "visible" after every move (and led to a wrong note, now discarded). With the real-time
+  display running on Si and the status bar's laser On, ls6t moves the shutter five
   times (value 0, value 1, label Off, label On in manual ShutterMode, then Off with ShutterMode back to automatic),
   reads each back and asks whether the Si line is there; then it puts LabSpec's ShutterMode and the shutter back.
   Note `steps` (read-backs and answers) and `verdict`: which move blocks the beam, and whether Off holds in automatic
@@ -607,6 +616,18 @@ the bridge's answer show the switch; LabSpec shows AE again afterwards. If LabSp
 study stops and says so (then AutoExposure is not a value the bridge can set: switch it off by hand and tell the
 maintainer). Today's results from studies with AE on carry the wrong exposure: their counts per second are off by
 the ratio (15 / 2).
+**Results on .23.14 (2026-11-23):** `status` gave `auto_exposure: ""` and the switch `-> ?`: `AutoExposure` is not
+LabSpec's GetValue name (the spectra's header says `acq.AutoExposure=On`, the acquisition info's row). The safety
+held: with AE on, 15 s for 2 s asked, the study stopped with nothing stored. With AE off by hand: `exposure_s` 2.0
+from LabSpec's record, total 10.5 s (operator 2.75, Acq call 3.85, flush 1.62, analysis 1.3). From .23.15 the bridge
+tries `LabSpecAutoExposure`, `AutoExposure`, `LabSpecAutoExposition`, `AutoExposition`, `LabSpecAE`,
+`AcqAutoExposure` and reports which one reads (`auto_exposure_name` in `status` and in the acquire's answer); repeat
+with AE on and note it. Until one is found, switch AE off by hand: ls6t stops rather than mislabel the exposure.
+**Acq holds the bridge for the whole exposure, one window too** (`t_acq_call_s` 17.46 s for 15 s, 2.18 s for 2 s):
+`laser_shutter.during_checked` is always false on this instrument; the shutter's verification on Si is the proof.
+**The flush (`t_flush_s` 1.62 s) is shortened in .23.15**: it stops when GetAcqID answers the same three times
+(`flush_tries`, `flush_last_id` in the answer) and never takes that answer for the new spectrum. Check that
+`t_flush_s` drops below 0.2 s and spectra are still this acquisition's (the Remark's `ls6t <seq>`).
 
 **T4.9b LabSpec's AutoCalibration from ls6t (maintainer; the laser fires on Si).** `ls6t profile set calibration.autocal '{"enabled": true, "method": "call", "mode": "full"}'`, Si wafer in focus, 532 nm, 1200, 10 %; `ls6t instrument autocal-run`: LabSpec asks, then runs its AutoCalibration. Pass: `ok`, `changed` lists the 1200's parameters (as by hand: offset 34 -> 44 on 2026-11-23), and a calibration check after it passes. If the answer says LabSpec does not offer the call to scripts, set `"enabled": false` and keep running it from LabSpec's menu.
 

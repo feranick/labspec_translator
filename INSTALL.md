@@ -247,8 +247,8 @@ every laser's `nm`, `max_filter_pct` and `power_mw` filled in. `ls6t status` sho
    - `motors.laser_shutter`: the laser shutter's motor name, needed only for video snapshots with the laser on.
      The import proposes one if it finds a shutter motor; confirm it with the maintainer on the spectrum (the beam
      is often not visible on the camera), in two steps (TESTING T1.2): LabSpec's real-time display on Si, then the
-     status bar's Laser On / Off, the Si line must come and go; then, with the motor set and the bridge restarted, a
-     `background` study with `laser_off: "shutter"` at the same spot must show no Si line. If it does, set
+     status bar's Laser On / Off, the Si line must come and go; then, with the motor set and the bridge restarted,
+     `ls6t instrument shutter-verify` on Si for each laser (ls6t refuses to use the shutter until it passes). If it fails, set
      `motors.laser_shutter` back to `null`: ls6t cannot block the laser there. Between the two, `ls6t instrument
      shutter-test` shows which move of the motor blocks the beam (profile `shutter.by`). (On the XploRA the second step failed
      on 2026-11-23: keep it null until the bridge's shutter fix.)

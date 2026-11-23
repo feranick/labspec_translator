@@ -15,9 +15,10 @@ import threading
 import time
 from pathlib import Path
 
-from . import __version__, BRIDGE_PROTOCOL, config, plan, runner
+from . import __version__, BRIDGE_PROTOCOL, config, plan, runner, spectra
 from . import format as F
 from . import profile as P
+from . import shutter as SH
 from .bridge import Bridge, BridgeError
 
 VBS_DIR = Path(__file__).parent / "vbs"
@@ -499,6 +500,8 @@ def _instrument(action, camera, setup, seconds, um=None) -> dict:
             return autocal_run()
         if action == "shutter_test":
             return shutter_test()
+        if action == "shutter_verify":
+            return shutter_verify(float(seconds or 5.0))
         if action in ("camera_on", "camera_off"):
             prof = P.load()
             num, err = P.camera_number(prof, camera)
@@ -524,7 +527,7 @@ def _instrument(action, camera, setup, seconds, um=None) -> dict:
     except BridgeError as exc:
         return {"ok": False, "error": str(exc)}
     raise ValueError(f"action {action!r}: status, set, laser_on, laser_off, camera_on, camera_off, calibration, "
-                     "autocal_info, autocal_run, shutter_test, discover, resume, end_bridge or last_error")
+                     "autocal_info, autocal_run, shutter_test, shutter_verify, discover, resume, end_bridge or last_error")
 
 
 def profile_propose(dump=None) -> dict:
@@ -699,10 +702,13 @@ def shutter_test(motor: str | None = None) -> dict:
             return {"ok": False, "error": first.get("error")}
         out["before"] = {"mode": first.get("mode_before"), "label": first.get("label_before"),
                          "value": first.get("value_before")}
-        intro = (f"ls6t shutter test ({motor}). Put silicon under the objective, in focus, low filter (1 %); start "
-                 "LabSpec's real-time display around 520 cm-1 with a short exposure and the laser On in the status "
-                 f"bar. ls6t will move {motor} {len(SHUTTER_STEPS)} times and ask each time whether the Si line is "
-                 "there. The beam reaches the sample whenever the shutter is open. Continue?")
+        intro = (f"ls6t shutter test ({motor}). Put silicon under the objective, in focus, with a filter that makes "
+                 "the Si line unmistakable (e.g. 10 %, within the caps); start LabSpec's real-time display around 520 "
+                 "cm-1 with a short exposure and the laser On in the status bar, and ZOOM the display onto the line "
+                 "(a faint line on a zoomed-out display looks the same either way: 2026-11-23). ls6t will move "
+                 f"{motor} {len(SHUTTER_STEPS)} times and ask each time whether the Si line is there; wait for two or "
+                 "three refreshes before answering. The beam reaches the sample whenever the shutter is open. "
+                 "Continue?")
         if b.call("confirm", timeout_s=3600, text=intro).get("answer") != "yes":
             return {"ok": False, "error": "the operator declined in LabSpec"}
         for by, state in SHUTTER_STEPS:
@@ -758,6 +764,120 @@ def shutter_test(motor: str | None = None) -> dict:
     return out
 
 
+VERIFY_SENSITIVITY = 0.05   # the test must be able to see 5 % of the reference's Si line with the shutter closed
+
+
+def shutter_verify(exposure_s: float = 2.0) -> dict:
+    """The spectral proof that the laser shutter blocks the beam (TESTING T1.2 step 2), with silicon under the
+    objective, in focus, in the current set-up: a reference spectrum at 520 cm-1 with the laser, then the same with
+    laser_off 'shutter'. It passes when the Si line is gone (not detectable, with a reference strong enough that a
+    leak of 5 % of it would be); only
+    then is the record written that lets ls6t use the shutter for this laser (shutter.py). Two accumulations with
+    LabSpec's spike removal each, so a cosmic ray is not taken for the line."""
+    from .profile import filter_pct, laser_key, shift_to_nm
+    prof = P.load()
+    gate = P.review_gate(prof) if config.mode() == "labspec" else None
+    if gate:
+        return {"ok": False, "error": gate}
+    motor = prof["motors"].get("laser_shutter")
+    if not motor:
+        return {"ok": False, "error": "set motors.laser_shutter first (ls6t profile set motors.laser_shutter "
+                                      "\"<name>\"): it stays unused until this test passes"}
+    if runner.read_json(runner.lock_path(), None):
+        return {"ok": False, "error": "a request holds the instrument: wait or cancel it"}
+    ex = float(exposure_s)
+    if not 0 < ex <= float(prof["limits"].get("max_exposure_s", 60)):
+        return {"ok": False, "error": "exposure_s: above 0, within limits.max_exposure_s"}
+    b = Bridge()
+    if config.mode() == "sim":
+        from . import sim as S
+        S.ensure(b.dir)
+    d = config.home() / "shutter_verify" / time.strftime("%Y%m%d_%H%M%S")
+    d.mkdir(parents=True, exist_ok=True)
+    out: dict = {"ok": False, "motor": motor, "by": str((prof.get("shutter") or {}).get("by", "label")), "folder": str(d)}
+    try:
+        st = b.call("status", timeout_s=15, **runner.motor_args(prof))
+        laser, grating = runner._f(st.get("laser_nm")), runner._f(st.get("grating"))
+        pct = prof.get("filters", {}).get(st.get("filter"))
+        pct = pct if pct is not None else filter_pct(st.get("filter", ""))
+        lk = laser_key(prof, laser)
+        caps = [float(prof["limits"].get("max_filter_pct", 100))]
+        if lk:
+            caps.append(float(prof["lasers"][lk].get("max_filter_pct", 100)))
+        if laser is None or pct is None or pct > min(caps) + 1e-9:
+            return {"ok": False, "error": f"laser {st.get('laser_nm')}, filter {st.get('filter')!r}: a known laser "
+                                          f"and a filter within the caps ({min(caps):g} %) first (instrument set)"}
+        out.update(laser_nm=laser, grating=grating, filter=st.get("filter"), objective=st.get("objective"))
+        txt = (f"ls6t shutter verification ({motor}): silicon under the objective, in focus. The laser fires twice for "
+               f"2 x {ex:g} s at {laser:g} nm, filter {st.get('filter')}: once as a reference, once with the "
+               "shutter closed (the Si line must then be gone). Continue?")
+        if b.call("confirm", timeout_s=3600, text=txt).get("answer") != "yes":
+            return {"ok": False, "error": "the operator declined in LabSpec"}
+        nm = shift_to_nm(520.7, laser)
+        mode = 10 + plan.SPIKE_MODES["double"] + (plan.ACQ_NO_ICS if plan.ics_off(prof, laser, grating) else 0)
+        common = dict(mode=mode, exposure_s=ex, accumulations=2, from_nm=round(nm, 4), to_nm=round(nm, 4),
+                      **runner.motor_args(prof))
+        meas = {}
+        for tag, extra in (("reference", {}), ("shutter_closed", dict(laser_off=1))):
+            f = d / f"{tag}.txt"
+            r = b.call("acquire", timeout_s=120 + 3 * ex, out=str(f), sample=f"shutter verification {tag}",
+                       **common, **extra)
+            if not r.get("ok"):
+                out["error"] = f"{tag}: {r.get('error')}"
+                out[tag] = {k: v for k, v in r.items() if k.startswith("shutter")}
+                return out
+            sp = spectra.read(f)
+            used = spectra.acq_exposure(sp["meta"]) or ex
+            x, _ = spectra.to_shift(sp["x"], sp["meta"].get("x_unit", "nm"), laser)
+            xs, ys = spectra.sort_xy(x, sp["y"])
+            sig = spectra.line_signal(xs, ys, 520.7, 30.0) / used
+            noise = spectra.noise_sigma(ys) / used
+            meas[tag] = {"si_signal_cps": round(sig, 3), "noise_cps": round(noise, 4), "exposure_used_s": used,
+                         "snr": round(sig / noise, 1) if noise > 0 else None, "file": str(f)}
+            if tag == "shutter_closed":
+                warns: list = []
+                meas[tag]["laser_shutter"] = runner.shutter_report(r, warns, verified=True)
+                out["warnings"] = warns
+        out.update(meas)
+        ref, off = meas["reference"], meas["shutter_closed"]
+        detect = float(prof["checks"].get("detect_snr", 5.0))
+        # the smallest fraction of the reference line the closed-shutter spectrum would show (detect_snr x its noise)
+        sens = detect * off["noise_cps"] / ref["si_signal_cps"] if ref["si_signal_cps"] > 0 else 1.0
+        out["sensitivity"] = round(sens, 4)
+        if sens > VERIFY_SENSITIVITY:
+            out["error"] = (f"not conclusive: the reference Si line is too weak (signal-to-noise {ref['snr']}): the "
+                            f"closed-shutter spectrum could only show a leak above {sens * 100:.0f} % (at most "
+                            f"{VERIFY_SENSITIVITY * 100:g} % needed). Focus on the silicon, a stronger filter (e.g. "
+                            "10 %, within the caps) or --seconds longer")
+            return out
+        ratio = off["si_signal_cps"] / ref["si_signal_cps"] if ref["si_signal_cps"] > 0 else 1.0
+        out["ratio"] = round(ratio, 4)
+        blocked = off["snr"] is None or off["snr"] < detect
+        out["blocked"] = bool(blocked)
+        if not blocked:
+            out["error"] = (f"NOT BLOCKED: with the shutter closed the Si line is still {ratio * 100:.0f} % of the "
+                            f"reference (signal-to-noise {off['snr']}). ls6t will not use the shutter: keep "
+                            "motors.laser_shutter null (ls6t profile set motors.laser_shutter null) and run "
+                            "`ls6t instrument shutter-test` to see which move blocks")
+            return out
+        during = (off.get("laser_shutter") or {}).get("during_checked")
+        rec = {"laser_nm": laser, "time": time.time(), "date": time.strftime("%Y-%m-%dT%H:%M:%S"),
+               "version": __version__, "rev": SH.REV, "motor": motor, "by": out["by"], "grating": grating,
+               "filter": st.get("filter"), "objective": st.get("objective"), "ratio": out["ratio"],
+               "sensitivity": out["sensitivity"],
+               "reference_snr": ref["snr"], "during_checked": during, "folder": str(d)}
+        SH.record(rec)
+        out.update(ok=True, record=rec,
+                   next=f"ls6t may now use the shutter with the {laser:g} nm laser (laser_off 'shutter', laser_on, "
+                        "snapshots with the laser) for "
+                        f"{float((prof.get('shutter') or {}).get('verify_max_days', SH.MAX_DAYS)):g} days; verify "
+                        "each laser you use the shutter with")
+        return out
+    except BridgeError as exc:
+        out["error"] = str(exc)
+        return out
+
+
 def labspec_calibration(b: Bridge | None = None) -> dict:
     """LabSpec's own spectrometer calibration per grating, read only (OperVar ACT_INSTRUMENT[...], the names HORIBA's
     service scripts use): AF, BF, Diode, Focal, Angle, Gamma, SpMin, SpMax; the grating in use is marked. Which of
@@ -811,6 +931,10 @@ def laser(on: bool, seconds: float | None = None) -> dict:
             return {"ok": False, "error": "no laser shutter motor in the profile: a person confirms it with the "
                                           f"maintainer ({P.HOW}) and sets it (ls6t profile set motors.laser_shutter "
                                           "\"<name from discovery>\")"}
+        cur = b.call("status", timeout_s=15, **runner.motor_args(prof))
+        g = SH.gate(prof, runner._f(cur.get("laser_nm")))
+        if g:      # the bridge closes it after `seconds`: only if closing is known to block the beam
+            return {"ok": False, "error": g}
         mx = float(prof["limits"].get("max_laser_on_s", 60.0))
         secs = float(seconds or min(30.0, mx))
         if secs <= 0 or secs > mx:
@@ -1410,6 +1534,9 @@ def snapshot(with_laser: bool = False, extended: bool = False) -> dict:
             if not prof["motors"].get("laser_shutter"):
                 return {"ok": False, "error": "no laser shutter motor in the profile (motors.laser_shutter): a person "
                                               f"sets it from the discovery dump once confirmed ({P.HOW})"}
+            g = SH.gate(prof, runner._f(st.get("laser_nm")))
+            if g:
+                return {"ok": False, "error": g}
             from .profile import filter_pct, laser_key
             pct = prof.get("filters", {}).get(st.get("filter"))
             pct = pct if pct is not None else filter_pct(st.get("filter", ""))

@@ -95,6 +95,7 @@ trusting numbers, the safety rules and the polling etiquette.
 | `ls6t instrument set [--laser-nm --grating --filter --objective --hole --slit]` | Change the set-up now, without measuring |
 | `ls6t instrument snapshot [--laser / --extended]` | A video frame with the beam marked; `--extended`: LabSpec's extended video |
 | `ls6t instrument video-scale [--um <move µm>]` | Measure the video's µm per pixel and directions for the current objective (stage moves +X and +Y, 0.4 x the field's smaller side by default, then back; flags a result unlike the same camera's other objectives) |
+| `ls6t instrument shutter-verify [--seconds S]` | The spectral proof that the laser shutter blocks the current laser (Si in focus: a reference, then the same with the shutter closed; the Si line must be gone). Only a pass lets ls6t use the shutter for that laser (laser_off 'shutter', laser_on, snapshots with the laser, spot 'shutter'), for `shutter.verify_max_days`. Maintainer only |
 | `ls6t instrument shutter-test [--motor NAME]` | Which move of the laser shutter blocks the beam: by value 0 / 1, by label Off / On, and Off in LabSpec's automatic ShutterMode, each read back, with the operator saying whether the Si line is in LabSpec's real-time display (TESTING T1.2). Maintainer only |
 | `ls6t instrument config list / save NAME / load NAME [--show]` | LabSpec's whole configuration as `LS6T_HOME\configs\NAME.ini` (`SaveConfig` / `LoadConfig`); loading asks the operator; `--show` opens LabSpec's dialog. Maintainer only |
 | `ls6t bridge install [--dest DIR]` | Write the LabSpec scripts for this PC: the bridge, the discovery, and the optional script-motor logger |
@@ -244,6 +245,7 @@ profile. The shutter mode is restored on every path.
 | Alignment checks | `alignment_log.jsonl` | every `alignment` study | readiness warnings, drift |
 | Beam offsets per objective and laser | `spot.json` | `spot` studies, lit snapshots | the marker, `move.to_um` |
 | Spectral corrections per laser and grating | `xcal.json` | `calibration` with `adjust: ls6t` | later spectra's Raman shift |
+| Laser shutter verifications per laser | `shutter_verified.json` | `instrument shutter-verify`, on a pass only | every use of the shutter (refused without a valid record) |
 | White-light backgrounds | `backgrounds\` | `background` studies | `acquire.subtract_background` |
 | LabSpec configurations | `configs\NAME.ini` | a person (`instrument config save`) | `instrument config load` |
 | LabSpec's configuration before a request | `LS6T_OUT\run_...\labspec_before.ini` | requests, with `session.restore_config` | loaded back when the request ends normally |

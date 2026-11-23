@@ -18,6 +18,7 @@ import numpy as np
 
 from . import __version__, BRIDGE_PROTOCOL, config, plan, spectra, video
 from . import spot as SP
+from . import shutter as SH
 from . import profile as P
 from .bridge import replace_retry, Bridge, BridgeError, BridgeGone, BridgeTimeout
 
@@ -241,10 +242,17 @@ def timing(calls: list, per_point: list, total_s: float) -> dict:
 EXPOSURE_TOL = 0.02     # LabSpec's exposure within 2 % of the one asked
 
 
+def _shutter_gate(prof: dict, laser) -> None:
+    """At run time too: the shutter only where it has been shown to block this laser on Si (shutter.py)."""
+    g = SH.gate(prof, laser)
+    if g:
+        raise Stop(f"laser_off 'shutter' refused: {g}", "study")
+
+
 WATCH_MIN_S = 0.5      # the bridge read the shutter while LabSpec was still acquiring for at least this long
 
 
-def shutter_report(r: dict, warnings: list) -> dict:
+def shutter_report(r: dict, warnings: list, verified: bool = False) -> dict:
     """What the bridge read of the laser shutter around a laser_off acquisition, and whether it could read it during
     the acquisition at all: LabSpec's Acq can hold the script until the spectrum is taken (2026-11-23), and then the
     reads start only afterwards; LabSpec could have opened and closed the shutter unseen. The spectral test (TESTING
@@ -259,7 +267,12 @@ def shutter_report(r: dict, warnings: list) -> dict:
     if held is not None and after is not None and held + after > 0:
         out["watched_fraction"] = round(after / (held + after), 3)
         out["during_checked"] = bool(reads and after >= WATCH_MIN_S)
-        if not out["during_checked"]:
+        if not out["during_checked"] and verified:
+            # on the XploRA Acq holds the bridge for the whole exposure (2026-11-23): the shutter-verify record is the
+            # proof, not these reads
+            out["during_note"] = ("LabSpec held the bridge during the acquisition (as on the XploRA): the reads are "
+                                  "before and after only; the shutter's verification on Si is what shows it blocks")
+        elif not out["during_checked"]:
             warnings.append(f"the bridge could not read the laser shutter during the acquisition: LabSpec's Acq held it "
                             f"for {held:.1f} s and the data came {after:.1f} s later, so only the reads before and "
                             "after count; LabSpec could have opened and closed the shutter unseen. Only the spectral "
@@ -1823,6 +1836,7 @@ def run_cutoff(name: str, study: dict, ctx: Ctx) -> dict:
     out = sd / "spectra" / "cutoff.txt"
     params = dict(acq, out=str(out), sample="edge filter cut-off")
     if white and cp["laser_off"] == "shutter":
+        _shutter_gate(prof, laser)
         params.update(laser_off=1, m_laser_shutter=prof["motors"]["laser_shutter"], **shutter_args(prof))
     r = ctx.call("acquire", timeout_s=_acq_timeout(study, prof, rng), **params)
     if white and cp["laser_off"] == "operator":
@@ -1901,7 +1915,7 @@ def run_background(name: str, study: dict, ctx: Ctx) -> dict:
     checks: dict = {}
     bgk = study.get("background") or {}
     bname = bgk["name"]
-    off = bgk.get("laser_off", "shutter" if prof["motors"].get("laser_shutter") else "operator")
+    off = bgk.get("laser_off", SH.default_laser_off(prof, (study.get("setup") or {}).get("laser_nm")))
     _progress(sd, state="running", stage="setup", started=t_start)
     su = _setup(name, study, ctx, warnings, unreliable, checks, 1, confirm=False)
     laser, rng = su["laser"], su["rng"]
@@ -1916,6 +1930,7 @@ def run_background(name: str, study: dict, ctx: Ctx) -> dict:
     params = dict(acq, out=str(out), sample=f"white-light background {bname}",
                   native=str(sd / "spectra" / "background.l6s") if study.get("save_native", True) else None)
     if off == "shutter":
+        _shutter_gate(prof, laser)
         params.update(laser_off=1, m_laser_shutter=prof["motors"]["laser_shutter"], **shutter_args(prof))
     r = ctx.call("acquire", timeout_s=_acq_timeout(study, prof, rng), **params)
     if off == "operator":
@@ -1932,18 +1947,25 @@ def run_background(name: str, study: dict, ctx: Ctx) -> dict:
                              prof["checks"]["saturation_frac"])
     if sat["saturated"]:
         unreliable.append("the background is saturated: a shorter exposure, or less white light")
-    # narrow lines in a background mean the laser was not blocked
+    # narrow lines in a background: the laser not blocked? Cosmic rays first out (a 5-point median: one to three
+    # pixels): on 2026-11-23 two good backgrounds (8 counts at most, no Si line) were rejected for spikes at 415 /
+    # 516 / 737 and 269 / 358 / 558 cm-1, in other places each time
     try:
+        from scipy.signal import medfilt
         shift, _ = spectra.to_shift(sp["x"], sp["meta"].get("x_unit", "nm"), laser)
         xs, ysr = spectra.sort_xy(shift, sp["y"])
+        sig_raw = spectra.noise_sigma(ysr - spectra.baseline(xs, ysr, 3))     # the noise from the spectrum as taken
+        ysr = medfilt(ysr, 5) if len(ysr) >= 5 else ysr
         yc = ysr - spectra.baseline(xs, ysr, 3)
-        narrow = spectra.find_peaks(xs, yc, 3, None, 25.0)
+        narrow = spectra.find_peaks(xs, yc, 3, sig_raw or None, 25.0)
+        verified = SH.records().get(SH._key(laser)) if off == "shutter" else None
         if narrow and off == "shutter":
-            # 2026-11-23: a laser_off 'shutter' background kept 86 % of the Si signal: the beam was not blocked
-            unreliable.append(f"the background has narrow lines at {', '.join(f'{v:.0f}' for v in narrow)} cm-1 with "
-                              "the laser shutter supposedly closed: the laser was probably NOT blocked. Not stored. "
-                              "Do not rely on laser_off 'shutter' here (TESTING T1.2 step 2; motors.laser_shutter "
-                              "back to null) until ls6t instrument shutter-test shows how this shutter blocks")
+            # the shutter has been shown to block this laser on Si (shutter.py), so these are the lamp or the room's
+            # light more likely than the laser; said, kept
+            warnings.append(f"the background has narrow lines at {', '.join(f'{v:.0f}' for v in narrow)} cm-1 (after "
+                            "spike removal) with the laser shutter closed: the white lamp or room light? The shutter "
+                            f"was shown to block this laser on Si on {(verified or {}).get('date', '?')}; if these are "
+                            "the sample's Raman lines, run ls6t instrument shutter-verify again")
         elif narrow:
             warnings.append(f"the background has narrow lines at {', '.join(f'{v:.0f}' for v in narrow)} cm-1: was "
                             "the laser blocked? (a Raman line in the background would be subtracted from samples)")
@@ -1953,7 +1975,7 @@ def run_background(name: str, study: dict, ctx: Ctx) -> dict:
             "objective": su["after"].get("objective"), "exposure_s": ex,
             "accumulations": int(_f(r.get("accumulations")) or 1), "range": rng, "request": str(ctx.folder),
             "laser_off": off}
-    shut = shutter_report(r, warnings) if off == "shutter" else {}
+    shut = shutter_report(r, warnings, verified=SH.gate(prof, laser) is None) if off == "shutter" else {}
     blocked_doubt = any("NOT blocked" in u for u in unreliable)
     stored = (BG.save(bname, sp["x"], cps, sp["meta"].get("x_unit", "nm"), meta) if not blocked_doubt else
               {"name": bname, "stored": False})

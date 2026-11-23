@@ -32,7 +32,7 @@ DEFAULT_PROFILE: dict = {
                "illumination_light": None},   # the light source's mode (XploRA: uLight), read only
     # the laser shutter's positions (OLConfig on the XploRA: Off / On); ls6t moves it by label and reads it back
     # (2026-11-23: moved by value 0, unchecked, it did not block the beam). by: label or value
-    "shutter": {"off": "Off", "on": "On", "by": "label"},
+    "shutter": {"off": "Off", "on": "On", "by": "label", "verify_max_days": 30},
     # the polarisers' positions by motor role (from discovery), e.g. {"laser_pol": ["Circular", "Horizontal", ...]}
     "polarizers": {},
     "lasers": {"532": {"nm": 532.0, "label": "532", "power_mw": None, "max_filter_pct": 100},
@@ -128,9 +128,9 @@ DEFAULT_PROFILE: dict = {
 # line came and went), and ls6t's use of the motor blocks it too (the same day it did not: the Si line stayed in a
 # laser_off 'shutter' background). The first alone is not enough.
 HOW = ("confirm it on the spectrum, in two steps (TESTING T1.2): 1. LabSpec's real-time display on Si, then the status "
-       "bar's Laser On / Off: the Si line must come and go; 2. with the motor set and the bridge restarted, a "
-       "'background' study with laser_off 'shutter' at the same spot must show no Si line, otherwise set it back to "
-       "null: ls6t cannot block the laser on that instrument")
+       "bar's Laser On / Off: the Si line must come and go; 2. with the motor set and the bridge restarted, `ls6t "
+       "instrument shutter-verify` on Si for each laser: ls6t uses the shutter only after it passes; if it fails, "
+       "set the motor back to null: ls6t cannot block the laser on that instrument")
 
 
 def _merge(base: dict, over: dict) -> dict:

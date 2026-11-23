@@ -9,6 +9,7 @@ from __future__ import annotations
 import math
 import numpy as np
 
+from . import shutter as SH
 from .profile import laser_key, match_label, shift_to_nm
 
 SPIKE_MODES = {"labspec": 0, "none": 100, "single": 200, "double": 300, "double_auto": 400}
@@ -749,7 +750,7 @@ def cutoff_params(study: dict, prof: dict) -> dict:
     cp = study.get("cutoff") or {}
     return {"from_cm1": float(cp.get("from_cm1", -100.0)), "to_cm1": float(cp.get("to_cm1", 400.0)),
             "light": cp.get("light", "white"),
-            "laser_off": cp.get("laser_off", "shutter" if prof["motors"].get("laser_shutter") else "operator"),
+            "laser_off": cp.get("laser_off", SH.default_laser_off(prof, (study.get("setup") or {}).get("laser_nm"))),
             "plateau_cm1": list(cp.get("plateau_cm1", [200.0, 380.0]))}
 
 

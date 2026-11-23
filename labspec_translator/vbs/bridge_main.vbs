@@ -437,7 +437,8 @@ Sub VStatus(cmd, res)
     res("z_um") = MotorValue(GetP(cmd, "m_z", "Z"))
     res("exposure_s") = LSValue(0, "LabSpecExposureTime")
     res("accumulations") = LSValue(0, "LabSpecAccumulation")
-    res("auto_exposure") = LSValue(0, "AutoExposure")
+    res("auto_exposure_name") = AeName()
+    If res("auto_exposure_name") <> "" Then res("auto_exposure") = LSValue(0, res("auto_exposure_name"))
     If GetP(cmd, "m_laser_shutter", "") <> "" Then res("laser_shutter_label") = MotorLabel(GetP(cmd, "m_laser_shutter", ""))
     res("shutter_mode") = LSValue(0, "ShutterMode")
     res("last_error") = LabSpecError()
@@ -1233,20 +1234,37 @@ End Function
 ' LabSpec's AutoExposure (status bar 'AE') replaces the exposure asked (2026-11-23: 2 s asked, 15 s used, the
 ' results said 2 s). For a fixed exposure the bridge switches it off for the acquisition and puts it back after;
 ' ls6t checks the exposure LabSpec reports in the spectrum's acquisition info either way.
+Function AeName()
+    ' LabSpec's name for AutoExposure in GetValue / PutValue is not documented: 'AutoExposure' reads "" on the
+    ' XploRA (2026-11-23); the first of these that reads a value is used, and reported
+    Dim n
+    AeName = ""
+    For Each n In Array("LabSpecAutoExposure", "AutoExposure", "LabSpecAutoExposition", "AutoExposition", _
+                        "LabSpecAE", "AcqAutoExposure")
+        If CStr(LSValue(0, n)) <> "" Then
+            AeName = n
+            Exit Function
+        End If
+    Next
+End Function
+
 Sub VAcquire(cmd, res)
-    Dim aeBefore, aeOff
+    Dim aeBefore, aeOff, aeN
     aeBefore = ""
+    aeN = ""
     If ParseNum(GetP(cmd, "exposure_s", "1")) > 0 Then
-        aeBefore = LSValue(0, "AutoExposure")
+        aeN = AeName()
+        res("auto_exposure_name") = aeN
+        If aeN <> "" Then aeBefore = LSValue(0, aeN)
         res("auto_exposure_before") = aeBefore
         aeOff = LCase(CStr(aeBefore))
         If aeOff <> "" And aeOff <> "0" And aeOff <> "off" And aeOff <> "false" Then
             aeOff = 0
             On Error Resume Next
-            LabSpec.PutValue 0, "AutoExposure", aeOff
+            LabSpec.PutValue 0, aeN, aeOff
             Err.Clear
             On Error GoTo 0
-            res("auto_exposure_set") = LSValue(0, "AutoExposure")
+            res("auto_exposure_set") = LSValue(0, aeN)
         Else
             aeBefore = ""                     ' off already (or not readable): nothing to put back
         End If
@@ -1254,7 +1272,7 @@ Sub VAcquire(cmd, res)
     VAcquireLaser cmd, res
     If CStr(aeBefore) <> "" Then
         On Error Resume Next
-        LabSpec.PutValue 0, "AutoExposure", aeBefore
+        LabSpec.PutValue 0, aeN, aeBefore
         Err.Clear
         On Error GoTo 0
     End If
@@ -1305,6 +1323,7 @@ End Sub
 
 Sub VAcquireInner(cmd, res)
     Dim mode, ex, acc, f, t, outPath, native, sample, id, t0, started, who, tmo, r, spm, waitedS, tp, tAll, cur
+    Dim prevId, same, staleId
     mode = CLng(ParseNum(GetP(cmd, "mode", "10")))
     ex = ParseNum(GetP(cmd, "exposure_s", "1"))
     acc = CLng(ParseNum(GetP(cmd, "accumulations", "1")))
@@ -1380,12 +1399,30 @@ Sub VAcquireInner(cmd, res)
     If f < 0 Then f = -f
     tp = Timer
     ' collect earlier results (and a 'cancelled' state) until LabSpec reports none, so the next ID is ours
+    ' 2026-11-23: this took 1.6 s on the XploRA (the 50 tries ran out: GetAcqID kept answering the same): it stops
+    ' when LabSpec reports none (-1) or the same answer three times in a row, and says what it saw; a result it
+    ' keeps answering (staleId) is never taken for this acquisition's
+    prevId = "x"
+    same = 0
     For r = 1 To 50
         id = LabSpec.GetAcqID()
         If Err.Number <> 0 Then Exit For
         If id = -1 Then Exit For
+        If CStr(id) = CStr(prevId) Then
+            same = same + 1
+            If same >= 2 Then Exit For
+        Else
+            same = 0
+        End If
+        prevId = id
         LabSpec.Pause 20
     Next
+    res("flush_tries") = r
+    res("flush_last_id") = id
+    staleId = -99
+    If IsNumeric(id) Then
+        If id > 0 Then staleId = id
+    End If
     Err.Clear
     res("t_flush_s") = Secs(Elapsed(tp))
     tp = Timer
@@ -1424,7 +1461,11 @@ Sub VAcquireInner(cmd, res)
             Err.Clear
             Exit Sub
         End If
-        If id > 0 Then Exit Do
+        If id > 0 And CStr(id) <> CStr(staleId) Then Exit Do
+        If CStr(id) = CStr(staleId) And Elapsed(t0) > ex * acc + 60 Then
+            Fail res, "LabSpec still reports the earlier result " & staleId & " instead of this acquisition's"
+            Exit Sub
+        End If
         If id = -2 And (started Or Elapsed(t0) > 1) Then      ' cancelled in LabSpec: the operator intervened
             gHalted = True
             gStoppedBy = "operator"

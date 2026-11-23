@@ -437,14 +437,17 @@ def test_laser_off_shutter_is_read_back_and_checked(tmp_path):
     (bdir / "sim_acq_holds").write_text("1")
     st = run_inline({"b": dict(bg, background={"name": "shut1", "laser_off": "shutter"})})
     r = st["studies"]["b"]
-    assert r["laser_shutter"]["during_checked"] is False
-    assert any("could not read the laser shutter during the acquisition" in w for w in r["warnings"])
+    assert r["laser_shutter"]["during_checked"] is False and "verification on Si" in r["laser_shutter"]["during_note"]
+    assert not any("could not read the laser shutter" in w for w in r["warnings"])     # verified: a note, no warning
+    warns: list = []
+    rep = runner.shutter_report({"t_acq_call_s": 17.46, "t_until_data_s": 0.05, "shutter_reads": 1}, warns)
+    assert rep["during_checked"] is False and any("could not read the laser shutter" in w for w in warns)
     (bdir / "sim_acq_holds").unlink()
+    # lines that survive spike removal with a verified shutter: said (lamp, room light?), not taken for the laser
     (bdir / "sim_shutter_ignored").write_text("1")            # reads Off, beam still passes: the Si line is there
     st = run_inline({"b": dict(bg, background={"name": "shut2", "laser_off": "shutter"})})
     r = st["studies"]["b"]
-    assert not r["reliable"] and any("NOT blocked" in u for u in r["unreliable_because"])
-    assert r["background"]["stored"] is False
+    assert any("after spike removal" in w and "shutter-verify again" in w for w in r["warnings"])
     (bdir / "sim_shutter_ignored").unlink()
     (bdir / "sim_shutter_reopens").write_text("1")            # LabSpec opens it during the acquisition
     st = run_inline({"b": dict(bg, background={"name": "shut3", "laser_off": "shutter"})})
@@ -472,3 +475,54 @@ def test_labspec_auto_exposure_does_not_replace_the_exposure_asked():
     st = run_inline({"s": sp})
     s = st["studies"]["s"]
     assert not s["ok"] and "instead of the 2 s asked" in s["why"] and "AutoExposure" in s["why"]
+
+
+def test_shutter_used_only_once_shown_to_block_on_si(tmp_path):
+    """Nicola's suggestion (2026-11-23): the narrow-line check cannot protect samples without sharp lines, so
+    laser_off 'shutter' (and laser_on, snapshots with the laser) needs a passed spectral test on Si: a record per
+    laser, refused when missing, too old, for another motor or way of moving it, or another shutter revision."""
+    import time as _t
+    from labspec_translator import shutter as SH
+    sim = S.ensure(config.active_bridge_dir())
+    b = bridge.Bridge()
+    b.call("discover", timeout_s=10, out=str(tmp_path / "dump.txt"))
+    prof, _ = P.import_discovery(P.read_text(tmp_path / "dump.txt"))
+    prof["motors"]["laser_shutter"] = prof["laser_shutter_candidate"]
+    P.save(prof)
+    bg = {"kind": "background", "sample": {"name": "lamp"}, "setup": SETUP,
+          "acquire": {"center_cm1": 520, "exposure_s": 1}, "background": {"name": "g", "laser_off": "shutter"}}
+    v = api.validate({"b": bg})["b"]
+    assert not v["ok"] and any("has not been shown to block the 532 nm laser" in e and "shutter-verify" in e
+                               for e in v["errors"])
+    assert "has not been shown" in api.laser(True, 5)["error"]
+    # unverified: a background without laser_off defaults to the operator blocking it by hand
+    assert plan.cutoff_params({"kind": "cutoff", "setup": SETUP}, P.load())["laser_off"] == "operator"
+    # at 1 % the simulated line is too weak to tell a 5 % leak: not conclusive
+    r = api.shutter_verify()
+    assert not r["ok"] and "not conclusive" in r["error"] and not SH.records()
+    api.bridge_call("move", {"motor": "Filter", "mode": "label", "value": "10%"})
+    # the beam passes although the shutter reads Off: the verification fails and writes nothing
+    (config.active_bridge_dir() / "sim_shutter_ignored").write_text("1")
+    r = api.shutter_verify()
+    assert not r["ok"] and r["blocked"] is False and "NOT BLOCKED" in r["error"] and not SH.records()
+    (config.active_bridge_dir() / "sim_shutter_ignored").unlink()
+    r = api.shutter_verify()
+    assert r["ok"] and r["sensitivity"] <= 0.05 and r["record"]["laser_nm"] == 532, r.get("error")
+    assert r["shutter_closed"]["laser_shutter"]["during_checked"] is True
+    assert api.validate({"b": bg})["b"]["ok"]
+    assert SH.gate(P.load(), 637.75) and "637.75 nm" in SH.gate(P.load(), 637.75)     # per laser
+    # another way of moving it, or too old: verify again
+    prof = P.load()
+    prof["shutter"]["by"] = "value"
+    assert "moved by label" in SH.gate(prof, 532)
+    rec = SH.records()["532"]
+    SH.record(dict(rec, time=_t.time() - 40 * 86400))
+    assert "days ago" in SH.gate(P.load(), 532)
+    SH.record(dict(rec, rev=SH.REV - 1))
+    assert "shutter handling has changed" in SH.gate(P.load(), 532)
+    r = api.start({"b": bg}, inline=True)
+    assert not r["ok"] and "shutter handling has changed" in r["errors"]["b"][0]
+    # and at run time, should validation be bypassed
+    with pytest.raises(runner.Stop):
+        runner._shutter_gate(P.load(), 532)
+    del sim
