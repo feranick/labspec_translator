@@ -30,7 +30,7 @@ GUIDE_MODES = ("reach", "drop", "maximize")
 VIDEO_KEYS = {"before", "after", "with_laser"}
 SETUP_KEYS = {"laser_nm", "grating", "filter", "objective", "hole_um", "slit_um", "laser_pol", "raman_pol"}
 ACQ_KEYS = {"range_cm1", "center_cm1", "exposure_s", "accumulations", "auto_exposure", "spike", "dark",
-            "subtract_background"}
+            "subtract_background", "ics"}
 AE_KEYS = {"target_counts", "min_s", "max_s", "test_s"}
 FOCUS_KEYS = {"autofocus", "every", "dz_um", "scan"}
 MAP_KEYS = {"x_um", "y_um", "z_um", "snake", "engine", "swift"}
@@ -106,8 +106,9 @@ def study_format(status: dict | None = None) -> dict:
             "acquire": "{range_cm1: [from, to] (extended range: LabSpec stitches windows) | center_cm1 (one "
                        "window), exposure_s (s per accumulation, or 'auto' with auto_exposure: {target_counts, "
                        "min_s, max_s, test_s}), accumulations, spike: labspec | none | single | double | "
-                       "double_auto, dark: labspec | true | false, subtract_background: a stored background's "
-                       "name}",
+                       "double_auto, dark: labspec | true | false, ics (LabSpec's intensity correction): labspec | "
+                       "true | false (labspec: off where the profile's ics.off_for lists the grating@laser), "
+                       "subtract_background: a stored background's name}",
             "focus": "{autofocus: laser | raman | video (LabSpec's routines) | scan (ls6t's focus scan on the "
                      "Raman line) (before the first point; map: also every N points with 'every'), dz_um: Z "
                      "offset from the focus (spectrum, series), scan: {range_um (10), step_um (1), line_cm1 (Si), "
@@ -552,6 +553,9 @@ def validate_study(name: str, study: dict, prof: dict) -> dict:
                         "(or 'double_auto', which adds one)")
     if a.get("dark", "labspec") not in ("labspec", True, False):
         errors.append("acquire.dark: labspec, true or false")
+    if a.get("ics", "labspec") not in ("labspec", True, False):
+        errors.append("acquire.ics: labspec (LabSpec's setting, off where the profile's ics.off_for says), true or "
+                      "false")
 
     # ---- focus, points, map, series
     f = study.get("focus", {})
@@ -695,6 +699,24 @@ def validate_study(name: str, study: dict, prof: dict) -> dict:
     # ---- range in nm, windows, estimate (now that the study is well formed)
     laser = plan.laser_nm(study, prof)
     rng = plan.acq_range(study, prof, laser)
+    if laser and rng.get("from_nm") is not None and (study.get("setup") or {}).get("grating") is None:
+        # LabSpec's grating will be used: say which gratings reach the range (785 nm: 600 up to 3951 cm-1, 1200 up
+        # to 3745, 1800 up to 2043, from LabSpec's SpMax; the run stops if LabSpec's grating cannot)
+        reach_all = {g: plan.grating_reach(prof, g, laser) for g in prof.get("gratings", {})}
+        top_nm = float(rng.get("to_nm") or 0)
+        can = sorted((g for g, r in reach_all.items() if r and top_nm <= r["limit_nm"]), key=float)
+        cannot = {g: r for g, r in reach_all.items() if r and top_nm > r["limit_nm"]}
+        if reach_all and not can:
+            errors.append(f"no grating reaches {top_nm:.0f} nm ({rng.get('to_cm1')} cm-1) with the {laser:g} nm laser: "
+                          + "; ".join(f"{g} up to {r['max_shift_cm1']:g} cm-1" for g, r in sorted(cannot.items(),
+                                      key=lambda kv: float(kv[0])) if r.get("max_shift_cm1") is not None)
+                          + ": a shorter range")
+        elif cannot:
+            warnings.append(f"setup.grating not given: LabSpec's grating is used, and only {', '.join(can)} reach "
+                            f"{rng.get('to_cm1')} cm-1 with the {laser:g} nm laser ("
+                            + "; ".join(f"{g} stops at {r['max_shift_cm1']:g} cm-1" for g, r in sorted(
+                                cannot.items(), key=lambda kv: float(kv[0])) if r.get("max_shift_cm1") is not None)
+                            + "): the run stops before measuring if LabSpec has another; give setup.grating")
     if laser and rng.get("from_nm") is not None:
         reach = plan.grating_reach(prof, (study.get("setup") or {}).get("grating"), laser)
         if reach and float(rng.get("to_nm") or 0) > reach["limit_nm"]:
@@ -716,6 +738,10 @@ def validate_study(name: str, study: dict, prof: dict) -> dict:
             if cut is not None and rng["from_cm1"] < cut:
                 warnings.append(f"the range starts at {rng['from_cm1']:g} cm-1, below the measured cut-off "
                                 f"({cut:g} cm-1 for this laser and grating): the edge filter blocks part of it")
+            elif cut is None and 0 <= rng["from_cm1"] < 100:
+                warnings.append(f"the range starts at {rng['from_cm1']:g} cm-1: an edge filter usually blocks below "
+                                "about 50-100 cm-1, and this laser's cut-off is not measured yet (a 'cutoff' study "
+                                "measures it)")
         if rng.get("windows") and rng["windows"] > 12:
             warnings.append(f"the range needs about {rng['windows']} detector windows: a coarser grating "
                             "covers it in fewer")

@@ -36,6 +36,8 @@ DEFAULT_PROFILE: dict = {
                "638": {"nm": 638.0, "label": "638", "power_mw": None, "max_filter_pct": 100},
                "785": {"nm": 785.0, "label": "785", "power_mw": None, "max_filter_pct": 100}},
     # window_nm: the spectral width of one detector window (for time estimates and the extended-range count)
+    # generic estimates (the simulator uses them); the XploRA measured 600 197.8, 1200 85.4-87.4, 1800 46.7 nm at
+    # 638 nm (2026-11-23): its profile sets them (ls6t profile set gratings.<g>.window_nm <nm>, as ls6t's warnings say)
     "gratings": {"600": {"window_nm": 78.0}, "1200": {"window_nm": 39.0},
                  "1800": {"window_nm": 26.0}, "2400": {"window_nm": 19.5}},
     "filters": {"100%": 100.0, "50%": 50.0, "25%": 25.0, "10%": 10.0, "1%": 1.0, "0.1%": 0.1},
@@ -110,6 +112,9 @@ DEFAULT_PROFILE: dict = {
     # LabSpec's configuration around each request: with restore_config, the bridge saves it (SaveConfig) when a
     # request starts and loads it back (LoadConfig) when the request ends normally
     "session": {"restore_config": False},
+    # LabSpec's ICS (intensity correction) is turned off for these "<grating>@<laser nm>": no correction file there,
+    # and with ICS on LabSpec stops each acquisition at a modal Error 2070 (2026-11-23: 2400 with 637.75 nm)
+    "ics": {"off_for": []},
     "checks": {"min_snr": 10.0, "detect_snr": 5.0, "si_cm1": 520.7, "si_tol_cm1": 1.0, "saturation_frac": 0.98},
 }
 

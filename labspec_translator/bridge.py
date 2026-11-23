@@ -353,8 +353,13 @@ class Bridge:
         dropped = ("ls6t asked the bridge to drop it (a stop request, which the bridge sees only between LabSpec "
                    "calls)")
         if hb.get("state") == "busy" and hb.get("blocking"):
-            return (f"{verb}: no result within {timeout_s:g} s; {dropped}. LabSpec is still in a blocking move of "
-                    f"the {hb['blocking']} ({hb.get('age_s', 0):.0f} s): the bridge answers when LabSpec returns")
+            extra = (" If LabSpec shows a message (e.g. 'The required ICS correction file does not exist ... Error "
+                     "Code=2070'), press OK there: the acquisition waits for it. For that one, list the grating and "
+                     "laser in the profile's ics.off_for (ls6t profile set ics.off_for '[\"2400@637.75\"]')"
+                     if hb["blocking"] == "acquire" else "")
+            what = "acquisition" if hb["blocking"] == "acquire" else f"blocking move of the {hb['blocking']}"
+            return (f"{verb}: no result within {timeout_s:g} s; {dropped}. LabSpec is still in the {what} "
+                    f"({hb.get('age_s', 0):.0f} s): the bridge answers when LabSpec returns." + extra)
         if hb.get("state") == "busy" and hb.get("verb") == verb and hb.get("age_s", 0) > 5:
             return (f"{verb}: no result within {timeout_s:g} s; {dropped}. The bridge is stuck inside LabSpec in "
                     f"'{verb}' (no heartbeat for {hb['age_s']:.0f} s). " + labspec_hint(verb))

@@ -165,3 +165,25 @@ def test_shift_conversion():
     assert sh[0] == pytest.approx(520.7, abs=1e-6) and unit == "nm"
     with pytest.raises(ValueError):
         spectra.to_shift([500], "furlongs", 532.0)
+
+
+def test_reach_when_the_grating_is_not_given():
+    """2026-11-23, Nicola: a multi-window range such as 50-3400 cm-1 is not possible with every laser and grating
+    (785 nm: 600 up to 3951 cm-1, 1200 up to 3745, from LabSpec's SpMax; 1800 only to 2043). With the grating
+    given it was refused; without it, nothing was said."""
+    prof = P.load()
+    prof["lasers"]["785"]["nm"] = 785.04
+    for g, sp in (("600", [100, 1138]), ("1200", [100, 1112]), ("1800", [100, 935]), ("2400", [100, 690])):
+        prof["gratings"][g]["spectro_nm"] = sp
+    P.save(prof)
+    assert plan.grating_reach(P.load(), "600", 785.04)["max_shift_cm1"] == 3951
+    assert plan.grating_reach(P.load(), "1200", 785.04)["max_shift_cm1"] == 3745
+    base = {"kind": "spectrum", "sample": {"name": "x"}, "acquire": {"range_cm1": [50, 3400], "exposure_s": 1}}
+    r = api.validate({"s": dict(base, setup={"laser_nm": 785, "filter": "10%"})})["s"]
+    assert r["ok"] and any("only 600, 1200 reach" in w and "1800 stops at 2043" in w for w in r["warnings"])
+    assert any("50-100 cm-1" in w for w in r["warnings"])
+    r = api.validate({"s": dict(base, setup={"laser_nm": 785, "filter": "10%"},
+                                acquire={"range_cm1": [100, 4200], "exposure_s": 1})})["s"]
+    assert not r["ok"] and any("no grating reaches" in e for e in r["errors"])
+    r = api.validate({"s": dict(base, setup={"laser_nm": 785, "filter": "10%", "grating": 1800})})["s"]
+    assert not r["ok"] and any("above 2043 cm-1" in e for e in r["errors"])

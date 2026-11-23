@@ -190,3 +190,16 @@ def test_cli_bridge_call_takes_params_after_options(capsys):
     rc = cli.main(["bridge", "call", "move", "--timeout", "30", "motor=Grating", "mode=value", "value=600"])
     out = json.loads(capsys.readouterr().out)
     assert rc == 0 and float(out["value"]) == 600
+
+
+def test_run_stops_when_labspecs_grating_cannot_reach_the_range():
+    """No setup.grating: the grating LabSpec has is checked against the range before anything is measured."""
+    prof = P.load()
+    prof["gratings"]["1800"]["spectro_nm"] = [100, 935]
+    P.save(prof)
+    S.ensure(config.active_bridge_dir())
+    api.instrument("set", setup={"grating": 1800})
+    st = run_inline({"s": {"kind": "spectrum", "sample": {"name": "x"}, "setup": {"laser_nm": 785, "filter": "10%"},
+                           "acquire": {"range_cm1": [100, 3400], "exposure_s": 1}}})
+    s = st["studies"]["s"]
+    assert not s["ok"] and "cannot reach" in json.dumps(s) and not s.get("spectra")

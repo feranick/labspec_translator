@@ -245,15 +245,38 @@ def grating_reach(prof: dict, grating, laser_nm) -> dict | None:
 
 
 def acq_mode(study: dict) -> int:
-    """LabSpec's Acq Mode: ACQ_SPECTRUM + ACQ_AUTO_SHOW + spike removal + dark."""
+    """LabSpec's Acq Mode: ACQ_SPECTRUM + ACQ_AUTO_SHOW + spike removal + ICS (intensity correction) + dark."""
     acq = study.get("acquire", {})
     mode = 0 + 10 + SPIKE_MODES[acq.get("spike", "labspec")]
+    ics = acq.get("ics", "labspec")
+    if ics is True:
+        mode += ACQ_ICS
+    elif ics is False:
+        mode += ACQ_NO_ICS
     dark = acq.get("dark", "labspec")
     if dark is True:
         mode += 2000000
     elif dark is False:
         mode += 1000000
     return mode
+
+
+ACQ_NO_ICS, ACQ_ICS = 100000, 200000      # LabSpec's Acq mode digits (ActiveX manual)
+
+
+def ics_off(prof: dict, laser, grating) -> bool:
+    """True where LabSpec has no ICS (intensity correction) file for this grating and laser (profile ics.off_for,
+    entries "<grating>@<laser nm>"): with ICS on, LabSpec stops every acquisition there with a modal "The required
+    ICS correction file does not exist ... Error Code=2070" until someone presses OK (2026-11-23: 2400 gr/mm with
+    637.75 nm), and the bridge waits inside the acquisition meanwhile."""
+    import re as _re
+    if laser in (None, "") or grating in (None, ""):
+        return False
+    mg = _re.match(r"\s*(\d+(?:\.\d+)?)", str(grating))
+    if not mg:
+        return False
+    key = f"{float(mg.group(1)):g}@{float(laser):g}"
+    return key in set((prof.get("ics") or {}).get("off_for") or [])
 
 
 def setup_steps(study: dict, prof: dict) -> list[dict]:

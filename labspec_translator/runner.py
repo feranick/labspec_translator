@@ -101,6 +101,7 @@ class Ctx:
         self.focus_stale = False            # after a retract for an objective change: a fresh focus is needed
         self.last_beat = 0.0
         self.bridge_version = None
+        self.optics = (None, None)          # (laser nm, grating) after the last setup: for ics.off_for
 
     def cancelled(self) -> bool:
         return (self.folder / "cancel").exists()
@@ -116,6 +117,11 @@ class Ctx:
                 pass
 
     def call(self, verb: str, timeout_s: float = 60.0, **params) -> dict:
+        if verb == "acquire" and "mode" in params and (int(params["mode"]) // 100000) % 10 == 0 \
+                and plan.ics_off(self.prof, *self.optics):
+            # no ICS correction file for this grating and laser: LabSpec would stop at a modal dialog (Error 2070)
+            params["mode"] = int(params["mode"]) + plan.ACQ_NO_ICS
+            self.ics_skipped = True
         try:
             r = self.bridge.call(verb, timeout_s=timeout_s, should_stop=self.cancelled, on_wait=self.beat, **params)
         except BridgeGone as exc:
@@ -357,6 +363,20 @@ def _setup(name: str, study: dict, ctx: Ctx, warnings: list, unreliable: list, c
     after = ctx.call("status", timeout_s=15, **motor_args(prof))
     ctx.objective = after.get("objective") or ctx.objective
     laser = _f(after.get("laser_nm")) or plan.laser_nm(study, prof) or ctx.start.get("laser_nm")
+    ctx.optics = (laser, after.get("grating"))
+    rng0 = plan.acq_range(study, prof, laser)
+    if (study.get("setup") or {}).get("grating") is None and rng0.get("to_nm") is not None and \
+            study.get("kind", "spectrum") not in ("alignment", "guide"):
+        import re as _re
+        mg = _re.match(r"\s*(\d+(?:\.\d+)?)", str(after.get("grating") or ""))
+        reach = plan.grating_reach(prof, mg.group(1), laser) if mg else None
+        if reach and float(rng0["to_nm"]) > reach["limit_nm"]:
+            raise Stop(f"LabSpec's grating {reach['grating']} cannot reach {rng0.get('to_cm1')} cm-1 with the "
+                       f"{laser:g} nm laser (up to {reach['max_shift_cm1']} cm-1, {reach['basis']}): nothing was "
+                       "measured; give setup.grating (a coarser one) or a shorter range", "study")
+    if plan.ics_off(prof, *ctx.optics) and (study.get("acquire") or {}).get("ics", "labspec") == "labspec":
+        warnings.append(f"ICS (intensity correction) off for grating {after.get('grating')} with {laser:g} nm: LabSpec "
+                        "has no correction file for it (profile ics.off_for); intensities are not corrected")
     temp = _f(after.get("detector_temp_c"))
     checks["detector_temp_c"] = {"value": temp, "max": prof["detector"]["max_temp_c"],
                                  "pass": temp is not None and temp <= prof["detector"]["max_temp_c"]}

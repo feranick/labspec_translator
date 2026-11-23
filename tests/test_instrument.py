@@ -1262,3 +1262,32 @@ def test_maintainer_session_2026_11_23_afternoon(tmp_path):
     st = run_inline({"s": {"kind": "spectrum", "sample": {"name": "Si"}, "setup": SETUP,
                            "acquire": {"range_cm1": [100, 1000], "exposure_s": 1}}})
     assert st["studies"]["s"]["checks"]["range"]["pass"], st["studies"]["s"]["checks"]["range"]
+
+
+def test_ics_off_where_labspec_has_no_correction_file():
+    """2026-11-23: with the 2400 grating and 637.75 nm LabSpec stopped every acquisition at 'The required ICS
+    correction file does not exist ... Error Code=2070' until OK was pressed. Profile ics.off_for turns ICS off there."""
+    prof = P.load()
+    assert not plan.ics_off(prof, 637.75, "2400 (400nm)")
+    prof = dict(prof, ics={"off_for": ["2400@637.75"]})
+    assert plan.ics_off(prof, 637.75, "2400 (400nm)") and plan.ics_off(prof, "637.75", 2400)
+    assert not plan.ics_off(prof, 532, 2400) and not plan.ics_off(prof, 637.75, 1200)
+    assert (plan.acq_mode({"acquire": {"ics": False}}) // 100000) % 10 == 1
+    assert (plan.acq_mode({"acquire": {"ics": True}}) // 100000) % 10 == 2
+    assert not F.validate({"s": {"kind": "spectrum", "setup": SETUP, "acquire": {"ics": "maybe"}}})["s"]["ok"]
+    # on the simulator: the acquisition is sent with ACQ_NO_ICS and the result says so
+    S.ensure(config.active_bridge_dir())
+    P.save(dict(P.load(), ics={"off_for": ["1800@532"]}))
+    sent = []
+    orig = bridge.Bridge.call
+
+    def spy(self, verb, *a, **kw):
+        if verb == "acquire":
+            sent.append(int(kw.get("mode", 0)))
+        return orig(self, verb, *a, **kw)
+    import unittest.mock as um
+    with um.patch.object(bridge.Bridge, "call", spy):
+        st = run_inline({"s": {"kind": "spectrum", "sample": {"name": "Si"}, "setup": SETUP,
+                               "acquire": {"center_cm1": 520, "exposure_s": 1}}})
+    assert sent and all((m // 100000) % 10 == 1 for m in sent), sent
+    assert any("ICS" in w for w in st["studies"]["s"]["warnings"])

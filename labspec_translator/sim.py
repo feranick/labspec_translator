@@ -41,6 +41,7 @@ PEAKS = {"ps": [(1001.4, 3.0, 0.6), (1031.8, 4.0, 0.2), (1602.3, 6.0, 0.3), (305
          "si": [(520.7, 3.5, 1.0)], "graphene": [(1585.0, 14.0, 0.35), (2680.0, 30.0, 0.7), (1350.0, 20.0, 0.04)]}
 
 
+
 class SimLabSpec:
     def __init__(self, folder: Path, seed: int = 1):
         self.dir = Path(folder)

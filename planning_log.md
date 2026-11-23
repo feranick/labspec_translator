@@ -785,3 +785,14 @@ What was done, found and decided, by date (oldest first). The current design is 
   notice, no xcal store; notice adds Offset-shift steps from calibration.offset_step_cm1 when set; range check
   tolerance max(3, 0.5 % of span); bridge InventoryNeeded (missing, >= 7 days, inventory.flag); objective question
   says focus by eye. AutoCalibration script still not found by autocal_info (LabSpec's menu has it). 149 tests.
+- 2026-11-23, 2026.11.23.6: Nicola ran the T3.16 list (Codex, .23.3, guardian logs): centre fix confirmed - 1200 @
+  637.75 nm, 520 / 1500 cm-1: Spectro asked / read 659.6251 / 659.6308 and 705.2124 / 705.2123 nm, windows differ,
+  widths 87.37 / 85.36 nm; 1200 -> 1800 -> 1200 -> 600: widths 46.66, 87.37, 197.79 nm, all centred, checks passed,
+  .l6s saved. 2400 @ 637.75: LabSpec's modal 'ICS correction file does not exist, Error Code=2070' on every
+  acquisition (2400 blazed at 400 nm; LabSpec labels 600 (750nm), 1200 (750nm), 1800 (450-850nm), 2400 (400nm)).
+  ACQ_NO_ICS = 100000 / ACQ_ICS = 200000 (ActiveX manual): profile ics.off_for, acquire.ics, Ctx.call adds
+  ACQ_NO_ICS where listed, timeout text names the dialog. Nicola: 785 nm reach 600 3951, 1200 3745 cm-1 (= ls6t's
+  SpMax numbers); flag ranges no grating reaches: validation without setup.grating lists the gratings that reach,
+  refuses when none, runner stops if LabSpec's grating cannot; < 100 cm-1 without a measured cut-off warned.
+  The default profile's window_nm stay generic (the simulator uses them); the XploRA's are set from the warnings.
+  151 tests.
