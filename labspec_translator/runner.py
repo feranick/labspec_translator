@@ -102,6 +102,7 @@ class Ctx:
         self.last_beat = 0.0
         self.bridge_version = None
         self.optics = (None, None)          # (laser nm, grating) after the last setup: for ics.off_for
+        self.last_ics = None                # the ICS state of the last acquisition sent
 
     def cancelled(self) -> bool:
         return (self.folder / "cancel").exists()
@@ -117,11 +118,19 @@ class Ctx:
                 pass
 
     def call(self, verb: str, timeout_s: float = 60.0, **params) -> dict:
-        if verb == "acquire" and "mode" in params and (int(params["mode"]) // 100000) % 10 == 0 \
-                and plan.ics_off(self.prof, *self.optics):
-            # no ICS correction file for this grating and laser: LabSpec would stop at a modal dialog (Error 2070)
-            params["mode"] = int(params["mode"]) + plan.ACQ_NO_ICS
-            self.ics_skipped = True
+        if verb == "acquire" and "mode" in params:
+            digit = (int(params["mode"]) // 100000) % 10
+            if digit == 0 and plan.ics_off(self.prof, *self.optics):
+                # no ICS correction file for this grating and laser: LabSpec would stop at a modal dialog (Error 2070)
+                params["mode"] = int(params["mode"]) + plan.ACQ_NO_ICS
+                self.last_ics = (f"off (no correction file for grating {self.optics[1]} with "
+                                 f"{_f(self.optics[0]) or 0:g} nm)")
+            else:
+                # with and without ICS, intensities are not comparable: each spectrum says which (2026-11-23)
+                self.last_ics = {1: "off (asked)", 2: "on (asked)"}.get(digit, "LabSpec's setting (a correction "
+                                                                              "file exists for this pair)"
+                                                                       if plan.ics_files(self.prof) is not None
+                                                                       else "LabSpec's setting")
         try:
             r = self.bridge.call(verb, timeout_s=timeout_s, should_stop=self.cancelled, on_wait=self.beat, **params)
         except BridgeGone as exc:
@@ -597,7 +606,7 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
                    "stage": {"x_um": ax, "y_um": ay, "z_um": zcur}, "file": str(out),
                    "native": params.get("native"), "id": r.get("id"), "t": round(time.time() - t_start, 3),
                    "exposure_s": _f(r.get("exposure_s")), "accumulations": _f(r.get("accumulations")),
-                   "detector_temp_c": _f(r.get("detector_temp_c"))}
+                   "detector_temp_c": _f(r.get("detector_temp_c")), "ics": ctx.last_ics}
             per_point.append(rec)
             # live view in LabSpec: the map or the series grows as it is measured
             if kind in ("map", "series") and r.get("id"):
@@ -2283,7 +2292,8 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
         ys.append(a["_y"])
         if kind != "map":
             spectra.write(Path(rec["file"]).with_suffix(".shift.txt"), a["_x"], a["_y"],
-                          {"x_unit": "1/cm", "y_unit": sp["meta"].get("y_unit", "cnt"), "laser_nm": laser})
+                          {"x_unit": "1/cm", "y_unit": sp["meta"].get("y_unit", "cnt"), "laser_nm": laser,
+                           "ics": rec.get("ics") or "unknown"})
     n = len(per_point)
     checks["saturation"] = {"pass": not sat_points, "points": sat_points[:50], "full_scale": fs, "threshold": fs * frac}
     if sat_points:
@@ -2293,6 +2303,11 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
     if spike_points and spike_mode == "none":
         # with LabSpec's spike removal on, what remains is usually a narrow Raman line, not a cosmic ray
         warnings.append(f"cosmic-ray spikes left in {len(spike_points)} spectra (spike removal is off: use 'double')")
+    ics_states = sorted({str(r.get("ics")) for r in per_point if r.get("ics")})
+    if ics_states:
+        if len(ics_states) > 1:
+            warnings.append("ICS was not the same for every spectrum (" + "; ".join(ics_states) + "): intensities with "
+                            "and without ICS are not comparable")
     checks["range"] = {"pass": not cover_short, "points": cover_short[:50]}
     if cover_short:
         warnings.append(f"{len(cover_short)} spectra do not cover the whole range asked for")
@@ -2309,6 +2324,8 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
         warnings.append(f"a requested peak was not detected in {len(set(undetected))} spectra (see peaks[].why)")
 
     out: dict = {"files": {"folder": str(sd)}}
+    if ics_states:      # the ICS state of the spectra: intensities with and without ICS are not comparable
+        out["ics"] = ics_states[0] if len(ics_states) == 1 else ics_states
     if kind == "map":
         out["map"] = _map_result(name, study, per_point, axes, ys, sd, process)
         out["files"]["map"] = out["map"]["files"]
@@ -2511,7 +2528,8 @@ def parse_native_map(path, study: dict, prof: dict, x0, y0, zref) -> list:
 
 def _point_summary(r: dict) -> dict:
     keys = ("point", "offset", "stage", "file", "native", "t", "exposure_s", "accumulations", "max_counts",
-            "saturated", "noise_sigma", "spikes", "from_cm1", "to_cm1", "peaks", "bands", "x_correction", "background")
+            "saturated", "noise_sigma", "spikes", "from_cm1", "to_cm1", "peaks", "bands", "x_correction", "background",
+            "ics")
     return {k: r.get(k) for k in keys}
 
 

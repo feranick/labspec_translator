@@ -1348,3 +1348,18 @@ def test_labspec_autocalibration_called_directly(tmp_path):
     assert r["ok"], r
     assert "the laser fires" in api.autocal_question({"method": "call"})
     assert "no sample" in api.autocal_question({"method": "call", "mode": "offset"})
+
+
+def test_each_spectrum_records_its_ics_state():
+    """Nicola, 2026-11-23: intensities with and without ICS are not comparable: every spectrum says which."""
+    S.ensure(config.active_bridge_dir())
+    P.save(dict(P.load(), ics={"off_for": ["1800@532"], "auto": True}))
+    st = run_inline({"off": {"kind": "spectrum", "sample": {"name": "Si"}, "setup": SETUP,
+                             "acquire": {"center_cm1": 520, "exposure_s": 1}},
+                     "on": {"kind": "spectrum", "sample": {"name": "Si"}, "setup": SETUP,
+                            "acquire": {"center_cm1": 520, "exposure_s": 1, "ics": True}}})
+    off, on = st["studies"]["off"], st["studies"]["on"]
+    assert off["ics"].startswith("off (no correction file") and off["spectra"][0]["ics"] == off["ics"]
+    assert on["ics"] == "on (asked)"
+    shift = Path(off["spectra"][0]["file"]).with_suffix(".shift.txt").read_text()
+    assert "# ics=off (no correction file" in shift

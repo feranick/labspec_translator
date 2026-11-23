@@ -811,3 +811,6 @@ What was done, found and decided, by date (oldest first). The current design is 
   found no .vbs) -> bridge verb autocal (VAutoCal, polls status, beats, stop), sim v_autocal, api.autocal_call /
   autocal_question used by autocal_run and run_calibration (method 'call'). To try once with the maintainer (T4.9).
   155 tests.
+- 2026-11-23, 2026.11.23.8: Nicola's suggestion: record the ICS state with each spectrum. Ctx.last_ics set
+  from the Acq mode's ICS digit (ics_off reason, asked on / off, LabSpec's setting); per-point 'ics', _point_summary,
+  the .shift.txt header, the study's 'ics' (a list and a warning when they differ). 156 tests.
