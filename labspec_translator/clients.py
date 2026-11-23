@@ -1,7 +1,7 @@
 """clients.py — connecting ls6t's MCP server to the LLM apps on this computer (`ls6t connect`, and the installer).
-Version: 2026.11.22.10
+Version: 2026.11.22.11
 
-Each app keeps its MCP servers in its own file. ls6t knows four that start local (stdio) servers:
+Each app keeps its MCP servers in its own file. ls6t knows eight that start local (stdio) servers:
 
 | client  | app                                                     | file                                             |
 |---------|---------------------------------------------------------|--------------------------------------------------|
@@ -9,6 +9,10 @@ Each app keeps its MCP servers in its own file. ls6t knows four that start local
 | codex   | ChatGPT desktop app, Codex CLI and IDE extension (they share it) | %CODEX_HOME% or ~/.codex/config.toml (TOML) |
 | gemini  | Gemini CLI                                              | ~/.gemini/settings.json                          |
 | cursor  | Cursor (the editor; its agent and chat)                 | ~/.cursor/mcp.json (global: every project)       |
+| claudecode | Claude Code (terminal, IDE extensions)               | %CLAUDE_CONFIG_DIR%\.claude.json or ~/.claude.json (user scope: mcpServers at the top) |
+| copilot | GitHub Copilot (VS Code / Visual Studio agent, Copilot CLI) | %COPILOT_HOME%\mcp-config.json or ~/.copilot/mcp-config.json |
+| windsurf | Windsurf (Cascade)                                     | ~/.codeium/windsurf/mcp_config.json (and windsurf-next's when present) |
+| lmstudio | LM Studio (local models: nothing leaves the PC)        | ~/.lmstudio/mcp.json                             |
 
 The Gemini app and ChatGPT on the web take only remote servers (an internet address): ls6t does not offer the
 instrument to the internet, so they cannot use it.
@@ -42,9 +46,11 @@ ENTRY = "ls6t"
 SIM_ENTRY = "ls6t-sim"
 MODULE_ARGS = ["-m", "labspec_translator.mcp_server"]
 TOOL_TIMEOUT_S = 3600          # a tool may wait for the operator's answer in LabSpec
-CLIENTS = ("claude", "codex", "gemini", "cursor")
+CLIENTS = ("claude", "codex", "gemini", "cursor", "claudecode", "copilot", "windsurf", "lmstudio")
 LABELS = {"claude": "Claude desktop app", "codex": "ChatGPT desktop app / Codex", "gemini": "Gemini CLI",
-          "cursor": "Cursor"}
+          "cursor": "Cursor", "claudecode": "Claude Code", "copilot": "GitHub Copilot (VS Code, Visual Studio, CLI)",
+          "windsurf": "Windsurf", "lmstudio": "LM Studio"}
+ALIASES = {"claude-code": "claudecode", "lm-studio": "lmstudio", "vscode": "copilot", "github-copilot": "copilot"}
 
 
 def _norm(p) -> str:
@@ -171,6 +177,31 @@ def cursor_file() -> Path:
     return _home() / ".cursor" / "mcp.json"
 
 
+def claudecode_file() -> Path:
+    """Claude Code's user-scope servers: mcpServers at the top of .claude.json (CLAUDE_CONFIG_DIR when set). Edited
+    directly rather than through `claude mcp add --scope user`, which some versions wrote under one project
+    (anthropics/claude-code#16728); Claude Code must not be running meanwhile (it rewrites this file)."""
+    d = os.environ.get("CLAUDE_CONFIG_DIR")
+    return (Path(d) if d else _home()) / ".claude.json"
+
+
+def copilot_file() -> Path:
+    """GitHub Copilot's own user file (portable mcpServers format), read by the Copilot agent in VS Code and Visual
+    Studio and by Copilot CLI; COPILOT_HOME replaces ~/.copilot (VS Code then checks only that one)."""
+    return Path(os.environ.get("COPILOT_HOME") or _home() / ".copilot") / "mcp-config.json"
+
+
+def windsurf_files(create: bool = False) -> list[Path]:
+    """Windsurf's mcp_config.json: the stable build's, and the Next build's when that one is installed."""
+    base = _home() / ".codeium"
+    out = [d / "mcp_config.json" for d in (base / "windsurf", base / "windsurf-next") if d.is_dir()]
+    return out or ([base / "windsurf" / "mcp_config.json"] if create else [])
+
+
+def lmstudio_file() -> Path:
+    return _home() / ".lmstudio" / "mcp.json"
+
+
 def files(client: str, create: bool = False) -> list[Path]:
     if client == "claude":
         return claude_files(create)
@@ -180,6 +211,14 @@ def files(client: str, create: bool = False) -> list[Path]:
         return [gemini_file()]
     if client == "cursor":
         return [cursor_file()]
+    if client == "claudecode":
+        return [claudecode_file()]
+    if client == "copilot":
+        return [copilot_file()]
+    if client == "windsurf":
+        return windsurf_files(True)
+    if client == "lmstudio":
+        return [lmstudio_file()]
     raise ValueError(f"client {client!r}: {', '.join(CLIENTS)}")
 
 
@@ -205,8 +244,21 @@ def detect() -> dict:
         found["cursor"].append(str(Path(local) / "Programs" / "cursor"))
     if sys.platform == "darwin" and Path("/Applications/Cursor.app").is_dir():
         found["cursor"].append("/Applications/Cursor.app")
-    for client in ("codex", "gemini", "cursor"):   # the CLIs (npm, winget) and Cursor's `cursor` command
-        w = shutil.which(client)
+    if claudecode_file().exists() or (_home() / ".claude").is_dir():
+        found["claudecode"].append(str(claudecode_file()))
+    if copilot_file().parent.is_dir():
+        found["copilot"].append(str(copilot_file().parent))
+    found["copilot"] += [str(p) for p in sorted((_home() / ".vscode" / "extensions").glob("github.copilot*"))[:1]]
+    found["windsurf"] += [str(p.parent) for p in windsurf_files()]
+    if lmstudio_file().parent.is_dir():
+        found["lmstudio"].append(str(lmstudio_file().parent))
+    if os.name == "nt" and local:
+        for client, sub in (("windsurf", "Windsurf"), ("lmstudio", "LM Studio")):
+            if (Path(local) / "Programs" / sub).is_dir():
+                found[client].append(str(Path(local) / "Programs" / sub))
+    for client, exe in (("codex", "codex"), ("gemini", "gemini"), ("cursor", "cursor"), ("claudecode", "claude"),
+                        ("copilot", "copilot"), ("windsurf", "windsurf"), ("lmstudio", "lms")):
+        w = shutil.which(exe)
         if w:
             found[client].append(w)
     return {c: sorted(set(v)) for c, v in found.items()}
@@ -218,8 +270,10 @@ def _entry(client: str, python: str, env: dict) -> dict:
     e = {"command": str(python), "args": list(MODULE_ARGS), "env": dict(env)}
     if client == "gemini":
         e.update(timeout=TOOL_TIMEOUT_S * 1000, trust=False)    # trust false: Gemini CLI asks before each tool
-    if client == "cursor":
-        e = {"type": "stdio", **e}            # Cursor's documented form for a local server
+    if client in ("cursor", "claudecode"):
+        e = {"type": "stdio", **e}            # their documented form for a local server
+    if client == "copilot":
+        e = {"type": "stdio", **e, "tools": ["*"]}    # the portable format: which tools; approvals still apply
     return e
 
 
@@ -242,7 +296,7 @@ def merge_server(cfg: dict, name: str, python: str, defaults: dict, forced: dict
     new = _entry(client, python, env)
     if isinstance(old, dict):                 # keep the person's other keys (timeout, trust, includeTools...)
         new = {**{k: v for k, v in old.items() if k not in ("command", "args", "env", "url", "httpUrl")}, **new}
-        for k in ("timeout", "trust"):
+        for k in ("timeout", "trust", "tools"):        # the person's choices (Copilot's tool list) win
             if k in old:
                 new[k] = old[k]
     servers[name] = new
@@ -445,6 +499,9 @@ def connect(clients: list, python: str, sim: bool = False, main: bool = True, te
                         notes.append(n)
                     rep["backup"] = _str(write_json(path, cfg))
                 rep.update(ok=True, notes=notes)
+                if client == "claudecode":
+                    rep["warning"] = ("Claude Code rewrites this file while it runs: if a Claude Code session was "
+                                      "open, end it and check with `ls6t connect check claudecode`")
                 if client == "claude" and claude_is_running():
                     rep["warning"] = ("the Claude app is running and rewrites this file when it quits: quit it fully "
                                       "(tray icon > Quit), then run `ls6t connect claude` again")

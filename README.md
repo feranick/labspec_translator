@@ -16,7 +16,7 @@ it runs **locally**: on the instrument PC, next to the Claude desktop app. It ha
 machines. Unlike the other translators, the backend has no Python API: LabSpec is automated with VBScript
 (*LabSpec 5/6 Automation*, HORIBA, 2018). That is why the bridge script exists.
 
-First instrument: **XploRA** (LabSpec 6, Windows 11). Version 2026.11.22.10.
+First instrument: **XploRA** (LabSpec 6, Windows 11). Version 2026.11.22.11.
 
 **Scope of version 1**
 
@@ -71,8 +71,8 @@ detectors. See `planning.md`.
 
 On the instrument PC (Windows 11, next to LabSpec 6 and the Claude desktop app), run **`ls6t-setup-<version>.exe`**
 (from the repository's Releases, built for every version): per user, no administrator rights, no network; it brings its
-own Python, writes the LabSpec scripts, and connects the LLM apps it finds (Claude desktop app, ChatGPT desktop app /
-Codex, Gemini CLI, Cursor). Then add the scripts in LabSpec, run the
+own Python, writes the LabSpec scripts, and connects the LLM apps it finds (Claude desktop app, Claude Code, ChatGPT desktop app /
+Codex, Gemini CLI, Cursor, GitHub Copilot, Windsurf, LM Studio). Then add the scripts in LabSpec, run the
 discovery and set the machine profile. From source instead: Python 3.10+ and Git, a venv,
 `pip install -e ".[mcp,render,test,windows]"`, `ls6t bridge install`, and the MCP entry in the Claude app by hand.
 The steps, building the installer, the offline install, updating and troubleshooting are in **[INSTALL.md](INSTALL.md)**.
@@ -566,7 +566,7 @@ Claude app ──MCP──> ls6t-mcp ──> request folder + runner process (ls
 | `bench.py` | The benchmarks |
 | `api.py`, `cli.py`, `mcp_server.py` | The functions, the command line, the MCP server |
 | `testmode.py` | Test mode: TESTING.md read as a plan, single bridge commands with guards and the operator's Yes for the laser, the test log and report (`hardware_test`, `ls6t test`) |
-| `clients.py` | `ls6t connect`: finds the LLM apps (Claude desktop app, ChatGPT desktop app / Codex, Gemini CLI, Cursor) and adds or removes the MCP server in their files (JSON or TOML), backed up, other settings kept |
+| `clients.py` | `ls6t connect`: finds the LLM apps (Claude desktop app, Claude Code, ChatGPT desktop app / Codex, Gemini CLI, Cursor, GitHub Copilot, Windsurf, LM Studio) and adds or removes the MCP server in their files (JSON or TOML), backed up, other settings kept |
 | `winsetup.py` | What the Windows installer does beyond copying files: checks, precompiling, the LabSpec scripts, PATH, the LLM apps (and undoing them) |
 | `installer/` | The Windows installer: `ls6t.nsi` (NSIS), `build_installer.py`, the launchers (`bin/`) |
 | `vbs/common.vbs`, `vbs/bridge_main.vbs`, `vbs/discover_main.vbs`, `vbs/script_motor_main.vbs` | The LabSpec scripts' parts; `ls6t bridge install` puts them together (the script-motor logger is optional: TESTING.md T1.4) |
@@ -593,7 +593,7 @@ the laser was on), `config` (`action` save or load, `path`, `show`), `last_error
 
 `ls6t-mcp` (stdio; `--http PORT` for streamable HTTP on 127.0.0.1). It answers the handshake at once (0.3 s
 measured). Any app that starts local MCP servers can use it: the Claude desktop app, the ChatGPT desktop app / Codex,
-Gemini CLI, Cursor. `ls6t connect` (and the installer) adds it to those found on the PC ([INSTALL.md, step
+Gemini CLI, Cursor, Claude Code, GitHub Copilot (VS Code, Visual Studio, CLI), Windsurf, LM Studio. `ls6t connect` (and the installer) adds it to those found on the PC ([INSTALL.md, step
 8](INSTALL.md#8-connect-an-llm-app)).
 
 | Tool | What it does |
@@ -706,6 +706,7 @@ frames, LabSpec's image files, `snapshot.json`); a study's frames go to its `vid
 | 2026.11.22.8 | **Snapshots look like LabSpec's image**: ls6t compares its decoded frame with LabSpec's own saved JPEG and corrects a reversed row order or swapped red/blue by itself (`orientation`; remembered per camera for frames without a JPEG), so `video.packing` needs no change. The µm axes come from the objective's field of view (`OLConfig.ini`) centred on the stage position (LabSpec's axes were 1 per pixel), and the laser marker sits at the centre. **`ls6t instrument video-scale`** (`video_scale`) measures µm per pixel and the axis directions per objective and camera from two known stage moves (+X, +Y) and image cross-correlation, returns the stage home, and snapshots use it from then on (`axes_from: measured`); feature positions and `move.to_um` follow. **No second question from LabSpec** for a manual objective change: after ls6t's question the move goes with MOTOR_NO_MESSAGE (`labspec_prompt` in the move; profile `suppress_labspec_prompt`). **Black frames** (too little light) give `frame_dark` and no features (strengths of 1e9 before: the noise estimate was ~0). |
 | 2026.11.22.9 | Review of .22.8. The orientation is **learnt only from a frame that can decide it** (lit and structured, a clear match with LabSpec's JPEG; the red/blue swap only from a frame with colour): a black or flat frame keeps and applies what is remembered for the camera. **`video-scale --um`** (was `--seconds`): the default move is a fifth of the objective's field (~17 µm x100, ~170 µm x10; `step_from`), over half the field is refused, and a black frame is refused before anything moves. **MOTOR_NO_MESSAGE** goes only with the objective move the operator has just confirmed in ls6t's question, never with another, so there is always exactly one confirmation. **The marker says it is assumed** (`marker_measured` false, `marker_source` "ASSUMED …", labelled on the plot) until a `spot` study measured the beam. |
 | 2026.11.22.10 | **Cursor**: `ls6t connect cursor` and the installer (component *Cursor*, ticked when `%USERPROFILE%\.cursor` or Cursor's program folder is found; silent `/CURSOR`) add the `ls6t` server to Cursor's global `~/.cursor/mcp.json` (`"type": "stdio"`, the same `LS6T_HOME` as the other apps; backed up, other servers kept; removed on uninstall). Codex was already supported (the *ChatGPT desktop app / Codex* component, `~/.codex/config.toml`). |
+| 2026.11.22.11 | Four more apps in `ls6t connect` and the installer (each a component, ticked when found; silent `/CLAUDECODE /COPILOT /WINDSURF /LMSTUDIO`): **Claude Code** (user scope, `~/.claude.json`, its own state kept), **GitHub Copilot** (VS Code and Visual Studio's agent, Copilot CLI: `~/.copilot/mcp-config.json`, a narrowed tool list kept), **Windsurf** (`~/.codeium/windsurf/mcp_config.json`, and the Next build's) and **LM Studio** (`~/.lmstudio/mcp.json`: local models, nothing leaves the PC). All share one `LS6T_HOME`; backed up, other servers kept, removed on uninstall. `ls6t connect` takes `claude-code` and `lm-studio` too. INSTALL step 8: per-app notes and how to keep each agent asking before terminal commands. |
 | 2026.11.20.19 | Calibration: ls6t checks, LabSpec's own AutoCalibration corrects. `calibration.adjust: "auto"`: when the check fails and the profile enables it (`calibration.autocal`, after TESTING T4.9), the bridge runs LabSpec's AutoCalibration script (new verb `run_vbs`, only for a .vbs in LabSpec's folder, after the operator's Yes) and measures again; otherwise the operator is guided as with `labspec`. `instrument autocal_info` finds the script and says from its text whether it can run inside the bridge and whether it asks the operator; `instrument autocal_run` runs it once and lists the calibration values it changed. The CI prints which benchmark failed and keeps `bench.json`. |
 | 2026.11.20.18 | From LabSpec's own service scripts (read on the instrument PC, not copied): LabSpec's spectrometer calibration per grating is reachable with `OperVar` (`ACT_INSTRUMENT[AF / BF / Diode / Focal / Angle / Gamma / SpMin / SpMax][grating]`). New bridge verb `calib_params` (read only), `instrument calibration`, and `calibration` studies with `adjust: labspec` record the parameters before and after the operator's correction and which changed. Motors with more than ten positions are read with LabSpec 6.7's codes (100+i, 200+i). TESTING Q27 (updated), Q43. |
 | 2026.11.20.17 | LabSpec's files found where they are: `Parameters\ACQUISITION\OLConfig.ini` and `Parameters\COMMON\OLSetup.ini` in LabSpec's folder. From `OLSetup.ini`, ls6t records LabSpec's OneClick presets (per laser: grating, range) and the AutoCalibration script LabSpec runs (`UniversalAutoCalibrationv3.vbs`), leaving users and licences out. TESTING Q42. |

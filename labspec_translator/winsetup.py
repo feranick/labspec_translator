@@ -1,18 +1,20 @@
 """winsetup.py — what the Windows installer does beyond copying files (installer/ls6t.nsi calls it).
-Version: 2026.11.22.10
+Version: 2026.11.22.11
 
 The installer puts a private Python (python.org's embeddable build, with every dependency already in its
 Lib/site-packages) in <install>/python and the launchers in <install>/bin. Then it runs, with that Python:
 
   python -m labspec_translator.winsetup detect
-  python -m labspec_translator.winsetup install [--claude] [--codex] [--gemini] [--cursor] [--sim] [--path] [--compile]
+  python -m labspec_translator.winsetup install [--claude] [--codex] [--gemini] [--cursor] [--claudecode] [--copilot]
+          [--windsurf] [--lmstudio] [--sim] [--path] [--compile]
   python -m labspec_translator.winsetup uninstall
   python -m labspec_translator.winsetup check
 
-detect:    which LLM apps are here (Claude desktop app; ChatGPT desktop app / Codex; Gemini CLI; Cursor): clients.detect.
+detect:    which LLM apps are here (Claude desktop app; ChatGPT desktop app / Codex; Gemini CLI; Cursor;
+           Claude Code; GitHub Copilot; Windsurf; LM Studio): clients.detect.
 install:   checks that every package imports; precompiles the packages (a faster first start); writes the LabSpec
            scripts (`ls6t bridge install`); adds <install>/bin to the user's PATH (--path); adds the MCP server "ls6t"
-           to each chosen app's configuration (--claude, --codex, --gemini, --cursor) and the simulator "ls6t-sim" (--sim):
+           to each chosen app's configuration (--claude, --codex, --gemini, --cursor, --claudecode, --copilot, --windsurf, --lmstudio) and the simulator "ls6t-sim" (--sim):
            clients.connect (backed up first; settings already in an existing entry are kept).
 uninstall: removes the PATH entry and, in every app, the entries that run this Python. The profile, the bridge
            folder and the results (LS6T_HOME, LS6T_OUT) are kept.

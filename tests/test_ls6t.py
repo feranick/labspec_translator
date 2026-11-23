@@ -1062,12 +1062,35 @@ def test_connect_detect_and_disconnect(tmp_path, monkeypatch, capsys):
     e = cu["mcpServers"]["ls6t"]
     assert e["type"] == "stdio" and e["command"] == sys.executable and e["args"] == C.MODULE_ARGS
     assert e["env"]["LS6T_HOME"] == g["mcpServers"]["ls6t"]["env"]["LS6T_HOME"]          # one lock for all apps
+    # Claude Code (~/.claude.json: its own state kept), GitHub Copilot (portable format, the person's tool list
+    # kept), Windsurf (stable and Next), LM Studio
+    u = tmp_path / "u"
+    (u / ".claude.json").write_text('{"numStartups": 7, "projects": {"C:/x": {"mcpServers": {}}}}')
+    (u / ".copilot").mkdir()
+    (u / ".copilot" / "mcp-config.json").write_text('{"mcpServers": {"ls6t": {"command": "old", "tools": ["status"]}}}')
+    (u / ".codeium" / "windsurf").mkdir(parents=True)
+    (u / ".codeium" / "windsurf-next").mkdir()
+    (u / ".lmstudio").mkdir()
+    found = C.detect()
+    assert all(found[c] for c in ("claudecode", "copilot", "windsurf", "lmstudio"))
+    assert cli.main(["connect", "claude-code", "copilot", "windsurf", "LM-Studio"]) == 0      # aliases, any case
+    cc = json.loads((u / ".claude.json").read_text())
+    assert cc["numStartups"] == 7 and cc["projects"] == {"C:/x": {"mcpServers": {}}}
+    assert cc["mcpServers"]["ls6t"]["type"] == "stdio" and cc["mcpServers"]["ls6t"]["command"] == sys.executable
+    co = json.loads((u / ".copilot" / "mcp-config.json").read_text())["mcpServers"]["ls6t"]
+    assert co["type"] == "stdio" and co["command"] == sys.executable and co["tools"] == ["status"]
+    for d in ("windsurf", "windsurf-next"):
+        ws = json.loads((u / ".codeium" / d / "mcp_config.json").read_text())["mcpServers"]["ls6t"]
+        assert ws["command"] == sys.executable and "type" not in ws
+    lm = json.loads((u / ".lmstudio" / "mcp.json").read_text())["mcpServers"]["ls6t"]
+    assert lm["args"] == C.MODULE_ARGS and lm["env"]["LS6T_HOME"] == e["env"]["LS6T_HOME"]
     st = C.status()
     assert all(st[c]["files"] and any("ls6t" in v for v in st[c]["files"].values()) for c in C.CLIENTS)
     capsys.readouterr()
-    assert cli.main(["connect", "gemini", "codex", "claude", "cursor", "--remove"]) == 0
+    assert cli.main(["connect", *C.CLIENTS, "--remove"]) == 0
     out = json.loads(capsys.readouterr().out)
-    assert sorted(sum((r["removed"] for r in out["files"]), [])) == ["ls6t", "ls6t", "ls6t", "ls6t", "ls6t-sim"]
+    assert sorted(sum((r["removed"] for r in out["files"]), [])) == ["ls6t"] * 9 + ["ls6t-sim"]
+    assert json.loads((u / ".claude.json").read_text())["numStartups"] == 7
     assert set(json.loads((tmp_path / "u" / ".cursor" / "mcp.json").read_text())["mcpServers"]) == {"other"}
     assert json.loads((tmp_path / "u" / ".gemini" / "settings.json").read_text())["mcpServers"] == {}
 

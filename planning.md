@@ -12,7 +12,7 @@ LabSpec has no Python API: it runs VBScript (LabSpec 5/6 Automation manual, 2018
 **bridge script runs inside LabSpec** so the operator sees every move and spectrum, confirms before the first
 exposure, and can stop everything there.
 
-## Architecture (version 2026.11.22.10)
+## Architecture (version 2026.11.22.11)
 
 ```
 Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-request`)
@@ -689,6 +689,16 @@ Claude app -> ls6t-mcp (Python) -> request folder + detached runner (`ls6t run-r
   detect: ~/.cursor, %LOCALAPPDATA%\Programs\cursor\Cursor.exe, /Applications/Cursor.app, `cursor` on PATH);
   winsetup --cursor; installer SecCursor, /CURSOR, ticked when found; CI installs /CURSOR and checks the entry.
   No timeout key in Cursor's file (progress keepalive covers long waits): to be tried on the instrument PC. 141 tests.
+- 2026-11-22, 2026.11.22.11: Nicola: all four more apps. clients: claudecode (CLAUDE_CONFIG_DIR or ~/.claude.json,
+  top-level mcpServers = user scope, edited directly: `claude mcp add --scope user` misplaced entries in some versions,
+  anthropics/claude-code#16728; type stdio; warning to end sessions), copilot (COPILOT_HOME or
+  ~/.copilot/mcp-config.json, portable format type stdio + tools ['*'], a person's tools kept; VS Code's profile
+  mcp.json, deprecated 'servers' format, untouched), windsurf (~/.codeium/windsurf[-next]/mcp_config.json),
+  lmstudio (~/.lmstudio/mcp.json, Cursor's format). ALIASES (claude-code, lm-studio, vscode, github-copilot), case-
+  insensitive. detect: folders, %LOCALAPPDATA%\Programs\{Windsurf,LM Studio}, VS Code's github.copilot* extension,
+  claude / copilot / windsurf / lms on PATH. Installer: four sections, /CLAUDECODE /COPILOT /WINDSURF /LMSTUDIO,
+  welcome text 910 chars (< 1024). CI installs all and checks each file. INSTALL step 8 notes and approval settings.
+  None tried at the instrument yet. 141 tests.
 
 ## To do next
 

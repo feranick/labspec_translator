@@ -34,7 +34,7 @@ jobs:
         shell: pwsh
         run: |
           $exe = Get-ChildItem dist\ls6t-setup-*.exe | Select-Object -First 1
-          $p = Start-Process $exe.FullName -ArgumentList "/S /CLAUDE /CODEX /GEMINI /CURSOR" -Wait -PassThru
+          $p = Start-Process $exe.FullName -ArgumentList "/S /CLAUDE /CODEX /GEMINI /CURSOR /CLAUDECODE /COPILOT /WINDSURF /LMSTUDIO" -Wait -PassThru
           $dir = "$env:LOCALAPPDATA\Programs\ls6t"
           if (Test-Path "$dir\install.log") { Get-Content "$dir\install.log" }
           if ($p.ExitCode -ne 0) { throw "installer exit code $($p.ExitCode)" }
@@ -63,6 +63,10 @@ jobs:
           $codex = "$env:USERPROFILE\.codex\config.toml"
           $cursor = "$env:USERPROFILE\.cursor\mcp.json"
           if (-not (Get-Content $cursor | ConvertFrom-Json).mcpServers.ls6t) { throw "no ls6t entry for Cursor" }
+          foreach ($f in @("$env:USERPROFILE\.claude.json", "$env:USERPROFILE\.copilot\mcp-config.json",
+                           "$env:USERPROFILE\.codeium\windsurf\mcp_config.json", "$env:USERPROFILE\.lmstudio\mcp.json")) {
+            if (-not (Get-Content $f -Raw | ConvertFrom-Json).mcpServers.ls6t) { throw "no ls6t entry in $f" }
+          }
           if (-not (Get-Content $claude | ConvertFrom-Json).mcpServers.ls6t) { throw "no ls6t entry for Claude" }
           if (-not (Get-Content $gemini | ConvertFrom-Json).mcpServers.ls6t) { throw "no ls6t entry for Gemini CLI" }
           if (-not (Select-String -Path $codex -Pattern '^\[mcp_servers\.ls6t\]' -Quiet)) { throw "no ls6t entry for Codex" }

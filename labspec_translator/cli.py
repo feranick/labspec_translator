@@ -1,5 +1,5 @@
 """cli.py — the command line. Every command prints JSON; '-' reads the studies from stdin.
-Version: 2026.11.22.10
+Version: 2026.11.22.11
 
   ls6t status [REQUEST] [--wait S]   versions, the bridge, the profile; or a request's studies
   ls6t format                        the study format
@@ -36,7 +36,9 @@ Version: 2026.11.22.10
   ls6t connect check [APP...]        start each app's ls6t entry as the app would and list its tools
   ls6t connect APP... [--sim] [--remove]
                                      add (or remove) the MCP server in: claude (Claude desktop app), codex (ChatGPT
-                                     desktop app, Codex CLI and IDE extension), gemini (Gemini CLI), cursor (Cursor), or auto (every
+                                     desktop app, Codex CLI and IDE extension), gemini (Gemini CLI), cursor (Cursor),
+                                     claudecode (Claude Code), copilot (GitHub Copilot: VS Code, Visual Studio,
+                                     Copilot CLI), windsurf (Windsurf), lmstudio (LM Studio), or auto (every
                                      app found); --sim also adds 'ls6t-sim' (the simulator); --test turns test
                                      mode on for those entries (the hardware_test tool), --no-test off
   ls6t test plan | step ID | report  TESTING.md's tests: the plan with results so far, one test, the report
@@ -133,7 +135,7 @@ def main(argv=None) -> int:
     s.add_argument("--study")
     s.add_argument("--attempt", type=int)
     s = sub.add_parser("connect")
-    s.add_argument("apps", nargs="*", help="claude, codex, gemini, cursor, or auto (every app found)")
+    s.add_argument("apps", nargs="*", help="claude, codex, gemini, cursor, claudecode, copilot, windsurf, lmstudio, or auto (every app found)")
     s.add_argument("--sim", action="store_true", help="also add 'ls6t-sim' (the simulator)")
     s.add_argument("--remove", action="store_true", help="remove this install's entries instead")
     s.add_argument("--test", dest="test", action="store_true", default=None, help="test mode on (hardware_test)")
@@ -290,20 +292,22 @@ def main(argv=None) -> int:
             _print(C.status())
             return 0
         if a.apps[0] == "check":
-            r = C.check([x for x in a.apps[1:] if x in C.CLIENTS] or None)
+            r = C.check([y for y in (C.ALIASES.get(x.lower(), x.lower()) for x in a.apps[1:]) if y in C.CLIENTS]
+                        or None)
             _print(r)
             return 0 if all(v.get("ok") for v in r.values() if "no 'ls6t' entry" not in str(v.get("error"))) else 1
-        apps = list(a.apps)
+        apps = [C.ALIASES.get(x.lower(), x.lower()) for x in a.apps]
         if "auto" in apps:
             found = C.detect()
             apps = [c for c in C.CLIENTS if found[c]]
             if not apps:
                 _print({"ok": False, "error": "no LLM app found (Claude desktop app, ChatGPT desktop app / Codex, "
-                                              "Gemini CLI, Cursor): name one to prepare its file anyway"})
+                                              "Gemini CLI, Cursor, Claude Code, GitHub Copilot, Windsurf, LM Studio): name one to prepare its "
+                                              "file anyway"})
                 return 1
         bad = [x for x in apps if x not in C.CLIENTS]
         if bad:
-            ap.error(f"connect: unknown app {', '.join(bad)} (claude, codex, gemini, cursor, auto)")
+            ap.error(f"connect: unknown app {', '.join(bad)} ({', '.join(C.CLIENTS)}, auto)")
         reps = (C.disconnect(apps, sys.executable) if a.remove
                 else C.connect(apps, sys.executable, sim=a.sim, test=a.test))
         ok = all(r.get("ok") for r in reps)
