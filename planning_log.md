@@ -1,0 +1,776 @@
+# labspec-translator: development log
+
+What was done, found and decided, by date (oldest first). The current design is in [planning.md](planning.md); what changed per version, in [CHANGELOG.md](CHANGELOG.md).
+
+## State log
+
+- 2026-11-19: v1 written. 40 tests pass (sandbox, Python 3.10, mcp 2.3). 6/6 benchmarks pass on the simulator.
+  examples/studies.json (6 studies) ran end to end through the detached runner in sim mode: all reliable.
+  VBS reviewed against the manual by an independent agent; its findings were fixed (stale stop.flag, popup test
+  closing the bridge's window, path escaping, stale GetAcqID -2, Unicode files, label index > 9, discover crash,
+  error checks before starting hardware, never running a command twice).
+- Repo moved from ~/Software/labspec-translator (now only its .git and .gitignore: can be deleted) to
+  ~/Software/labspec_translator (remote git@github.com:feranick/labspec_translator.git).
+- 2026-11-19 (later): README.md written (with the Windows 11 installation, offline install, Claude app entry,
+  troubleshooting) and TESTING.md (the hardware plan T0-T9 with the maintainer, open questions Q1-Q12, results
+  table). Added `ls6t bridge call VERB key=value` (maintainer tool; acquire/autofocus need --laser; refused while a
+  request holds the instrument). MCP stdio handshake checked with the SDK client: initialize 0.26 s, 11 tools,
+  run_studies + get_image + instrument on the simulator. Simulator now recognises another process's simulator by
+  pid. 42 tests pass. Committed and tagged 2026.11.19.1 ("First release").
+- 2026-11-19, 2026.11.19.2: video snapshots. Bridge verb `video` clones the live frame (Video(2) + Exec(id, 3)),
+  writes axes and pixels for Python and tries LabSpec's image formats. With laser_s, it takes a frame without the
+  laser, opens the shutter (ShutterMode manual + motors.laser_shutter) for laser_s, takes the lit frame, and closes
+  and restores on every path. video.py decodes (COLORREF/RGB, x/y fastest), marks the laser position (stage +
+  video.laser_offset_um) and finds the spot from the difference of the two frames: on the simulator the offset
+  (1.5, -0.8) µm is recovered to 0.01 µm at x100/x50 and 0.06 µm at x10. Tool `snapshot` (image + details),
+  `ls6t instrument snapshot [--laser]`, study key `video` (before on by default for calibration). Guards: shutter
+  motor in the profile, current filter within caps, operator confirmation, refused while a request runs. Discovery
+  looks for shutter motors and records the video state. TESTING T5b and Q13-Q16 added. 48 tests pass; the MCP
+  snapshot tool returns [image, text] through the stdio protocol (SDK 2.3).
+- 2026-11-19, 2026.11.19.3: alignment and guided adjustments, from HORIBA's AutoAlignment quick start guide (2013:
+  check Si intensity -> standard / high-precision alignment -> re-check -> laser marker; per laser; calibrate after;
+  no automation command for it). Kind `alignment`: the Si check at the laser's fixed settings vs the baseline the
+  maintainer records (`ls6t alignment record`, CLI only); guided: on failure the bridge's `notice` shows HORIBA's
+  checklist, the operator runs AutoAlignment and presses OK, the check repeats (max_retries 1); then a snapshot
+  re-measures the beam's offset (AutoAlignment moves LabSpec's marker); alignment_log.jsonl; readiness warnings
+  once baselines exist. Kind `guide` (Nicola's idea: the tool proposes a continuous manual action and says STOP):
+  the fast loop runs in the bridge (short acquisitions, line height/s, reach/drop/maximize, saturation guard,
+  LabSpec dynamic Dialog with Done/Abort, or the status bar), so STOP never waits for Python or the LLM; the LLM
+  sets the goal and reads the result. Simulator: misalignment, AutoAlignment, an operator ramping power or passing
+  focus. `ls6t profile set`. 55 tests pass; 7/7 benchmarks (new: guided_focus). TESTING T5c-T5d, Q17-Q20.
+- 2026-11-19, 2026.11.19.4: stage and focus. Kind `move` (no laser; offset from home, snapshot, `stay` makes it
+  home), kind `focus` and `autofocus: "scan"` (Z steps over range_um, line height after a 3-point median, weighted
+  Gaussian through the points above 30 % of the best; back to the start without an interior maximum). The request
+  keeps a home spot and a focus (ctx.home_xy, ctx.z_focus): offsets start from them, autofocus/scan update the
+  focus, and at the end of a normal request Z returns to the focus first, then XY home (before, a depth profile left
+  Z off focus and the next request took it as the focus: fixed). stage.z_um absolute limit. The guided loop's
+  metric now uses a 3-point median (cosmic rays: the loop runs without spike removal). Simulator: depth of focus
+  by objective, sim_defocus. 61 tests; 8/8 benchmarks (new focus_scan: 2.293 for 2.3). TESTING T6.5-T6.6, Q21-Q22.
+- 2026-11-19, 2026.11.19.5: the laser spot (Nicola: the beam drifts from the screen centre; find it by trial and
+  error with focus/signal, and remember it). spot.py keeps the offset (beam - LabSpec marker) per objective@laser
+  with history and drift (LS6T_HOME/spot.json; plausibility spot.max_offset_um; drift warning spot.drift_warn_um).
+  Kind `spot`: methods shutter (frames without/with the beam), acquisition (bridge `video` during_acq_s: a frame
+  half-way through a Raman acquisition, no shutter motor needed), raman (snapshot -> feature (given, or 'auto':
+  the DoG blob nearest the centre) refined on the video -> grid scan of the stage around feature - prior offset,
+  line height each -> dip or peak -> weighted centroid -> offset = feature - stage). Snapshots now list
+  'features' (numbered on the PNG) and draw the marker with the remembered offset; lit snapshots in any study
+  update the record. move.to_um aims the beam (stage = point - offset). Simulator: Raman follows the real beam
+  (stage + offset), a dust particle 15 µm -X / 10 µm +Y of the start, sim_spot_offset. 65 tests; 10/10
+  benchmarks (spot_raman 1.073/0.584 for 1.1/0.6; spot_video 1.52/-0.80 for 1.5/-0.8). TESTING T5e, Q23-Q25.
+- 2026-11-19, 2026.11.19.6: depth profiles (kind depth -> a Z-only map, depth_result: profiles vs nominal and
+  n-corrected depth, interfaces at half-way crossings with 10-90 % widths, interfaces_by; stage.z_into_sample;
+  live profile in LabSpec; Everall caveat), the spectral zero (kind calibration: reference si/polystyrene/
+  cyclohexane/naphthalene/diamond or lines_cm1; offset, or offset and scale with lines >= 300 cm-1 apart;
+  adjust labspec = notice with the shift in cm-1 and nm, re-check up to max_retries, then drop ls6t's correction;
+  adjust ls6t = xcal.json per laser@grating applied to later spectra with a warning; no automation command for
+  LabSpec's Zero/Koeff), white-light backgrounds (kind background: notices for the lamp and, without a shutter
+  motor, for blocking the laser; bridge acquire laser_off closes the shutter in manual mode; stored as cps per
+  accumulation; acquire.subtract_background scales by exposure and interpolates; narrow lines in a background
+  warn). Tool/command references. INSTALL.md split from the README; FUNCTIONALITY.md. Simulator: sim_film,
+  sim_xshift, sim_lamp, laser blocked by the operator. 72 tests; 13/13 benchmarks. TESTING T4.7, T4.8, T6.3,
+  Q26-Q28.
+- 2026-11-19, 2026.11.19.7: native mapping. map.engine auto|points|native (+swift); auto -> native from
+  mapping.native_min_points (400) when nothing is needed between points (one window, fixed exposure, no autofocus
+  every N). Bridge map_native: Spectro to the centre, SetMappingParams (all off, then x/y/z by step), PutValue
+  LabSpecExposureTime/Accumulation, SWIFT, Acq(ACQ_SPECTRAL_IMAGE, -1 or exposure), wait/cancel, WriteData (the
+  generic writer the video uses) + Save .l6s and txt. ls6t parse_native_map: axes, data order (profile), first
+  spatial axis fastest -> per-point records with grid indices, analysed like points maps. The open points are
+  profile settings (mapping.positions, data_order, acq_time, native_point_s) for TESTING T6.7 (Q29-Q33).
+  75 tests; 14/14 benchmarks (native_map = the points map).
+- 2026-11-19, 2026.11.19.8: ls6t-typelib (typelib.py, separate console script, also `python typelib.py`):
+  LoadTypeLibEx (REGKIND_NONE) via comtypes, or pythoncom; finds NFActiveX.ocx / NGSActiveX.ocx in LabSpec's folders
+  or registered type libraries naming LabSpec/HORIBA; lists types, methods (signatures, in/out/optional, dispid,
+  doc), properties, enum values; marks methods not in the 2018 manual (NEW) and words of interest; text, markdown,
+  JSON. Not run on Windows yet (TESTING T1.3, Q34). 77 tests.
+- 2026-11-20, 2026.11.19.9: Nicola pulled NFActiveX.ocx from the Raman PC (32-bit, 2021-03-11, 995 kB; 64-bit,
+  2021-10-07, 865 kB; both "NFActiveX ActiveX Control Module" 1.0.0.1). ls6t-typelib now reads the TYPELIB resource
+  itself (PE resource tree + MSFT format, pure Python; Windows loaders only as fallback). Both builds carry the same
+  type library: NFACTIVEXLib 1.0 {8E2C42D5-A3C9-4D8D-996C-DD2D669F59DA}, MIDL 7.00.0500, 2019-01-02; dispinterface
+  _DNFActiveX (60 methods), _DNFActiveXEvents (no events: polling stays the only way), coclass NFActiveX.
+  In the manual: 45 (Autofocus is spelled AutoFocus). Not in this library though documented: GetValueEx,
+  SetExtendedVideo. Not in the manual (signatures in ~/Desktop/activeX/NFActiveX_commands.md):
+  GetLastErrorInfo() -> VARIANT (now appended to the bridge's error messages); SetScriptPath(path);
+  GetConfigParam(names, units, types, values) / SetConfigParam(description, names, units, types, values, show)
+  (look like script configuration parameters); SetMotorInfo(position, state) (script-controlled motors);
+  SaveConfig(ini, show) / LoadConfig(ini, show) (a whole configuration: could save and restore the instrument's
+  set-up around a request); Translate(text); GUI(mode, name, param, id, value*, state, format), OperVar(mode,
+  index, value*, param), PutGUI(index, value, mode), PutArrGUI(index, value*, mode) (generic access to the
+  interface's controls/variables: possibly the way to calibration settings, lamp, etc., semantics unknown: ask
+  HORIBA before trying); OpenCL(...) (GPU processing); GetValueSimplePart(id, name, value, vtype, start, size)
+  (chunked data reads: useful for exporting large native maps faster than GetValue); InitNA(root, status).
+  No method named for AutoAlignment, AutoCalibration, zero/coefficient, lamp or map progress.
+- 2026-11-20, 2026.11.20.1: the type library's extra methods put to use, each guarded and tested on the simulator:
+  SaveConfig/LoadConfig (bridge verb `config`; `ls6t instrument config save|load|list`, LS6T_HOME/configs/NAME.ini,
+  load asks the operator; profile `session.restore_config` saves at request start, loads at normal end);
+  GetValueSimplePart (map_native writes the values in chunks of `mapping.export_chunk`, falls back to whole reads;
+  results carry `data_via`); GetArr helper: GetValue -> GetValueEx -> GetValueSimple; MotorLabel falls back to
+  GetValueEx "CurrentPositionName:" (past index 9); GetLastErrorInfo: verb `last_error`, `status.last_error`;
+  extended video: `video` with extended=1 calls Video(3) (manual; SetExtendedVideo absent so the area is LabSpec's),
+  clones a returned id > 0, else the active video; profile video.allow_extended false + operator Yes; no laser.
+  Discovery probes GetValueEx, GetValueSimplePart (16-point scratch spectrum, removed) and GetConfigParam (lists
+  config_param.*); profile import notes them and sets mapping.export_chunk 0 when GetValueSimplePart is missing.
+  ls6t_script_motor.vbs: virtual script motor logging GetMotorAction / SetMotorInfo (Q38). Deliberately not called:
+  SetConfigParam, SetScriptPath (change the script set-up, semantics unknown), GUI/OperVar/PutGUI/PutArrGUI.
+  TESTING Q35-Q40, T1.4, T5b.6. 84 tests.
+- 2026-11-20, 2026.11.20.2: Windows installer. installer/ls6t.nsi (NSIS 3, MUI2, per user, RequestExecutionLevel
+  user, %LOCALAPPDATA%\Programs\ls6t, HKCU uninstall key); installer/build_installer.py stages python.org's embeddable
+  Python 3.12.10 (._pth 'import site' enabled), pip-installs the wheel [mcp,render,windows] + Windows-only deps
+  (comtypes, pywin32, colorama: markers are evaluated for the build OS) with --platform win_amd64 --only-binary into
+  Lib/site-packages (numpy/scipy/matplotlib tests dropped; ~215 MB staged), the .cmd launchers and a PowerShell
+  shell (installer/bin), docs as md + HTML, examples; then makensis. labspec_translator/winsetup.py (run by the
+  installer with the installed Python): check imports, compileall, `bridge install` (with LS6T_HOME/BRIDGE_DIR of an
+  existing Claude entry), HKCU PATH + WM_SETTINGCHANGE, Claude config merge (APPDATA and the Store package folder;
+  backup; existing env kept; entry = python.exe -m labspec_translator.mcp_server; optional ls6t-sim); uninstall
+  removes only entries pointing at this Python. Running ls6t (python.exe open for write fails) blocks an update with
+  Retry/Cancel. .github/workflows/installer.yml builds on windows-latest per tag, installs /S, runs winsetup check
+  and three sim benchmarks, uninstalls, attaches to the release. Staging tested here (Linux, fake embeddable zip);
+  the NSIS script itself is not compiled yet: first compile on the user's Mac (brew makensis) or in CI. 86 tests.
+- 2026-11-20, 2026.11.20.3: first CI build failed: Windows makensis found no files for `File /r "<stage>/*"`
+  (mixed separators); the script now picks the separator (NSIS_WIN32_MAKENSIS). Workflow actions moved to Node 24
+  (checkout v5, setup-python v6, upload-artifact v6); release upload via `gh` instead of softprops/action-gh-release.
+- 2026-11-20, 2026.11.20.4: other LLM apps (the instrument PC may run ChatGPT or Gemini). clients.py: detect + connect
+  / disconnect / status for claude (claude_desktop_config.json, APPDATA + Store package; macOS/Linux paths too),
+  codex (ChatGPT desktop app, Codex CLI and IDE extension share ~/.codex/config.toml or %CODEX_HOME%; TOML edited
+  by removing [mcp_servers.<name>] tables and appending ours, validated with tomllib; inline/dotted forms refused;
+  tool_timeout_sec 3600, startup 60) and gemini (Gemini CLI ~/.gemini/settings.json, trust false, timeout 1 h).
+  Every entry gets the same LS6T_HOME/LS6T_OUT (one lock and bridge for all apps). `ls6t connect [auto|apps]
+  [--sim] [--remove]`. Installer: a section group with one section per app, ticked in .onInit when found (folders,
+  Store packages, codex/gemini on PATH); silent /CLAUDE /CODEX /GEMINI /NOAPPS /SIM; CI installs with all three and
+  checks each file, then that uninstall removed them. Not supported: the Gemini app and ChatGPT web (remote servers
+  only). Known: a 2026 report that the ChatGPT Windows desktop app may not expose local stdio tools to ordinary chats
+  (openai/codex #38162). tomli added for Python 3.10. 88 tests.
+- 2026-11-20, 2026.11.20.5: test mode. testmode.py parses TESTING.md (sections, bold-titled and table-row steps,
+  sections without steps as one step, the Q table; laser flag from LASER in the title/section) and offers
+  hardware_test (MCP, only with LS6T_TEST_MODE=1: `ls6t connect APP --test`): plan, step, call, record, report,
+  status, last_error, config. call = bridge_call plus guards: no quit, verb list, refused during a request, out/
+  native/path forced into LS6T_HOME/testing/files, filter by label within caps, X/Y/Z within limits of the current
+  position, laser verbs need filter within caps + exposure/accumulation limits + the operator's Yes in LabSpec every
+  time; acquire returns a spectrum summary; every call logged. record validates step/result/Q ids; report.md is the
+  results table filled in plus the answers to Q1-Q40. `ls6t test plan|step|record|report`. 91 tests.
+- 2026-11-20, 2026.11.20.6: Nicola: every request had a long "looking for..." phase (e.g. "where to turn the camera
+  on"): the LLM searched for how to do simple things (there was no way to turn the live view on). Now: bridge verb
+  `camera` (Video START/STOP/GET_VIDEO_ID, waits up to 5 s for the live id), `instrument camera_on/off`, status
+  `live_video`; the instructions map direct requests to tools in two lines; in test mode the hardware_test
+  description starts with the direct-request map and `move` takes roles (filter, grating, z...). 92 tests.
+- 2026-11-20, 2026.11.20.7: Nicola's screenshot: asked to turn on the top camera, the LLM "ran commands" (its own
+  shell) and drove NFActiveX directly: LabSpec showed "About NFActiveX Control" (AboutBox) and the bridge hung (a
+  modal dialog blocks LabSpec's script thread). ls6t never calls AboutBox. Changes: instructions (3 lines) and
+  hardware_test: only ls6t's tools reach the instrument, never scripts/shell/COM/bridge files, say so when no tool
+  fits; INSTALL step 8: make Codex (approval_policy on-request, sandbox_mode read-only), Gemini CLI (tools.exclude
+  run_shell_command or confirmationRequired) and Claude (no terminal extensions) ask before commands; TESTING ground
+  rule 7. Cameras by name: profile video.cameras {name: number}, P.camera_number, instrument(camera_on, camera),
+  status 'camera', study_format profile.cameras. BridgeGone mentions an open LabSpec dialog. Not done: a token in
+  bridge commands (an LLM with a shell could read it too). 93 tests.
+- 2026-11-20, 2026.11.20.8: Nicola installed with Claude ticked, but Claude did not see ls6t. Cause (GitHub
+  TGoodhew/GPIB-MCP#175, jacob-bd/gemini-notebook-mcp-cli#378): current Microsoft Store builds of Claude Desktop
+  move their data to %LOCALAPPDATA%\Claude-Data\<package family name, lower case> (run with --user-data-dir) and
+  no longer read Packages\Claude_*\LocalCache\Roaming\Claude (left with a .user-data-left.<name> marker); two
+  identities (Claude_pzs8sxrjxfjjc, AnthropicPBC.Claude_fnn82j28hfe8t); CLAUDE_USER_DATA_DIR overrides; Claude-3p
+  for the third-party-cloud variant; the app rewrites the config while running. clients.claude_dirs follows that
+  order (running --user-data-dir via Get-CimInstance, env, packages -> Claude-Data or LocalCache, Claude-3p,
+  APPDATA); connect removes ours from stale files and warns when Claude runs; the NSIS detection adds the new
+  folders. `ls6t connect check`: an MCP stdio handshake with each app's entry (initialize + tools/list). 95 tests.
+- 2026-11-20, 2026.11.20.9: the entry is in Claude-Data (the folder the running app reads) and Claude still does not
+  show ls6t. Nicola tests on another PC: tools/ls6t_diagnose.ps1 (PowerShell 5.1, ASCII, CRLF, read-only) collects
+  processes and --user-data-dir, packages, every candidate config (validity, BOM, .user-data-left markers, server
+  names, the ls6t entries), the ls6t python and install.log, the MCP handshake with the entry's env, and Claude's
+  logs (mcp.log, mcp-server-ls6t.log, lines about ls6t/policies). Not run here (no PowerShell in the sandbox).
+- 2026-11-20, 2026.11.20.10: the diagnosis (Claude 5.11492.5.0, Store, reads Claude-Data\claude_pzs8sxrjxfjjc):
+  that file has no mcpServers (rewritten 13:29 by the running app: the hand edit was lost); the installer (.7) had
+  written APPDATA\Claude and the stale LocalCache file (marker .user-data-left present); ls6t's server answers the
+  MCP handshake in 1.5 s with all tools; Codex config.toml has ls6t. tools/ls6t_fix_claude.ps1: waits for Claude to
+  close (or force-closes on request), then merges the entry with clients.merge_server into each Claude-Data\claude_*.
+- 2026-11-20, 2026.11.20.11: Claude then loaded the entry but could not start it: "spawn C:\Users\<you>\...\python.exe
+  ENOENT" (and cmd's "The filename, directory name, or volume label syntax is incorrect": the < >): the hand-made
+  entry kept the docs' <you> placeholder (Nicola fixed it by hand; ls6t then started). merge_server / toml_merge /
+  existing_env drop env values with <...>; the fix script does too. 96 tests.
+- 2026-11-20, 2026.11.20.12: in Claude, "switch to 532 nm" could not be done: no tool changed the set-up without a
+  measuring study (the LLM rightly refused to work around it). api.set_instrument / instrument(action="set",
+  setup) / `ls6t instrument set`: filter (caps of the target laser), laser, grating, objective (operator's Yes in
+  LabSpec first), hole, slit; holds the instrument lock while moving; read-back. Also LabSpec labels x10_VIS vs the
+  default profile's x10: profile.match_label (same name any case, else the unique label starting with it and not
+  continuing with a letter/digit), bridge verb `labels`, used by set, by format's objective check, plan and the
+  runner's set-up moves. 97 tests.
+- 2026-11-20, 2026.11.20.13: first real discovery (XploRA Plus, LabSpec 6.8.1, bridge 2026.11.20.7, via the
+  discover verb): lasers 785.04 (785nm_Edge), 637.75 (638nm_Edge), 532 (532nm_Edge); gratings 600/1200/1800/2400
+  (labels "1800 (450-850nm)"); filters 100/50/25/10/1/0.1 %; objectives x100_VIS, x10_VIS, x5_VIS (no x50); hole
+  100/300/500, slit 50/100/200 (labels with µm); motors also Spectro, XT, YT, LaserShutter (Off/On); detector -60 C;
+  active camera 1, live video off; GetValueEx missing; GetValueSimplePart(start 4, size 8) returned 2 values: sizes
+  are not value counts (bytes?) -> chunked export off by default, enabled only when the ramp probe returns 4..11; the
+  bridge checks chunk lengths. Nicola: the installation should use discovery: the bridge now records an inventory at
+  each start (DiscoverTo(out, popup, probes=False) -> LS6T_HOME/discovery_latest.txt); P.load() builds an automatic
+  profile from it when none exists (lasers capped at 10 %, laser_shutter None, 'auto' block) and refreshes it from
+  newer inventories until a person imports/sets (then P.drift reports differences in tool_status). The dump is in
+  tests/data. 98 tests.
+- 2026-11-20, 2026.11.20.14: Claude on the instrument: camera_on with a number failed (the tool's camera was typed
+  str: now str | int); cameras cannot be listed by LabSpec's API, so names stay a person's (video.cameras; the
+  instrument showed top = 0, internal = 1); "turn the laser on so I can see it" had no tool: bridge verb `laser`
+  (on: manual shutter mode + shutter motor 1 for `seconds`; globals gLaserOpen/T0/S/Motor/OldMode; LaserClose on
+  time up in the main loop, halt/quit, safe, bridge end, and LaserGuard before any verb but
+  ping/status/camera/labels/last_error/message/laser), api.laser (shutter motor from the profile, filter within the
+  caps, seconds <= limits.max_laser_on_s = 60, the operator's Yes each time), instrument laser_on/laser_off, status
+  laser_open/laser_left_s; hardware_test routes `laser` through api.laser. Risk left: if the VBS script dies with an
+  error while open, the shutter stays open (the operator closes it in LabSpec; TESTING T5b.7). 100 tests.
+- 2026-11-20, 2026.11.20.16: Nicola sent LabSpec's OLConfig.ini (C:\HORIBA\LabSpec_6_8_1, Latin-1, numeric hash keys;
+  134243433 = internal name, 1835884910 = display name; Names[i]/Values[i] in sub-sections <motor>_<config>; active
+  configuration Hardware_Devices OLService[-605497649] = -355149504 = XploRA Plus). It names the cameras (Top = 0,
+  Internal = 1, IDS U3-388xLE-C and U3-356xXLE-C), objectives with NA (0.9/0.25/0.1) and arrays 85.6x58.3,
+  863x590, 1713x1170 (field of view in µm, inferred), motors discovery missed (LaserPol Circular/Horizontal/
+  Vertical, RamanPol Horizontal/Vertical/None, LaserFilter Notch/Edge/PL, FilterV, DuoPos Camera/Mirror/DuoScan,
+  Output Camera/Trinocular, IlluminatorV Dark/Bright field, Microscope, LaserSwitch, E-Cal_Neon, Laser position
+  VISU, Slit 0 µm), and per-grating device arrays (198.8, 12.2, 1.047e-5, 7.7-8...: likely focal length, angle,
+  Koeff, Zero: Q41). labspec_ini.py parses it (read only); import_discovery/auto_profile enrich the profile
+  (video.cameras when unset, objectives_info, labspec_config); `ls6t profile ini`; discovery's name list adds those
+  motors. Test fixture: a reduced made-up ini (the real file, with camera serial numbers, is not in the public
+  repo). Ideas: setup keys for the polarisers; the e-Cal neon lamp for the spectral zero. 101 tests.
+- 2026-11-20, 2026.11.20.17: locations confirmed: <LabSpec>\Parameters\ACQUISITION\OLConfig.ini and
+  <LabSpec>\Parameters\COMMON\OLSetup.ini (software set-up: users and roles, licences and owner names - not
+  copied anywhere; external programs; OneClick presets per configuration: -355149504 Blue (off), Green = laser 2
+  (532), Red = 1 (638), Near-IR = 0 (785), IR (off), all grating 0 (600), centre 1001.38, range 100-3500; -355149503
+  RAW/AUTO; and the AutoCalibration script C:\HORIBA\LabSpec_6_1_174\AutoCalibration\UniversalAutoCalibrationv3.vbs
+  (an older install's path). HORIBA's own calibration is a VBS script: reading it may show how to adjust LabSpec's
+  zero/coefficient from a script (Q42, ask Nicola for it). labspec_ini.find knows both paths;
+  setup_summary(presets, autocalibration_script) goes into profile.labspec_config.
+- 2026-11-20, 2026.11.20.18: Nicola shared the LabSpec 6.7.1 program folder (SERVICE: ~195 HORIBA service/QC
+  VBS scripts for LabRAM Soleil, HR Evolution, XploRA PLUS, T64000; macros\constants.vbm and horiba.vbm; SCRIPTS\
+  SERVICE\pixelunit.vbs). Read, not copied (HORIBA's code). Learned:
+  * calls used (count): Dialog 6715 (VBS-only custom dialogs), GetValue, GetMotorPosition, MoveMotor, PutValue,
+    Message, Exec, GetMotorStatus, PutDataInfo, Acq, Treat, OperVar 57, GUI 9, SetSingleScriptParam,
+    SetScriptParamOptions, Get/SetDetectorZone, SetAutoExposure, MoveXY, MapEx, Send ("RS232", "HTTP_POST");
+  * OperVar(mode 0 read / 1 write / 2 ?, "name", value, 0): the instrument calibration per grating is
+    ACT_INSTRUMENT[AF|BF|Diode|Focal|Angle|Gamma|SpMin|SpMax][grating index]; pixelunit.vbs (the service "pixel
+    unit" panel) treats AF/BF as the Spectro motor's coefficients and sets Diode from the Spectro position; the
+    Soleil calibration script computes Angle/Focal/Gamma from neon lines and writes them after a Yes. OLConfig's
+    per-grating arrays (198.8, 12.2...) are these. Other OperVar names: G[Params][OLAccessory][...],
+    G[Params][OLMapping][MapType][i], GLOBAL[Datas][id][Type], ActMotor, OldMotor, MotorStep, MotorDelta.
+  * The XploRA spectro QC uses a neon lamp under the objective (RaiesCalibration_XPL.csv: Ne lines in nm per
+    grating and centre) with LabSpec's PeakFitting Treat; ShutterMode 1 = manual (laser), CCDShutter has its own
+    0/1/2; GetMotorPosition codes in 6.7: INDEXTOVALUE 100, INDEXTOSTRING 200, FULL_* 300/400, INDEXTOSTEP 500.
+  Changes: bridge verb calib_params (read), api.labspec_calibration / instrument calibration, run_calibration
+  (adjust labspec) records labspec_parameters before/after/changed; labels and discovery use 100+/200+ codes for
+  motors with more than ten positions. Writing LabSpec's calibration (OperVar 1) stays off until Q27 says which
+  parameter to change and the maintainer agrees. 101 tests.
+- 2026-11-20, 2026.11.20.19: decision with Nicola: ls6t checks the calibration (fast, structured, no dialogs);
+  LabSpec's own AutoCalibration corrects it (HORIBA's validated procedure) rather than ls6t writing OperVar values;
+  the service/QC scripts are not called (interactive, results to Excel/QC folders, slow). autocal.py: candidates
+  (OLSetup's script, <LabSpec>\AutoCalibration\*.vbs), assess (LabSpec calls, operator dialogs, what it changes,
+  includes, top-level names shared with the composed bridge = 'Name redefined' at ExecuteGlobal). Bridge verb
+  run_vbs (ExecuteGlobal of a .vbs under LabSpecPath; heartbeat pauses: Bridge.alive treats busy/run_vbs like a
+  modal question). calibration.adjust 'auto' + profile calibration.autocal {enabled false, script, timeout_s,
+  sample}; instrument autocal_info / autocal_run (values changed, read with calib_params). TESTING T4.9.
+  CI (.18) failed in the installed copy's benchmarks on Windows (native_map passed; which failed is not in the
+  pasted tail; they pass on Linux): the workflow now prints the failing case, its checks, state.json and runner.log,
+  and keeps bench.json. 102 tests.
+- 2026-11-20, 2026.11.20.20: Nicola: build all five checks inspired by HORIBA's service scripts (own code, no
+  HORIBA code or spec tables copied). perf.py (performance.json: filters per laser, axial per objective@laser@hole,
+  resolution per laser@grating@slit, cutoff per laser@grating; history, first = baseline). Kind filters
+  (plan.filters_steps: within the caps, strongest first = reference, exposure x ref%/%, skipped above
+  max_exposure_s; line_signal per s; measured = ref% x ratio; flagged beyond performance.filters_tol; restores the
+  operator's filter; profile_command for a person). Kind cutoff (white light + laser off via shutter or operator,
+  or the laser; smoothed; transmission (y-dark)/(plateau-dark), plateau 200-380 cm-1; crossings at 10/50/90 %
+  walking down from the plateau; format warns ranges below perf.cutoff_for). Focus scan: FWHM of the log-Gaussian
+  (2 sqrt(ln2/-c2)) -> axial_fwhm_um, recorded. Calibration: fwhm of the first line -> resolution, vs baseline x
+  resolution_tol and performance.resolution_cm1 {grating}. Polarisers: profile motors.laser_pol/raman_pol and
+  polarizers{} from discovery (LaserPol/RamanPol), setup keys (match_label), plan.setup_steps, instrument set, status.
+  Sim: edge filter (45 cm-1, sim_edge_cm1), sim_filter_actual, LaserPol/RamanPol motors. 106 tests, 14/14 bench.
+- 2026-11-20, 2026.11.20.21: Nicola: TESTING.md audited against the code. Stale: T0.2 (14 benchmarks), installer
+  and any LLM app (not only Claude), T1.1 (GetValueSimplePart ramp probe), T1.2 (the automatic profile), T3 (via
+  `instrument set`; no x50 here), T4.1 placeholder path; Q1, Q5, Q13, Q15, Q27, Q34, Q35, Q37, Q40, Q41, Q43 marked
+  with what the 2026-11-20 files already answered. Order fixed (T4.8 before T4.9-4.11, T5b.6 before T5b.7, T6.4
+  before T6.5-6.7; Q table numeric; results table complete). Redundant: T5b.4's hand copy of the offset (spot.json
+  keeps it per objective and laser) reduced to a repeatability check; T1.3 only after a LabSpec update. New: T3.10
+  polarisers, T3.11 cameras, T8.6 direct requests. 73 steps, 43 questions. 106 tests.
+- 2026-11-20, 2026.11.20.22: report from the instrument: discovery (instrument discover twice, ls6t_discover.vbs
+  once with the bridge stopped) opened LabSpec's About NFActiveX Control box and LabSpec crashed seconds after it was
+  dismissed; a run on another Windows account worked. That run was bridge 2026.11.20.7, not .21: the account is
+  probably not the cause, the version is. The bridge's start inventory (DiscoverTo without probes) ran fine on the
+  failing account, so the crash is in the probe block, whose new part since .7 is the ramp probe (CreateDataObject,
+  PutValue of a VBScript Variant array into the scratch spectrum's Data, GetValueSimplePart). Heap damage from that
+  write would fit a crash a few seconds later; nothing in discovery calls AboutBox by name. Not confirmed on the
+  instrument. Fix: discovery only reads (probe block removed; Q35 left open, Q37/Q40 already answered), motor names
+  trimmed (no LaserSwitch = laser power, E-Cal_Neon = a lamp device, Fiber, Output, DuoPos, IlluminatorV, LaserFilter,
+  FilterV); step log discovery_progress.txt (begin/end per step, file closed each time) and discovery_skip.txt (a step
+  begun and never ended is skipped by later runs); bridge.labspec_hint names LabSpec's #32770 dialogs or says LabSpec
+  is gone (EnumWindows, Windows only); api.instrument logs actions to instrument_log.jsonl, jobs shows them; discover
+  failures report stopped_in; profile import takes a reviewed JSON (import_reviewed: nm and max_filter_pct required);
+  format refuses the built-in profile in labspec mode; diagnose flags placeholders. 108 tests.
+- 2026-11-20, 2026.11.20.23: Nicola's review of .22: power_mw required at import too; the laser may fire on the
+  instrument only with a reviewed profile (also laser_on and snapshots with the laser, keeping the unconfirmed
+  LaserShutter out of play); the About box stays unexplained (ls6t never calls AboutBox; possibly an early symptom of
+  the same corruption): watch for it on .22+; both Windows accounts to run the same version (the installer is per
+  user). profile.laser_problems / review_gate; import_reviewed sets 'reviewed' {time, from}; import_discovery drops
+  it; format.validate_study refuses laser-firing kinds (all but move, background, white-light cutoff; or
+  video.with_laser) in labspec mode without review; api.laser / snapshot(with_laser) likewise; tool_status
+  profile.reviewed / review_needed. One review route (P.REVIEW_STEPS, used by the automatic profile's hint,
+  review_gate, drift, discovery's message box and the docs): `ls6t profile propose` (api.profile_propose: the dump
+  or discovery_latest.txt -> profile.proposed.json, current limits kept; also what instrument discover does), edit,
+  `ls6t profile import` it. Editing profile.json in place is not the route: an automatic profile.json is rebuilt at
+  the next bridge start. 109 tests.
+- 2026-11-20, 2026.11.20.24: from the instrument (.23): camera_on top/0 left LabSpec on camera 1 though the
+  answer said ok (the bridge never checked Video(10+id)'s return nor read the camera back); camera_off with the live
+  video on never returned: heartbeat 'busy', no dialog, LabSpec running, i.e. Video(STOP_VIDEO) blocked inside
+  LabSpec (the manual's example is ActiveX-mode, with GET_VIDEO_ID polled throughout; from a script it may wait for
+  a loop that never comes). Fix: SetCamera (Video(10+id), Pause 300, read back; camera_before/after/
+  set_returned in the answer) used by VCamera and VVideo, failing when LabSpec did not follow (message differs with
+  the video live: stop it first; or the ids may not be OLConfig's order); STOP_VIDEO only with stop_video=1 from
+  profile video.stop_from_script (default false; testmode forces the profile's value); VVideo leaves a video it
+  started on (video_left_on). labspec_hint(verb): LabSpec running, no dialog -> stuck in a LabSpec call. Sim mirrors
+  (sim_camera_locked). TESTING T3.11 / Q44. 110 tests.
+- 2026-11-20, 2026.11.20.25: Nicola on .24: GET_ACTIVE_CAMERA is the selection, not the camera shown; with the
+  video running a switch is reported while the view (and snapshots) stay on the old camera; a switch takes effect at
+  a video start, which ls6t cannot cause while the video runs (STOP hangs); stopping/starting the video in LabSpec's
+  UI ends the bridge script (last heartbeat idle), so .24's advice ("use LabSpec's video button") ends the bridge;
+  one internal -> top switch with the video stopped failed (repeat to tell reproducible from timing). Fix: CameraFor
+  (cam, live): same camera -> ok; another while live -> refused (what to do: stop by hand, restart the bridge, ask
+  again); video stopped -> SetCamera (read-back polled up to 2 s, camera_set_s) then the video is started
+  (video_started). VCamera and VVideo use it; camera_off refused while live (unless video.stop_from_script).
+  Messages and BridgeGone say the UI's video button ends the bridge. Sim mirrors. TESTING T3.11 (three repeats; look
+  at the view), Q44. 110 tests.
+- 2026-11-20, 2026.11.20.26: from the instrument (.25 advice followed): video stopped by hand (ends the bridge),
+  bridge restarted: it never answered, heartbeat busy from start, ls6t said stuck in 'ping' then, seconds later,
+  'not running' (two code paths, two stories: the pre-call check said not running for any stale heartbeat). No
+  script stop button in this LabSpec (the popup's Cancel only); after Cancel LabSpec froze (no restart of the script,
+  STOP ALL dead). Reading: ping is one GetValue(SystemName); if it blocks, LabSpec's scripting was already wedged,
+  most likely left so when the UI's video control ended the previous script (cause not proven). Fix: bridge.diagnose
+  (hb) for both paths (no heartbeat / stopped / ended without stopping = last beat idle or halted / busy in <verb>,
+  'inventory' at start-up) + labspec_hint with STUCK_ADVICE (nothing frees it; wait, restart LabSpec; not Cancel);
+  instrument end_bridge (quit verb; refused while a request holds the lock) so the operator never uses LabSpec's
+  video buttons under a running script; camera refusals give that order; popup text and all docs drop the 'script
+  stop button'; TESTING ground rule 5, T2.4, T3.11, T9.2, Q2, Q44. Then T3.11's optional step: with
+  stop_from_script true, camera_off hung inside Video(STOP_VIDEO) again (command camera, no dialog). Conclusion
+  (Nicola): no reliable camera switching on this XploRA. Video(STOP_VIDEO) removed from the bridge altogether
+  (stop_from_script removed); switching only with profile video.switch_camera (default false; for another
+  instrument, video stopped): CameraFor(cam, live, allowSwitch) refuses another camera with the end_bridge
+  sequence. Then, from LabSpec 6.8.1's SERVICE scripts (Nicola's request): StandardMapping / SWIFTMapping
+  XploRA.vbs start the video with `Video START_VIDEO` + GET_VIDEO_ID polled until > 0, and stop it with `Video
+  STOP_VIDEO` (a statement) followed by `GetMotorStatus("Video", MoveID)` polled until 0, with no Video() call in
+  between; Cut-Off.vbs uses the manual's pattern. No script uses SET_ACTIVE_CAMERA. ls6t's stop called
+  Video(GET_VIDEO_ID) 200 ms after STOP: a call into the video while it stops is the likely place of the hang (not
+  proven). StopVideoHoriba reproduces HORIBA's sequence (15 s limit, heartbeat kept), opt-in via
+  video.stop_from_script for TESTING T3.12. 111 tests.
+- 2026-11-20, 2026.11.20.27: T3.12 result: StopVideoHoriba returned (live 0, status 0, 3.38 s); the next status
+  timed out (15 s, 'no result ... (stop requested)'), then was reported stuck in status: its Video(GET_VIDEO_ID) /
+  Video(GET_ACTIVE_CAMERA) right after the stop (the overlap HORIBA's scripts never make). Fix: common.vbs VidId /
+  VidCam (no LabSpec video call while gVidOff, set by the bridge's own successful stop, with the camera read just
+  before STOP); cleared when the bridge starts the video (then GET_VIDEO_ID polled, as HORIBA); VidSettle waits
+  LS6T_VIDEO_SETTLE_S = 5 s after the stop before a START (to size from a hand-timed stop: T3.13). Status reports
+  video_known_off. Bridge._timeout_text: stuck in <verb> (busy, heartbeat > 5 s old) with labspec_hint, or still
+  working; says ls6t asked the bridge to drop the command. Popup: Cancel acts when LabSpec's current call ends.
+  112 tests.
+- 2026-11-20, 2026.11.20.28: Nicola's review of .27: every command must honour the bridge's own stop, not only
+  status; a new bridge must not inherit it; camera 0 is a separate problem (ignored with the video stopped, even
+  after a LabSpec restart): when switching returns, first check Video(10+0) after a clean stop + 5 s. Audit of every
+  LabSpec.Video call: VidId/VidCam gated; SetCamera now VidSettle + VidCam first, and keeps gVidCam; StopVideoHoriba
+  only when live; VCamera/VVideo START after VidSettle, then gVidOff cleared; GrabFrame only once the video runs;
+  VAutofocus 'video' and the extended video refused while gVidOff; GetMotorStatus (moves, safe) is what HORIBA polls
+  right after STOP, so left. test_every_video_call_respects_the_bridges_own_stop pins the call sites. gVidOff starts
+  False in each script run and is never written to a file. CI (Windows, .27 tag): bench graphene_map failed; passes
+  5/5 here (7.1 s): the job's printed check list is needed. 113 tests.
+- 2026-11-20, 2026.11.20.29: T3.13 passed on .28 (stop 3.09 s, restart honoured the settle, no hang).
+  stop_from_script default true. Camera switching rebuilt for T3.14 (switch_camera still false): CameraFor(cam,
+  live, allowSwitch, canStop) stops a running video with StopVideoHoriba (camera_restart), SelectCamera (VidSettle,
+  Video(10+id), no read-back while off: the T3.12 lesson), the caller starts the video (GET_VIDEO_ID polled, as
+  HORIBA) and CameraCheck reads the camera while it runs ('LabSpec ignored the switch' otherwise). VVideo keeps a
+  video it restarted for a switch running (keepOn). SetCamera (read-back polling while off) removed. Sim mirrors.
+  Snapshot on the instrument: the top camera's raw frame had 888 x 606 x 3 values: video.decode now takes 1, 3 or 4
+  values per pixel (_channels: interleaved or planar, whichever gives the smoother image; channel order from
+  video.packing: colorref R,G,B, rgb B,G,R; data_dims with a channel axis); api.image_for_view: PNG <= 900 kB as is,
+  anything else (size, JPEG/BMP/TIFF) reduced with Pillow (PNG, else JPEG, down to <= 900 kB) and saved as
+  <name>.view.*; get_image uses it; an undecodable frame points to LabSpec's own image ('view'). 114 tests.
+  CI: the Windows graphene_map benchmark failure (.18, .27 tags) is fixed (Nicola, 2026-11-20).
+- 2026-11-20, 2026.11.20.30: .29 on the instrument: get_image shows the marked plot and LabSpec's JPEG (full size,
+  under the limit); frames 888 x 606 x 3 (RGB) decode right (black: light off, holder empty). LabSpec's own PNG was
+  overwritten by the plot (both <base>.png): the plot is now <base>.marked.png. Open: 888 x 606 is neither camera's
+  sensor (OLConfig names IDS uEye USB3 cameras: the top one's family is 3088 x 2076, the internal one's 1920 x 1200,
+  from public datasheets; models only, no serials here): likely LabSpec's video buffer (binning or the window);
+  check the internal camera's frame size and LabSpec's camera settings (TESTING T5b.1).
+- 2026-11-20, 2026.11.20.31: from the instrument (.29/.30): all motorised settings reach every value asked
+  (laser 532/785.04/637.75, gratings 1800/600/2400/1200, filters 10/1/0.1 %, pinhole 100/500/300, slit 50/200/100),
+  but set reported ok false with the old values: VMove waited only `If moveId > 0`, and MoveMotor (+NO_WAIT) gave no
+  id here. Now WaitMotor always (gNoId, an Empty MoveID, as HORIBA's scripts' unset MoveID), then SettleReadback
+  (value within 0.5 or the label, 200 ms polls, at most 30 s; settle_s, settle_timeout): mid-move positions (grating
+  1800 between 2400 and 1200, pinhole 100 between 500 and 300) are not taken as arrived. The filter cap refused a
+  whole request (right): errors now say nothing was changed. Objectives: the turret is manual; LabSpec's objective
+  is a record, not a reading, and discovery/OLConfig list configured lenses, not mounted ones (hence the earlier
+  x50). api.objective_question (manual_objective, default true): change by hand, confirm; used by set, the runner's
+  set-up and kind move; the laser go-ahead asks whether LabSpec's lens is the one on the turret; checks.objective /
+  set's objective / snapshot objective_source say confirmed-by-operator or LabSpec's unchecked setting; move.to_um
+  warns when unchecked. 115 tests.
+- 2026-11-20, 2026.11.20.32: Nicola's review of .31: read-back matching must not depend on formats (a mismatch
+  would now cost 30 s and a false failure). profile.same_position (numbers within 0.5 with units %, nm, µm, gr/mm
+  stripped; labels without spaces/case) used by runner._matches, set_instrument and kind move; the bridge's
+  SettleReadback compares numbers numerically (it already did) and labels with NormLabel, and ends as soon as the
+  reading is unchanged for 1.5 s (settle_stable). move.to_um on a manual turret now asks the operator to confirm the
+  objective (the snapshot's µm scale comes from it; confirmations off: a warning). .31 at the instrument: set waits
+  right (every move reported accurately, first read-back), objective source and the refusal message as intended;
+  settle_s was measured by the bridge but dropped by set_instrument and the runner: api._move_timing passes seconds,
+  settle_s, settle_stable, settle_timeout. 116 tests.
+- 2026-11-20, 2026.11.20.33: Nicola: the 0.5 absolute tolerance must not apply to filters (0.1 % vs 0.01 % differ by
+  0.09; the filter is the setting tied to laser power). same_position: a value in % matches only within 0.1 %
+  relative (0.10 % = 0.1 %); positions keep 0.5 absolute. Filters move and read back by label (plan.setup_steps,
+  set_instrument), compared exactly by the bridge (NormLabel). 116 tests.
+- 2026-11-20, 2026.11.20.34: T3.15 passed on .32/.33: all moves ok, settle_s 0.0; whole-call times: filter ~1 s
+  (36.6 s for the first move after the bridge started: watch), laser 1.9-2.8 s, pinhole 2.1-5.7 s (slowest; the
+  'slow slit' of .29 was only last in line), slit 1.7-2.9 s, grating 0.2-0.3 s although it moves for seconds (.29).
+  So GetMotorStatus("Grating", no id) said idle and the value read was the target at once: the grating was not
+  waited on. HORIBA's scripts do MoveMotor("Grating", g, "", MOTOR_VALUE) (blocking, an id) then GetMotorStatus with
+  that id; the manual documents WaitForAllMotors = GetMotorStatus("", 0). VMove now waits on the motor, then on all
+  motors, then reads back; move_call_s / wait_s / all_wait_s / settle_s reported (api._move_timing). Also from the
+  manual: MOTOR_NO_MESSAGE (100) stops LabSpec's own prompt for a manual motor: T3.2 records whether LabSpec asks
+  as well as ls6t. 116 tests.
+- 2026-11-20, 2026.11.20.35: .34 at the instrument: round trip ok, breakdown works. First set after each bridge
+  start 30.9-45.4 s (.31, .32, .34; later sets 9-12 s): most likely the start-up inventory (the bridge takes
+  commands only after it); DStep now runs BeatNow (Execute, ignored in the discovery script) and set_instrument
+  reports timing {total_s, status_before_s, checks_s, moves_s, status_after_s, note when the heartbeat said
+  'inventory'}. The 30.9 s call was dropped by the app ('No client-side handler found') though done: the
+  instrument tool is async and reports progress every 5 s (_keepalive: asyncio.to_thread + ctx.report_progress; the
+  error wrapper handles coroutines). Grating: move_call_s 0, wait_s 0.05-0.09 s, even 2400 -> 1200; with 637.75 nm
+  1200 -> 2400 stopped at 1800 silently (settle_stable caught it). HORIBA's scripts move the grating blocking
+  (MoveMotor without NO_WAIT, then GetMotorStatus with its id): VMove blocking=1, profile blocking_motors
+  ['grating'] (runner.move_extra, used by set and the runner's set-up). OLConfig names gratings with ranges but has
+  no laser pairing: no up-front refusal; a short stop reports laser and SpMin / SpMax (_grating_short). TESTING
+  T3.16, Q45. Sim: sim_grating_stuck. 117 tests.
+- 2026-11-20, 2026.11.20.36: Nicola's review of .35: (1) a blocking MoveMotor holds the single VBS thread, so no
+  beats: Beat writes blocking=<motor> before and clears it after; Bridge.alive allows busy+blocking up to
+  config.blocking_move_s (LS6T_BLOCKING_MOVE_S, 180 s); diagnose / _timeout_text say 'blocking move of the
+  <motor>'. (2) the 2400 gr/mm grating vs 785 nm is physics: first order reaches at most 2/G (833 nm; Raman up to
+  ~739 cm-1 at 785 nm, ~3680 cm-1 at 637.75 nm), less with the spectrometer's deviation angle. plan.grating_limit_nm
+  / grating_reach (2e6/G, or gratings.<G>.max_nm when set from a measured limit / LabSpec's SpMax once its unit is
+  known); format refuses ranges beyond it; set refuses a grating that cannot reach the laser line and reports reach
+  + a note below 3200 cm-1. 118 tests.
+- 2026-11-20, 2026.11.20.37: .36 at the instrument: the blocking grating move returned in 0.02-0.04 s (move_id 0,
+  no wait) like NO_WAIT; the laser's status wait works (1.7-1.9 s). LabSpec changes the grating at once in
+  software; whether the turret moves then or at the next acquisition needs someone at the instrument (T3.16 now has
+  the observation and a first-vs-second acquisition timing). blocking_motors back to [] (the option stays). SpMax
+  per grating reads as nm (600 1138, 1200 1112, 1800 935, 2400 690): DiscoverTo step 'spectro_range' (OperVar
+  ACT_INSTRUMENT[SpMin|SpMax][i], read only, crash-skippable); import_discovery keeps it as gratings.<G>.spectro_nm
+  when plausible (200 < SpMax <= 1.05 x 2e6/G); plan.grating_limit_nm takes the lowest of 2e6/G, max_nm, SpMax;
+  grating_min_nm (SpMin); format refuses ranges outside; set no longer refuses a grating for a laser (LabSpec
+  accepts 785 + 2400), notes the reach and that the turret's motion is not visible. T3.16 sequence fixed: laser and
+  grating together from a different grating. First set after a bridge start: 0.21 s when idle first (inventory
+  explanation holds). Sim discovery reports the same SpMin/SpMax. 120 tests.
+- 2026-11-20, 2026.11.20.38: Nicola: this account's profile is a person's (stop_from_script set) but not reviewed,
+  so the SpMax limits would wait for the review (import needs power_mw); and the two-spectra timing needs the laser.
+  profile.spectro_ranges (shared with import_discovery) and _inventory_facts: load() puts the inventory's
+  spectro_nm into a person's profile (only restricts; facts_from_inventory). Dark timing: kind background with
+  laser_off operator passes the review gate (no laser) and now reports seconds.acquire and setup_moves seconds.
+  TESTING: .37's T3.16 rewrite had gone to the wrong row (the first '| T3.16 |' is Q45's test column); rewritten
+  now with the fixed sequence and the dark timing. 121 tests.
+- 2026-11-20, 2026.11.20.39: Nicola asked whether anything keeps the laser off in a background with laser_off
+  operator: no. The bridge's acquire closes the laser shutter only with laser_off=1 and a shutter motor (the
+  'shutter' mode); 'operator' is a plain acquisition, LabSpec's shutter opening as usual. runner.BLOCK_BY_HAND in
+  the background and cutoff notices (OK only at the instrument with the beam physically blocked; not from a remote
+  session); format._blocked_by_hand: a warning always, and with an unreviewed profile (labspec mode) the filter
+  must be the strongest attenuation. TESTING T3.16's dark timing: someone in the room, filter 0.1 %. 121 tests.
+- 2026-11-20, 2026.11.20.40: .39 at the instrument: SpMax reached the person's profile and every set reports its
+  reach (600 1138, 1200 1112, 1800 935, 2400 690 nm; the 2400 note fires). study_format's summary lacked it:
+  profile.grating_reach_table -> summary['grating_reach']. Grating moves after the first answer in 0.06-0.09 s;
+  the laser's wait is real (1.6-2.0 s); all_wait_s 0.0 throughout (kept: harmless). The slow first move is not the
+  inventory: 24.1 s on the grating with status_before_s 0.21 s (bridge idle), 36.6 s on the filter another session:
+  the first motor command after LabSpec starts is slow, whichever motor; possibly the only real turret move (T3.16
+  now starts with it, after a LabSpec restart). The 600 s grating timeout and the MCP progress cover it. 121 tests.
+- 2026-11-20, 2026.11.20.41: Nicola: both slow first moves followed a bridge restart, LabSpec perhaps not; T3.16 now
+  has (a) bridge-only restart (remote, no watcher), (b) LabSpec + bridge restart with a watcher. VMove counts its
+  MoveMotor calls (gMoveN -> bridge_move_n in each move's answer). If (a) is slow: a deliberate warm-up at bridge
+  start (to design then: which harmless command warms it). 121 tests.
+- 2026-11-20, 2026.11.20.42: remote check of .40: grating_reach right (2400: 1187 cm-1 at 637.75, 4304 at 532,
+  none at 785.04). SpMin = 100 for every grating: not plausible: grating_min_nm uses only a person's
+  gratings.<G>.min_nm; the table shows labspec_spmin. Third slow first move: 31.7 s (grating 1200 -> 600, all in
+  wait_s, move_call_s 0, bridge idle). WarmUp at bridge start (after the inventory): GetMotorStatus by name for
+  Grating, Filter, Laser, Hole, Slit, Spectro, polled while busy (<= 60 s each, beats), times in ping 'warmup' and
+  LS6T_HOME/warmup.txt; nothing moves. Remote Desktop (Nicola's earlier suggestion, unanswered until now):
+  config.remote_session (SM_REMOTESESSION or SESSIONNAME RDP-*; LS6T_REMOTE_SESSION for tests): hand-blocked
+  backgrounds / cut-offs refused in labspec mode unless LS6T_HAND_BLOCK_REMOTE_OK=1; TESTING ground rule 7. Not
+  detected: TeamViewer, Quick Assist. Still open, people's: the turret watch (T3.16), cameras with light and a
+  sample (T3.14), the profile review and the laser shutter confirmation (the most useful step). 123 tests.
+- 2026-11-21, 2026.11.20.43: .42 at the instrument (RDP): warm-up works: Grating 36.0 s, the other motors 0, the
+  first grating move then 0.10 s (bridge_move_n 1): a one-time cost of the grating's first status query after a
+  bridge start, LabSpec already running. The Remote Desktop refusal works. Cancel halted the bridge, its window
+  went away, a second ls6t_bridge.vbs start did nothing (the halted bridge ran on; LabSpec may run one script at a
+  time), resume fixed it. Now: OpenPopup says Cancel = HALT; when halted the main loop opens OpenHaltedPopup, whose
+  closing ends the bridge (OperatorStop -> quit via gHaltPopup); VResume closes it; BridgeMain starts with
+  OtherBridge (heartbeat <= 5 s old, not stopped): a message box with what to do, and exits. TESTING T2.3, rule 5.
+  124 tests.
+- 2026-11-21, 2026.11.20.44: T2.3 on .43 (RDP): the HALTED window works; a second bridge start does nothing (LabSpec
+  runs one script at a time: OtherBridge kept, harmless, but its message never shows here); the main window
+  'reappeared' after Cancel until LabSpec's call ended; the window reopened after resume looked like a new request;
+  resume took 58.8 / 99.6 s (very likely queued behind the warm-up, 50.9 s this time, plus the operator's answer);
+  both windows titled 'Non blocking'; two status calls timed out at 15 s during the warm-up. Now: HORIBA's
+  '#title#button' suffix on the non-blocking messages ('ls6t: in control' / Halt, 'ls6t: HALTED' / End bridge);
+  StopRequested and the warm-up open the HALTED window at once; WarmUp polls OperatorStop (Halt or the stop button
+  ends it) and allows 120 s per motor; OpenMainPopup(resumed) says RESUMED; Bridge.call extends its deadline while
+  the heartbeat says inventory/warmup (STARTUP_MAX_S 600; waited_for_bridge_start_s).
+- 2026-11-21, 2026.11.20.45: Nicola: the slow resumes were
+  not the warm-up (it had finished; status answered quickly while halted, so the halted loop takes commands): the
+  time is inside VResume, i.e. the Yes/No prompt (shown late, hidden behind the HALTED window, or slow to answer over
+  RDP). VResume now closes the HALTED window first (reopens it on No) and reports prompt_shown_after_s /
+  answer_after_s (gCmdT0 set when HandleFile takes a command); api adds picked_up_after_s. Bridge.heartbeat retries a
+  read that catches the file mid-rewrite (empty / no state), which also made a test flaky. 126 tests.
+- 2026-11-21, 2026.11.20.46: Nicola: prompt_shown_after_s is when the bridge asked; a question LabSpec shows late
+  (or behind a window over RDP) counts as answer_after_s. api resume watches labspec_windows() every 0.5 s during
+  the call (Bridge.call on_wait) and reports dialog_appeared_after_s / dialog_title (first LabSpec dialog not titled
+  'ls6t:'); z-order is not visible, so TESTING T2.3 asks the person to note when it became visible. 126 tests.
+- 2026-11-21, 2026.11.21.1 (versions follow the date from now on): fresh Windows login, LabSpec and bridge started
+  fresh: warm-up 0 s for every motor. The slow first grating status (36.0, 50.9 s) followed bridge restarts within
+  a running session: neither LabSpec's start nor the bridge's alone. Logged per bridge session from now on:
+  WarmUp's gWarm starts with started=<time>;grating_at=<value>; api.log_warmup (on instrument status) appends one
+  record per bridge start to warmup_log.jsonl with bridge.session_context() (LabSpec's process start via
+  GetProcessTimes, labspec_running_min, windows_up_min via GetTickCount64) and the last grating set from
+  instrument_log (set rows now carry their setup). Sim ping reports a warm-up. T2.3 on .46: all works; resume
+  picked_up 0.22 / prompt 0.02 / answer 10.1 s (the old 58.8 / 99.6 s: the question hidden behind the HALTED window);
+  #title#button confirmed. dialog_appeared_after_s missing: the watch looked only at #32770 dialogs of labspec*.exe;
+  now any new top-level window (hwnd not there before) of labspec* or OL* helper processes, not titled 'ls6t:',
+  with class and process; None when watched and nothing seen. Warm-up 0 s on a fresh login and on a bridge-only
+  restart: Nicola now tests whether grating moves before a restart are the trigger. Then: 0 s also after two clean
+  End-bridge restarts (one after two grating moves); all five slow cases followed a deploy. The installer never
+  touched a running bridge (it only rewrote the scripts): winsetup.end_running_bridge (quit, wait for 'stopped';
+  not while a request holds the lock) runs before install_bridge in the installer and in `ls6t bridge install`,
+  logging deploy_log.jsonl; log_warmup adds last_deploy. 128 tests.
+- 2026-11-21, 2026.11.21.2: 2026.11.21.1 at the instrument: dialog_appeared_after_s 0.31 s ('LabSpec', class OLGui,
+  labspec64.exe: not a #32770, hence the earlier miss); resume picked up 0.18 / prompt 0.02 / answer 10.9 s.
+  prompt_shown_after_s was '1.953125E-02' (CStr): common.vbs Secs(x) = Fmt(Round(x, 2)) for every Elapsed(); api
+  rounds resume's timings. Warm-up: this deploy found the bridge already stopped, yet Grating 29.5 s with LabSpec
+  started 1.2 min before: the likelier cause is the grating initialising for about a minute after LabSpec starts
+  (warmup_log's labspec_running_min will tell); the installer's clean ending still to test with a running bridge.
+  129 tests.
+- 2026-11-21, 2026.11.21.3: 2026.11.21.1 at the instrument: the installer ended a running idle bridge cleanly
+  (deploy_log bridge_was idle, ended cleanly); its window closed at Finish with no message: the welcome page now
+  says to quit the LLM apps (Claude from the tray) and that LabSpec may stay open, the finish page that a running
+  bridge was ended and must be started again; INSTALL.md the same. Warm-up settled: Grating 29.5 s with LabSpec
+  restarted right after the deploy (bridge 43 s later; ready ~73 s after LabSpec's launch), 0 s with LabSpec
+  running 8.3 min: the grating initialises for about a minute after LabSpec starts (later revised: 2026-11-22 a
+  bridge 26 s after LabSpec had 0 s: likely at best, under observation); WarmUp absorbs it. The
+  scientific-notation duration was fixed in 2026.11.21.2. 129 tests.
+- 2026-11-21, 2026.11.21.4: Nicola: the welcome page said a running bridge 'gets started again at the end'; the
+  installer cannot start a LabSpec script: it now says the operator starts ls6t_bridge.vbs again after the
+  installation, as the finish page does. (The 2026.11.21.2 tag was pushed after .3 on the same code; removed.)
+- 2026-11-22, 2026.11.22.1: stage tests on 2026.11.21.4 (remote, empty holder): XY right (encoder read-backs,
+  0.73 s / 580 µm, 1.14 s / 4950 µm), stay true/false right, max_xy_um radial (5657 refused), Halt mid-request
+  right, Y creep 0.1 -> 0.3 µm over three round trips; video stop/start x4 fine (stops 3.05-3.40 s, starts 6.9-10.2
+  s). Changes: runner state 'returned' {done, why} and 'stage_at_end' (with from_home_um) for every request, also
+  stopped ones (status exposes both); moves report objective + objective_source (_objective_source); summary
+  limits_meaning; maps checked radially (farthest corner). Nicola's Z safety: plan.WD_BY_MAG_UM (Olympus MPlan N
+  class: 100x 210, 50x 350, 20x 1300, 10x 10600, 5x 20000 µm) / objectives_wd_um; plan.z_limits (toward =
+  min(max_dz, z_toward_wd_fraction x WD), away = max_dz, toward_sign from stage.z_into_sample or None = both ways
+  limited), z_check, toward; format._z_safety (map z_um, points / move / focus dz, focus-scan half range;
+  sample.unevenness_um >= WD/2 -> XY within focus_valid_xy_um); runner._z_guard in move_z (limits; toward + stale
+  focus -> Stop unless a focus scan), _focus_here after a focus is found, _retract_before_xy in the map loop. TESTING
+  T3.17 (Z direction by watching, x10, empty holder). VBS: res.Exists for camera_asked / camera_restart (reading a
+  missing Dictionary key adds it, empty). 131 tests.
+- 2026-11-22, 2026.11.22.2: Nicola: dry runs: api.inputs drops the review-gate error into review_note (nothing is
+  sent); acq_range single window adds center_nm, window_nm (from_nm = to_nm = centre is LabSpec's parameter: the
+  report read it as the range, 659.66 nm vs 646.6-672.7); estimate: plan.setup_parts (commands, laser, grating,
+  objective, filter, hole, slit), acquisitions, video_snapshots, not_included (the operator's answers); default
+  timing laser 3 s, grating 5 s (measured; a saved profile keeps its own). T3.17 rewritten: a 5 µm move cannot be
+  seen against a 10 mm gap; the maintainer moves ~1 mm toward the objective in LabSpec with x10/x5 while ls6t reads
+  Z before and after (no exception to ls6t's limits), or HORIBA's documentation; unset unless unmistakable. Depth:
+  z_limits(purpose='depth') uses limits.depth_toward_wd_fraction (0.3); format marks the derived map _kind depth
+  (internal '_' keys skip the unknown-key check); runner._confirm_depth asks in LabSpec when the profile goes past
+  the ordinary toward limit; ctx.z_purpose while it runs. Then (Nicola): after a halt with nothing moved the
+  message suggested the stage was away (runner._not_returned: 'nothing moved away; at the home spot', or the
+  distance it stays); 'resume it in LabSpec' -> `ls6t instrument resume` (runner, bridge, sim); _stage_now gives
+  from_home_um also when the request stopped before taking its home spot (home = here). 134 tests.
+- 2026-11-22, 2026.11.22.3: Nicola's retract-travel-return: plan.retract_um (limits.retract_um 2000, away only),
+  travel_mode (move.travel, or auto with sample.unevenness_um beyond focus_valid_xy_um), coarse_focus_step_um
+  (half the measured axial FWHM, else by magnification); z_limits purpose 'travel' (away up to retract_um);
+  runner.travel_xy (retract from the focus, travel, descend to focus - unevenness; _z_direct for these away moves),
+  run_move uses it and says Z is short of the focus; focus_scan from_below -> _focus_from_below (coarse steps toward
+  the sample to old focus + toward limit, stop past a clear peak (> 3x the first steps' median), fine symmetric scan
+  around it). Optional stage.retract_for_objective_change (api.objective_retract, set and the runner's set-up;
+  ctx.focus_stale until a focus is found). format: move.travel, focus.scan.from_below, both need
+  stage.z_into_sample; a retract move is exempt from the unevenness refusal. sample.notes -> LabSpec Remark (bridge
+  'remark'). Warm-up cause revised to 'likely, under observation' (a bridge 26 s after LabSpec: 0 s). TESTING T6.8.
+  CI: graphene_map failed again on Windows, intermittently. Likely cause: on Windows os.replace raises
+  PermissionError while another process has the target or source open (study_status reading progress/state while
+  the runner rewrites them, a virus scanner on new files); in the runner (write_json) that ended the request, in the
+  simulator's command loop it killed its thread. bridge.replace_retry (100 x 20 ms) for write_json, the bridge's
+  command files, the sim's results / heartbeat / spectra, profile and spectra saves; the sim's loop no longer dies
+  on a write error and retries a locked command file's removal. Not reproducible on Linux; the next tag's CI runs
+  will tell. 134 tests.
+- 2026-11-22, 2026.11.22.4: CI log (graphene_map, Windows): state cancelled 2.4 s in, 'move_xy: the bridge ended
+  without stopping (last heartbeat idle 0 s ago)': Bridge.heartbeat returned None on an OSError (PermissionError while
+  the simulated bridge replaced heartbeat.txt), alive() then False, while the next read (diagnose) saw it fresh. Now
+  heartbeat() retries locked / half-written reads (10 x 20 ms; None only if the file is really absent: 3 misses) and
+  call() looks a second time (0.3 s) before raising BridgeGone, before and during a call. Nicola: the focus search
+  from below needs the laser (and a reviewed profile); move.focus 'video' ends a retract-travel-return with LabSpec's
+  video autofocus (bridge autofocus how=video; no laser; the live video must run: the bridge refuses it after its
+  own video stop), accepted only within unevenness + toward limit of the old focus (_video_focus_after_travel), else
+  back to the descended height with a warning. TESTING T6.8 starts without the laser. Then (2026.11.22.3 at the
+  instrument): dry run, window_nm, per-motor estimate and halt wording confirmed; settings already in place were still
+  sent and charged (the objective: 20 s, and the operator would have been asked for the lens already mounted).
+  plan.setup_steps carry a role; plan.already_set (same_position, or match_label for the objective) against a status;
+  marked_setup_steps / setup_parts / estimate / inputs take current; api.inputs reads the status when the bridge runs
+  (state_read); runner._setup and api.set_instrument skip steps already in place (already_set in the read-back).
+  TESTING T4.0 (dry run), T4.2 (sample.notes in LabSpec's Remark). 137 tests.
+- 2026-11-22, 2026.11.22.5: Nicola: a post-check of LabSpec's autofocus comes too late if its search passes the
+  safe limit on the way. The ActiveX manual's Autofocus has START, GET_STATUS, STOP (restores the previous
+  settings), GET_OFFSET, enable/disable and the method; no range; templates have only 'AutoFocus' on/off; HORIBA's
+  service scripts set no range either. So: VAutofocus takes z_bound / z_sign, reads Z at every 100 ms poll, stops
+  the autofocus (2) and the Z motor when Z passes the bound, fails with z_bound_hit; reports z_seen_min/max.
+  runner._af_bound for autofocus inside studies (focus + toward limit); _video_focus_after_travel: bound =
+  min(unevenness + toward, WD - unevenness - WD/10), none (skipped) when <= 0; the result records z_bound_um,
+  z_seen_um, stopped_at_bound. Sim: sim_af_range (+-20 µm by default) and the bound. Overshoot after the bound is
+  passed: one poll (100 ms) of Z travel plus the stop. Also: set_instrument lists the objective already in place
+  (already list, already_set) and adds the grating note only when a grating move was sent. 138 tests.
+- 2026-11-22, 2026.11.22.6: Nicola: measure Z speed and the stop latency, trip earlier by the worst-case overshoot,
+  refuse when no room; x10/x5 first. VAutofocus measures z_speed_um_s (max |dz|/dt between polls), poll_s (max
+  interval), and on a trip stop_s (until two equal Z readings 50 ms apart) and overshoot_um. plan.af_motion (largest
+  measured from autofocus_motion.json, else profile autofocus.*, else AF_ASSUMED 200 µm/s, 0.5 s, 0.15 s;
+  margin = 1.25 x speed x (poll + stop)) and record_af_motion (after every guarded autofocus). runner._af_bound
+  (studies) and _video_focus_after_travel trip at bound - margin and refuse (Stop / skipped 'no safe room') when that
+  is <= 0. TESTING T6.8 (x10/x5 first; one deliberate trip to measure the stop), T5 note. Sim reports a speed and,
+  on a trip, a 2 µm coast. 138 tests.
+- 2026-11-22, 2026.11.22.7: Nicola (on .22.6): set with the objective already in place reported objective.source
+  'changed by hand and confirmed by the operator'; the 'asked' test counted the already_set entry; now it needs a
+  change actually made. 138 tests.
+- 2026-11-22, 2026.11.22.8: Nicola's first real snapshot (Si, x10, top camera): frame rows reversed and R/B swapped
+  against LabSpec's JPEG; scale 1/px (LabSpec's axes); marker outside; +100 µm X -> -101 px, +100 µm Y -> +102 px
+  (flipped). video.detect_orientation (correlates with the saved jpg/png: flips by grayscale, swap by channels;
+  stored per camera in video_orientation.json when score >= 0.5 and margin >= 0.05), apply_orientation, stage_axes
+  (video_scale.json "<objective>@<camera>" if measured, else field_um / pixels around stage X,Y; signs
+  video.image_x_right / image_y_up), image_shift (phase correlation, sub-pixel). api.video_scale (instrument action,
+  CLI video-scale, step 5-500 µm, default 50; cross-talk > 10 % fails; returns home). Bridge VVideo returns the
+  camera. Nicola's per-objective test (x10 100 µm -> 101-102 px, 0.98-0.99 µm/px; x100 10 µm -> 103-105 px, 0.096;
+  profile fields 0.972 / 0.0963; ls6t's axes 1.00 for all, x5 field stayed 887 µm) confirms it. T3.2: LabSpec asked a
+  second time after ls6t's question: runner.move_extra(asked) adds no_message=1 (profile suppress_labspec_prompt,
+  default on), the bridge adds LS_MOTOR_NO_MESSAGE (100, 2018 manual; not in 6.8.1's constants.vbm) and retries
+  without it if refused (no_message_refused); api._move_timing reports labspec_prompt. Black x5 frame: features
+  divided by a ~1e-15 MAD (strength 1e9): video.frame_too_dark (p99 < 8 or p99 - p1 < 4) skips features and
+  warns (frame_dark), DOG_NOISE_FLOOR 0.1. Snapshot with LabSpec's 1/px axes and no field warns. 140 tests.
+  T3.14 on .22.7: clean stop, settle, Video(11) -> 0, restart: the view stayed on camera 0. Nicola asked whether
+  10 + id is the right code: LabSpec 6.8.1's HELP\VBS\Video.html documents long Video(long Mode) with
+  '10+CameraID : SET_ACTIVE_CAMERA' (constants.vbm SET_ACTIVE_CAMERA = 10): it is. CameraCheck now adds
+  camera_note (GET_ACTIVE_CAMERA is the selection, not the view). TESTING T3.14b: Video(11) from LabSpec's own
+  script window with no bridge, then a start by hand. video.switch_camera stays false.
+- 2026-11-22, 2026.11.22.9: Nicola's review of .22.8: (1) orientation learnt from a black frame would be stored
+  and applied later: video.orientation_for learns only when not frame_too_dark, score >= 0.5, margin >= 0.05;
+  swap_rb only when the channels can tell (|crossed - same| > 0.1, ref R/B corr < 0.98), else kept
+  (swap_from); otherwise the stored one applies; a warning only when a reference existed. video_scale uses it.
+  (2) video_scale: --um / um (MCP, api), default SCALE_STEP_FRACTION 0.2 of the field width (measured scale,
+  OLConfig field, or LabSpec's axes when not 1/px), two significant figures; > half the field refused; black
+  first frame refused; nothing moves before the checks. (3) move_extra(confirmed_now): only the objective
+  motor, only right after the Yes (runner move study: local confirmed_now, not objective_by_operator).
+  (4) marker_measured / marker_source ('ASSUMED ...'), plot label 'assumed'. 141 tests.
+- 2026-11-22, 2026.11.22.10: Nicola asked for Codex and Cursor at install. Codex was there (SecCodex,
+  ~/.codex/config.toml). Cursor added: clients 'cursor' (~/.cursor/mcp.json, JSON mcpServers, entry type 'stdio';
+  detect: ~/.cursor, %LOCALAPPDATA%\Programs\cursor\Cursor.exe, /Applications/Cursor.app, `cursor` on PATH);
+  winsetup --cursor; installer SecCursor, /CURSOR, ticked when found; CI installs /CURSOR and checks the entry.
+  No timeout key in Cursor's file (progress keepalive covers long waits): to be tried on the instrument PC. 141 tests.
+- 2026-11-22, 2026.11.22.11: Nicola: all four more apps. clients: claudecode (CLAUDE_CONFIG_DIR or ~/.claude.json,
+  top-level mcpServers = user scope, edited directly: `claude mcp add --scope user` misplaced entries in some versions,
+  anthropics/claude-code#16728; type stdio; warning to end sessions), copilot (COPILOT_HOME or
+  ~/.copilot/mcp-config.json, portable format type stdio + tools ['*'], a person's tools kept; VS Code's profile
+  mcp.json, deprecated 'servers' format, untouched), windsurf (~/.codeium/windsurf[-next]/mcp_config.json),
+  lmstudio (~/.lmstudio/mcp.json, Cursor's format). ALIASES (claude-code, lm-studio, vscode, github-copilot), case-
+  insensitive. detect: folders, %LOCALAPPDATA%\Programs\{Windsurf,LM Studio}, VS Code's github.copilot* extension,
+  claude / copilot / windsurf / lms on PATH. Installer: four sections, /CLAUDECODE /COPILOT /WINDSURF /LMSTUDIO,
+  welcome text 910 chars (< 1024). CI installs all and checks each file. INSTALL step 8 notes and approval settings.
+  None tried at the instrument yet. 141 tests.
+- 2026-11-22, 2026.11.22.12: Nicola: a third option on the installer's finish page, prompts to try. PROMPTS.md
+  (first steps, first measurements, advanced, tips; rendered to docs\PROMPTS.html by build_installer DOCS). NSIS:
+  MUI2's finish page has two options only: MUI_PAGE_CUSTOMFUNCTION_SHOW FinishShow adds an nsDialogs checkbox under
+  ShowReadme at the Run-to-ShowReadme spacing (GetWindowRect + MapWindowPoints), their font and MUI_BGCOLOR,
+  checked; FinishLeave opens PROMPTS.html. Start menu 'Prompts to try'. CI checks docs\PROMPTS.html. The page's
+  look to be checked on the built installer (makensis not available here). 141 tests.
+- 2026-11-22, 2026.11.22.13: Nicola installed .12: it ended 'with warnings' because connect always set the
+  Claude Code warning (no session was open). clients.claudecode_running (Win32_Process claude.exe / node.exe:
+  is_claudecode_process: claude.exe outside WindowsApps / AnthropicClaude / Claude-3p, or node with claude-code on
+  the command line; an unreadable path counts as not Claude Code) gates the warning.
+  install.log (Nov 20-22): 'ended (cleanly)' only for .21.1 / .21.4. Sim check: end_running_bridge ends a running
+  bridge cleanly; the .12 20:23 install found it stopped (Nicola: deploy_log bridge_was stopped, ended not running),
+  so not a proven regression; .22.4 / .22.6 to be checked in deploy_log. Now: 'no running bridge found' logged either
+  way (no heartbeat / stopped N s ago / stale heartbeat state, verb, age, with what to do), a failed check warns
+  (was silent), deploy_log adds heartbeat_age_s, verb, bridge_version. Store Packages copy kept an old ls6t entry
+  from .24: clients.clean_stale removes any ls6t server (is_ls6t_entry: args name labspec_translator.mcp_server)
+  from files Claude no longer reads, reports each (removed / not ls6t's / no entry / error). Warm-up: LabSpec
+  20:29:56, bridge 24 s later, grating 0 s (with 18 s and 26 s also 0 s today): LabSpec-start explanation weak;
+  Nov 20-21 slow cases unexplained. 142 tests.
+- 2026-11-22, 2026.11.22.14 (.13 was already tagged): Nicola: the Store build read the Packages copy on Nov 20 (the placeholder error
+  came from it), so a Claude-Data folder is no proof: claude_dirs' 'moved' now needs the app's .user-data-left marker;
+  without it both the Packages copy and Claude-Data are written and nothing is removed. TESTING T0.3: after .14, quit
+  and restart Claude, tools present? running_app_reads, marker present? deploy_log for .22.4 / .22.6: bridge_was
+  stopped, ended not running: only the bridge's own exit writes 'stopped' (a running one beats every second), so no
+  regression. 142 tests.
+  T0.3 passed on .14: running_app_reads Claude-Data\claude_pzs8sxrjxfjjc, 15 tools in 2.48 s, tools present after a
+  restart; marker .user-data-left.claude_pzs8sxrjxfjjc present (122 bytes, 21:17, the install and restart minute:
+  written by the app; ls6t only reads it: clients.claude_dirs iterdir, ls6t_diagnose.ps1 lists it). Deploy: bridge
+  stopped, not running; warm-up 0 s, bridge 20 s after LabSpec (a fourth early start at 0 s).
+- 2026-11-22, 2026.11.22.15: Nicola: the old Packages folder holds only the marker (no config file): the install log
+  now says so (claude_stale_files(existing_only=False) in clean_stale: 'no config file here: ... moved to Claude-Data').
+  142 tests.
+- 2026-11-23, 2026.11.22.16: Nicola on .22.15 (Si, x10, top camera): orientation learnt (flip_y, score 0.996, no
+  swap); video-scale x10 0.977 / 0.982 µm/px, cross-talk 0.05 px, image up = stage -Y, stored x10_VIS@0; bright field
+  0.981 / 0.979, cross-talk 0.84 px (about 0.4 % repeatable; features dark spots); move test within ~0.6 µm over
+  100 µm. Fallback axes had Y reversed (+153 vs -155 µm). video.axes_directions: measured > learned from the same
+  camera (any objective in video_scale.json) > profile video.image_x_right / image_y_up when set > assumed;
+  field_um helper; snapshot directions_from + warning when assumed; runner move.to_um raises Stop when the
+  objective has a field and the directions are assumed. Nicola: twice LabSpec showed bright field with dark-field
+  light after a video restart / objective change (toggling fixed it). LabSpec's own reading would repeat its error,
+  so video.brightness_check (video_brightness.json, mean grey per objective@camera, warn at 2.5x either way) on
+  every snapshot without the laser. Re-asserting the mode needs the illumination motor: IlluminatorV appears among
+  LabSpec's configured motors (labspec_ini); its positions and role to be confirmed (TESTING T5b.2).
+  Nicola (x100 video-scale table): 17 µm 4 % mismatch, 35 µm Y left the 58 µm field, 25 µm consistent. Now:
+  SCALE_STEP_FRACTION 0.4 of the smaller side, X / Y limits against width / height, aspect and rotation_deg stored and
+  compared per camera (SCALE_AGREE 1 %, SCALE_ROT_DEG 0.5; 'disagrees' kept in video_scale.json, warning). Sim: the
+  periodic texture made phase correlation pick false peaks: specks added (seeded, 1500 within 600 µm), sinusoid
+  weakened; image_shift checks the phase-correlation result against the frames' overlap mismatch and otherwise
+  searches (4x reduced, along the moved axis, +-10 % across), integer then parabola. Nicola: IlluminatorV (Dark field,
+  Bright field) and uLight (Off, BrightField, DarkField1-4, Full) are the illumination controls; LaserSwitch (Off, On)
+  switches a laser. motors.illumination / illumination_light from discovery and labspec_ini; status and the video
+  verb read both; illumination_mismatch warns; api.illumination_set (through the other position when LabSpec
+  already shows it) for set --illumination, after an objective change in set and after a camera_on restart.
+  Bridge VMove and the sim refuse LaserSwitch. Proposal: laser_shutter never set (laser_shutter_candidate + note),
+  caps matched by line (+-0.5 nm), a new laser at AUTO_MAX_FILTER_PCT. autocal.assess written_for_labspec;
+  info version_warning against discovered.labspec_version (now recorded). 147 tests.
+- 2026-11-23 (note, no code change): Nicola: while the bridge runs, LabSpec's own grating control is blocked (the
+  operator cannot change the grating in LabSpec's interface). Possibly linked to T3.16 (grating `set` answered in
+  0.02-0.3 s while the turret moves for seconds; first grating status 0-51 s after some bridge starts): LabSpec may
+  treat a running script as holding the spectrometer, and carry out script-requested grating changes differently
+  (queued, deferred to the next acquisition, or reported before the motor moves). To find out (TESTING T3.16):
+  which controls are blocked (grating only, or laser / filter / slit / hole too); blocked from the bridge's start
+  or only after its first grating command; released at once by End bridge; and whether a grating changed in
+  LabSpec with the bridge ended, then the bridge started, gives a fast or slow first status.
+
+- 2026-11-23, 2026.11.23.1: Nicola (.22.15, 637.75 nm, x100): 1800 -> data "-1016 to -974 nm", Spectro -996.66; 1200
+  -> 646-728 nm centred ~687 (asked 659.66); 520 and 1500 cm-1 studies with all motors set gave the same window; the
+  1200's window measures 85-87 nm (profile 39). Cause found: the bridge passed the centre only as Acq From = To, which
+  LabSpec does not use to move the spectrometer. VAcquireInner: single window -> WaitMotor all, MoveMotor Spectro
+  (MOTOR_VALUE, blocking, beat), wait, read back spectro_nm. plan.grating_window_check + window_store
+  (grating_windows.json, learnt when centred) + runner.grating_guard on the first spectrum of every study (and
+  cut-off, background): stop on impossible nm, centre > 1/4 window off, Spectro read-back > 1 nm off, width > 20 %
+  from the learnt one; warn on profile window_nm (defaults look ~2.2x small). Also: save_native was overwritten by
+  `native = map_engine == native` (no .l6s, Remark not checkable): native_map; note_grating_set
+  (last_grating_set.json) from study setups and set, read by the warm-up log. T3.16 item 4: after a hand grating
+  change, the restarted bridge's inventory sat in LabSpec > 76 s (LabSpec restarted). Installer: PROMPTS.html did not
+  open from FinishLeave: state kept in $PromptsWanted (OnClick and leave), opened in .onGUIEnd after a completed
+  install ($InstallDone); fixed fallback position when MUI's checkboxes cannot be measured. 148 tests.
+
+- 2026-11-23, 2026.11.23.2: Nicola: the prompts checkbox shows and something tries to open, but nothing appears.
+  ExecShell from .onGUIEnd (and from the finish page's leave) runs in the installer, which exits at once; the shell's
+  hand-off to the browser can die with it. OpenWithExplorer: Exec explorer.exe "<file>" (its own process) for the
+  prompts, the guide (MUI_FINISHPAGE_SHOWREADME_FUNCTION OpenGuide) and the scripts folder. 148 tests.
+
+- 2026-11-23, 2026.11.23.3: the maintainer's Codex session (.22.16, rollout log): connect (old halted heartbeat 67 h:
+  diagnose now says halted); profile reviewed and imported (powers 532/638/785: 100/35/100 mW) from the Nov 20
+  proposal, so no objectives_info, cameras or illumination motor (profile._ini_facts: OLConfig descriptions added
+  at load when missing, cached by file mtime, never replacing a person's value; facts_from_ini). video_scale x10 on
+  the internal camera (1): X -213 px for 240 µm (1.126 µm/px), Y NaN (move out of view: image_shift returns NaN only
+  when nothing overlaps; frac guards inf); with ls6t's live video on, no shift at all: the live image froze (LabSpec
+  help: in ActiveX mode GET_VIDEO_ID must be called during the entire video) -> common.VidKeep (gVidOwn, every 0.2 s
+  from the main loop, WaitStoppable, WaitMotor). Illumination fell to dark field after video starts -> IllumBefore /
+  IllumRestore around the bridge's video starts (VCamera on, VVideo), camera verb now gets motor_args. Top camera = 0
+  confirmed (camera 1 internal); x10@0: 0.977 / 0.982 µm/px with 50 µm (repeats Nicola's). Silicon 532 nm 100-1000
+  cm-1 5 s: ls6t declared the bridge stuck after 20 s inside 'acquire' while LabSpec was still collecting (Acq holds
+  the script for an extended range) -> gBlocking 'acquire' + blocking_s (the command's timeout) in the heartbeat,
+  bridge.blocking_allowance. Seen once: a snapshot read Y -81.1 µm right after status read -0.2 (unexplained).
+  149 tests.
+- 2026-11-23, 2026.11.23.4: code audit (audit.pdf): Nicola chose the low-risk cleanups now, the core refactors
+  for later (planning.md, Deferred). Done: version only in __init__.py (pyproject dynamic attr; 25 'Version:' lines
+  and the guides' version stamps removed); README Versions -> CHANGELOG.md (78 rows, newest first); planning State
+  log -> planning_log.md; store.py (path / read / write, sim_ prefix, replace_retry) used by perf, xcal (as jstore:
+  xcal has its own store()), spot, background index, video's three stores and plan.window_store; profile.stamp and
+  profile.isfinite removed (no callers; the audit's render.is_finite does not exist); tools/ls6t_fix_claude.ps1
+  removed; tests split (conftest.py autouse env, helpers.py, 9 files, 139 test functions, 148 with parameters).
+  Not done, with reason: typelib.py stays (the installed ls6t-typelib command); testmode.py and
+  script_motor_main.vbs stay during bring-up. Release routine from now on: bump __init__.py, a CHANGELOG.md row, a
+  planning_log.md entry.

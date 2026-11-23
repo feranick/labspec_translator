@@ -12,7 +12,7 @@ stops and cancel on the simulator, and `ls6t bench` gives known answers. What re
 LabSpec and hardware. The plan goes from no laser and no motion to an LLM app driving a full map, in stages. Each
 stage starts only when the previous one passed.
 
-Version under test: 2026.11.23.3 (bridge protocol 1).
+Version under test: the one `ls6t --version` prints (bridge protocol 1); write it in the results table.
 
 **Already known** (2026-11-20, from the instrument's discovery dump, its `NFActiveX.ocx`, `OLConfig.ini`,
 `OLSetup.ini` and LabSpec 6.7.1's service scripts): the motors and their positions (lasers 532, 637.75, 785.04 nm;
@@ -113,7 +113,7 @@ files already showed.
 | Q31 | Native maps: does `GetAcqID` return the map when it ends, and does `ACQ_CANCEL` stop it? | T6.7 |
 | Q32 | Native maps: in which order are the values in `GetValue(map, "Data")` (`mapping.data_order`), and how long does writing out a 50 × 50 map take? Does `Save(map, "...txt", "txt")` write LabSpec's text export? | T6.7 |
 | Q33 | Is SWIFT available on this XploRA (`GetValue SWIFT`), and how much faster is it? Time per point native vs point by point (`mapping.native_point_s`) | T6.7 |
-| Q34 | Which commands does the installed LabSpec offer beyond the 2018 manual? **Known:** 15 methods in the `NFActiveX.ocx` type library (planning.md); HORIBA's scripts also use `Dialog`, `OperVar`, `GUI`, `SetSingleScriptParam`, `SetDetectorZone`, `SetAutoExposure`, `MoveXY`, `MapEx`, `Send`. Re-run `ls6t-typelib` after a LabSpec update. | T1.3 |
+| Q34 | Which commands does the installed LabSpec offer beyond the 2018 manual? **Known:** 15 methods in the `NFActiveX.ocx` type library (planning_log.md); HORIBA's scripts also use `Dialog`, `OperVar`, `GUI`, `SetSingleScriptParam`, `SetDetectorZone`, `SetAutoExposure`, `MoveXY`, `MapEx`, `Send`. Re-run `ls6t-typelib` after a LabSpec update. | T1.3 |
 | Q35 | `GetValueSimplePart(id, "Data", 0, VT_R4, start, size)`: in which units are start and size? **Known: not values** (size 8 gave 2 values: bytes?), so native maps are read whole (`mapping.export_chunk` 0). Discovery no longer probes it (its write probe is the suspect in the 2026-11-20 crash): left open, chunked export stays off. | — |
 | Q36 | `SaveConfig(ini, 0)` / `LoadConfig(ini, 0)`: what does the file hold (laser, grating, filter, hole, slit, acquisition settings, stage?), does `ShowDialog` 0 run without a dialog, and does loading move motors? Is it safe to restore it after each request (`session.restore_config`)? | T1.4 |
 | Q37 | `GetConfigParam`: what parameters does it list? **Known: it works, and lists none** for the bridge (it is the script's own configuration; no longer probed). `SetConfigParam` is not used. | — |
@@ -143,7 +143,7 @@ Every record goes to `%USERPROFILE%\ls6t\testing\log.jsonl`, and `%USERPROFILE%\
 this plan's results table filled in, with the answers to the open questions (`ls6t test report`; `ls6t test plan`
 shows what is done and what is next).
 
-After the session, the tester adds a dated entry to `planning.md` (*State log*). It says what passed, the answers to
+After the session, the tester adds a dated entry at the end of `planning_log.md`. It says what passed, the answers to
 Q1–Q45, and the measured times, and lists anything to change.
 
 ---
@@ -249,7 +249,7 @@ ls6t profile import "$HOME\ls6t\profile.proposed.json"
 Pass: a laser with `nm`, `max_filter_pct` or `power_mw` blank is refused (try once); after the import, `ls6t status`
 shows `profile.reviewed: true`; `ls6t format` shows the instrument's choices and the limits agreed.
 
-**T1.3 The installed LabSpec's commands (Q34).** Done on 2026-11-20 from the `.ocx` (planning.md). Repeat only after
+**T1.3 The installed LabSpec's commands (Q34).** Done on 2026-11-20 from the `.ocx` (planning_log.md). Repeat only after
 a LabSpec update: `ls6t-typelib --format markdown --out labspec_commands.md`, and compare.
 
 **T1.4 LabSpec configurations and script motors (Q36, Q38; maintainer; no laser).** Start the bridge first (T2.1).

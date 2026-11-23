@@ -1,5 +1,4 @@
 """mcp_server.py — MCP server: lets LLM-based tools run Raman measurements on a HORIBA instrument through LabSpec 6.
-Version: 2026.11.23.3
 
 Tools (all JSON):
   study_format      the study format, the profile's choices and limits, the bridge's state. Read it first.

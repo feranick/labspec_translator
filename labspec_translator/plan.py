@@ -1,5 +1,4 @@
 """plan.py — a study as bridge commands: the setup moves, the points, the acquisitions; and the time estimate.
-Version: 2026.11.23.3
 
 Everything here is computed from the study and the profile alone: wavelengths from Raman shifts, the number of
 detector windows, the stage positions (always offsets from where the operator left the stage, Z from the
@@ -126,20 +125,13 @@ GRATING_WIDTH_TOL = 0.2    # a window this much wider or narrower than the one m
 def window_store(new: dict | None = None) -> dict:
     """The width of one detector window, measured per grating and laser (LS6T_HOME/grating_windows.json,
     "<grating>@<laser nm>": {width_nm, center_nm, time}): learnt from acquisitions whose centre was right."""
-    import json
-    from . import config
-    path = config.home() / "grating_windows.json"
+    from . import store
     if new is not None:
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(new, indent=1), encoding="utf-8")
+            return store.write("grating_windows.json", new)
         except OSError:
-            pass
-        return new
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
+            return new
+    return store.read("grating_windows.json")
 
 
 def grating_window_check(x, x_unit: str, laser_nm, grating, prof: dict, rng: dict, learn: bool = True) -> dict:
@@ -800,7 +792,6 @@ def estimate(study: dict, prof: dict, current: dict | None = None) -> dict:
     laser = laser_nm(study, prof)
     rng = acq_range(study, prof, laser)
     pts = positions(study)
-    s = study.get("setup", {})
     parts = setup_parts(study, prof, current)
     setup = sum(parts.values())
     focus = study.get("focus", {})

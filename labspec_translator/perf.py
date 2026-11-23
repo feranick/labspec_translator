@@ -1,5 +1,4 @@
 """perf.py — the instrument's measured performance, remembered between sessions.
-Version: 2026.11.23.3
 
 Four kinds of measurement, each kept per key with its history (the first record is the baseline):
 
@@ -16,18 +15,16 @@ own). They feed warnings (a range below the cut-off, a resolution worse than the
 """
 from __future__ import annotations
 
-import json
-import os
 import time
 from pathlib import Path
 
-from . import config
+from . import store
 
 KINDS = ("filters", "axial", "resolution", "cutoff")
 
 
 def path() -> Path:
-    return (config.out_dir() / "sim_performance.json") if config.mode() == "sim" else (config.home() / "performance.json")
+    return store.path("performance.json")
 
 
 def _num(v) -> str:
@@ -42,18 +39,11 @@ def key(*parts) -> str:
 
 
 def load() -> dict:
-    try:
-        return json.loads(path().read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
+    return store.read("performance.json")
 
 
 def _save(d: dict):
-    p = path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(".tmp")
-    tmp.write_text(json.dumps(d, indent=1, default=str), encoding="utf-8")
-    os.replace(tmp, p)
+    store.write("performance.json", d)
 
 
 def record(kind: str, k: str, entry: dict, request: str | None = None) -> dict:

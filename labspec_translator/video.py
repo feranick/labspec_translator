@@ -1,5 +1,4 @@
 """video.py — video snapshots: decoding the bridge's frame file and drawing it with the laser position marked.
-Version: 2026.11.23.3
 
 The bridge writes a cloned video frame as '# key=value' header lines (axis types, sizes, units, values) and the
 pixel values in LabSpec's order. LabSpec's video axes are taken to be stage coordinates in µm ('mkm'), so the laser
@@ -194,20 +193,13 @@ BRIGHTNESS_RATIO = 2.5      # a frame this much darker (or brighter) than the la
 def _brightness_store(new: dict | None = None) -> dict:
     """The mean grey level of the last frame without the laser, per objective and camera
     (LS6T_HOME/video_brightness.json)."""
-    import json
-    from . import config
-    p = config.home() / "video_brightness.json"
+    from . import store
     if new is not None:
         try:
-            p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(json.dumps(new, indent=1), encoding="utf-8")
+            return store.write("video_brightness.json", new)
         except OSError:
-            pass
-        return new
-    try:
-        return json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
+            return new
+    return store.read("video_brightness.json")
 
 
 def brightness_check(dec: dict, objective, camera) -> tuple[dict, str | None]:
@@ -258,20 +250,13 @@ def illumination_mismatch(illum, light) -> str | None:
 def scale_store(new: dict | None = None) -> dict:
     """µm per pixel and the axis signs measured per objective and camera (instrument video_scale):
     LS6T_HOME/video_scale.json {"<objective>@<camera>": {"sx": µm/px along +image x, "ty": µm/px along -image y}}."""
-    import json
-    from . import config
-    p = config.home() / "video_scale.json"
+    from . import store
     if new is not None:
         try:
-            p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(json.dumps(new, indent=1), encoding="utf-8")
+            return store.write("video_scale.json", new)
         except OSError:
-            pass
-        return new
-    try:
-        return json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
+            return new
+    return store.read("video_scale.json")
 
 
 def _phase_shift(a: np.ndarray, b: np.ndarray) -> tuple[float, float]:
@@ -587,20 +572,13 @@ def render(dec: dict, png: Path, marker: tuple | None, title: str, note: str = "
 
 def _orientation_store(new: dict | None = None) -> dict:
     """The frame orientation found per camera (LS6T_HOME/video_orientation.json): read, or written when new."""
-    import json
-    from . import config
-    p = config.home() / "video_orientation.json"
+    from . import store
     if new is not None:
         try:
-            p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(json.dumps(new, indent=1), encoding="utf-8")
+            return store.write("video_orientation.json", new)
         except OSError:
-            pass
-        return new
-    try:
-        return json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
+            return new
+    return store.read("video_orientation.json")
 
 
 def snapshot(res: dict, prof: dict, base: Path, title: str, laser_nm=None) -> dict:

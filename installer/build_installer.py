@@ -1,5 +1,4 @@
 """build_installer.py — builds the Windows installer of labspec-translator: dist/ls6t-setup-<version>.exe.
-Version: 2026.11.23.3
 
   python installer/build_installer.py                 # everything (needs network and NSIS)
   python installer/build_installer.py --no-nsis       # stage the files only (build/installer/stage)

@@ -1,5 +1,4 @@
 """spot.py — where the laser beam really is: the measured offsets, remembered per objective and laser.
-Version: 2026.11.23.3
 
 LabSpec marks the laser at the stage position (the image centre); the beam drifts away from it. Each 'spot' study
 (or snapshot with the laser) that finds the beam reliably records the offset (beam - LabSpec's position, µm) for
@@ -9,17 +8,15 @@ itself (LS6T_HOME/spot.json; the simulator keeps its own); the profile's spot se
 """
 from __future__ import annotations
 
-import json
 import math
-import os
 import time
 from pathlib import Path
 
-from . import config
+from . import store
 
 
 def path() -> Path:
-    return (config.out_dir() / "sim_spot.json") if config.mode() == "sim" else (config.home() / "spot.json")
+    return store.path("spot.json")
 
 
 def key(objective, laser_nm) -> str:
@@ -31,18 +28,11 @@ def key(objective, laser_nm) -> str:
 
 
 def load() -> dict:
-    try:
-        return json.loads(path().read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {"records": {}, "history": []}
+    return store.read("spot.json") or {"records": {}, "history": []}
 
 
 def _save(d: dict):
-    p = path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(".tmp")
-    tmp.write_text(json.dumps(d, indent=1), encoding="utf-8")
-    os.replace(tmp, p)
+    store.write("spot.json", d)
 
 
 def current(objective, laser_nm) -> dict | None:

@@ -1,6 +1,5 @@
 """background.py — white-light backgrounds: spectra taken with the white light on and the laser off, kept by name and
 subtracted from later spectra taken with the same light.
-Version: 2026.11.23.3
 
 A background is stored as counts per second per accumulation against wavelength (nm), with the settings it was
 taken with (laser line, grating, objective, range). Subtraction scales it by each spectrum's exposure and
@@ -8,7 +7,6 @@ interpolates it onto the spectrum's axis; spectra keep their raw files, and resu
 """
 from __future__ import annotations
 
-import json
 import os
 import re
 import time
@@ -16,11 +14,11 @@ from pathlib import Path
 
 import numpy as np
 
-from . import config
+from . import store
 
 
 def folder() -> Path:
-    return (config.out_dir() / "sim_backgrounds") if config.mode() == "sim" else (config.home() / "backgrounds")
+    return store.path("backgrounds")
 
 
 def _index_path() -> Path:
@@ -28,10 +26,7 @@ def _index_path() -> Path:
 
 
 def index() -> dict:
-    try:
-        return json.loads(_index_path().read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
+    return store.read("backgrounds/index.json")
 
 
 def valid_name(name: str) -> bool:
@@ -51,9 +46,7 @@ def save(name: str, x, y_cps, x_unit: str, meta: dict) -> dict:
     idx = index()
     idx[name] = {**meta, "x_unit": x_unit, "file": str(data), "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
                  "points": int(len(x))}
-    tmp = _index_path().with_suffix(".tmp")
-    tmp.write_text(json.dumps(idx, indent=1), encoding="utf-8")
-    os.replace(tmp, _index_path())
+    store.write("backgrounds/index.json", idx)
     return idx[name]
 
 

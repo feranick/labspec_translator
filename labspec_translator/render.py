@@ -1,5 +1,4 @@
 """render.py — PNG pictures of a study's results (matplotlib, optional extra 'render').
-Version: 2026.11.23.3
 
 spectrum / calibration / series: the spectrum (or the first and last of a series) with its baseline and fitted
 peaks; map: one image per peak quantity and band (position, FWHM, height or area), positions in µm offsets.

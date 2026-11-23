@@ -1,5 +1,4 @@
 """profile.py — the machine profile: what the instrument has (from the discovery script) and the limits a person sets.
-Version: 2026.11.23.3
 
 The profile is a JSON file (LS6T_PROFILE, default ~/ls6t/profile.json). Studies never change it: an LLM can only
 ask for what the profile allows. Without a file, the built-in XploRA defaults below apply and every result says so
@@ -10,7 +9,6 @@ from __future__ import annotations
 
 import copy
 import json
-import math
 import re
 import time
 from pathlib import Path
@@ -739,10 +737,6 @@ def camera_number(prof: dict, camera) -> tuple:
         return None, f"camera {camera!r}: known cameras: {known}; or give its number"
 
 
-def stamp() -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%S")
-
-
 def nm_to_shift(nm, laser_nm: float):
     """Raman shift (cm-1) of absolute wavelengths (nm) for a laser line (nm). Works on numbers and numpy arrays."""
     return 1e7 / laser_nm - 1e7 / nm
@@ -750,10 +744,3 @@ def nm_to_shift(nm, laser_nm: float):
 
 def shift_to_nm(cm1, laser_nm: float):
     return 1e7 / (1e7 / laser_nm - cm1)
-
-
-def isfinite(x) -> bool:
-    try:
-        return math.isfinite(float(x))
-    except (TypeError, ValueError):
-        return False

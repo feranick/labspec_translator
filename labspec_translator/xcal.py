@@ -1,5 +1,4 @@
 """xcal.py — the spectral (Raman shift) calibration: reference lines, and the correction ls6t may apply itself.
-Version: 2026.11.23.3
 
 At the start of a session the zero of the spectral scale is checked on a sample with strong, well-known lines
 (silicon, polystyrene...). LabSpec's own correction (the spectrometer's zero and its dispersion coefficient, in
@@ -9,12 +8,10 @@ applies it to every later spectrum, saying so in each result. Corrections live i
 """
 from __future__ import annotations
 
-import json
-import os
 import time
 from pathlib import Path
 
-from . import config
+from . import store as jstore
 
 # reference Raman shifts (cm-1)
 REFERENCES = {
@@ -29,7 +26,7 @@ REFERENCES = {
 
 
 def path() -> Path:
-    return (config.out_dir() / "sim_xcal.json") if config.mode() == "sim" else (config.home() / "xcal.json")
+    return jstore.path("xcal.json")
 
 
 def key(laser_nm, grating) -> str:
@@ -42,18 +39,11 @@ def key(laser_nm, grating) -> str:
 
 
 def load() -> dict:
-    try:
-        return json.loads(path().read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
+    return jstore.read("xcal.json")
 
 
 def _save(d: dict):
-    p = path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(".tmp")
-    tmp.write_text(json.dumps(d, indent=1), encoding="utf-8")
-    os.replace(tmp, p)
+    jstore.write("xcal.json", d)
 
 
 def get(laser_nm, grating) -> dict | None:
