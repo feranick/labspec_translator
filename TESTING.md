@@ -644,10 +644,19 @@ with AE on and note it. Until one is found, switch AE off by hand: ls6t stops ra
 **The flush (`t_flush_s` 1.62 s) is shortened in .23.15**: it stops when GetAcqID answers the same three times
 (`flush_tries`, `flush_last_id` in the answer) and never takes that answer for the new spectrum. Check that
 `t_flush_s` drops below 0.2 s and spectra are still this acquisition's (the Remark's `ls6t <seq>`).
-**On .23.15:** `auto_exposure_name` stayed empty with AE on and off: none of the six names reads. LabSpec's
-GetValue name for AutoExposure is still unknown (to look for in LabSpec's ActiveX help under GetValue / PutValue,
-or with HORIBA); until then AE is switched off by hand, and ls6t stops a study whose exposure differs from the one
-asked.
+**On .23.15:** `auto_exposure_name` stayed empty with AE on and off: none of the six names reads. **Found in
+LabSpec 6.8.1's help (`HELP\VBS\Template.html`, `constants.vbm`):** AutoExposure is a template value,
+`Template(TEMPLATE_GET_VALUE = 4 / TEMPLATE_SET_VALUE = 3, "AutoExposure", value)`; `Acq` already receives the asked
+exposure (the bridge passes it), and LabSpec's AE still replaced it. **From .23.17** the bridge reads it through
+`Template` (`status`: `auto_exposure`, with `ae_status_param` / `ae_status_return`, since the help's lines 31–53 on
+what GET returns are still to read) and writes it only when the profile has `autoexposure.switch_off: true`, then
+puts the value read back after the acquisition (`auto_exposure_before`, `_set`, `_after` in the answer). It never
+applies a template. Steps: (1) `ls6t instrument status` with AE on and with AE off: note `auto_exposure`,
+`ae_status_param`, `ae_status_return`. (2) Read `Template.html` lines 31–53 (what SET / GET take and return, the
+values of "AutoExposure", whether SET_VALUE changes the live settings or a stored template that must be applied).
+(3) Only if SET_VALUE acts on the live settings: `ls6t profile set autoexposure.switch_off true`, AE on in LabSpec, a
+1 × 2 s spectrum. Pass: `exposure_s` 2 from LabSpec's header and LabSpec shows AE again afterwards. Until then AE is
+switched off by hand; ls6t stops a study whose exposure differs from the one asked.
 
 **T4.9b LabSpec's AutoCalibration from ls6t (maintainer; the laser fires on Si).** `ls6t profile set calibration.autocal '{"enabled": true, "method": "call", "mode": "full"}'`, Si wafer in focus, 532 nm, 1200, 10 %; `ls6t instrument autocal-run`: LabSpec asks, then runs its AutoCalibration. Pass: `ok`, `changed` lists the 1200's parameters (as by hand: offset 34 -> 44 on 2026-11-23), and a calibration check after it passes. If the answer says LabSpec does not offer the call to scripts, set `"enabled": false` and keep running it from LabSpec's menu.
 

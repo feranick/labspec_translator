@@ -80,6 +80,11 @@ def motor_args(prof: dict) -> dict:
     return {**{f"m_{k}": v for k, v in prof["motors"].items()}, **shutter_args(prof)}
 
 
+def ae_off(prof: dict) -> int:
+    """1 when the bridge may switch LabSpec's AutoExposure off through its template for a fixed exposure."""
+    return int(bool((prof.get("autoexposure") or {}).get("switch_off")))
+
+
 def shutter_args(prof: dict) -> dict:
     """How the bridge moves the laser shutter: by its positions' labels (Off / On), read back."""
     sh = prof.get("shutter") or {}
@@ -141,6 +146,8 @@ class Ctx:
                                                                               "file exists for this pair)"
                                                                        if plan.ics_files(self.prof) is not None
                                                                        else "LabSpec's setting")
+        if verb == "acquire":
+            params.setdefault("ae_off", ae_off(self.prof))
         t0 = time.monotonic()
         try:
             r = self.bridge.call(verb, timeout_s=timeout_s, should_stop=self.cancelled, on_wait=self.beat, **params)

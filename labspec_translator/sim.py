@@ -997,7 +997,7 @@ class SimLabSpec:
         ae_on = (self.dir / "sim_autoexposure").exists()
         if exp > 0 and ae_on:
             extra["auto_exposure_before"] = 1
-            if (self.dir / "sim_ae_sticky").exists():
+            if (self.dir / "sim_ae_sticky").exists() or str(p.get("ae_off", "0")) != "1":
                 extra["auto_exposure_set"] = 1
                 exp = exp * 1.5
             else:

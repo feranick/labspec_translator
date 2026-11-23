@@ -437,8 +437,7 @@ Sub VStatus(cmd, res)
     res("z_um") = MotorValue(GetP(cmd, "m_z", "Z"))
     res("exposure_s") = LSValue(0, "LabSpecExposureTime")
     res("accumulations") = LSValue(0, "LabSpecAccumulation")
-    res("auto_exposure_name") = AeName()
-    If res("auto_exposure_name") <> "" Then res("auto_exposure") = LSValue(0, res("auto_exposure_name"))
+    res("auto_exposure") = TplGet("AutoExposure", res, "ae_status")
     If GetP(cmd, "m_laser_shutter", "") <> "" Then res("laser_shutter_label") = MotorLabel(GetP(cmd, "m_laser_shutter", ""))
     res("shutter_mode") = LSValue(0, "ShutterMode")
     res("last_error") = LabSpecError()
@@ -1234,47 +1233,76 @@ End Function
 ' LabSpec's AutoExposure (status bar 'AE') replaces the exposure asked (2026-11-23: 2 s asked, 15 s used, the
 ' results said 2 s). For a fixed exposure the bridge switches it off for the acquisition and puts it back after;
 ' ls6t checks the exposure LabSpec reports in the spectrum's acquisition info either way.
-Function AeName()
-    ' LabSpec's name for AutoExposure in GetValue / PutValue is not documented: 'AutoExposure' reads "" on the
-    ' XploRA (2026-11-23); the first of these that reads a value is used, and reported
-    Dim n
-    AeName = ""
-    For Each n In Array("LabSpecAutoExposure", "AutoExposure", "LabSpecAutoExposition", "AutoExposition", _
-                        "LabSpecAE", "AcqAutoExposure")
-        If CStr(LSValue(0, n)) <> "" Then
-            AeName = n
-            Exit Function
-        End If
-    Next
+' LabSpec's AutoExposure (status bar 'AE') is a template value, reached with Template (LabSpec 6.8.1's help,
+' Template.html: TEMPLATE_SET_VALUE 3, TEMPLATE_GET_VALUE 4, value "AutoExposure"), not GetValue / PutValue: six
+' GetValue names read nothing (2026-11-23). TplGet returns what LabSpec gives back (the third argument, or the
+' call's result) and records both, since the help does not say which carries the value.
+Function TplGet(name, res, tag)
+    Dim v, r
+    TplGet = ""
+    v = ""
+    On Error Resume Next
+    r = LabSpec.Template(LS_TEMPLATE_GET_VALUE, name, v)
+    If Err.Number <> 0 Then
+        res(tag & "_error") = ErrText("Template GET_VALUE " & name)
+        Err.Clear
+        On Error GoTo 0
+        Exit Function
+    End If
+    On Error GoTo 0
+    res(tag & "_param") = v
+    res(tag & "_return") = r
+    If CStr(v) <> "" Then
+        TplGet = v
+    Else
+        TplGet = r
+    End If
 End Function
 
+Function TplSet(name, value, res, tag)
+    Dim r
+    TplSet = False
+    On Error Resume Next
+    r = LabSpec.Template(LS_TEMPLATE_SET_VALUE, name, value)
+    If Err.Number <> 0 Then
+        res(tag & "_error") = ErrText("Template SET_VALUE " & name)
+        Err.Clear
+    Else
+        res(tag & "_return") = r
+        TplSet = True
+    End If
+    On Error GoTo 0
+End Function
+
+Function AeIsOn(v)
+    Dim x
+    x = LCase(Trim(CStr(v)))
+    AeIsOn = (x <> "" And x <> "0" And x <> "off" And x <> "false")
+End Function
+
+' LabSpec's AutoExposure replaces the exposure given to Acq (2026-11-23: Acq was given 2 s, LabSpec exposed 15 s):
+' for a fixed exposure the bridge switches it off through the template for the acquisition and puts it back after;
+' ls6t checks the exposure in the spectrum's acquisition info either way.
 Sub VAcquire(cmd, res)
-    Dim aeBefore, aeOff, aeN
+    Dim aeBefore, aeOff
     aeBefore = ""
-    aeN = ""
     If ParseNum(GetP(cmd, "exposure_s", "1")) > 0 Then
-        aeN = AeName()
-        res("auto_exposure_name") = aeN
-        If aeN <> "" Then aeBefore = LSValue(0, aeN)
+        aeBefore = TplGet("AutoExposure", res, "ae_get")
         res("auto_exposure_before") = aeBefore
-        aeOff = LCase(CStr(aeBefore))
-        If aeOff <> "" And aeOff <> "0" And aeOff <> "off" And aeOff <> "false" Then
+        ' written only when the profile allows it (autoexposure.switch_off): until LabSpec's help says whether
+        ' SET_VALUE changes the live settings or a stored template, the bridge only reads it
+        If AeIsOn(aeBefore) And GetP(cmd, "ae_off", "0") = "1" Then
             aeOff = 0
-            On Error Resume Next
-            LabSpec.PutValue 0, aeN, aeOff
-            Err.Clear
-            On Error GoTo 0
-            res("auto_exposure_set") = LSValue(0, aeN)
+            If TplSet("AutoExposure", aeOff, res, "ae_set") Then
+                res("auto_exposure_set") = TplGet("AutoExposure", res, "ae_check")
+            End If
         Else
             aeBefore = ""                     ' off already (or not readable): nothing to put back
         End If
     End If
     VAcquireLaser cmd, res
     If CStr(aeBefore) <> "" Then
-        On Error Resume Next
-        LabSpec.PutValue 0, aeN, aeBefore
-        Err.Clear
-        On Error GoTo 0
+        If TplSet("AutoExposure", aeBefore, res, "ae_restore") Then res("auto_exposure_after") = TplGet("AutoExposure", res, "ae_after")
     End If
 End Sub
 

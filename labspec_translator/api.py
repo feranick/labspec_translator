@@ -851,7 +851,7 @@ def shutter_verify(exposure_s: float = 2.0) -> dict:
         nm = shift_to_nm(520.7, laser)
         mode = 10 + plan.SPIKE_MODES["double"] + (plan.ACQ_NO_ICS if plan.ics_off(prof, laser, grating) else 0)
         common = dict(mode=mode, exposure_s=ex, accumulations=2, from_nm=round(nm, 4), to_nm=round(nm, 4),
-                      **runner.motor_args(prof))
+                      ae_off=runner.ae_off(prof), **runner.motor_args(prof))
         meas = {}
         for tag, extra in (("reference", {}), ("shutter_closed", dict(laser_off=1))):
             f = d / f"{tag}.txt"
