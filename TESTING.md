@@ -614,8 +614,11 @@ remembering them per camera; the scale comes from the objective's field of view 
 about 3 × low. From .23.16 each step records `exposure_used_s` (LabSpec's), `max_counts`, `saturated`,
 `filter_read_back` and its move's timing, and the reference filter is measured again at the end
 (`checks.reference_repeat.ratio_to_first`; off by more than 10 %: drift, unreliable). Repeat it on Si (637.75 nm,
-x100) and send the steps: a low step with `ratio_to_first` near 1 and the right `filter_read_back` points at the
-filter itself or its exposure; a drifting reference points at focus or power. (b) `laser_on` asks every time (the
+x100) and send the steps. The hardware is already excluded: plain spectra at the same spot, same session, gave
+1376 cps at 10 % and 137–159 cps at 1 % (the 1 % filter close to nominal), with the exposures confirmed in LabSpec's
+headers. So a low second step with `ratio_to_first` near 1 and the right `filter_read_back` points at the study's
+own second step (its window, its measure, or the timing around the filter move: compare its `move` timing and
+`exposure_used_s` with the plain spectrum's), not at the filter; a drifting reference points at focus or power. (b) `laser_on` asks every time (the
 operator's Yes in LabSpec); a repeated laser_on that took 0.2 s in all cannot have been answered by a person. From
 .23.16 the answer is timed (`confirm_s`) and a Yes faster than 0.4 s is not taken: repeat `ls6t instrument
 laser-on --seconds 5` twice and note `confirm_s` and whether LabSpec showed the question both times.
