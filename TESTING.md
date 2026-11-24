@@ -266,7 +266,13 @@ With the maintainer, go through:
   another exposure (`burst_check`: a burst gives the same counts at any exposure, a steady leak counts in proportion;
   try `--seconds 2 --burst-seconds 8`); every attempt, passed or not, is kept (`attempts` in `shutter_verified.json`;
   a pass records `failed_attempts_before` and the recent attempts); the default limit is 0.5 % (about 3 × the worst
-  seen; a profile saved earlier may still say 0.001: `ls6t profile set shutter.max_leak_frac 0.005`). Only a
+  seen; a profile saved earlier may still say 0.001: `ls6t profile set shutter.max_leak_frac 0.005`).
+  **The burst confirmed on every laser (2026-11-23):** the closed shutter passes a few counts per acquisition
+  whatever the exposure (532: 0.5–1.7; 637.75: 1.3–3.5; 785.04: 1.3–3.3; on 785 nm 1.6–6.6 counts at 2 s against 2.55 at
+  8 s, `burst_check` "a burst per acquisition"), so the fraction depends on each laser's Si signal (785 nm: about 680
+  cps against 4500 at 532). 785 nm failed at 2 s on the burst alone and passed at 8 s (0.042–0.048 %); 532 nm passed at
+  2 s (0.019 %). **From .23.26 the default verification exposure is 8 s** (2 accumulations, 1 reference + 3 closed:
+  about a minute of laser on Si). Only a
   pass writes the record (`shutter_verified.json`: date, laser, version, motor, how it is moved, the ratio,
   `during_checked`) without which ls6t refuses every use of the shutter: `laser_off: "shutter"` (background, cutoff;
   without it they default to `operator`), `laser_on`, snapshots with the laser and `spot` 'shutter'. A record is
@@ -749,6 +755,28 @@ mode 0; On while held); `status` afterwards `shutter_held` 0, shutter Off, mode 
 10 s); in longer maps keep the laser line in the window (`checks.laser_line` reports every spectrum's position, and
 `laser_reference: "correct"` follows a drift too). Set: `ls6t profile set lasers.637.75.hold_shutter true` and
 `lasers.637.75.settle_s 0` (a laser is found by its wavelength since .23.23).
+**Not every kind held on .23.24:** a `filters` study with 637.75 nm and `hold_shutter` true (`run_20261123_221051_ab4daf`)
+had no `shutter_hold` and the same fall (10 % 1405.7 cps → 1 % 75.8, 0.54 ×; reference again 484.9, 0.345 ×): the hold
+lived in the spectrum/map/series/depth runner only, and `unstable_multi` accepted the profile's hold anyway. **From
+.23.25** the hold applies to every study that acquires (spectrum, map, series, depth, filters, focus, spot,
+calibration, alignment, guide; not move, background, cutoff): it is taken before the study's first acquisition, the
+bridge keeps it through the spectra, LabSpec's own map, the guided loop, motor and stage moves, the live view and quick
+reads, and ls6t takes it again if another command (a snapshot, an autofocus, the operator's question) let it go
+(`shutter_hold.times_held` above 1 then, with a warning). LabSpec's own map engine is accepted for an `unstable_multi`
+laser when held. **Test:** the same `filters` study: `shutter_hold.held` and `released` true, `times_held` 1, and the
+transmissions near nominal (10 % → 1 % about 0.1 ×, the reference again near 1).
+**First map and series held (.23.24, 637.75 nm, 1200, 1 %, 1 s):** map 3 × 3, 2 µm (`run_20261123_221434_2536da`):
+laser −3.52 to −3.76 (σ 0.07), Si 520.47–520.72 (σ 0.09), no jumps, about 2.5 s per point; series of 5, 5 s apart
+(`run_20261123_221637_872628`): intervals kept, laser −3.45 to −3.72, Si 520.75–520.90. Notes and changes (.23.25):
+(a) the map's live view in LabSpec failed ("LabSpec could not create the map"): the bridge now tries again without
+the spectral range and gives Map's return value and LabSpec's last error (`map_create_return`, `_2`); send them if
+it still fails. (b) The spectrometer move after a grating change (2400 → 1200) took 38.8 s (37 s before): LabSpec's
+own MoveMotor of the spectrometer, which the bridge waits on; to look at with HORIBA's timing (a slow spectrometer
+drive after a grating change?) — it is `t_spectro_call_s` in `timing`. (c) The estimate includes the series' waits
+(`seconds.series_waits`; `acquisitions` alone leaves them out). (d) Series spectra are now saved as `.l6s` too. (e) A
+series whose spectra are further apart than the laser's `settle_s` is not held (the beam is off the sample between
+spectra): with `lasers.637.75.settle_s 5` and `hold_shutter true`, a series 5 s or more apart lets LabSpec's shutter
+cycle, faster ones are held; `acquire.shutter` in a study decides otherwise.
 
 **T3.19 LabSpec's AutoExposure (2026-11-23, .23.13).** With AutoExposure On in LabSpec (status bar "AE"), a
 spectrum asking 2 s ran 15 s while ls6t reported 2 s (this explains most of the 23–64 s acquisitions of T3.17).

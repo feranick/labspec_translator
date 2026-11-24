@@ -211,7 +211,7 @@ def main(argv=None) -> int:
         if a.action == "shutter-test":
             _print(api.shutter_test(a.motor))
         elif a.action == "shutter-verify":
-            _print(api.shutter_verify(a.seconds or 2.0, a.repeats, a.burst_seconds))
+            _print(api.shutter_verify(a.seconds or api.VERIFY_EXPOSURE_S, a.repeats, a.burst_seconds))
         else:
             _print(api.instrument(a.action.replace("-", "_"), camera=a.camera, seconds=a.seconds, um=a.um))
     elif a.cmd == "bridge":

@@ -808,12 +808,24 @@ def settle_s(prof: dict, laser) -> float:
 
 def hold_shutter(study: dict, prof: dict, laser) -> bool:
     """Whether a study's spectra are taken with the laser shutter held open between them (acquire.shutter 'hold', or
-    the laser's lasers.<k>.hold_shutter unless the study says 'auto'), as HORIBA's mapping scripts do."""
+    the laser's lasers.<k>.hold_shutter unless the study says 'auto'), as HORIBA's mapping scripts do. A series whose
+    spectra are further apart than the laser's settle_s (the time it needs to recover after LabSpec closes and opens
+    the shutter: 5 s for the XploRA's 637.75 nm) is not held: the beam is then off the sample between spectra."""
     a = (study.get("acquire") or {}).get("shutter")
     if a in ("hold", "auto"):
         return a == "hold"
     lk = laser_key(prof, laser) if laser is not None else None
-    return bool(lk and prof["lasers"][lk].get("hold_shutter"))
+    if not (lk and prof["lasers"][lk].get("hold_shutter")):
+        return False
+    if study.get("kind") == "series":
+        acq = study.get("acquire") or {}
+        ex = acq.get("exposure_s", 1.0)
+        busy = (float(ex) if isinstance(ex, (int, float)) else 0.0) * int(acq.get("accumulations", 1) or 1)
+        gap = float((study.get("series") or {}).get("interval_s", 0) or 0) - busy
+        rec = float(prof["lasers"][lk].get("settle_s") or 0)
+        if rec > 0 and gap >= rec:
+            return False
+    return True
 
 
 def estimate(study: dict, prof: dict, current: dict | None = None) -> dict:
@@ -906,14 +918,17 @@ def estimate(study: dict, prof: dict, current: dict | None = None) -> dict:
     shots = int(bool(vd.get("before", study.get("kind") == "calibration"))) + int(bool(vd.get("after")))
     total += shots * (float(v.get("settle_s", 1.5)) + 5.0 +
                       (float(v.get("laser_s", 1.0)) if vd.get("with_laser") else 0.0))
+    series_wait = 0.0
     if study.get("kind") == "series":
-        total += max(0.0, float(study.get("series", {}).get("interval_s", 0)) * (len(pts) - 1)
-                     - acq_s * (len(pts) - 1)) if len(pts) > 1 else 0.0
+        series_wait = max(0.0, float(study.get("series", {}).get("interval_s", 0)) * (len(pts) - 1)
+                          - acq_s * (len(pts) - 1)) if len(pts) > 1 else 0.0
+        total += series_wait
     snap_s = shots * (float(v.get("settle_s", 1.5)) + 5.0 + (float(v.get("laser_s", 1.0)) if vd.get("with_laser")
                                                               else 0.0))
     return {"minutes": round(total / 60.0, 2), "points": len(pts), "windows": rng.get("windows"),
             "seconds": {"setup": round(setup, 1), "setup_parts": parts, "per_acquisition": round(acq_s, 2),
                         "acquisitions": round(acq_s * len(pts), 1), "video_snapshots": round(snap_s, 1),
+                        **({"series_waits": round(series_wait, 1)} if study.get("kind") == "series" else {}),
                         "total": round(total, 1)},
             "not_included": "the operator's answers in LabSpec (the go-ahead before the first exposure, the "
                             "objective by hand)"}

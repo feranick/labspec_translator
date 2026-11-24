@@ -536,8 +536,8 @@ def test_shutter_used_only_once_shown_to_block_on_si(tmp_path):
     assert "has not been shown" in api.laser(True, 5)["error"]
     # unverified: a background without laser_off defaults to the operator blocking it by hand
     assert plan.cutoff_params({"kind": "cutoff", "setup": SETUP}, P.load())["laser_off"] == "operator"
-    # at 1 % the simulated line is too weak to tell a 5 % leak: not conclusive
-    r = api.shutter_verify()
+    # at 1 % and 1 s the simulated line is too weak to tell a 5 % leak: not conclusive
+    r = api.shutter_verify(1.0)
     assert not r["ok"] and "not conclusive" in r["error"] and not SH.records()
     api.bridge_call("move", {"motor": "Filter", "mode": "label", "value": "10%"})
     # the beam passes although the shutter reads Off: the verification fails and writes nothing
@@ -687,6 +687,14 @@ def test_shutter_held_open_across_spectra(tmp_path):
     s = st["studies"]["s"]
     assert s["reliable"] and not s["checks"]["same_spot"]["disagree"], s["unreliable_because"]
     assert s["shutter_hold"]["held"] and s["shutter_hold"]["released"] and not sim.held
+    assert s["shutter_hold"]["times_held"] == 1
+    # every kind that acquires: a filters study holds too (2026-11-23: it was not held and read 0.54 x low)
+    st = run_inline({"f": {"kind": "filters", "sample": {"name": "Si"}, "setup": {"laser_nm": 532, "grating": 1800,
+                                                                                 "objective": "x100"},
+                           "acquire": {"shutter": "hold"}, "filters": {"exposure_s": 0.2, "max_exposure_s": 5}}})
+    f = st["studies"]["f"]
+    assert f["shutter_hold"]["held"] and f["shutter_hold"]["released"] and f["shutter_hold"]["times_held"] == 1
+    assert not sim.held
     # the laser's own setting, and refused without a verified shutter
     prof = P.load()
     lk = next(k for k, v in prof["lasers"].items() if abs(v["nm"] - 532) < 1)
@@ -694,6 +702,9 @@ def test_shutter_held_open_across_spectra(tmp_path):
     prof["lasers"][lk]["unstable_multi"] = True
     P.save(prof)
     assert plan.hold_shutter(st0, P.load(), 532) and F.validate({"s": st0})["s"]["ok"]
+    nat = {"kind": "map", "sample": {"name": "x"}, "setup": SETUP, "acquire": {"center_cm1": 520, "exposure_s": 1},
+           "map": {"x_um": [0, 2, 1], "y_um": [0, 0, 1], "engine": "native"}}
+    assert F.validate({"m": nat})["m"]["ok"]                   # LabSpec's own map, held as HORIBA's scripts do
     from labspec_translator import shutter as SH
     store_file = SH.store.path(SH.FILE)
     store_file.unlink()
@@ -701,3 +712,27 @@ def test_shutter_held_open_across_spectra(tmp_path):
     assert not v["ok"] and any("acquire.shutter 'hold'" in e for e in v["errors"])
     text = api.compose_vbs(bdir, config.home())["ls6t_bridge.vbs"]
     assert "Sub VShutterHold(cmd, res)" in text and 'HoldRelease "bridge stopped"' in text
+
+
+def test_series_hold_native_and_estimate():
+    """2026-11-23 on the first series with 637.75 nm: spectra 5 s apart need no held shutter (the laser recovers in
+    its settle_s), the estimate shows the waits, and series spectra are saved as .l6s too."""
+    bdir = config.active_bridge_dir()
+    S.ensure(bdir)
+    prof = P.load()
+    lk = next(k for k, v in prof["lasers"].items() if abs(v["nm"] - 532) < 1)
+    prof["lasers"][lk].update(hold_shutter=True, settle_s=5)
+    P.save(prof)
+    ser = {"kind": "series", "sample": {"name": "Si"}, "setup": SETUP,
+           "acquire": {"center_cm1": 520, "exposure_s": 1}, "series": {"count": 3, "interval_s": 8}}
+    assert not plan.hold_shutter(ser, P.load(), 532)            # 7 s between spectra >= 5 s: LabSpec's own shutter
+    fast = dict(ser, series={"count": 3, "interval_s": 2})
+    assert plan.hold_shutter(fast, P.load(), 532)               # 1 s apart: held
+    assert plan.hold_shutter(dict(ser, acquire=dict(ser["acquire"], shutter="hold")), P.load(), 532)
+    e = plan.estimate(ser, P.load())["seconds"]
+    assert e["series_waits"] > 0
+    prof["lasers"][lk].update(hold_shutter=False, settle_s=0)
+    P.save(prof)
+    st = run_inline({"s": dict(ser, series={"count": 2, "interval_s": 1})})
+    s = st["studies"]["s"]
+    assert all(p_.get("native", "").endswith(".l6s") and Path(p_["native"]).exists() for p_ in s["spectra"])

@@ -236,6 +236,8 @@ class Ctx:
         self.confirmed = False
         self.calls: list = []                  # every bridge command: verb, seconds, the bridge's own t_*_s phases
         self.holding = False                   # the laser shutter held open for a study's spectra
+        self.hold_wanted = False               # this study asks for it (run_any)
+        self.hold_log: list = []
         self.objective_by_operator = None      # the objective the operator confirmed in this request
         self.objective = None               # LabSpec's objective now (its record)
         self.focus_xy = (None, None)        # where the focus was found (the operator's spot, or the last focus)
@@ -273,6 +275,9 @@ class Ctx:
                                                                               "file exists for this pair)"
                                                                        if plan.ics_files(self.prof) is not None
                                                                        else "LabSpec's setting")
+        laser_off = str(params.get("laser_off", "0")) == "1"
+        if self.hold_wanted and not self.holding and verb in ("acquire", "map_native", "guide") and not laser_off:
+            self._hold_on()
         if verb == "acquire":
             params.setdefault("ae_off", ae_off(self.prof))
             if self.holding:
@@ -295,6 +300,9 @@ class Ctx:
         except BridgeTimeout as exc:
             raise Stop(str(exc), "timeout") from exc
         self.beat()
+        if self.holding and (verb not in HOLD_VERBS or laser_off or (verb == "shutter_hold" and params.get("state") == "off")):
+            self.holding = False                 # the bridge let it go (bridge_main.vbs, LaserGuard)
+            self.hold_log.append({"released": True, "by": verb})
         if verb == "acquire" and r["ok"] and params.get("out"):
             self._exposure_used(r, params)
         if not r["ok"]:
@@ -303,6 +311,17 @@ class Ctx:
             if r.get("stopped_by") == "request" or self.cancelled():
                 raise Stop("cancelled", "cancel")
         return r
+
+    def _hold_on(self) -> None:
+        """The laser shutter held open (ShutterMode manual) before this study's next acquisition, as HORIBA's
+        mapping scripts do for a map; the bridge keeps it only through HOLD_VERBS."""
+        r = self.call("shutter_hold", timeout_s=30, state="on", max_s=getattr(self, "hold_max_s", 3600),
+                      **motor_args(self.prof))
+        if not r.get("ok"):
+            raise Stop(f"acquire.shutter 'hold': {r.get('error')}", "study")
+        self.holding = True
+        self.hold_log.append({"held": True, "shutter_before": r.get("old_index"), "mode_before": r.get("old_mode"),
+                              "label_while_held": r.get("hold_label")})
 
     def _exposure_used(self, r: dict, params: dict) -> None:
         """The exposure LabSpec really used, from the spectrum's acquisition info. 2026-11-23: with LabSpec's
@@ -701,7 +720,58 @@ def _setup(name: str, study: dict, ctx: Ctx, warnings: list, unreliable: list, c
     return {"before": before, "after": after, "laser": laser, "temp": temp, "readback": readback, "rng": rng}
 
 
+NO_HOLD_KINDS = ("move", "background", "cutoff")      # no laser, or the laser off on purpose
+# the bridge commands that keep the shutter held (bridge_main.vbs HOLD_VERBS)
+HOLD_VERBS = ("ping", "status", "acquire", "map_native", "guide", "move_xy", "move", "view", "remove", "save", "labels",
+              "last_error", "message", "shutter_hold")
+
+
 def run_any(name: str, study: dict, ctx: Ctx) -> dict:
+    """Runs one study. With acquire.shutter 'hold' (or the laser's hold_shutter) the laser shutter is held open
+    around every acquisition of the study, whatever its kind (2026-11-23: a 'filters' study with 637.75 nm was not
+    held and read its second filter 0.54 x low); Ctx.call holds it before an acquisition and notes when the bridge
+    lets it go; released here at the end."""
+    kind = study.get("kind", "spectrum")
+    laser = (study.get("setup") or {}).get("laser_nm")
+    if laser is None:
+        laser = (ctx.start or {}).get("laser_nm")
+    ctx.hold_wanted = kind not in NO_HOLD_KINDS and plan.hold_shutter(study, ctx.prof, laser)
+    ctx.hold_log = []
+    if ctx.hold_wanted:
+        try:
+            ctx.hold_max_s = round(plan.estimate(study, ctx.prof)["seconds"]["total"] * 1.5 + 300)
+        except (KeyError, ValueError, TypeError):
+            ctx.hold_max_s = 3600
+    try:
+        res = _run_kind(name, study, ctx)
+    finally:
+        ctx.hold_wanted = False
+        if ctx.holding:
+            ctx.holding = False
+            try:
+                r = ctx.call("shutter_hold", timeout_s=30, state="off")
+                ctx.hold_log.append({"released": bool(r.get("ok"))})
+            except Stop as exc:
+                ctx.hold_log.append({"released": False, "why": exc.why})
+    if isinstance(res, dict) and ctx.hold_log:
+        holds = [h for h in ctx.hold_log if "held" in h]
+        res["shutter_hold"] = {"held": bool(holds), "times_held": len(holds),
+                               "released": all(h.get("released", True) for h in ctx.hold_log if "released" in h),
+                               "shutter_before": holds[0].get("shutter_before") if holds else None,
+                               "mode_before": holds[0].get("mode_before") if holds else None,
+                               "label_while_held": holds[0].get("label_while_held") if holds else None,
+                               "log": ctx.hold_log[-20:]}
+        if len(holds) > 1:
+            res.setdefault("warnings", []).append(
+                f"the laser shutter was held {len(holds)} times in this study: another command (a snapshot, an "
+                "autofocus, the operator's question) let it go in between, and LabSpec closed and opened it")
+        f = ctx.folder / name / f"{name}.json"
+        if f.exists():
+            write_json(f, clean(res))
+    return res
+
+
+def _run_kind(name: str, study: dict, ctx: Ctx) -> dict:
     kind = study.get("kind", "spectrum")
     if kind == "move":
         return run_move(name, study, ctx)
@@ -801,16 +871,6 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
         except Stop as exc:
             stop_exc = exc
     warmup_info = None
-    hold = None
-    if not native_map and len(pts) > 1 and plan.hold_shutter(study, prof, laser) and stop_exc is None:
-        # as HORIBA's mapping scripts: ShutterMode manual and the shutter open for all the spectra, put back after
-        # (2026-11-23: the 637.75 nm laser changed mode when LabSpec closed and opened it around each spectrum)
-        hold = ctx.call("shutter_hold", timeout_s=30, state="on",
-                        max_s=round(plan.estimate(study, prof)["seconds"]["total"] * 1.5 + 120),
-                        **motor_args(prof))
-        if not hold.get("ok"):
-            raise Stop(f"acquire.shutter 'hold': {hold.get('error')}", "study")
-        ctx.holding = True
     for k, p in enumerate(pts if not native_map else []):
         if ctx.cancelled():
             stop_exc = Stop("cancelled", "cancel")
@@ -889,7 +949,7 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
                           site=str(study.get("sample", {}).get("site", ""))[:100])
             if study.get("sample", {}).get("notes"):
                 params["remark"] = str(study["sample"]["notes"])[:200]     # LabSpec's Remark, after "ls6t <seq>"
-            if native and kind not in ("map", "series"):
+            if native and kind != "map":             # series too (2026-11-23: no .l6s for series spectra)
                 params["native"] = str(sd / "spectra" / f"p{k:05d}.l6s")
             if kind == "series" and k == 0:
                 t_series0 = time.time()
@@ -934,15 +994,6 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
         except Stop as exc:
             stop_exc = exc
             break
-    hold_info = None
-    if ctx.holding:
-        ctx.holding = False
-        try:
-            rel = ctx.call("shutter_hold", timeout_s=30, state="off")
-            hold_info = {"held": True, "released": bool(rel.get("ok")), "shutter_before": hold.get("old_index"),
-                         "mode_before": hold.get("old_mode"), "label_while_held": hold.get("hold_label")}
-        except Stop as exc:
-            hold_info = {"held": True, "released": False, "why": exc.why}
     if vd.get("after") and per_point and stop_exc is None:
         try:
             snaps["after"] = _snapshot(ctx, name, sd, "after", bool(vd.get("with_laser")), warnings, laser)
@@ -981,7 +1032,6 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
                  "operator": tm["operator_s"], "analysis": round(time.time() - t_an, 2)},
         timing=tm,
         **({"warmup": warmup_info} if warmup_info else {}),
-        **({"shutter_hold": hold_info} if hold_info else {}),
         execution={"mode": config.mode(), "bridge": ctx.bridge_version, "translator": __version__,
                    "protocol": BRIDGE_PROTOCOL})
     if not per_point:

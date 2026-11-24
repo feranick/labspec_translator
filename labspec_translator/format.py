@@ -481,15 +481,18 @@ def validate_study(name: str, study: dict, prof: dict) -> dict:
             native = kind == "map" and plan.map_engine(study, prof) == "native"
         except (ValueError, KeyError, TypeError):
             native = False                       # a malformed map is reported below
-        settled = (plan.settle_s(prof, s.get("laser_nm")) > 0
-                   or plan.hold_shutter(study, prof, s.get("laser_nm"))) and not native     # 5 s, or held open
+        # held open (any kind, LabSpec's own map too, as HORIBA's mapping scripts do), or a pause (not possible
+        # inside LabSpec's own map)
+        settled = plan.hold_shutter(study, prof, s.get("laser_nm")) or \
+            (plan.settle_s(prof, s.get("laser_nm")) > 0 and not native)
     if unstable and multi and (study.get("acquire") or {}).get("laser_reference") != "correct" and not settled:
         why = (f"the {prof['lasers'][lk]['nm']:g} nm laser changes between acquisitions on this instrument (profile "
                f"lasers.{lk}.unstable_multi): every spectrum after the first may be shifted (about 8 cm-1 on "
                "2026-11-23). Hold the shutter open across the spectra (acquire.shutter 'hold', or lasers." + lk +
                ".hold_shutter), give the laser a pause between spectra (lasers." + lk + ".settle_s, 5 s held it), or "
                "put the laser line in the window with acquire.laser_reference 'correct', or use another laser"
-               + ("; LabSpec's own map engine cannot pause between points: use map.engine 'points'" if native else ""))
+               + ("; LabSpec's own map engine cannot pause between points: hold the shutter, or use map.engine "
+                  "'points'" if native else ""))
         (warnings if unstable == "warn" else errors).append(why)
     if s.get("grating") is not None:
         if not _num(s["grating"]) or f"{float(s['grating']):g}" not in prof["gratings"]:

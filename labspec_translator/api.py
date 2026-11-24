@@ -501,7 +501,7 @@ def _instrument(action, camera, setup, seconds, um=None) -> dict:
         if action == "shutter_test":
             return shutter_test()
         if action == "shutter_verify":
-            return shutter_verify(float(seconds or 2.0))
+            return shutter_verify(float(seconds or VERIFY_EXPOSURE_S))
         if action in ("camera_on", "camera_off"):
             prof = P.load()
             num, err = P.camera_number(prof, camera)
@@ -805,7 +805,12 @@ def _pct(f: float) -> str:
     return f"{f * 100:.2g} %" if f < 0.1 else f"{f * 100:.0f} %"
 
 
-def shutter_verify(exposure_s: float = 2.0, repeats: int = 3, burst_s: float | None = None) -> dict:
+VERIFY_EXPOSURE_S = 8.0     # 2026-11-23: the closed shutter passes a burst of a few counts per acquisition on every
+                            # laser (532: 0.5-1.7, 637.75: 1.3-3.5, 785: 1.3-3.3); at 2 s it failed 785 nm (weak Si)
+                            # on the burst alone, at 8 s it passed (0.042-0.048 %)
+
+
+def shutter_verify(exposure_s: float = VERIFY_EXPOSURE_S, repeats: int = 3, burst_s: float | None = None) -> dict:
     """The spectral proof that the laser shutter blocks the beam (TESTING T1.2 step 2), with silicon under the
     objective, in focus, in the current set-up: a reference spectrum at 520 cm-1 with the laser, then `repeats`
     spectra with laser_off 'shutter' (and, with burst_s, one more of that exposure: a burst at the start or end of

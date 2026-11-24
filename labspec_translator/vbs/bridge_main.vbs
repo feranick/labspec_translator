@@ -32,6 +32,9 @@ Dim gInbox, gOutbox, gHb, gStopFlag, gHalted, gQuit, gLastBeat, gLastPopup, gPop
 Dim gVerb, gSeq, gLastSeq, gChunk
 Dim gLaserOpen, gLaserT0, gLaserS, gLaserMotor, gLaserOldMode, gLaserOffLabel, gLaserBy
 Dim gHoldOn, gHoldMotor, gHoldOldMode, gHoldOldIdx, gHoldT0, gHoldMaxS   ' the shutter held open across spectra
+' the commands that keep it held (runner.HOLD_VERBS lists the same): spectra, LabSpec's own map and the guided loop,
+' stage and motor moves, the live view, saving data, quick reads
+Const HOLD_VERBS = ",ping,status,acquire,map_native,guide,move_xy,move,view,remove,save,labels,last_error,message,shutter_hold,"
 gHoldOn = False
 Dim gShutterWatch, gShutterOff, gShutterSeen   ' a laser_off acquisition: the shutter read back while it runs
 Dim gShutterReads, gShutterT0, gShutterFirstS  ' how many reads, and when (s after Acq was called)
@@ -1650,7 +1653,18 @@ Sub VView(cmd, res)
     If action = "create" Then
         If kind = "map" Then
             r = LabSpec.Map(LS_CREATE_MAP, dataId, mapId, id, vals, labels, units, disp, fv, tv)
-            If Err.Number = 0 And r < 0 Then Fail res, "LabSpec could not create the map"
+            res("map_create_return") = r
+            ' 2026-11-23: a 3 x 3 map with one window (637.75 nm, 1200) got r < 0: once more without the spectral
+            ' range given (LabSpec's own then), and LabSpec's last error said
+            If Err.Number = 0 And r < 0 And (fv <> 0 Or tv <> 0) Then
+                res("map_create_range") = fv & "-" & tv
+                fv = 0
+                tv = 0
+                r = LabSpec.Map(LS_CREATE_MAP, dataId, mapId, id, vals, labels, units, disp, fv, tv)
+                res("map_create_return_2") = r
+            End If
+            If Err.Number = 0 And r < 0 Then Fail res, "LabSpec could not create the map (Map returned " & r & _
+                                                       "; " & LabSpecError() & ")"
             If Err.Number = 0 And r >= 0 Then
                 LabSpec.Exec mapId, LS_SHOW_DATA, p
                 gViews(name) = Array("map", dataId, mapId)
@@ -2591,7 +2605,7 @@ Sub LaserGuard(verb)
         LaserClose "before " & verb
     End If
     ' the shutter held open for a study's spectra: only the spectra, the stage moves between them and quick reads
-    If gHoldOn And InStr(",ping,status,acquire,move_xy,move,view,message,shutter_hold,", "," & verb & ",") = 0 Then
+    If gHoldOn And InStr(HOLD_VERBS, "," & verb & ",") = 0 Then
         HoldRelease "before " & verb
     End If
 End Sub
