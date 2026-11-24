@@ -34,8 +34,10 @@ Dim gLaserOpen, gLaserT0, gLaserS, gLaserMotor, gLaserOldMode, gLaserOffLabel, g
 Dim gHoldOn, gHoldMotor, gHoldOldMode, gHoldOldIdx, gHoldT0, gHoldMaxS   ' the shutter held open across spectra
 ' the commands that keep it held (runner.HOLD_VERBS lists the same): spectra, LabSpec's own map and the guided loop,
 ' stage and motor moves, the live view, saving data, quick reads
-' (no display call: 2026-11-24 LabSpec froze, then crashed, in the live map view with the shutter held)
-Const HOLD_VERBS = ",ping,status,acquire,map_native,guide,move_xy,move,remove,save,labels,last_error,message,shutter_hold,"
+' The live view keeps it: its crash (2026-11-24) was MapEx's axes passed as a Variant, with the shutter automatic too;
+' releasing the hold at each view made the 637.75 nm laser hop at every point (.24.3). If LabSpec froze in a view with
+' the shutter held, the heartbeat's shutter_held makes ls6t say the laser may still reach the sample
+Const HOLD_VERBS = ",ping,status,acquire,map_native,guide,move_xy,move,view,remove,save,labels,last_error,message,shutter_hold,"
 gHoldOn = False
 Dim gShutterWatch, gShutterOff, gShutterSeen   ' a laser_off acquisition: the shutter read back while it runs
 Dim gShutterReads, gShutterT0, gShutterFirstS  ' how many reads, and when (s after Acq was called)
@@ -73,7 +75,8 @@ Sub Beat(state, force)
     ts.WriteLine "state=" & state
     ts.WriteLine "verb=" & gVerb
     ts.WriteLine "blocking=" & gBlocking        ' the motor of a blocking LabSpec move in progress: no beats meanwhile
-    If gBlockingS > 0 Then ts.WriteLine "blocking_s=" & gBlockingS    ' how long it may hold the script
+    ' the longest LabSpec may hold the script now (the request's timeout for it), not the time elapsed
+    If gBlockingS > 0 Then ts.WriteLine "blocking_allowance_s=" & gBlockingS
     ts.WriteLine "seq=" & gSeq
     ts.WriteLine "protocol=" & LS6T_PROTOCOL
     ts.WriteLine "version=" & LS6T_VERSION

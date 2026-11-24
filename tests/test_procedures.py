@@ -841,10 +841,12 @@ def test_laser_may_be_on_when_the_bridge_stops_during_a_hold(tmp_path):
     msg = BR.diagnose({"state": "busy", "verb": "view", "age_s": 300, "shutter_held": "1"}, tmp_path)
     assert msg.startswith("THE LASER MAY STILL REACH THE SAMPLE")
     assert not BR.diagnose({"state": "busy", "verb": "view", "age_s": 300, "shutter_held": "0"}, tmp_path).startswith("THE LASER")
-    assert "view" not in runner.HOLD_VERBS and "video" not in runner.HOLD_VERBS
+    # the live view keeps the hold (its crash was MapEx's axes, 2026-11-24); a snapshot (video) still releases it
+    assert "view" in runner.HOLD_VERBS and "video" not in runner.HOLD_VERBS
     text = api.compose_vbs(config.active_bridge_dir(), config.home())["ls6t_bridge.vbs"]
     hv = [l for l in text.splitlines() if l.startswith("Const HOLD_VERBS")][0]
-    assert ",view," not in hv and 'ts.WriteLine "shutter_held=" & Bit(gHoldOn)' in text
+    assert ",view," in hv and ",video," not in hv and 'ts.WriteLine "shutter_held=" & Bit(gHoldOn)' in text
+    assert set(runner.HOLD_VERBS) == set(hv.split('"')[1].strip(",").split(","))
     ctx = runner.Ctx(tmp_path, BR.Bridge(config.active_bridge_dir()), P.load())
     ctx.holding = True
     assert ctx._held_warning("no answer").startswith("THE LASER MAY STILL REACH THE SAMPLE")
@@ -891,8 +893,17 @@ def test_live_view_never_cycles_the_held_shutter(tmp_path):
     assert m["shutter_hold"]["times_held"] == 1 and m["shutter_hold"]["released"], m["shutter_hold"]
     assert sim.views["m"]["n"] == 9 and not any("held" in w for w in m["warnings"])
     log = (Path(st["request"]) / "runner.log").read_text().splitlines()
-    first_view = next(i for i, l in enumerate(log) if "-> view" in l)
-    assert all("[shutter held]" not in l for l in log[first_view:] if "-> view" in l)
+    views = [l for l in log if "-> view action=create" in l or "-> view action=add" in l]
+    assert len(views) == 9 and all("[shutter held]" in l for l in views)      # the map grows while held
+    # display.live_view_while_held false: the views after the last spectrum, the hold released first
+    P.save(dict(P.load(), display={"live_view": True, "live_view_while_held": False}))
+    sim.views.clear()
+    st = run_inline(mp)
+    log = (Path(st["request"]) / "runner.log").read_text().splitlines()
+    views = [l for l in log if "-> view action=create" in l or "-> view action=add" in l]
+    assert sim.views["m"]["n"] == 9 and all("[shutter held]" not in l for l in views)
+    assert st["studies"]["m"]["shutter_hold"]["times_held"] == 1
+    P.save(dict(P.load(), display={"live_view": True}))
     # without the hold the map grows as measured
     sim.views.clear()
     mp["m"]["acquire"]["shutter"] = "auto"

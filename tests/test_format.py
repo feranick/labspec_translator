@@ -187,3 +187,19 @@ def test_reach_when_the_grating_is_not_given():
     assert not r["ok"] and any("no grating reaches" in e for e in r["errors"])
     r = api.validate({"s": dict(base, setup={"laser_nm": 785, "filter": "10%", "grating": 1800})})["s"]
     assert not r["ok"] and any("above 2043 cm-1" in e for e in r["errors"])
+
+
+def test_spikes_are_narrow_and_located():
+    """2026-11-24: spikes were flagged in nearly every spectrum; a sharp Raman line (about 3 pixels at half height)
+    is not a spike, a one- or two-pixel cosmic ray is; where each was found is reported."""
+    import numpy as np
+    from labspec_translator import spectra as SP
+    x = np.linspace(100, 900, 800)
+    rng = np.random.default_rng(1)
+    y = 300 + rng.normal(0, 4, x.size)
+    y += 2000 * np.exp(-0.5 * ((x - 520.7) / 1.3) ** 2)          # Si: FWHM about 3 pixels
+    assert SP.spikes(y) == []
+    y[200] += 3000                                                 # a cosmic ray, one pixel
+    assert SP.spikes(y) == [200]
+    a = SP.analyze(x, y, {"peaks": [{"name": "Si", "near_cm1": 520.7}]}, 10.0, 5.0)
+    assert a["spike_cm1"] == [round(float(x[200]), 1)]

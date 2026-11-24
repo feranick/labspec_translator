@@ -106,7 +106,7 @@ DEFAULT_PROFILE: dict = {
     "performance": {"filters_tol": 0.3, "resolution_tol": 1.25, "resolution_cm1": {}},
     # LabSpec's live display of a map or series as it is measured: off until it has passed on the instrument
     # (2026-11-24: the MapEx view froze, then crashed, LabSpec)
-    "display": {"live_view": False},
+    "display": {"live_view": False, "live_view_while_held": True},
     "calibration": {"max_age_h": 24.0, "max_retries": 2,
                     # a video frame before each calibration (false: none, for batches; a study's video.before wins)
                     "video_before": True,

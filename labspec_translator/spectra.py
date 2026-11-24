@@ -138,7 +138,14 @@ def spikes(y, sigma: float | None = None, k: float = 12.0) -> list[int]:
     for i in hits:
         left = y[i - 2] if i >= 2 else y[0]
         right = y[i + 2] if i + 2 < y.size else y[-1]
-        if y[i] - max(left, right) > k * s:   # narrow: falls back within two pixels on both sides
+        if y[i] - max(left, right) <= k * s:   # narrow: falls back within two pixels on both sides
+            continue
+        # and one or two pixels wide at half its height: a sharp Raman line (Si, the laser line: about 3 pixels at
+        # half height at 1200 gr/mm) is not a spike (2026-11-24: spikes were flagged in nearly every spectrum)
+        base = float(np.median(y[max(0, i - 7):i + 8]))             # the local level, wider than any spike
+        half = base + (y[i] - base) / 2.0
+        lo, hi = max(0, i - 3), min(y.size, i + 4)
+        if int(np.sum(y[lo:hi] > half)) <= 2:
             out.append(int(i))
     return out
 
@@ -355,6 +362,7 @@ def analyze(shift, y, process: dict, min_snr: float = 10.0, detect_snr: float = 
         if not any(pk.get("ok") and abs(xi - pk["position_cm1"]) <= 3 * max(pk["fwhm_cm1"], 1.0) for pk in peaks):
             keep.append(i)
     out["spikes"] = keep
+    out["spike_cm1"] = [round(float(x[i]), 1) for i in keep]        # where, to tell cosmic rays from lines
     out["bands"] = {b.get("name", f"band{i}"): band(x, yc, float(b["from_cm1"]), float(b["to_cm1"]))
                     for i, b in enumerate(process.get("bands", []) or [])}
     out["_baseline"] = base

@@ -161,7 +161,7 @@ def blocking_allowance(hb: dict) -> float:
     """How long a heartbeat may stay silent while LabSpec holds the bridge: the bridge's own blocking_s (an
     acquisition: its timeout) plus a margin, else the blocking-move allowance."""
     try:
-        s = float(hb.get("blocking_s") or 0)
+        s = float(hb.get("blocking_allowance_s") or hb.get("blocking_s") or 0)    # blocking_s: before 2026.11.24.5
     except (TypeError, ValueError):
         s = 0.0
     return s + 30.0 if s > 0 else config.blocking_move_s()

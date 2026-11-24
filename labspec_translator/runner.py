@@ -775,8 +775,8 @@ LASER_MAY_BE_ON = ("THE LASER MAY STILL REACH THE SAMPLE: ls6t held the laser sh
                    "restarting LabSpec, check that the laser shutter reads Off and ShutterMode is automatic (0).")
 NO_HOLD_KINDS = ("move", "background", "cutoff")      # no laser, or the laser off on purpose
 # the bridge commands that keep the shutter held (bridge_main.vbs HOLD_VERBS)
-HOLD_VERBS = ("ping", "status", "acquire", "map_native", "guide", "move_xy", "move", "remove", "save", "labels",
-              "last_error", "message", "shutter_hold")      # no display call (view, video): released before one
+HOLD_VERBS = ("ping", "status", "acquire", "map_native", "guide", "move_xy", "move", "view", "remove", "save",
+              "labels", "last_error", "message", "shutter_hold")      # video and others release it
 
 
 def run_any(name: str, study: dict, ctx: Ctx) -> dict:
@@ -1071,11 +1071,11 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
                    **({"settled_s": _f(r.get("settled_s"))} if r.get("settled_s") not in (None, "") else {})}
             per_point.append(rec)
             # live view in LabSpec: the map or the series grows as it is measured (off by default: display.live_view).
-            # Never a display call with the shutter held (2026-11-24: each view released the hold and the 637.75 nm
-            # laser hopped at every point): with the hold the views are made after the last spectrum
+            # The view keeps the shutter hold (2026-11-24: releasing it at each view made the 637.75 nm laser hop at
+            # every point); display.live_view_while_held false makes the views after the last spectrum instead
             if kind in ("map", "series") and r.get("id") and live_on:
                 vval = rec["t"] if kind == "series" else p["dz_um"]
-                if ctx.holding:
+                if ctx.holding and not (prof.get("display") or {}).get("live_view_while_held", True):
                     pending_views.append((r["id"], p, vval, out))
                 else:
                     view = _live_view(ctx, view, name, kind, study, rng, r["id"], p, vval, out, warnings)
@@ -2936,7 +2936,8 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
                 if pk.get("ok") and pk.get("position_cm1") is not None:
                     pk["from_laser_line_cm1"] = round(float(pk["position_cm1"]) - base, 3)
         rec.update(max_counts=sat["max_counts"], saturated=sat["saturated"], saturated_pixels=sat["pixels"],
-                   noise_sigma=a["noise_sigma"], spikes=len(a["spikes"]), from_cm1=a["from_cm1"],
+                   noise_sigma=a["noise_sigma"], spikes=len(a["spikes"]), spike_cm1=a.get("spike_cm1", [])[:20],
+                   from_cm1=a["from_cm1"],
                    to_cm1=a["to_cm1"], peaks=a["peaks"], bands=a["bands"], auto_peaks=a["auto_peaks"])
         if sat["saturated"]:
             sat_points.append(rec["point"])
@@ -3298,7 +3299,8 @@ def parse_native_map(path, study: dict, prof: dict, x0, y0, zref) -> list:
 
 def _point_summary(r: dict) -> dict:
     keys = ("point", "offset", "stage", "file", "native", "t", "exposure_s", "accumulations", "max_counts",
-            "saturated", "noise_sigma", "spikes", "from_cm1", "to_cm1", "peaks", "bands", "x_correction", "background",
+            "saturated", "noise_sigma", "spikes", "spike_cm1", "from_cm1", "to_cm1", "peaks", "bands", "x_correction",
+            "background",
             "ics", "auto_exposure", "optics_check", "t_start")
     return {k: r.get(k) for k in keys if k not in ("auto_exposure", "optics_check", "t_start") or r.get(k) is not None}
 

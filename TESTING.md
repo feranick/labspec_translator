@@ -881,6 +881,18 @@ remove them (its removal compares accumulations); use `accumulations: 2` with `s
 `blocking_s` (about 124 s during an acquisition) is the allowance, the longest the acquisition may hold the bridge
 (the request's acquisition timeout), not the time elapsed. The heartbeat is UTF-16 on purpose (Windows account
 folders can have non-ASCII names); read it as UTF-16, as ls6t does.
+**From 2026.11.24.5 (review):** the live view keeps the shutter hold again (`view` among the commands that keep it):
+the rule against display calls with the shutter held came from the .24.1 crash, whose cause was MapEx's axes (it
+crashed with the shutter automatic too), and releasing the hold at each view brought the hop back. The remaining risk,
+LabSpec freezing in a view with the shutter open, is reported by the heartbeat's `shutter_held` ("THE LASER MAY STILL
+REACH THE SAMPLE"). `display.live_view_while_held: false` makes the view after the last spectrum instead (the .24.4
+behaviour). **Spikes:** a flagged spike must now also be one or two pixels wide at half its height above the local
+level (a sharp Si or laser line, about 3 pixels at 1200 gr/mm, could pass the old test), and every spectrum lists where
+(`spectra[].spike_cm1`): if they sit at 520 or near 0 cm⁻¹ they were the lines. The heartbeat's `blocking_s` is now
+`blocking_allowance_s`. **Tests on .24.5:** (1) a held 3 × 3 map at 637.75 nm with the live view: `times_held` 1, no
+laser-line hops, Si near 520.7, the map growing; (2) the same with the shutter automatic: the map in front, growing,
+"um" axes; (3) a 2 s series: the validation warning, `median_s` about 3.5 s, `t_start` in each spectrum; and the spike
+count with `spike_cm1`.
 **runner.log was empty after the crash:** from 2026.11.24.2 every bridge command is written to the request's
 `runner.log` when it is sent and when it returns (`-> view kind=mapex`, `<- acquire ok=1 2.4 s`, marked `[shutter
 held]`), each line flushed at once, so the last call before a hang or crash is always there.
