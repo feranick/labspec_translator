@@ -31,7 +31,7 @@ GUIDE_MODES = ("reach", "drop", "maximize")
 VIDEO_KEYS = {"before", "after", "with_laser"}
 SETUP_KEYS = {"laser_nm", "grating", "filter", "objective", "hole_um", "slit_um", "laser_pol", "raman_pol"}
 ACQ_KEYS = {"range_cm1", "center_cm1", "exposure_s", "accumulations", "auto_exposure", "spike", "dark",
-            "subtract_background", "ics"}
+            "subtract_background", "ics", "laser_reference", "warmup_s"}
 AE_KEYS = {"target_counts", "min_s", "max_s", "test_s"}
 FOCUS_KEYS = {"autofocus", "every", "dz_um", "scan"}
 MAP_KEYS = {"x_um", "y_um", "z_um", "snake", "engine", "swift"}
@@ -110,7 +110,11 @@ def study_format(status: dict | None = None) -> dict:
                        "min_s, max_s, test_s}), accumulations, spike: labspec | none | single | double | "
                        "double_auto, dark: labspec | true | false, ics (LabSpec's intensity correction): labspec | "
                        "true | false (labspec: off where the profile's ics.off_for lists the grating@laser), "
-                       "subtract_background: a stored background's name}",
+                       "subtract_background: a stored background's name, laser_reference: report | correct (when "
+                       "the window includes the laser line near 0 cm-1: it is fitted in every spectrum; correct "
+                       "shifts each spectrum by the laser line's move, so a laser mode hop does not move the "
+                       "peaks), warmup_s: a discarded acquisition of that many seconds before the first spectrum "
+                       "(the laser fires; default the profile's lasers.<laser>.warmup_s)}",
             "focus": "{autofocus: laser | raman | video (LabSpec's routines) | scan (ls6t's focus scan on the "
                      "Raman line) (before the first point; map: also every N points with 'every'), dz_um: Z "
                      "offset from the focus (spectrum, series), scan: {range_um (10), step_um (1), line_cm1 (Si), "
@@ -559,6 +563,11 @@ def validate_study(name: str, study: dict, prof: dict) -> dict:
     if a.get("ics", "labspec") not in ("labspec", True, False):
         errors.append("acquire.ics: labspec (LabSpec's setting, off where the profile's ics.off_for says), true or "
                       "false")
+    if a.get("laser_reference", "report") not in ("report", "correct"):
+        errors.append("acquire.laser_reference: report or correct")
+    w = a.get("warmup_s")
+    if w is not None and (not _num(w) or not 0 <= float(w) <= float(prof["limits"].get("max_exposure_s", 60))):
+        errors.append("acquire.warmup_s: seconds, 0 to limits.max_exposure_s")
 
     # ---- focus, points, map, series
     f = study.get("focus", {})

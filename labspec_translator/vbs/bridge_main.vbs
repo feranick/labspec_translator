@@ -21,6 +21,8 @@ gHaltPopup = False
 Dim gBlocking             ' the motor while a blocking MoveMotor runs (written in the heartbeat beforehand)
 Dim gBlockingS            ' the longest it may take, s (0: the default for a blocking move)
 Dim gAccountVersion       ' the ls6t version installed for the account running the bridge, when it differs
+Dim gLastAcqEnd           ' when the last acquisition's spectrum was written (Timer; -1: none yet)
+gLastAcqEnd = -1
 Dim gTplTest              ' LabSpec's Template TEST_TEMPLATE at start: is the template plugin there (AutoExposure)
 Dim gMoveN                ' MoveMotor calls since this bridge started (1: its first; TESTING T3.16, a slow first move)
 gMoveN = 0
@@ -1378,7 +1380,7 @@ End Sub
 
 Sub VAcquireInner(cmd, res)
     Dim mode, ex, acc, f, t, outPath, native, sample, id, t0, started, who, tmo, r, spm, waitedS, tp, tAll, cur
-    Dim prevId, same, staleId
+    Dim prevId, same, staleId, gap, settle, mspec, mgr
     mode = CLng(ParseNum(GetP(cmd, "mode", "10")))
     ex = ParseNum(GetP(cmd, "exposure_s", "1"))
     acc = CLng(ParseNum(GetP(cmd, "accumulations", "1")))
@@ -1484,12 +1486,37 @@ Sub VAcquireInner(cmd, res)
     ' LabSpec's Acq can hold the script until the spectrum is taken (an extended range: 2026-11-23, 532 nm 100-1000
     ' cm-1, 5 s: ls6t called the bridge stuck after 20 s while the detector was still collecting): the heartbeat says so
     ' first, with how long it may take
+    ' 2026-11-23: in a request, only the first spectrum was right; the next ones at the same spot had Si 8 cm-1 low and
+    ' 2.5 x broader (area kept, LabSpec's axis and acq.* unchanged): something moving during them. Recorded around
+    ' each Acq: the time since the previous spectrum, the spectrometer and grating read before, right after Acq
+    ' returns and after the data, and whether any motor is busy then; settle_s waits after the previous spectrum
+    mspec = GetP(cmd, "m_spectro", "Spectro")
+    mgr = GetP(cmd, "m_grating", "Grating")
+    If gLastAcqEnd >= 0 Then
+        gap = Elapsed(gLastAcqEnd)
+        res("since_last_acq_s") = Secs(gap)
+        settle = ParseNum(GetP(cmd, "settle_s", "0"))
+        If settle > gap Then
+            res("settled_s") = Secs(settle - gap)
+            If Not WaitStoppable(settle - gap) Then
+                Fail res, "stopped while settling"
+                Exit Sub
+            End If
+        End If
+    End If
+    res("spectro_before_acq") = MotorValue(mspec)
+    res("grating_before_acq") = MotorValue(mgr)
+    res("motors_busy_before_acq") = LabSpec.GetMotorStatus("", 0)
+    Err.Clear
     gBlocking = "acquire"
     gBlockingS = tmo
     Beat "busy", True
     gShutterT0 = Timer
     LabSpec.Acq mode, ex, acc, f, t
     res("t_acq_call_s") = Secs(Elapsed(tp))              ' Acq itself (it can hold the script)
+    res("spectro_after_acq_call") = MotorValue(mspec)
+    res("motors_busy_after_acq_call") = LabSpec.GetMotorStatus("", 0)
+    Err.Clear
     tp = Timer
     gBlocking = ""
     gBlockingS = 0
@@ -1562,6 +1589,9 @@ Sub VAcquireInner(cmd, res)
     Err.Clear
     On Error GoTo 0
     res("t_until_data_s") = Secs(Elapsed(tp))            ' after Acq returned, until LabSpec had the spectrum
+    res("spectro_after_data") = MotorValue(mspec)
+    res("grating_after_data") = MotorValue(mgr)
+    gLastAcqEnd = Timer
     tp = Timer
     res("id") = id
     If Not WriteSpectrum(id, outPath, res) Then Exit Sub

@@ -641,6 +641,59 @@ laser-on --seconds 5` twice and note `confirm_s` and whether LabSpec showed the 
 "0.2 s" was the `seconds` field, which left the confirmation out. From .23.19 `seconds` is the whole (confirmation
 included), with `confirm_s`, `laser_call_s` and `open_for_s` named.
 
+**T3.21 Only the first spectrum of a request is right (2026-11-23, serious).** On .23.18, five spectra at the same
+spot in one request (Si, 637.75 nm, 2400, x100): point 0 Si 520.29 cm⁻¹, FWHM 3.94; points 1–4 511.94–512.43, FWHM
+9.16–10.59 (at 10 %: 511.9–514.8, FWHM 15–22), area kept (1588–1753 vs 1582); the same at 1 % and 10 % (not
+heating); LabSpec's axis (252.758–751.508) and every `acq.*` header line identical, only the id differs; the same
+with `motors.laser_shutter` null and the bridge restarted (`run_20261123_202103_42a7c8`). A shift with broadening
+and the area kept means the line moved during the exposure: something in the optical path or the spectrometer moving
+while LabSpec acquires. The `filters` study's falling signal is probably the same effect. Two changes made the next
+acquisition start sooner or touch LabSpec between spectra: the flush shortened in .23.15 (from about 1.6 s to 0.05 s
+between one spectrum and the next) and, since .23.17, AutoExposure read and switched through the Template before and
+after each spectrum. **From .23.20** each spectrum has `optics_check` (time since the previous spectrum, any pause,
+the spectrometer and grating read before Acq, right after it returns and after the data, and whether a motor is
+busy), repeated spectra at the same spot are compared with the first (`checks.same_spot`; more than 2 cm⁻¹ or 1.5 ×
+as wide: unreliable, a warning for a series), and `timing.acquire_settle_s` pauses after each spectrum. Steps, five
+points at the same spot each: (a) as is, and note `optics_check` per point; (b) `ls6t profile set
+timing.acquire_settle_s 2`, then 5; (c) `acquire_settle_s` 0 with `autoexposure.switch_off false` and AE off by hand
+(no Template call between spectra); (d) five acquisitions by hand in LabSpec, back to back. Whichever brings points
+1–4 back to 520 cm⁻¹ / FWHM ≈ 4 names the cause.
+**Found (2026-11-23): the 637.75 nm laser changes mode after the first spectrum of a request.** With the laser line
+and Si in one 1200 window (`run_20261123_203003_bfdb68`): laser line −4.6 → −11.9, −12.7, −12.1, −12.4 cm⁻¹ and Si
+520.2 → 512.6, 512.2, 512.2, 512.3, their difference constant (524.3–524.8): the laser moved by about 0.35 nm, not
+the spectrometer. LabSpec's `.l6s` of point 1 shows both positions (a hop during the exposure). A 30 s warm-up
+acquisition first (`run_20261123_203245_1701fa`) was itself clean (laser −4.0, Si 520.7) and the five 2 s points
+after it all shifted, with both lines about twice as broad: not time or heat, but something between the first and
+later acquisitions of a request, undone at the start of the next request.
+**What the bridge does, at the start of a request and between spectra:**
+- Start of a request (once): `ping`; `status` (below); a status-bar message; then per study the set-up: `status`,
+  `labels` of the motors to set, a `move` only for what is not already set (laser, grating, filter, objective, hole,
+  slit, polarisers, illumination), `status` again, and the operator's laser Yes (a LabSpec Yes/No dialog, first
+  laser study only).
+- `status` reads: SystemName; the detector temperature (`Acq` with mode 4, GET_TEMPERATURE); the Laser, Grating,
+  Hole, Slit, X, Y, Z values and the Filter, Objective labels (GetMotorPosition); LabSpecExposureTime,
+  LabSpecAccumulation, ShutterMode (GetValue); AutoExposure (Template GET); the laser shutter's label (when set);
+  LabSpec's last error (GetLastErrorInfo); the polarisers and illumination labels (when set); the live video's id
+  and camera (Video GET_VIDEO_ID, GET_ACTIVE_CAMERA).
+- Each spectrum (point 0 included): AutoExposure read (Template GET) and, when on, switched off (SET 0); the flush
+  (GetAcqID until -1 or three equal answers); the spectrometer read (moved only if more than 0.01 nm off); `Acq`;
+  GetAcqID until the data; the spectrum read (GetValue XYData, AxisType, AxisUnits, AcqInfo); PutDataInfo Sample,
+  Remark, Title, Project, Site; Save of the .l6s; the detector temperature (`Acq` mode 4); AutoExposure put back
+  (Template SET) when it was switched. Nothing touches the laser motor, the shutter or ShutterMode for an ordinary
+  spectrum.
+- Between spectra of the same spot: nothing else (no move, no status, no dialog).
+So the differences are the `status` reads (laser motor value, video queries, last error, exposure/accumulation
+values), the set-up moves (only when something changes), and the operator's dialog. **Test (from .23.21):**
+`ls6t profile set timing.status_before_each true` runs the same `status` before every spectrum after the first. If
+points 1–4 then stay at 520 / −4.6, the reset is in one of those reads, and the maintainer bisects them; if not, the
+dialog or a set-up move is the reset (try a request whose set-up has nothing to move).
+**Safeguards from .23.21:** with the laser line in the window it is fitted in every spectrum (`spectra[].laser_line`,
+`checks.laser_line` with any jump over 1.5 cm⁻¹: unreliable); `acquire.laser_reference: "correct"` shifts each
+spectrum by the laser line's move (relative to the line recorded at the last calibration within tolerance, else the
+first spectrum); `acquire.warmup_s` / `lasers.<k>.warmup_s` puts a discarded acquisition first (it did not help
+here); `lasers.<k>.mode_hops: true` makes calibrations say they hold for the mode they were measured in. The
+spectrometer move to a new 1200 centre took 37 s (`t_spectro_call_s`).
+
 **T3.19 LabSpec's AutoExposure (2026-11-23, .23.13).** With AutoExposure On in LabSpec (status bar "AE"), a
 spectrum asking 2 s ran 15 s while ls6t reported 2 s (this explains most of the 23–64 s acquisitions of T3.17).
 From .23.13 the bridge switches AutoExposure off for a fixed exposure (and back after), and ls6t takes the exposure

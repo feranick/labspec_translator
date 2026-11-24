@@ -565,3 +565,62 @@ def test_shutter_used_only_once_shown_to_block_on_si(tmp_path):
     with pytest.raises(runner.Stop):
         runner._shutter_gate(P.load(), 532)
     del sim
+
+
+def test_spectra_at_the_same_spot_must_agree():
+    """2026-11-23 (serious): in a request only the first spectrum was right; points 1-4 at the same spot had Si 8 cm-1
+    low and 2.5 x broader, and nothing in LabSpec's records showed it. ls6t now compares repeated spectra at the same
+    spot with the first (unreliable when they disagree), records what the bridge read around each Acq
+    (optics_check) and can pause after each spectrum (timing.acquire_settle_s)."""
+    bdir = config.active_bridge_dir()
+    S.ensure(bdir)
+    st0 = {"kind": "spectrum", "sample": {"name": "Si"}, "setup": SETUP, "acquire": {"center_cm1": 520, "exposure_s": 1},
+           "points": [{}, {}, {}], "process": {"peaks": [{"name": "Si", "near_cm1": 520.7, "window_cm1": 30}]}}
+    st = run_inline({"s": st0})
+    s = st["studies"]["s"]
+    assert s["reliable"] and not s["checks"]["same_spot"]["disagree"]
+    (bdir / "sim_shift_after_first").write_text("1")
+    st = run_inline({"s": st0})
+    s = st["studies"]["s"]
+    ss = s["checks"]["same_spot"]
+    assert [b["point"] for b in ss["disagree"]] == [1, 2] and ss["disagree"][0]["shift_cm1"] == pytest.approx(-8.7, abs=0.5)
+    assert not s["reliable"] and any("disagree with point 0" in u for u in s["unreliable_because"])
+    text = api.compose_vbs(bdir, config.home())["ls6t_bridge.vbs"]
+    assert 'res("spectro_after_acq_call") = MotorValue(mspec)' in text and 'GetP(cmd, "settle_s", "0")' in text
+
+
+def test_laser_mode_hop_is_seen_and_corrected_with_the_laser_line():
+    """2026-11-23: the 637.75 nm laser hopped after the first spectrum of a request (laser line -4.6 -> -12 cm-1, Si
+    520.2 -> 512.4, their difference constant). With the laser line in the window ls6t fits it in every spectrum,
+    flags a jump, and with laser_reference 'correct' shifts each spectrum back; warmup_s puts a discarded
+    acquisition first."""
+    bdir = config.active_bridge_dir()
+    S.ensure(bdir)
+    (bdir / "sim_laser_line").write_text("1")
+    st0 = {"kind": "spectrum", "sample": {"name": "Si"}, "setup": dict(SETUP, grating=600),
+           "acquire": {"center_cm1": 250, "exposure_s": 1}, "points": [{}, {}, {}],
+           "process": {"peaks": [{"name": "Si", "near_cm1": 520.7, "window_cm1": 30}]}}
+    (bdir / "sim_shift_after_first").write_text("1")
+    st = run_inline({"s": st0})
+    s = st["studies"]["s"]
+    ll = s["checks"]["laser_line"]
+    assert [j["point"] for j in ll["jumps"]] == [1, 2] and ll["jumps"][0]["moved_cm1"] == pytest.approx(-8.7, abs=0.6)
+    assert not s["reliable"] and any("laser line moved" in u for u in s["unreliable_because"])
+    sim = S.ensure(bdir)
+    sim._shift_armed = False                                    # a new 'first spectrum'
+    st = run_inline({"s": dict(st0, acquire=dict(st0["acquire"], laser_reference="correct"))})
+    s = st["studies"]["s"]
+    pos = [p["peaks"][0]["position_cm1"] for p in s["spectra"]]
+    assert max(pos) - min(pos) < 1.0, pos                       # corrected: Si where point 0 had it
+    assert any("corrected" in w for w in s["warnings"]) and not s["checks"]["same_spot"]["disagree"]
+    # a warm-up acquisition first: the hop happens there, the measured spectra agree
+    sim._shift_armed = False
+    st = run_inline({"s": dict(st0, acquire=dict(st0["acquire"], warmup_s=1))})
+    s = st["studies"]["s"]
+    assert s["warmup"]["ok"] and not s["checks"]["laser_line"]["jumps"] and not s["checks"]["same_spot"]["disagree"]
+    assert not F.validate({"x": dict(st0, acquire=dict(st0["acquire"], laser_reference="maybe"))})["x"]["ok"]
+    # the diagnostic: the start-of-request status read before every spectrum
+    n0 = s["timing"]["bridge_commands"]["status"]["n"]
+    P.save(dict(P.load(), timing=dict(P.load()["timing"], status_before_each=True)))
+    st = run_inline({"s": st0})
+    assert st["studies"]["s"]["timing"]["bridge_commands"]["status"]["n"] == n0 + 2

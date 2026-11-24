@@ -68,7 +68,7 @@ DEFAULT_PROFILE: dict = {
                "max_laser_on_s": 60.0},     # longest the laser may be left on for viewing (instrument laser_on)
     # measured on the XploRA (2026-11-21): laser 1.6-2.8 s, grating 0.1-0.3 s (5 s kept: whether the turret turns
     # then is still to see, TESTING T3.16), filter ~1 s, pinhole 2-6 s, slit 2-3 s; the objective: the operator
-    "timing": {"command_s": 0.3, "move_s": 2.0, "laser_s": 3.0, "grating_s": 5.0, "objective_s": 20.0,
+    "timing": {"acquire_settle_s": 0.0, "status_before_each": False, "command_s": 0.3, "move_s": 2.0, "laser_s": 3.0, "grating_s": 5.0, "objective_s": 20.0,
                "xy_um_per_s": 2000.0, "xy_settle_s": 0.3, "autofocus_s": 10.0, "readout_s": 0.5,
                "window_move_s": 2.0},
     # video snapshots: where the beam really is relative to LabSpec's laser position (µm, measured: TESTING T5b),
@@ -313,6 +313,12 @@ def load(path: Path | None = None) -> dict:
         prof = copy.deepcopy(DEFAULT_PROFILE)
         prof["measured"] = False
         prof["path"] = None
+    for v in (prof.get("lasers") or {}).values():
+        # per laser, settable with `profile set lasers.<k>.…` (2026-11-23, the 637.75 nm mode hop): a discarded
+        # acquisition before the first spectrum, and whether the laser is known to hop between modes
+        if isinstance(v, dict):
+            v.setdefault("warmup_s", 0)
+            v.setdefault("mode_hops", False)
     return prof
 
 

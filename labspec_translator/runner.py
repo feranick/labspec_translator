@@ -81,6 +81,111 @@ def motor_args(prof: dict) -> dict:
     return {**{f"m_{k}": v for k, v in prof["motors"].items()}, **shutter_args(prof)}
 
 
+def optics_record(r: dict) -> dict | None:
+    """What the bridge read around one Acq: the time since the previous spectrum (and any pause), the spectrometer
+    and grating before Acq, right after it returned and after the data, and whether a motor was busy then
+    (2026-11-23: spectra after the first in a request shifted and broadened at the same spot)."""
+    keys = ("since_last_acq_s", "settled_s", "spectro_before_acq", "spectro_after_acq_call", "spectro_after_data",
+            "grating_before_acq", "grating_after_data", "motors_busy_before_acq", "motors_busy_after_acq_call")
+    out = {k: _f(r.get(k)) for k in keys if r.get(k) not in (None, "")}
+    if not out:
+        return None
+    sp = [out[k] for k in ("spectro_before_acq", "spectro_after_acq_call", "spectro_after_data") if out.get(k) is not None]
+    if len(sp) >= 2:
+        out["spectro_moved_nm"] = round(max(sp) - min(sp), 4)
+    out["motor_busy"] = bool(out.get("motors_busy_before_acq") or out.get("motors_busy_after_acq_call"))
+    return out
+
+
+def warmup_s(study: dict, prof: dict, laser) -> float:
+    """A discarded acquisition before the first spectrum (acquire.warmup_s, else lasers.<laser>.warmup_s): if the
+    laser's mode hop is thermal (2026-11-23, 637.75 nm: after the first spectrum of a request), the measured spectra
+    then all come after it."""
+    w = (study.get("acquire") or {}).get("warmup_s")
+    if w is None:
+        lk = P.laser_key(prof, laser) if laser else None
+        w = (prof["lasers"][lk].get("warmup_s") if lk else None) or 0
+    return float(w or 0)
+
+
+def _warmup(ctx: Ctx, acq: dict, sd: Path, seconds: float) -> dict:
+    params = dict(acq, exposure_s=seconds, accumulations=1, out=str(sd / "spectra" / "warmup.txt"),
+                  sample="ls6t laser warm-up (discarded)")
+    params.pop("verb", None)
+    params.pop("native", None)
+    t0 = time.time()
+    r = ctx.call("acquire", timeout_s=120 + 3 * seconds, **params)
+    out = {"seconds": seconds, "ok": bool(r.get("ok")), "took_s": round(time.time() - t0, 2),
+           "file": params["out"]}
+    try:
+        sp = spectra.read(params["out"])
+        ll = laser_line_fit(spectra.to_shift(sp["x"], sp["meta"].get("x_unit", "nm"), ctx.optics[0])[0], sp["y"])
+        if ll:
+            out["laser_line"] = ll
+    except (OSError, ValueError, TypeError):
+        pass
+    return out
+
+
+LASER_JUMP_CM1 = 1.5     # the laser line moving more than this between spectra: a mode hop
+
+
+def laser_line_fit(shift, y) -> dict | None:
+    """The laser line (Rayleigh) near 0 cm-1, when the spectrum covers -15 to +15 cm-1; else None."""
+    s = np.asarray(shift, float)
+    if s.size < 10 or float(np.min(s)) > -15 or float(np.max(s)) < 15:
+        return None
+    xs, ys = spectra.sort_xy(s, y)
+    pk = spectra.fit_peak(xs, ys, 0.0, 40.0, name="laser")
+    return {k: pk.get(k) for k in ("ok", "position_cm1", "fwhm_cm1", "height", "snr", "why") if pk.get(k) is not None}
+
+
+def laser_line_reference(laser, grating) -> float | None:
+    """Where the laser line sat when this laser and grating were last calibrated within tolerance (perf 'zero'
+    records it when the window included it); None: the study's first spectrum is the reference."""
+    from . import perf
+    rec = perf.get("zero", perf.key(laser, grating)) if laser else None
+    v = ((rec or {}).get("latest") or {}).get("laser_line_cm1")
+    return float(v) if v is not None else None
+
+
+def same_spot_check(kind: str, per_point: list, warnings: list, unreliable: list) -> dict | None:
+    """Spectra at the same spot should agree. 2026-11-23: in a request, point 0 had Si at 520.3 cm-1 (FWHM 3.9) and
+    points 1-4 at 512 cm-1 (FWHM 9-10, area kept): every spectrum after the first was wrong, and nothing in LabSpec's
+    records showed it. Each spectrum's first fitted peak is compared with point 0's: more than 2 cm-1 apart or 1.5 x
+    as wide is flagged (unreliable for repeated spectra; a warning for a series, which may change on purpose)."""
+    pts = [r for r in per_point if r.get("peaks")]
+    if len(pts) < 2:
+        return None
+    def key(r):
+        o = r.get("offset") or {}
+        return tuple(round(float(o.get(k) or 0), 3) for k in ("x_um", "y_um", "dz_um"))
+    first = pts[0]
+    if kind != "series" and any(key(r) != key(first) for r in pts):
+        return None
+    p0 = next((pk for pk in first["peaks"] if pk.get("ok")), None)
+    if not p0:
+        return None
+    rows, bad = [], []
+    for r in pts[1:]:
+        pk = next((q for q in r["peaks"] if q.get("ok") and q.get("name") == p0.get("name")), None)
+        if not pk:
+            continue
+        d = float(pk["position_cm1"]) - float(p0["position_cm1"])
+        w = float(pk.get("fwhm_cm1") or 0) / float(p0.get("fwhm_cm1") or 1)
+        rows.append({"point": r["point"], "shift_cm1": round(d, 2), "fwhm_ratio": round(w, 2)})
+        if abs(d) > 2.0 or w > 1.5:
+            bad.append(rows[-1])
+    out = {"peak": p0.get("name"), "reference_point": first["point"], "points": rows, "disagree": bad}
+    if bad:
+        msg = (f"spectra at the same spot disagree with point {first['point']}: "
+               + ", ".join(f"point {b['point']} {b['shift_cm1']:+.1f} cm-1, {b['fwhm_ratio']:.1f} x as wide" for b in bad[:6])
+               + ". Something changed between acquisitions (TESTING T3.21); the optics_check of each spectrum says "
+                 "what the bridge read around it")
+        (warnings if kind == "series" else unreliable).append(msg)
+    return out
+
+
 def ae_record(r: dict) -> dict | None:
     """LabSpec's AutoExposure around one acquisition, from the bridge's answer (read through its Template): the value
     before, whether ls6t switched it off, the value read after switching and after putting it back."""
@@ -169,6 +274,9 @@ class Ctx:
                                                                        else "LabSpec's setting")
         if verb == "acquire":
             params.setdefault("ae_off", ae_off(self.prof))
+            # a pause after the previous spectrum (TESTING T3.21: the spectra after the first in a request were
+            # shifted and broadened)
+            params.setdefault("settle_s", float((self.prof.get("timing") or {}).get("acquire_settle_s", 0.0)))
         t0 = time.monotonic()
         try:
             r = self.bridge.call(verb, timeout_s=timeout_s, should_stop=self.cancelled, on_wait=self.beat, **params)
@@ -689,6 +797,7 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
             t_acq += time.time() - t_a
         except Stop as exc:
             stop_exc = exc
+    warmup_info = None
     for k, p in enumerate(pts if not native_map else []):
         if ctx.cancelled():
             stop_exc = Stop("cancelled", "cancel")
@@ -751,6 +860,12 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
                     zcur = move_z(ctx, target, f"point {k}")
             if k == 0 and want_before:
                 snaps["before"] = _snapshot(ctx, name, sd, "before", bool(vd.get("with_laser")), warnings, laser)
+            if k > 0 and (prof.get("timing") or {}).get("status_before_each"):
+                # diagnostic (TESTING T3.21, 2026-11-23): the bridge's status read before every spectrum, as at the
+                # start of a request; the 637.75 nm laser's mode was right for the first spectrum of each request only
+                ctx.call("status", timeout_s=15, **motor_args(prof))
+            if k == 0 and warmup_s(study, prof, laser) > 0:
+                warmup_info = _warmup(ctx, acq, sd, warmup_s(study, prof, laser))
             out = sd / "spectra" / f"p{k:05d}.txt"
             params = dict(acq)
             params.pop("verb", None)
@@ -777,7 +892,7 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
                    "native": params.get("native"), "id": r.get("id"), "t": round(time.time() - t_start, 3),
                    "exposure_s": _f(r.get("exposure_s")), "accumulations": _f(r.get("accumulations")),
                    "detector_temp_c": _f(r.get("detector_temp_c")), "ics": ctx.last_ics,
-                   "auto_exposure": ae_record(r)}
+                   "auto_exposure": ae_record(r), "optics_check": optics_record(r)}
             per_point.append(rec)
             # live view in LabSpec: the map or the series grows as it is measured
             if kind in ("map", "series") and r.get("id"):
@@ -843,6 +958,7 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
         seconds={"total": round(time.time() - t_start, 2), "acquisition": round(t_acq, 2),
                  "operator": tm["operator_s"], "analysis": round(time.time() - t_an, 2)},
         timing=tm,
+        **({"warmup": warmup_info} if warmup_info else {}),
         execution={"mode": config.mode(), "bridge": ctx.bridge_version, "translator": __version__,
                    "protocol": BRIDGE_PROTOCOL})
     if not per_point:
@@ -2515,6 +2631,11 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
     sat_points, spike_points, cover_short = [], [], []
     spike_mode = study.get("acquire", {}).get("spike", "labspec")
     axes, ys = [], []
+    # the laser line, when the window includes it (2026-11-23: the 637.75 nm laser hopped by ~0.35 nm after the first
+    # spectrum of a request: laser line -4.6 -> -12 cm-1 and Si 520.2 -> 512.4, their difference constant)
+    ll_mode = study.get("acquire", {}).get("laser_reference", "report")
+    ll_ref = laser_line_reference(laser, grating)
+    ll_ref_from = "calibration" if ll_ref is not None else None
     for rec in per_point:
         sp = rec.pop("_sp") if "_sp" in rec else spectra.read(rec["file"])
         try:
@@ -2528,6 +2649,15 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
         else:
             y_counts = y
         sat = spectra.saturation(y_counts, fs, frac)
+        ll = laser_line_fit(shift, y)
+        if ll:
+            rec["laser_line"] = ll
+            if ll_ref is None and ll.get("ok"):
+                ll_ref, ll_ref_from = ll["position_cm1"], f"point {rec['point']}"
+            if ll_mode == "correct" and ll.get("ok") and ll_ref is not None:
+                d = ll["position_cm1"] - ll_ref
+                shift = shift - d
+                rec["laser_line_correction_cm1"] = round(-d, 3)
         if corr:
             shift = corr["a"] + corr["b"] * shift
             rec["x_correction"] = {"a": corr["a"], "b": corr["b"]}
@@ -2587,6 +2717,28 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
     if undetected and kind != "map" and process.get("peaks"):
         warnings.append(f"a requested peak was not detected in {len(set(undetected))} spectra (see peaks[].why)")
 
+    lls = [(r["point"], r["laser_line"]["position_cm1"]) for r in per_point if (r.get("laser_line") or {}).get("ok")]
+    if lls:
+        ref0 = ll_ref if ll_ref is not None else lls[0][1]
+        jumps = [(p, round(v - ref0, 2)) for p, v in lls if abs(v - ref0) > LASER_JUMP_CM1]
+        checks["laser_line"] = {"reference_cm1": round(ref0, 3), "reference_from": ll_ref_from, "mode": ll_mode,
+                                "positions_cm1": {str(p): round(v, 3) for p, v in lls},
+                                "jumps": [{"point": p, "moved_cm1": d} for p, d in jumps]}
+        if jumps:
+            msg = (f"the laser line moved by {', '.join(f'{d:+.1f}' for _, d in jumps[:6])} cm-1 at point(s) "
+                   f"{', '.join(str(p) for p, _ in jumps[:6])} (a laser mode hop?): every Raman shift there moves with it")
+            if ll_mode == "correct":
+                warnings.append(msg + "; corrected (acquire.laser_reference 'correct')")
+            else:
+                unreliable.append(msg + "; use acquire.laser_reference 'correct' with the laser line in the window")
+    ss = same_spot_check(kind, per_point, warnings, unreliable) if kind in ("spectrum", "series") else None
+    if ss:
+        checks["same_spot"] = ss
+    moved = [r["point"] for r in per_point if (r.get("optics_check") or {}).get("spectro_moved_nm", 0) > 0.005
+             or (r.get("optics_check") or {}).get("motor_busy")]
+    if moved:
+        warnings.append(f"the spectrometer moved, or a motor was busy, around the acquisition of point(s) "
+                        f"{', '.join(map(str, moved[:10]))} (optics_check)")
     out: dict = {"files": {"folder": str(sd)}}
     aes = [rec["auto_exposure"] for rec in per_point if rec.get("auto_exposure")]
     if aes:             # LabSpec's AutoExposure around the acquisitions (2026-11-23: a pass visible in the result)
@@ -2699,8 +2851,18 @@ def _calibration_result(study, prof, rec, ref_lines, laser, grating, request, ch
                              "tol_cm1": tol}
     if res["trusted"]:
         from . import perf
+        llc = (rec.get("laser_line") or {})
         perf.record("zero", perf.key(laser, grating), {"offset_cm1": res["offset_cm1"], "reference": refname,
-                                                        "pass": res["pass"], "tol_cm1": tol}, request)
+                                                        "pass": res["pass"], "tol_cm1": tol,
+                                                        **({"laser_line_cm1": llc["position_cm1"]}
+                                                           if llc.get("ok") and res["pass"] else {})}, request)
+    lk = P.laser_key(prof, laser)
+    if lk and prof["lasers"][lk].get("mode_hops"):
+        res["mode_note"] = (f"the {float(laser):g} nm laser has mode hops (profile lasers.{lk}.mode_hops): this "
+                            "calibration holds for the laser mode it was measured in"
+                            + (f" (laser line at {rec['laser_line']['position_cm1']:.2f} cm-1)"
+                               if (rec.get("laser_line") or {}).get("ok") else
+                               "; include the laser line in the window to record which mode"))
     # in words, so that 'pass: false' with a correction stored does not read as a failure (2026-11-23)
     if not res["trusted"]:
         res["outcome"] = "not judged: the reference line was not measured well enough"
@@ -2843,8 +3005,8 @@ def parse_native_map(path, study: dict, prof: dict, x0, y0, zref) -> list:
 def _point_summary(r: dict) -> dict:
     keys = ("point", "offset", "stage", "file", "native", "t", "exposure_s", "accumulations", "max_counts",
             "saturated", "noise_sigma", "spikes", "from_cm1", "to_cm1", "peaks", "bands", "x_correction", "background",
-            "ics", "auto_exposure")
-    return {k: r.get(k) for k in keys if k != "auto_exposure" or r.get(k)}
+            "ics", "auto_exposure", "optics_check")
+    return {k: r.get(k) for k in keys if k not in ("auto_exposure", "optics_check") or r.get(k)}
 
 
 def _quantities(per_point, process) -> dict:

@@ -1014,6 +1014,12 @@ class SimLabSpec:
         nm = self._axis_nm(f_nm, t_nm)
         # a miscalibrated spectrometer (sim_xshift 'a,b'): the light LabSpec labels nm comes from elsewhere
         xs_ = self._xshift()
+        # sim_shift_after_first: every spectrum after the first since the file appeared lands 8.7 cm-1 low (the
+        # XploRA, 2026-11-23: points 1-4 of a request at 512 cm-1, point 0 at 520.3)
+        if (self.dir / "sim_shift_after_first").exists():
+            if getattr(self, "_shift_armed", False):
+                xs_ = (-8.7, 1.0)
+            self._shift_armed = True
         if xs_:
             a_, b_ = xs_
             reported_shift = 1e7 / las - 1e7 / nm
@@ -1023,6 +1029,9 @@ class SimLabSpec:
             nm_true = nm
         rate = np.zeros_like(nm) if laser_off or self.laser_blocked else self._signal_per_s(nm_true)
         rate = (rate + self._lamp(nm_true)) * self._edge(nm_true)
+        if (self.dir / "sim_laser_line").exists() and not laser_off and not self.laser_blocked:
+            # the laser line, leaking through the edge filter, where the laser really is
+            rate = rate + 3000.0 * np.exp(-0.5 * ((1e7 / las - 1e7 / nm_true) / 2.0) ** 2)
         if exp <= 0:   # auto exposure: reach the target at the peak, within [min, max]
             target = float(p.get("ae_target", 30000))
             peak = float(rate.max()) or 1.0
