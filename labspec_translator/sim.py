@@ -278,6 +278,21 @@ class SimLabSpec:
         m["i"] = i
         return m["labels"][i]
 
+    def v_shutter_hold(self, p):
+        """The bridge's shutter_hold: the shutter held open across a study's spectra (ShutterMode manual)."""
+        if p.get("state") == "off":
+            was = getattr(self, "held", False)
+            self.held = False
+            return {"was_held": int(was)}
+        motor = p.get("m_laser_shutter", "")
+        if motor not in self.m:
+            return {"ok": 0, "error": "shutter_hold needs the laser shutter's motor (m_laser_shutter)"}
+        old = self.m[motor]["i"]
+        lab = self._shutter_to(motor, True, p)
+        self.held = True
+        self.hold_count = getattr(self, "hold_count", 0) + 1
+        return {"held": 1, "old_mode": 0, "old_index": old, "hold_label": lab}
+
     def v_shutter(self, p):
         motor = p.get("motor", "")
         if motor not in self.m:
@@ -815,6 +830,7 @@ class SimLabSpec:
         return {}
 
     def v_safe(self, p):
+        self.held = False
         return {"shutter": "closed"}
 
     def v_resume(self, p):
@@ -1017,7 +1033,7 @@ class SimLabSpec:
         # sim_shift_after_first: every spectrum after the first since the file appeared lands 8.7 cm-1 low (the
         # XploRA, 2026-11-23: points 1-4 of a request at 512 cm-1, point 0 at 520.3)
         if (self.dir / "sim_shift_after_first").exists():
-            if getattr(self, "_shift_armed", False):
+            if getattr(self, "_shift_armed", False) and not getattr(self, "held", False):
                 xs_ = (-8.7, 1.0)
             self._shift_armed = True
         if xs_:

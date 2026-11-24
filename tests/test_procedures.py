@@ -639,6 +639,18 @@ def test_laser_mode_hop_is_seen_and_corrected_with_the_laser_line():
     assert not v["ok"] and any("unstable_multi" in e for e in v["errors"])
     assert F.validate({"x": dict(st0, acquire=dict(st0["acquire"], laser_reference="correct"))})["x"]["ok"]
     assert F.validate({"x": dict(st0, points=[{}])})["x"]["ok"]                 # one spectrum: fine
+    # a pause between spectra for that laser fixes it (2026-11-23: 5 s held the 637.75 nm laser), and is counted
+    t0 = plan.estimate(st0, prof)["seconds"]["total"]
+    prof["lasers"][lk]["settle_s"] = 5
+    P.save(prof)
+    assert F.validate({"x": st0})["x"]["ok"]
+    assert plan.estimate(st0, P.load())["seconds"]["total"] == pytest.approx(t0 + 2 * 5, abs=0.5)
+    assert plan.settle_s(P.load(), 532) == 5 and plan.settle_s(P.load(), 785) == 0     # that laser only
+    nat = {"kind": "map", "sample": {"name": "x"}, "setup": SETUP, "acquire": {"center_cm1": 520, "exposure_s": 1},
+           "map": {"x_um": [0, 2, 1], "y_um": [0, 0, 1], "engine": "native"}}
+    v = F.validate({"m": nat})["m"]
+    assert not v["ok"] and any("map engine cannot pause" in e for e in v["errors"])
+    prof["lasers"][lk]["settle_s"] = 0
     prof["lasers"][lk]["unstable_multi"] = "warn"
     P.save(prof)
     v = F.validate({"x": st0})["x"]
@@ -654,3 +666,38 @@ def test_laser_mode_hop_is_seen_and_corrected_with_the_laser_line():
     P.save(dict(P.load(), timing=dict(P.load()["timing"], status_before_each=True)))
     st = run_inline({"s": st0})
     assert st["studies"]["s"]["timing"]["bridge_commands"]["status"]["n"] == n0 + 2
+
+
+def test_shutter_held_open_across_spectra(tmp_path):
+    """HORIBA's mapping scripts (StandardMapping / SWIFTMapping XploRA.vbs) set ShutterMode manual and open the laser
+    shutter for the whole map. acquire.shutter 'hold' does the same for a study's spectra: the 637.75 nm laser
+    changed mode when LabSpec closed and opened the shutter around each spectrum (2026-11-23). Needs the verified
+    shutter; released after the spectra (and by the bridge at a halt, another command, or max_s)."""
+    _profile_with_shutter(tmp_path)
+    bdir = config.active_bridge_dir()
+    sim = S.ensure(bdir)
+    st0 = {"kind": "spectrum", "sample": {"name": "Si"}, "setup": SETUP, "acquire": {"center_cm1": 520, "exposure_s": 1},
+           "points": [{}, {}, {}], "process": {"peaks": [{"name": "Si", "near_cm1": 520.7, "window_cm1": 30}]}}
+    (bdir / "sim_shift_after_first").write_text("1")
+    sim._shift_armed = False
+    st = run_inline({"s": st0})
+    assert st["studies"]["s"]["checks"]["same_spot"]["disagree"]            # LabSpec's shutter per spectrum: hop
+    sim._shift_armed = False
+    st = run_inline({"s": dict(st0, acquire=dict(st0["acquire"], shutter="hold"))})
+    s = st["studies"]["s"]
+    assert s["reliable"] and not s["checks"]["same_spot"]["disagree"], s["unreliable_because"]
+    assert s["shutter_hold"]["held"] and s["shutter_hold"]["released"] and not sim.held
+    # the laser's own setting, and refused without a verified shutter
+    prof = P.load()
+    lk = next(k for k, v in prof["lasers"].items() if abs(v["nm"] - 532) < 1)
+    prof["lasers"][lk]["hold_shutter"] = True
+    prof["lasers"][lk]["unstable_multi"] = True
+    P.save(prof)
+    assert plan.hold_shutter(st0, P.load(), 532) and F.validate({"s": st0})["s"]["ok"]
+    from labspec_translator import shutter as SH
+    store_file = SH.store.path(SH.FILE)
+    store_file.unlink()
+    v = F.validate({"s": st0})["s"]
+    assert not v["ok"] and any("acquire.shutter 'hold'" in e for e in v["errors"])
+    text = api.compose_vbs(bdir, config.home())["ls6t_bridge.vbs"]
+    assert "Sub VShutterHold(cmd, res)" in text and 'HoldRelease "bridge stopped"' in text

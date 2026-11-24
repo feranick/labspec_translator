@@ -31,7 +31,7 @@ GUIDE_MODES = ("reach", "drop", "maximize")
 VIDEO_KEYS = {"before", "after", "with_laser"}
 SETUP_KEYS = {"laser_nm", "grating", "filter", "objective", "hole_um", "slit_um", "laser_pol", "raman_pol"}
 ACQ_KEYS = {"range_cm1", "center_cm1", "exposure_s", "accumulations", "auto_exposure", "spike", "dark",
-            "subtract_background", "ics", "laser_reference", "warmup_s"}
+            "subtract_background", "ics", "laser_reference", "warmup_s", "shutter"}
 AE_KEYS = {"target_counts", "min_s", "max_s", "test_s"}
 FOCUS_KEYS = {"autofocus", "every", "dz_um", "scan"}
 MAP_KEYS = {"x_um", "y_um", "z_um", "snake", "engine", "swift"}
@@ -114,7 +114,10 @@ def study_format(status: dict | None = None) -> dict:
                        "the window includes the laser line near 0 cm-1: it is fitted in every spectrum; correct "
                        "shifts each spectrum by the laser line's move, so a laser mode hop does not move the "
                        "peaks), warmup_s: a discarded acquisition of that many seconds before the first spectrum "
-                       "(the laser fires; default the profile's lasers.<laser>.warmup_s)}",
+                       "(the laser fires; default the profile's lasers.<laser>.warmup_s), shutter: auto (LabSpec "
+                       "opens and closes the laser shutter around each spectrum) | hold (held open from the first "
+                       "spectrum to the last, as HORIBA's mapping scripts do; needs the verified shutter; default "
+                       "the profile's lasers.<laser>.hold_shutter)}",
             "focus": "{autofocus: laser | raman | video (LabSpec's routines) | scan (ls6t's focus scan on the "
                      "Raman line) (before the first point; map: also every N points with 'every'), dz_um: Z "
                      "offset from the focus (spectrum, series), scan: {range_um (10), step_um (1), line_cm1 (Si), "
@@ -472,11 +475,21 @@ def validate_study(name: str, study: dict, prof: dict) -> dict:
     # ('warn'), unless each spectrum is corrected with its own laser line (acquire.laser_reference 'correct')
     unstable = (prof["lasers"][lk].get("unstable_multi") if lk else None) or False
     multi = kind in ("map", "series", "depth", "filters") or (kind == "spectrum" and len(study.get("points") or []) > 1)
-    if unstable and multi and (study.get("acquire") or {}).get("laser_reference") != "correct":
+    native = settled = False
+    if unstable and multi:
+        try:
+            native = kind == "map" and plan.map_engine(study, prof) == "native"
+        except (ValueError, KeyError, TypeError):
+            native = False                       # a malformed map is reported below
+        settled = (plan.settle_s(prof, s.get("laser_nm")) > 0
+                   or plan.hold_shutter(study, prof, s.get("laser_nm"))) and not native     # 5 s, or held open
+    if unstable and multi and (study.get("acquire") or {}).get("laser_reference") != "correct" and not settled:
         why = (f"the {prof['lasers'][lk]['nm']:g} nm laser changes between acquisitions on this instrument (profile "
                f"lasers.{lk}.unstable_multi): every spectrum after the first may be shifted (about 8 cm-1 on "
-               "2026-11-23). Put the laser line in the window and set acquire.laser_reference 'correct', or use "
-               "another laser")
+               "2026-11-23). Hold the shutter open across the spectra (acquire.shutter 'hold', or lasers." + lk +
+               ".hold_shutter), give the laser a pause between spectra (lasers." + lk + ".settle_s, 5 s held it), or "
+               "put the laser line in the window with acquire.laser_reference 'correct', or use another laser"
+               + ("; LabSpec's own map engine cannot pause between points: use map.engine 'points'" if native else ""))
         (warnings if unstable == "warn" else errors).append(why)
     if s.get("grating") is not None:
         if not _num(s["grating"]) or f"{float(s['grating']):g}" not in prof["gratings"]:
@@ -576,6 +589,14 @@ def validate_study(name: str, study: dict, prof: dict) -> dict:
                       "false")
     if a.get("laser_reference", "report") not in ("report", "correct"):
         errors.append("acquire.laser_reference: report or correct")
+    if a.get("shutter", "auto") not in ("auto", "hold"):
+        errors.append("acquire.shutter: auto (LabSpec opens and closes it around each spectrum) or hold (held open "
+                      "for all the study's spectra, as HORIBA's mapping scripts do)")
+    elif a.get("shutter") == "hold" or (a.get("shutter") is None and
+                                         plan.hold_shutter(study, prof, (study.get("setup") or {}).get("laser_nm"))):
+        g = SH.gate(prof, (study.get("setup") or {}).get("laser_nm"))
+        if g:
+            errors.append(f"acquire.shutter 'hold': {g}")
     w = a.get("warmup_s")
     if w is not None and (not _num(w) or not 0 <= float(w) <= float(prof["limits"].get("max_exposure_s", 60))):
         errors.append("acquire.warmup_s: seconds, 0 to limits.max_exposure_s")

@@ -320,6 +320,8 @@ def load(path: Path | None = None) -> dict:
             v.setdefault("warmup_s", 0)
             v.setdefault("mode_hops", False)
             v.setdefault("unstable_multi", False)      # true: refuse multi-spectrum studies; "warn": warn
+            v.setdefault("settle_s", 0)                # a pause between spectra with this laser (its mode holds)
+            v.setdefault("hold_shutter", False)        # the shutter held open across a study's spectra
     return prof
 
 

@@ -235,6 +235,7 @@ class Ctx:
         self.saved_config = None            # LabSpec's configuration saved at the start (session.restore_config)
         self.confirmed = False
         self.calls: list = []                  # every bridge command: verb, seconds, the bridge's own t_*_s phases
+        self.holding = False                   # the laser shutter held open for a study's spectra
         self.objective_by_operator = None      # the objective the operator confirmed in this request
         self.objective = None               # LabSpec's objective now (its record)
         self.focus_xy = (None, None)        # where the focus was found (the operator's spot, or the last focus)
@@ -274,9 +275,11 @@ class Ctx:
                                                                        else "LabSpec's setting")
         if verb == "acquire":
             params.setdefault("ae_off", ae_off(self.prof))
+            if self.holding:
+                params.setdefault("settle_s", 0.0)       # the shutter is held open: no pause needed
             # a pause after the previous spectrum (TESTING T3.21: the spectra after the first in a request were
             # shifted and broadened)
-            params.setdefault("settle_s", float((self.prof.get("timing") or {}).get("acquire_settle_s", 0.0)))
+            params.setdefault("settle_s", plan.settle_s(self.prof, self.optics[0]))
         t0 = time.monotonic()
         try:
             r = self.bridge.call(verb, timeout_s=timeout_s, should_stop=self.cancelled, on_wait=self.beat, **params)
@@ -798,6 +801,16 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
         except Stop as exc:
             stop_exc = exc
     warmup_info = None
+    hold = None
+    if not native_map and len(pts) > 1 and plan.hold_shutter(study, prof, laser) and stop_exc is None:
+        # as HORIBA's mapping scripts: ShutterMode manual and the shutter open for all the spectra, put back after
+        # (2026-11-23: the 637.75 nm laser changed mode when LabSpec closed and opened it around each spectrum)
+        hold = ctx.call("shutter_hold", timeout_s=30, state="on",
+                        max_s=round(plan.estimate(study, prof)["seconds"]["total"] * 1.5 + 120),
+                        **motor_args(prof))
+        if not hold.get("ok"):
+            raise Stop(f"acquire.shutter 'hold': {hold.get('error')}", "study")
+        ctx.holding = True
     for k, p in enumerate(pts if not native_map else []):
         if ctx.cancelled():
             stop_exc = Stop("cancelled", "cancel")
@@ -921,6 +934,15 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
         except Stop as exc:
             stop_exc = exc
             break
+    hold_info = None
+    if ctx.holding:
+        ctx.holding = False
+        try:
+            rel = ctx.call("shutter_hold", timeout_s=30, state="off")
+            hold_info = {"held": True, "released": bool(rel.get("ok")), "shutter_before": hold.get("old_index"),
+                         "mode_before": hold.get("old_mode"), "label_while_held": hold.get("hold_label")}
+        except Stop as exc:
+            hold_info = {"held": True, "released": False, "why": exc.why}
     if vd.get("after") and per_point and stop_exc is None:
         try:
             snaps["after"] = _snapshot(ctx, name, sd, "after", bool(vd.get("with_laser")), warnings, laser)
@@ -959,6 +981,7 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
                  "operator": tm["operator_s"], "analysis": round(time.time() - t_an, 2)},
         timing=tm,
         **({"warmup": warmup_info} if warmup_info else {}),
+        **({"shutter_hold": hold_info} if hold_info else {}),
         execution={"mode": config.mode(), "bridge": ctx.bridge_version, "translator": __version__,
                    "protocol": BRIDGE_PROTOCOL})
     if not per_point:

@@ -795,6 +795,27 @@ def setup_parts(study: dict, prof: dict, current: dict | None = None) -> dict:
     return out
 
 
+def settle_s(prof: dict, laser) -> float:
+    """The pause after each spectrum before the next: timing.acquire_settle_s, or the laser's own lasers.<k>.settle_s
+    if longer (2026-11-23: the XploRA's 637.75 nm laser stays in its mode with 5 s between acquisitions and hops by
+    about 8 cm-1 with 0.5 s; 532 nm needs none)."""
+    s = float((prof.get("timing") or {}).get("acquire_settle_s", 0.0) or 0.0)
+    lk = laser_key(prof, laser) if laser is not None else None
+    if lk:
+        s = max(s, float(prof["lasers"][lk].get("settle_s") or 0.0))
+    return s
+
+
+def hold_shutter(study: dict, prof: dict, laser) -> bool:
+    """Whether a study's spectra are taken with the laser shutter held open between them (acquire.shutter 'hold', or
+    the laser's lasers.<k>.hold_shutter unless the study says 'auto'), as HORIBA's mapping scripts do."""
+    a = (study.get("acquire") or {}).get("shutter")
+    if a in ("hold", "auto"):
+        return a == "hold"
+    lk = laser_key(prof, laser) if laser is not None else None
+    return bool(lk and prof["lasers"][lk].get("hold_shutter"))
+
+
 def estimate(study: dict, prof: dict, current: dict | None = None) -> dict:
     """{minutes, points, windows, seconds: {setup, per_point, total}}: an upper-end estimate from the profile's
     timing (measured values replace the defaults once the instrument has run)."""
@@ -878,6 +899,8 @@ def estimate(study: dict, prof: dict, current: dict | None = None) -> dict:
         if af and (k == 0 or (every and k % every == 0)):
             total += scan_seconds(study, prof) if af == "scan" else t["autofocus_s"]
         total += acq_s
+        if k > 0 and not hold_shutter(study, prof, laser):
+            total += settle_s(prof, laser)          # the pause between spectra (a laser that needs it)
     vd = study.get("video") or {}
     v = prof.get("video", {})
     shots = int(bool(vd.get("before", study.get("kind") == "calibration"))) + int(bool(vd.get("after")))

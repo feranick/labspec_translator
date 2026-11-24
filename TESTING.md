@@ -708,6 +708,40 @@ The laser-line test already confirmed the hop (the laser line moved with Si; Si 
 **`timing.status_before_each` is now also a possible workaround:** if a `status` read resets the 637.75 nm laser,
 running it before every spectrum would make multi-spectrum studies usable with it. Report the five-point result with
 it on; if all five agree, ls6t will accept it in place of `laser_reference: "correct"` for `unstable_multi` lasers.
+**Result (2026-11-23):** `status_before_each` did not help. **A pause did:** with `timing.acquire_settle_s` 5
+(`run_20261123_211608_3c417c`, 1200, 1 %, 2 s, `settled_s` ≈ 4.7) the five points stayed together: laser line −5.27
+to −4.51 cm⁻¹, Si 519.78–520.14, FWHM 6.3–6.8, heights 993–1080, same-spot within 0.76 cm⁻¹, reliable; with about
+0.5 s between acquisitions the laser jumped by about −8 cm⁻¹ after the first every time. 532 nm needs no pause.
+**From .23.24:** `lasers.<k>.settle_s` is a pause after each spectrum for that laser only (the larger of it and
+`timing.acquire_settle_s`), counted in the time estimates; an `unstable_multi` laser with a pause is accepted (not
+with LabSpec's own map engine, which cannot pause between points). Set it with `ls6t profile set
+lasers.637.75.settle_s 5` and `timing.acquire_settle_s 0`. **Next: the minimum.** Five points with settle_s 2, then
+1 (and 3 if 2 fails); note the laser line per point and `optics_check.since_last_acq_s`; keep the smallest that holds,
+with a margin.
+**Minimum (2026-11-23):** the jump shrinks with the pause: about −8 cm⁻¹ at 0.5 s, −7 at 1.7 s, −6 at 3.2 s
+(`acquire_settle_s` 3.5, `run_20261123_212018_eef690`: laser −4.48 → −9.85…−9.54, Si 520.11 → 514.0–514.2), none at
+4.7 s: the laser needs about 4–5 s to recover between acquisitions. Use `lasers.637.75.settle_s` 5 (6 for margin until
+more runs confirm). `timing.acquire_settle_s` and `lasers.<k>.settle_s` apply without a bridge restart.
+**LabSpec's own map engine and the laser between points (open):** if HORIBA's mapping keeps the laser on between
+points, multi-point studies with 637.75 nm could go through it without the pause. To check: (1) how HORIBA's mapping
+scripts (`StandardMapping XploRA.vbs`, `SWIFTMapping XploRA.vbs` and variants) handle `ShutterMode`, `LaserShutter`
+or the laser between points; (2) a small LabSpec map (5 × 1 points) with 637.75 nm and the laser line in the window:
+any jump between points? Until then ls6t refuses the native map engine for an `unstable_multi` laser.
+**HORIBA's mapping scripts answer it (LabSpec 6.8.1 `SERVICE\StandardMapping XploRA.vbs`, `SWIFTMapping XploRA.vbs`,
+read on the instrument PC, nothing copied):** their first line records a change on 11/06/2018 "from SHUTTER_AUTO to
+SHUTTER_MANUAL + opening the shutter". Before the map they save `ShutterMode` and the `LaserShutter` index, set
+ShutterMode manual and move `LaserShutter` to index 1 (open) for the whole map, then put both back. So HORIBA's maps
+keep the laser on between points; in automatic mode LabSpec opens and closes the shutter around each acquisition,
+which is what ls6t's spectra did, and the 637.75 nm laser changes mode after such a cycle unless it gets about 5 s.
+**From .23.24: `acquire.shutter: "hold"`** (or `lasers.<k>.hold_shutter: true`) does the same for a study's spectra:
+ShutterMode manual and the shutter open from the first spectrum to the last (the beam stays on the sample between
+points, as in HORIBA's maps), then both put back (`shutter_hold` in the result). The bridge releases it before any
+other command than the spectra, stage moves, the live view and quick reads, at a halt, when it stops, and after
+`max_s` (1.5 × the study's estimate + 2 min). It needs the verified shutter (`shutter-verify`). An `unstable_multi`
+laser accepts it in place of the pause. **Test:** five points, 637.75 nm, laser line in the window, `acquire.shutter:
+"hold"` and `settle_s` 0: no jump and `shutter_hold.released` true; LabSpec's status bar and `instrument status`
+(`shutter_held` 0, ShutterMode as before) after the study. If it holds, `ls6t profile set lasers.637.75.hold_shutter
+true` and `settle_s 0`.
 
 **T3.19 LabSpec's AutoExposure (2026-11-23, .23.13).** With AutoExposure On in LabSpec (status bar "AE"), a
 spectrum asking 2 s ran 15 s while ls6t reported 2 s (this explains most of the 23–64 s acquisitions of T3.17).

@@ -31,6 +31,8 @@ gBlocking = ""
 Dim gInbox, gOutbox, gHb, gStopFlag, gHalted, gQuit, gLastBeat, gLastPopup, gPopupOpen, gViews, gStoppedBy
 Dim gVerb, gSeq, gLastSeq, gChunk
 Dim gLaserOpen, gLaserT0, gLaserS, gLaserMotor, gLaserOldMode, gLaserOffLabel, gLaserBy
+Dim gHoldOn, gHoldMotor, gHoldOldMode, gHoldOldIdx, gHoldT0, gHoldMaxS   ' the shutter held open across spectra
+gHoldOn = False
 Dim gShutterWatch, gShutterOff, gShutterSeen   ' a laser_off acquisition: the shutter read back while it runs
 Dim gShutterReads, gShutterT0, gShutterFirstS  ' how many reads, and when (s after Acq was called)
 gShutterWatch = ""
@@ -450,6 +452,7 @@ Sub VStatus(cmd, res)
     If GetP(cmd, "m_illumination_light", "") <> "" Then res("illumination_light") = MotorLabel(GetP(cmd, "m_illumination_light", ""))
     If GetP(cmd, "m_raman_pol", "") <> "" Then res("raman_pol") = MotorLabel(GetP(cmd, "m_raman_pol", ""))
     res("laser_open") = Bit(gLaserOpen)
+    res("shutter_held") = Bit(gHoldOn)
     If gLaserOpen Then res("laser_left_s") = Fmt(gLaserS - Elapsed(gLaserT0))
     On Error Resume Next
     v = VidId()
@@ -1346,6 +1349,7 @@ Sub VAcquireLaser(cmd, res)
         Fail res, "laser_off needs the laser shutter's motor name"
         Exit Sub
     End If
+    HoldRelease "before a laser_off acquisition"
     oldMode = LSValue(0, "ShutterMode")
     res("shutter_mode_before") = oldMode
     res("shutter_label_before") = MotorLabel(shutter)
@@ -2586,6 +2590,70 @@ Sub LaserGuard(verb)
     If gLaserOpen And InStr(",ping,status,camera,labels,last_error,message,laser,", "," & verb & ",") = 0 Then
         LaserClose "before " & verb
     End If
+    ' the shutter held open for a study's spectra: only the spectra, the stage moves between them and quick reads
+    If gHoldOn And InStr(",ping,status,acquire,move_xy,move,view,message,shutter_hold,", "," & verb & ",") = 0 Then
+        HoldRelease "before " & verb
+    End If
+End Sub
+
+' The laser shutter held open across a study's spectra, as HORIBA's mapping scripts do (StandardMapping /
+' SWIFTMapping XploRA.vbs, since 2018: ShutterMode manual, LaserShutter to index 1 for the whole map, both put back
+' after). In automatic mode LabSpec opens and closes the shutter around every acquisition, and the XploRA's 637.75 nm
+' laser then changed mode after the first spectrum unless it had about 5 s between acquisitions (2026-11-23).
+' Released (mode and shutter as they were) on 'off', before any other command than the spectra, stage moves and
+' quick reads, at a halt, when the bridge stops, and after max_s.
+Sub VShutterHold(cmd, res)
+    Dim m, idx
+    If GetP(cmd, "state", "") = "off" Then
+        res("was_held") = Bit(gHoldOn)
+        HoldRelease "asked"
+        Exit Sub
+    End If
+    m = GetP(cmd, "m_laser_shutter", "")
+    If m = "" Or MotorSize(m) = -1 Then
+        Fail res, "shutter_hold needs the laser shutter's motor (m_laser_shutter)"
+        Exit Sub
+    End If
+    If gLaserOpen Then LaserClose "before shutter_hold"
+    If Not gHoldOn Then
+        gHoldOldMode = LSValue(0, "ShutterMode")
+        On Error Resume Next
+        gHoldOldIdx = LabSpec.GetMotorPosition(m, LS_MOTOR_INDEX)
+        idx = LS_SHUTTER_MANUAL
+        LabSpec.PutValue 0, "ShutterMode", idx
+        Err.Clear
+        On Error GoTo 0
+        gHoldMotor = m
+        gHoldOn = True                      ' released on every path from here
+        If Not ShutterTo(m, True, cmd, res, "hold") Then
+            Fail res, "holding the laser shutter open: it reads back '" & res("hold_label") & "'"
+            HoldRelease "error"
+            Exit Sub
+        End If
+    End If
+    gHoldT0 = Timer
+    gHoldMaxS = ParseNum(GetP(cmd, "max_s", "600"))
+    res("held") = 1
+    res("old_mode") = gHoldOldMode
+    res("old_index") = gHoldOldIdx
+    LabSpec.Message "ls6t: laser shutter held open for the spectra (close the ls6t window to stop)", LS_MB_STATUS_BAR
+End Sub
+
+Sub HoldRelease(why)
+    Dim m, i
+    If Not gHoldOn Then Exit Sub
+    On Error Resume Next
+    i = gHoldOldIdx
+    If CStr(i) = "" Then i = 0
+    LabSpec.MoveMotor gHoldMotor, i, "", LS_MOTOR_INDEX            ' as it was (HORIBA's mapping scripts do this)
+    If CStr(gHoldOldMode) <> "" Then
+        m = gHoldOldMode
+        LabSpec.PutValue 0, "ShutterMode", m
+    End If
+    Err.Clear
+    On Error GoTo 0
+    gHoldOn = False
+    LabSpec.Message "ls6t: laser shutter released (" & why & "; reads '" & MotorLabel(gHoldMotor) & "')", LS_MB_STATUS_BAR
 End Sub
 
 Sub VLaser(cmd, res)
@@ -2637,6 +2705,7 @@ End Sub
 Sub VSafe(cmd, res)
     Dim st
     LaserClose "safe"
+    HoldRelease "safe"
     On Error Resume Next
     st = LabSpec.GetMotorStatus("", 0)
     If st <> 0 Then
@@ -2728,6 +2797,7 @@ Sub HandleFile(path)
         Select Case verb
             Case "laser": VLaser cmd, res
             Case "shutter": VShutter cmd, res
+            Case "shutter_hold": VShutterHold cmd, res
             Case "ping": VPing cmd, res
             Case "status": VStatus cmd, res
             Case "discover"
@@ -2936,6 +3006,13 @@ Sub BridgeMain()
                 LaserClose "time up"
             End If
         End If
+        If gHoldOn Then
+            If gHalted Or gQuit Then
+                HoldRelease "operator"
+            ElseIf Elapsed(gHoldT0) >= gHoldMaxS Then
+                HoldRelease "time up"
+            End If
+        End If
         If gQuit Then Exit Do
         VidKeep
         p = NextCommand()
@@ -2946,6 +3023,7 @@ Sub BridgeMain()
         End If
     Loop
     LaserClose "bridge stopped"
+    HoldRelease "bridge stopped"
     ClosePopup
     gVerb = ""
     Beat "stopped", True
