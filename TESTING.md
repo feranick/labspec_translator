@@ -742,6 +742,13 @@ laser accepts it in place of the pause. **Test:** five points, 637.75 nm, laser 
 "hold"` and `settle_s` 0: no jump and `shutter_hold.released` true; LabSpec's status bar and `instrument status`
 (`shutter_held` 0, ShutterMode as before) after the study. If it holds, `ls6t profile set lasers.637.75.hold_shutter
 true` and `settle_s 0`.
+**Passed on .23.24 (2026-11-23, `run_20261123_215834_37fed8`, hold, no pause):** laser line −5.29, −5.15, −5.06,
+−4.98, −4.90 cm⁻¹; Si 519.68–519.93; FWHM 6.0–6.2; no jumps, reliable; `shutter_hold` held and released (before Off,
+mode 0; On while held); `status` afterwards `shutter_held` 0, shutter Off, mode 0. About 2.5 s per point against about
+9 s with `settle_s` 5. **To watch:** a slow monotonic drift of the laser line, +0.4 cm⁻¹ over five points (about
+10 s); in longer maps keep the laser line in the window (`checks.laser_line` reports every spectrum's position, and
+`laser_reference: "correct"` follows a drift too). Set: `ls6t profile set lasers.637.75.hold_shutter true` and
+`lasers.637.75.settle_s 0` (a laser is found by its wavelength since .23.23).
 
 **T3.19 LabSpec's AutoExposure (2026-11-23, .23.13).** With AutoExposure On in LabSpec (status bar "AE"), a
 spectrum asking 2 s ran 15 s while ls6t reported 2 s (this explains most of the 23–64 s acquisitions of T3.17).
