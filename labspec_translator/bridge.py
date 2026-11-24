@@ -328,7 +328,7 @@ class Bridge:
 
     # ------------------------------------------------------------------ calls
     def call(self, verb: str, timeout_s: float = 30.0, should_stop=None, on_wait=None, poll_s: float = 0.1,
-             **params) -> dict:
+             keep_queued: bool | None = None, **params) -> dict:
         """Sends one command and waits for its result (a dict with 'ok' as bool). Raises BridgeGone when the
         bridge is not running (before or during the call) and BridgeTimeout after timeout_s; should_stop() true
         asks the bridge to stop the command (its result then says so)."""
@@ -338,6 +338,11 @@ class Bridge:
                 raise BridgeGone(f"{verb}: " + diagnose(self.heartbeat(), self.dir))
         seq = f"{time.time_ns():020d}"
         cmd = self.inbox / f"{seq}.cmd"
+        # a command that makes the instrument safe stays queued when the bridge does not answer in time: the bridge
+        # carries it out as soon as it is free (2026-11-24: a shutter release sent while LabSpec's map held the
+        # bridge was withdrawn, and the shutter stayed open)
+        if keep_queued is None:
+            keep_queued = verb == "safe" or (verb in ("shutter_hold", "laser") and params.get("state") == "off")
         res = self.outbox / f"{seq}.res"
         # the bridge gets a slightly shorter limit, so it stops the command itself and answers before we give up
         _write_atomic(cmd, encode({"verb": verb, "seq": seq, "timeout_s": round(0.95 * timeout_s, 1), **params}))
@@ -381,13 +386,17 @@ class Bridge:
                     startup_wait = (now - t0) - timeout_s + 1.0        # the deadline moves on while it starts
                     time.sleep(poll_s)
                     continue
-                self.request_stop(seq)
-                self._withdraw(cmd)
-                raise BridgeTimeout(self._timeout_text(verb, timeout_s))
+                if not keep_queued:
+                    self.request_stop(seq)
+                    self._withdraw(cmd)
+                raise BridgeTimeout(self._timeout_text(verb, timeout_s)
+                                    + (" (left queued: the bridge carries it out when it is free)" if keep_queued
+                                       else ""))
             if not self.alive():
                 time.sleep(0.3)                 # one more look before calling it gone (a file being rewritten)
                 if not self.alive() and not res.exists():
-                    self._withdraw(cmd)
+                    if not keep_queued:
+                        self._withdraw(cmd)
                     raise BridgeGone(f"{verb}: " + diagnose(self.heartbeat(), self.dir))
             time.sleep(poll_s)
 

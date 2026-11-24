@@ -965,8 +965,73 @@ def test_laser_line_and_stored_correction_do_not_count_the_zero_twice():
     zc = s["checks"]["zero_correction"]
     assert "relative to the laser line" in zc["method"] and zc["stored"]["laser_line_cm1"] == stored["laser_line_cm1"]
     assert s["peaks_by_name"]["Si"]["position_cm1"] == pytest.approx(520.7, abs=0.6)
+    # a hop over 3 cm-1 was followed, but the zero there is flagged uncertain (2026-11-24: about 1 cm-1 left)
+    assert zc["uncertain_points"] == [0] and "a hop" in s["spectra"][0]["zero_uncertain"]
+    assert any("zero uncertain" in w for w in s["warnings"])
     # report mode: the stored correction only
     st = run_inline({"s": dict(sp, acquire=acq)})
     assert st["studies"]["s"]["checks"]["zero_correction"]["method"].startswith("the stored correction only")
     (bdir / "sim_shift_after_first").unlink()
     xcal.clear()
+
+
+def test_shutter_hold_kept_between_studies_with_the_same_laser(tmp_path):
+    """2026-11-24: each study took and released its own hold, and the 637.75 nm laser hopped when the shutter closed
+    for 5-12 s between studies. The hold is kept into the next study when it holds too, with the same laser; released
+    at the end, at a laser change, or at a stop."""
+    _profile_with_shutter(tmp_path)
+    sim = S.ensure(config.active_bridge_dir())
+    sim.hold_count = 0
+    one = {"kind": "spectrum", "sample": {"name": "Si"}, "setup": SETUP,
+           "acquire": {"center_cm1": 520, "exposure_s": 0.2, "shutter": "hold"}, "points": [{}, {}]}
+    other = dict(one, setup=dict(SETUP, laser_nm=785))
+    st = run_inline({"a": one, "b": one, "c": other})
+    a, b, c = (st["studies"][k]["shutter_hold"] for k in "abc")
+    assert a["kept_for_next_study"] and a["released"] == "kept for the next study (same laser)"
+    assert b["continued_from_previous_study"] and not b["kept_for_next_study"] and b["released"] is True
+    assert c["times_held"] == 1 and not c["continued_from_previous_study"]
+    assert sim.hold_count == 2 and not sim.held                 # one hold for a + b, one for c; none left
+
+
+def test_safety_commands_stay_queued_and_native_map_announces_blocking(tmp_path):
+    """2026-11-24: during a native map LabSpec held the bridge; ls6t called it gone after 20 s and its shutter
+    release was withdrawn, so the shutter stayed open. A safety command (shutter_hold off, laser off, safe) now stays
+    queued for the bridge; the native map announces how long it may block; the bridge releases a hold by itself when
+    no command came for idle_s."""
+    from labspec_translator.bridge import Bridge, BridgeTimeout
+    d = tmp_path / "bridge"
+    (d / "inbox").mkdir(parents=True)
+    (d / "outbox").mkdir()
+    (d / "heartbeat.txt").write_text("state=busy\nverb=map_native\nblocking=map_native\nblocking_allowance_s=600\n")
+    b = Bridge(d)
+    with pytest.raises(BridgeTimeout, match="left queued"):
+        b.call("shutter_hold", timeout_s=0.3, state="off")
+    assert len(list((d / "inbox").glob("*.cmd"))) == 1
+    with pytest.raises(BridgeTimeout):
+        b.call("status", timeout_s=0.3)
+    assert len(list((d / "inbox").glob("*.cmd"))) == 1            # an ordinary command is withdrawn
+    text = api.compose_vbs(config.active_bridge_dir(), config.home())["ls6t_bridge.vbs"]
+    nm = text.split("Sub VMapNative")[1].split("End Sub")[0]
+    assert 'gBlocking = "map_native"' in nm and "gBlockingS = tmo" in nm
+    assert 'HoldRelease "no command for " & gHoldIdleS & " s"' in text and "gLastCmdEnd = Timer" in text
+
+
+def test_focus_scan_judges_noise_and_says_where_z_was_left():
+    """2026-11-24: about 25 counts per step (20 % noise) and a focus was still chosen. Each step now gives its counts
+    and SNR, a change with Z under 4 x one step's noise is no focus (Z back to the start), few counts are warned with
+    the exposure to use, and the result says where Z was left."""
+    bdir = config.active_bridge_dir()
+    S.ensure(bdir)
+    (bdir / "sim_defocus").write_text("2.3")
+    st = run_inline({"f": {"kind": "focus", "sample": {"name": "Si"}, "setup": SETUP}})
+    f = st["studies"]["f"]["focus"]
+    assert f["found"] and f["counts"] and f["snr"][0] and "focus found" in f["z_left_at"]
+    weak = {"kind": "focus", "sample": {"name": "Si"}, "setup": dict(SETUP, filter="0.1%"),
+            "focus": {"scan": {"exposure_s": 0.02}}}
+    st = run_inline({"f": weak})
+    r = st["studies"]["f"]
+    assert not r["focus"]["found"] and "starting Z" in r["focus"]["z_left_at"]
+    assert any("counts per step" in w for w in r["warnings"])
+    text = api.compose_vbs(bdir, config.home())["ls6t_bridge.vbs"]
+    nm = text.split("Sub VMapNative")[1].split("End Sub")[0]
+    assert "LabSpec.Acq mode, tval, 0, 0, 0" in nm and "LabSpec.GetMappingParams mname" in nm

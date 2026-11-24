@@ -287,6 +287,8 @@ class SimLabSpec:
         motor = p.get("m_laser_shutter", "")
         if motor not in self.m:
             return {"ok": 0, "error": "shutter_hold needs the laser shutter's motor (m_laser_shutter)"}
+        if getattr(self, "held", False):         # already held: the bridge only renews its time limit
+            return {"held": 1, "renewed": 1}
         old = self.m[motor]["i"]
         lab = self._shutter_to(motor, True, p)
         self.held = True

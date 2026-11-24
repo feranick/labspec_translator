@@ -943,6 +943,47 @@ laser line in the window (`range_cm1` from about −100), then a spectrum with `
 later: Si near 520.7 and `method` "the stored correction relative to the laser line". The spike floor's counting
 noise assumes one electron per count unless `detector.e_per_count` says otherwise (the 5-count minimum covers low
 signal).
+**Per-window zero on .24.9 (2026-11-24, 637.75 / 1200 / 1 % / x100):** stored centre 650.63 nm (−100 … 700): −2.01,
+laser line −5.74; centre 659.66 (Si): −0.46, −4.58; `method` "the stored correction relative to the laser line"; Si
+520.98 with no hop. **Problems and changes in 2026.11.24.10:** (1) hops between studies: each study took and released
+its hold, so the shutter closed between them; hop against the gap since the last close: 4.9, 9.9, 11.7 s yes, 21.9,
+48.8 s no. The hold is now kept into the next study when it holds too, with the same laser (`shutter_hold`:
+`kept_for_next_study`, `continued_from_previous_study`); released at the end of the request, at a laser change, at a
+stop, or when another command (the operator's question, a snapshot) needs it. (2) After a hop, following the laser line
+left about 1 cm⁻¹ (Si 519.57 and 520.05 after −8.0 and −8.9 cm⁻¹; lines 1.5–2 × wide): a spectrum whose laser line
+jumped more than 3 cm⁻¹, or is over 1.2 × as wide as at the calibration (or the study's narrowest), is flagged
+`zero_uncertain` (with `checks.zero_correction.uncertain_points` and a warning); corrections now keep the laser line's
+width too. (3) With a range (From ≠ To) LabSpec's Acq places the spectrometer itself (676.75 nm read after Acq for data
+centred near 650.6): ls6t no longer warns about that move. The real centre is the data's, which is what the key uses
+(650.63, computed from the range). "−89.7 instead of −100" is real: LabSpec's window did not reach −100. (4)
+Interpolation is still to test: calibrate at two centres more than 1 nm apart and take a spectrum between them.
+**Native map on .24.9, safety (3 × 3, 2 µm, 637.75 / 1200 / 1 %, 1 s × 2):** the map held the bridge about a minute
+(LabSpec's own map acquisition); ls6t called the bridge gone after 20 s ("busy in map_native"), and the shutter release
+it then sent was withdrawn from the bridge's queue, so the shutter stayed held open (laser_shutter On, ShutterMode 1,
+`shutter_held` 1) until a hand laser_off a minute later. **From 2026.11.24.10:** the native map announces in the
+heartbeat that it holds the bridge and for how long (as acquisitions do), so ls6t waits; a safety command
+(`shutter_hold` off, `laser` off, `safe`) is never withdrawn: it stays queued and the bridge carries it out as soon as
+it is free; and the bridge releases a hold by itself when no command came for `idle_s` (60 s, plus a series'
+interval). The hold is kept for the native map: HORIBA's mapping scripts do the same (ShutterMode manual, LaserShutter
+open), so the stall was the 20 s, not the hold. **Test:** the same native map: it runs to the end with no "stopped
+answering", `shutter_hold` released, and `instrument status` after it shows `shutter_held` 0, ShutterMode 0, shutter
+Off; then stop ls6t in the middle of a held map (cancel) and check that the bridge releases the hold within about
+60 s by itself.
+**Native map did not map (.24.9, two tries, held and not):** LabSpec made an empty map object ("Pixel" axes 0–30 ×
+0–1, no titles, no data), acquired nothing, and the stage never moved; the bridge was held about a minute. The bridge
+started LabSpec's map with its own flags, the accumulations and From = To; **from 2026.11.24.10** it starts it as
+HORIBA's mapping scripts do (`Acq ACQ_AUTO_SHOW + ACQ_SPECTRAL_IMAGE, -1, 0, 0, 0`: time, accumulations and range from
+LabSpec's interface, set just before; the spectrometer at the centre first), and reads back what LabSpec took for
+each axis (`x_readback`, `y_readback`: from / to / step / mode / use). **Test:** the same 3 × 3 native map: LabSpec's own
+map window fills point by point (no ls6t live view with the native engine), the stage moves; send the readbacks if it
+still does not. Running HORIBA's own map from LabSpec's interface with the same settings shows whether the engine maps
+here at all.
+**Focus scan (.24.9, 637.75 / 1200 / 1 % / x100, hole 300, 0.5 s per step, ±5 µm × 1 µm):** 36 … 57 cps, about 25
+counts per step (20 % counting noise), more than the curve's structure, and +0.51 µm was still chosen. **From .24.10**
+each step gives its `counts`, `counts_sigma` and `snr`; a change with Z under 4 × one step's noise is no focus (Z goes
+back to the start; `contrast_over_noise` says by how much); fewer than 300 counts at the best step is warned with the
+exposure to use; `z_left_at` says where Z was left. A standalone focus study keeps the focus it found (that is its
+purpose: later spectra and studies in the request use it); with no clear focus Z returns to where it started.
 **runner.log was empty after the crash:** from 2026.11.24.2 every bridge command is written to the request's
 `runner.log` when it is sent and when it returns (`-> view kind=mapex`, `<- acquire ok=1 2.4 s`, marked `[shutter
 held]`), each line flushed at once, so the last call before a hang or crash is always there.

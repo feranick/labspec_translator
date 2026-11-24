@@ -134,6 +134,7 @@ def _warmup(ctx: Ctx, acq: dict, sd: Path, seconds: float) -> dict:
 
 
 LASER_JUMP_CM1 = 1.5     # the laser line moving more than this between spectra: a mode hop
+ZERO_JUMP_CM1 = 3.0      # followed, but more than this: the corrected zero is uncertain (about 1 cm-1 left)
 
 
 def calibration_window(study: dict, grating, n_lines: int) -> float:
@@ -326,6 +327,8 @@ class Ctx:
         self.confirmed = False
         self.calls: list = []                  # every bridge command: verb, seconds, the bridge's own t_*_s phases
         self.holding = False                   # the laser shutter held open for a study's spectra
+        self.keep_hold = False                 # and kept into the next study (same laser, holds too)
+        self.hold_idle_s = 60.0
         self.hold_wanted = False               # this study asks for it (run_any)
         self.hold_log: list = []
         self.objective_by_operator = None      # the objective the operator confirmed in this request
@@ -429,7 +432,7 @@ class Ctx:
         """The laser shutter held open (ShutterMode manual) before this study's next acquisition, as HORIBA's
         mapping scripts do for a map; the bridge keeps it only through HOLD_VERBS."""
         r = self.call("shutter_hold", timeout_s=30, state="on", max_s=getattr(self, "hold_max_s", 3600),
-                      **motor_args(self.prof))
+                      idle_s=getattr(self, "hold_idle_s", 60), **motor_args(self.prof))
         if not r.get("ok"):
             raise Stop(f"acquire.shutter 'hold': {r.get('error')}", "study")
         self.holding = True
@@ -636,7 +639,12 @@ def run_request(folder: Path | str) -> dict:
                            "bridge")
         ctx.call("message", text=f"ls6t: request {folder.name} started ({len(studies)} studies)")
         stopped = None
-        for name, study in studies.items():
+        names = list(studies)
+        for si_, (name, study) in enumerate(studies.items()):
+            # keep the shutter held into the next study when it holds too, with the same laser (2026-11-24: the
+            # 637.75 nm laser hopped when the shutter closed for 5-12 s between two studies; not after 22 s)
+            nxt = studies[names[si_ + 1]] if si_ + 1 < len(names) else None
+            ctx.keep_hold = bool(nxt is not None and _continues_hold(study, nxt, ctx))
             if stopped:
                 write_json(folder / name / f"{name}.json",
                            {"ok": False, "why": f"not run: {stopped.why}", "reliable": False,
@@ -858,6 +866,22 @@ HOLD_VERBS = ("ping", "status", "acquire", "map_native", "guide", "move_xy", "mo
               "labels", "last_error", "message", "shutter_hold")      # video and others release it
 
 
+def _study_laser(study: dict, ctx: Ctx):
+    las = (study.get("setup") or {}).get("laser_nm")
+    if las is None:
+        las = (ctx.start or {}).get("laser_nm")
+    return _f(las)
+
+
+def _continues_hold(study: dict, nxt: dict, ctx: Ctx) -> bool:
+    """The next study holds the shutter too, with the same laser: the hold is kept between them."""
+    a, b = _study_laser(study, ctx), _study_laser(nxt, ctx)
+    if a is None or b is None or abs(a - b) > 0.5:
+        return False
+    return all(s_.get("kind", "spectrum") not in NO_HOLD_KINDS and plan.hold_shutter(s_, ctx.prof, las_)
+               for s_, las_ in ((study, a), (nxt, b)))
+
+
 def run_any(name: str, study: dict, ctx: Ctx) -> dict:
     """Runs one study. With acquire.shutter 'hold' (or the laser's hold_shutter) the laser shutter is held open
     around every acquisition of the study, whatever its kind (2026-11-23: a 'filters' study with 637.75 nm was not
@@ -874,11 +898,25 @@ def run_any(name: str, study: dict, ctx: Ctx) -> dict:
             ctx.hold_max_s = round(plan.estimate(study, ctx.prof)["seconds"]["total"] * 1.5 + 300)
         except (KeyError, ValueError, TypeError):
             ctx.hold_max_s = 3600
+        # the bridge lets the hold go by itself after this long without a command (a lost release, ls6t gone);
+        # a series waits its interval between commands
+        ctx.hold_idle_s = 60 + float((study.get("series") or {}).get("interval_s", 0) or 0)
+    if ctx.holding:
+        if ctx.hold_wanted:
+            # held from the previous study (same laser): this study's own time limit for it
+            r_ = ctx.call("shutter_hold", timeout_s=30, state="on", max_s=ctx.hold_max_s, idle_s=ctx.hold_idle_s,
+                          **motor_args(ctx.prof))
+            ctx.hold_log.append({"continued": True, "from_previous_study": True, "ok": bool(r_.get("ok"))})
+        else:
+            ctx.holding = False
+            ctx.call("shutter_hold", timeout_s=30, state="off")
     try:
         res = _run_kind(name, study, ctx)
     finally:
         ctx.hold_wanted = False
-        if ctx.holding:
+        if ctx.holding and getattr(ctx, "keep_hold", False):
+            ctx.hold_log.append({"kept_for_next_study": True})
+        elif ctx.holding:
             ctx.holding = False
             try:
                 r = ctx.call("shutter_hold", timeout_s=30, state="off")
@@ -887,8 +925,13 @@ def run_any(name: str, study: dict, ctx: Ctx) -> dict:
                 ctx.hold_log.append({"released": False, "why": exc.why})
     if isinstance(res, dict) and ctx.hold_log:
         holds = [h for h in ctx.hold_log if "held" in h]
-        res["shutter_hold"] = {"held": bool(holds), "times_held": len(holds),
-                               "released": all(h.get("released", True) for h in ctx.hold_log if "released" in h),
+        res["shutter_hold"] = {"held": bool(holds) or any(h.get("continued") for h in ctx.hold_log),
+                               "times_held": len(holds),
+                               "continued_from_previous_study": any(h.get("continued") for h in ctx.hold_log),
+                               "kept_for_next_study": any(h.get("kept_for_next_study") for h in ctx.hold_log),
+                               "released": ("kept for the next study (same laser)"
+                                            if any(h.get("kept_for_next_study") for h in ctx.hold_log) else
+                                            all(h.get("released", True) for h in ctx.hold_log if "released" in h)),
                                "shutter_before": holds[0].get("shutter_before") if holds else None,
                                "mode_before": holds[0].get("mode_before") if holds else None,
                                "label_while_held": holds[0].get("label_while_held") if holds else None,
@@ -1500,6 +1543,10 @@ def _return_home(ctx: Ctx) -> dict:
     return out
 
 
+FOCUS_MIN_COUNTS = 300          # per step at the best, to see a focus curve above counting noise
+FOCUS_MIN_CONTRAST_SIGMA = 4.0  # the change with Z must be this many times one step's noise
+
+
 def focus_scan(ctx: Ctx, study: dict, laser: float, z0: float | None, sd: Path, warnings: list) -> dict:
     """Focus by the Raman signal: Z steps across focus.scan.range_um around z0, a short acquisition at each, the
     line's height above its window's edges; the best step (refined by a parabola through it and its neighbours)
@@ -1515,7 +1562,8 @@ def focus_scan(ctx: Ctx, study: dict, laser: float, z0: float | None, sd: Path, 
     offs = plan.scan_offsets(sc)
     line, win = float(sc["line_cm1"]), float(sc["window_cm1"])
     nm = round(shift_to_nm(line, laser), 4)
-    zs, vals = [], []
+    zs, vals, counts, sigmas = [], [], [], []
+    e_gain = max(float((prof.get("detector") or {}).get("e_per_count", 1.0) or 1.0), 1e-6)
     for i, dz in enumerate(offs):
         z = move_z(ctx, z0 + dz, f"focus scan step {i}", focusing=True)
         out = sd / f"z{i:03d}.txt"
@@ -1527,17 +1575,41 @@ def focus_scan(ctx: Ctx, study: dict, laser: float, z0: float | None, sd: Path, 
         x, unit = spectra.to_shift(sp["x"], sp["meta"].get("x_unit", "nm"), laser)
         x, y = spectra.sort_xy(x, sp["y"])
         zs.append(z)
-        vals.append(spectra.line_signal(x, y, line, win) / float(sc["exposure_s"]))
+        h = spectra.line_signal(x, y, line, win)
+        # the noise of that height (2026-11-24: about 25 counts per step, 20 % noise, more than the curve's structure,
+        # and a focus was still chosen): the spectrum's own pixel noise (measured: the background's photons and the
+        # read noise) and the line's extra photons at its top
+        ns = spectra.noise_sigma(y)
+        ns = 0.0 if ns is None or not math.isfinite(ns) else ns
+        counts.append(round(float(h), 1))
+        sigmas.append(round(math.sqrt(max(h, 0.0) / e_gain + ns ** 2), 2))
+        vals.append(h / float(sc["exposure_s"]))
     zs_a, v = np.array(zs), np.array(vals)
     i = int(np.argmax(v))
     res = {"z_um": None, "z0_um": z0, "offsets_um": offs, "z_steps_um": zs, "signal": [round(a, 3) for a in vals],
+           "counts": counts, "counts_sigma": sigmas,
+           "snr": [round(c / s_, 1) if s_ else None for c, s_ in zip(counts, sigmas)],
            "line_cm1": line, "unit": "counts/s", "found": False}
     contrast = (v.max() - v.min()) / max(abs(v.max()), 1e-12)
     interior = 0 < i < len(v) - 1
-    if v.max() <= 0 or contrast < 0.2 or not interior:
+    # the change with Z against the noise of one step, in counts
+    span_counts = (v.max() - v.min()) * float(sc["exposure_s"])
+    noise_counts = float(np.median(sigmas)) if sigmas else 0.0
+    res["contrast_over_noise"] = round(span_counts / noise_counts, 2) if noise_counts else None
+    if max(counts or [0]) < FOCUS_MIN_COUNTS:
+        want = float(sc["exposure_s"]) * FOCUS_MIN_COUNTS / max(max(counts or [1.0]), 1.0)
+        warnings.append(f"focus scan: at most {max(counts or [0]):.0f} counts per step, too few to see the focus "
+                        f"(about {FOCUS_MIN_COUNTS} wanted): focus.scan.exposure_s about {want:.1f} s, or a stronger "
+                        "filter")
+    noisy = noise_counts and span_counts < FOCUS_MIN_CONTRAST_SIGMA * noise_counts
+    if v.max() <= 0 or contrast < 0.2 or not interior or noisy:
         res["why"] = ("the best is at the edge of the range: widen focus.scan.range_um or start closer" if not interior
+                      else (f"the signal changes with Z by {span_counts:.0f} counts, less than "
+                            f"{FOCUS_MIN_CONTRAST_SIGMA:g} x one step's noise ({noise_counts:.0f} counts): a longer "
+                            "exposure or a stronger filter") if noisy
                       else "the signal hardly changes with Z: no line, or the range is far from focus")
         res["z_now"] = move_z(ctx, z0, "focus scan: back to the start", focusing=True)
+        res["z_left_at"] = "the starting Z (no focus found)"
     else:
         # a Gaussian through the points above 30 % of the best (a parabola in log, weighted by the signal); a
         # three-point parabola around the best when too few points qualify
@@ -1560,6 +1632,7 @@ def focus_scan(ctx: Ctx, study: dict, laser: float, z0: float | None, sd: Path, 
         if fwhm is not None and fwhm < 0.9 * (zs_a.max() - zs_a.min()):
             res["axial_fwhm_um"] = round(fwhm, 3)       # the depth resolution on this sample (stage µm)
         res["z_now"] = res["z_um"]
+        res["z_left_at"] = "the focus found (later spectra and studies use it)"
     try:
         from . import render
         res["image"] = render.focus_png(sd / "focus_scan.png", res)
@@ -3108,6 +3181,25 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
 
     lls = [(r["point"], r["laser_line"]["position_cm1"]) for r in per_point if (r.get("laser_line") or {}).get("ok")]
     followed = any(r.get("laser_line_correction_cm1") is not None for r in per_point)
+    # after a hop the laser line sits deeper in the edge filter (clipped) and may be multimode: following it left
+    # about 1 cm-1 (2026-11-24: Si 519.57 and 520.05 after hops of -8.0 and -8.9 cm-1, lines 1.5-2 x as wide). A
+    # jump over 3 cm-1, or a laser line over 1.2 x its calibration's (or the study's narrowest) width: zero uncertain
+    widths = [float(r["laser_line"]["fwhm_cm1"]) for r in per_point
+              if (r.get("laser_line") or {}).get("ok") and r["laser_line"].get("fwhm_cm1")]
+    ref_w = float(corr["laser_line_fwhm_cm1"]) if corr and corr.get("laser_line_fwhm_cm1") else \
+        (min(widths) if widths else None)
+    uncertain = []
+    for r in per_point:
+        why = []
+        c_ = r.get("laser_line_correction_cm1")
+        if c_ is not None and abs(float(c_)) > ZERO_JUMP_CM1:
+            why.append(f"the laser line moved {-float(c_):+.1f} cm-1 (a hop)")
+        w_ = (r.get("laser_line") or {}).get("fwhm_cm1")
+        if ref_w and w_ and float(w_) > 1.2 * ref_w:
+            why.append(f"the laser line is {float(w_) / ref_w:.1f} x as wide as {'at the calibration' if corr and corr.get('laser_line_fwhm_cm1') else 'the narrowest here'}")
+        if why:
+            r["zero_uncertain"] = "; ".join(why)
+            uncertain.append(r["point"])
     if corr and followed:
         how = ("the stored correction relative to the laser line: each spectrum brought back to the laser line of the "
                "correction's calibration, then the correction" if corr.get("laser_line_cm1") is not None else
@@ -3127,6 +3219,12 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
                                      ll_ref_from} if followed and ll_ref is not None else {})}
     if corr and followed and corr.get("laser_line_cm1") is None:
         warnings.append("zero: " + how)
+    if uncertain:
+        checks["zero_correction"]["uncertain_points"] = uncertain[:50]
+        checks["zero_correction"]["method"] += "; zero uncertain at some points (see spectra[].zero_uncertain)"
+        warnings.append(f"zero uncertain at {len(uncertain)} spectra (points {', '.join(map(str, uncertain[:10]))}): "
+                        "the laser line jumped or broadened; positions there may be off by about a cm-1 even after "
+                        "following it")
     if ll_mode == "correct" and len(lls) < len(per_point):
         miss = [r["point"] for r in per_point if not (r.get("laser_line") or {}).get("ok")]
         unreliable.append(f"acquire.laser_reference 'correct', but no laser line was found in spectra "
@@ -3148,9 +3246,11 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
     ss = same_spot_check(kind, per_point, warnings, unreliable) if kind in ("spectrum", "series") else None
     if ss:
         checks["same_spot"] = ss
+    # with a range (From != To) LabSpec's Acq places the spectrometer itself (2026-11-24: -100 ... 700 cm-1 read 676.75
+    # nm after Acq for data centred at about 650.6): that move is not a warning
     moved = [r["point"] for r in per_point if (r.get("optics_check") or {}).get("motor_busy")
              or ((r.get("optics_check") or {}).get("spectro_moved_nm", 0) > 0.005
-                 and not (r.get("optics_check") or {}).get("spectro_moved_by_ls6t"))]
+                 and not (r.get("optics_check") or {}).get("spectro_moved_by_ls6t") and rng.get("single", True))]
     if moved:
         warnings.append(f"the spectrometer moved, or a motor was busy, around the acquisition of point(s) "
                         f"{', '.join(map(str, moved[:10]))} (optics_check)")
@@ -3320,7 +3420,8 @@ def _calibration_result(study, prof, rec, ref_lines, laser, grating, rng, reques
     if res["adjust"] == "ls6t" and res["trusted"]:
         llc = (rec.get("laser_line") or {})
         st = xcal.store(laser, grating, a, b, refname, lines, request, centre_nm=plan.window_centre(rng),
-                        laser_line_cm1=llc.get("position_cm1") if llc.get("ok") else None)
+                        laser_line_cm1=llc.get("position_cm1") if llc.get("ok") else None,
+                        laser_line_fwhm_cm1=llc.get("fwhm_cm1") if llc.get("ok") else None)
         res["stored_correction"] = st
         warnings.append(f"ls6t now corrects later spectra ({xcal.key(laser, grating)}): true = {a:+.3f} + "
                         f"{b:.6f} x measured")
@@ -3448,10 +3549,12 @@ def parse_native_map(path, study: dict, prof: dict, x0, y0, zref) -> list:
 def _point_summary(r: dict) -> dict:
     keys = ("point", "offset", "stage", "file", "native", "t", "exposure_s", "accumulations", "max_counts",
             "saturated", "noise_sigma", "spikes", "spike_cm1", "spike_info", "from_cm1", "to_cm1", "peaks", "bands",
-            "x_correction",
+            "x_correction", "laser_line_correction_cm1", "zero_uncertain",
             "background",
             "ics", "auto_exposure", "optics_check", "t_start")
-    return {k: r.get(k) for k in keys if k not in ("auto_exposure", "optics_check", "t_start") or r.get(k) is not None}
+    return {k: r.get(k) for k in keys if k not in ("auto_exposure", "optics_check", "t_start",
+                                                    "laser_line_correction_cm1", "zero_uncertain")
+            or r.get(k) is not None}
 
 
 def _quantities(per_point, process) -> dict:

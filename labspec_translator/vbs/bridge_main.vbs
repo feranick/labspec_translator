@@ -32,6 +32,9 @@ Dim gInbox, gOutbox, gHb, gStopFlag, gHalted, gQuit, gLastBeat, gLastPopup, gPop
 Dim gVerb, gSeq, gLastSeq, gChunk
 Dim gLaserOpen, gLaserT0, gLaserS, gLaserMotor, gLaserOldMode, gLaserOffLabel, gLaserBy
 Dim gHoldOn, gHoldMotor, gHoldOldMode, gHoldOldIdx, gHoldT0, gHoldMaxS   ' the shutter held open across spectra
+Dim gHoldIdleS, gLastCmdEnd   ' released by the bridge itself when no command came for gHoldIdleS (a lost release)
+gHoldIdleS = 60
+gLastCmdEnd = Timer
 ' the commands that keep it held (runner.HOLD_VERBS lists the same): spectra, LabSpec's own map and the guided loop,
 ' stage and motor moves, the live view, saving data, quick reads
 ' The live view keeps it: its crash (2026-11-24) was MapEx's axes passed as a Variant, with the shutter automatic too;
@@ -2536,6 +2539,7 @@ End Sub
 ' map is written for ls6t (out & ".map.txt": axes and values) and saved as .l6s (and LabSpec's text export).
 Sub VMapNative(cmd, res)
     Dim ax, i, mname, f, t, st, n, ex, acc, sw, swOk, id, t0, started, who, tmo, outBase, r, mode, tval, axes
+    Dim gf, gt, gs, gm, gu
     outBase = GetP(cmd, "out", "")
     gChunk = CLng(ParseNum(GetP(cmd, "chunk", "65536")))
     ex = ParseNum(GetP(cmd, "exposure_s", "1"))
@@ -2567,6 +2571,10 @@ Sub VMapNative(cmd, res)
             st = ParseNum(GetP(cmd, ax & "_step", "1"))
             LabSpec.SetMappingParams mname, f, t, st, LS_INCREMENT_STEP, LS_ENABLE_AXIS
             axes = axes & mname & " "
+            ' what LabSpec took (2026-11-24: its map came out as "Pixel" axes 0-30 x 0-1, the stage never moved)
+            LabSpec.GetMappingParams mname, gf, gt, gs, gm, gu
+            res(ax & "_readback") = gf & " / " & gt & " / " & gs & " / mode " & gm & " / use " & gu
+            Err.Clear
         End If
     Next
     If Err.Number <> 0 Then
@@ -2594,7 +2602,13 @@ Sub VMapNative(cmd, res)
     End If
     Err.Clear
     ' start
-    mode = LS_ACQ_SPECTRAL_IMAGE + CLng(ParseNum(GetP(cmd, "mode_flags", "0")))
+    ' started as HORIBA's mapping scripts start it (StandardMapping XploRA.vbs: Acq ACQ_AUTO_SHOW +
+    ' ACQ_SPECTRAL_IMAGE, -1, 0, 0, 0): time, accumulations and range from LabSpec's interface (set above), the
+    ' spectrometer already at the centre. Until 2026.11.24.10 the bridge added its own flags, accumulations and
+    ' From = To, and LabSpec made an empty "Pixel" map without measuring
+    mode = LS_ACQ_SPECTRAL_IMAGE + LS_ACQ_AUTO_SHOW
+    If GetP(cmd, "horiba_start", "1") <> "1" Then mode = LS_ACQ_SPECTRAL_IMAGE + CLng(ParseNum(GetP(cmd, "mode_flags", "0")))
+    res("acq_mode") = mode
     tval = -1
     If GetP(cmd, "acq_time", "interface") = "exposure" Then tval = ex
     For i = 1 To 50
@@ -2603,7 +2617,19 @@ Sub VMapNative(cmd, res)
         LabSpec.Pause 20
     Next
     Err.Clear
-    LabSpec.Acq mode, tval, acc, ParseNum(GetP(cmd, "from_nm", "0")), ParseNum(GetP(cmd, "to_nm", "0"))
+    ' LabSpec's map holds the script for the whole map: the heartbeat says so first, with how long it may take
+    ' (2026-11-24: ls6t called the bridge gone after 20 s of a 1-minute native map)
+    gBlocking = "map_native"
+    gBlockingS = tmo
+    Beat "busy", True
+    If GetP(cmd, "horiba_start", "1") = "1" Then
+        LabSpec.Acq mode, tval, 0, 0, 0
+    Else
+        LabSpec.Acq mode, tval, acc, ParseNum(GetP(cmd, "from_nm", "0")), ParseNum(GetP(cmd, "to_nm", "0"))
+    End If
+    gBlocking = ""
+    gBlockingS = 0
+    Beat "busy", True
     If Err.Number <> 0 Then
         Fail res, ErrText("Acq (spectral image)")
         Err.Clear
@@ -2751,6 +2777,7 @@ Sub VShutterHold(cmd, res)
     End If
     gHoldT0 = Timer
     gHoldMaxS = ParseNum(GetP(cmd, "max_s", "600"))
+    gHoldIdleS = ParseNum(GetP(cmd, "idle_s", "60"))
     Beat "busy", True
     res("held") = 1
     res("old_mode") = gHoldOldMode
@@ -2986,6 +3013,7 @@ Sub HandleFile(path)
     Err.Clear
     On Error GoTo 0
     gVerb = ""
+    gLastCmdEnd = Timer
     BeatNow
 End Sub
 
@@ -3131,6 +3159,11 @@ Sub BridgeMain()
                 HoldRelease "operator"
             ElseIf Elapsed(gHoldT0) >= gHoldMaxS Then
                 HoldRelease "time up"
+            ElseIf Elapsed(gLastCmdEnd) >= gHoldIdleS Then
+                ' no command for this long while held: ls6t has gone or lost its release (2026-11-24: the release
+                ' sent while LabSpec's map held the bridge was dropped; the shutter stayed open until a hand
+                ' laser_off)
+                HoldRelease "no command for " & gHoldIdleS & " s"
             End If
         End If
         If gQuit Then Exit Do

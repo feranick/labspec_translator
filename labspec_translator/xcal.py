@@ -84,7 +84,7 @@ def get(laser_nm, grating, centre_nm=None) -> dict | None:
 
 
 def store(laser_nm, grating, a: float, b: float, reference: str, lines: list, request: str | None = None,
-          centre_nm=None, laser_line_cm1=None) -> dict:
+          centre_nm=None, laser_line_cm1=None, laser_line_fwhm_cm1=None) -> dict:
     """Keeps the correction per window centre (2026-11-24: two Si calibrations a minute apart, in two windows, gave
     -0.72 and -2.40 cm-1: each had overwritten the other)."""
     d = load()
@@ -97,6 +97,8 @@ def store(laser_nm, grating, a: float, b: float, reference: str, lines: list, re
         # where the laser line sat when this was measured: a later spectrum is brought back to it before the
         # correction applies (laser_reference 'correct'), so the laser's move is not counted twice
         rec["laser_line_cm1"] = round(float(laser_line_cm1), 3)
+        if laser_line_fwhm_cm1:
+            rec["laser_line_fwhm_cm1"] = round(float(laser_line_fwhm_cm1), 3)
     by = dict((d.get(k) or {}).get("by_centre") or {})
     if centre_nm is not None:
         by[f"{float(centre_nm):.2f}"] = rec
