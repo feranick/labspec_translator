@@ -813,6 +813,14 @@ list each try (`reselect.laser_nm`, `via`, `got`, `ok`). A wrong grating reading
 (`until_target_stable`) ends the wait at once (it is a refusal); 120 s stays the limit for a turret still moving.
 **Test:** the reproduction through `instrument set`: does the first try (the same laser again) or the second (via
 another laser) bring 2400, or neither (then only the bridge restart)?
+**Passed on .23.27 (2026-11-23):** 785 → 637.75 → 2400 through `instrument set` reached 2400 with the laser selected
+again (`retried_after_laser_reselect` ok), no bridge restart; 123 s in all, the full 120 s wait before the retry (from
+.23.28 a stable wrong reading ends it after 10 s). LabSpec's interface kept showing 1800 until its next dialog, but the
+spectrum straight after (`run_20261123_233004_9bc562`) was on the 2400: window 252.8–751.5 cm⁻¹ (21.66 nm, as
+learned), Si FWHM 3.95, 520.52 cm⁻¹ with the 637.75@2400 correction. So the same laser again is enough; the
+interface's display lags while the bridge runs (trust `instrument status` and the spectrum). The spectrometer move for
+that spectrum took 67.9 s (`t_spectro_call_s`; 37–50 s before): LabSpec's own move, longer the farther the
+spectrometer was left (here by the 785 nm visit).
 
 **T3.19 LabSpec's AutoExposure (2026-11-23, .23.13).** With AutoExposure On in LabSpec (status bar "AE"), a
 spectrum asking 2 s ran 15 s while ls6t reported 2 s (this explains most of the 23–64 s acquisitions of T3.17).
