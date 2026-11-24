@@ -444,10 +444,17 @@ def test_laser_off_shutter_is_read_back_and_checked(tmp_path):
     assert rep["during_checked"] is False and any("could not read the laser shutter" in w for w in warns)
     (bdir / "sim_acq_holds").unlink()
     # lines that survive spike removal with a verified shutter: said (lamp, room light?), not taken for the laser
+    # (2026-11-23: noise 'lines' of a few counts at nine different places in three backgrounds) only lines above
+    # checks.background_line_min_counts that recur in another background are warned about
     (bdir / "sim_shutter_ignored").write_text("1")            # reads Off, beam still passes: the Si line is there
     st = run_inline({"b": dict(bg, background={"name": "shut2", "laser_off": "shutter"})})
     r = st["studies"]["b"]
-    assert any("after spike removal" in w and "shutter-verify again" in w for w in r["warnings"])
+    nl = r["narrow_lines"]
+    assert nl["above_min"] and not nl["recurring"] and not any("recur" in w for w in r["warnings"])
+    st = run_inline({"b": dict(bg, background={"name": "shut2b", "laser_off": "shutter"})})
+    r = st["studies"]["b"]
+    assert r["narrow_lines"]["recurring"] and any("recur in earlier backgrounds" in w and "shutter-verify again" in w
+                                                  for w in r["warnings"])
     (bdir / "sim_shutter_ignored").unlink()
     (bdir / "sim_shutter_reopens").write_text("1")            # LabSpec opens it during the acquisition
     st = run_inline({"b": dict(bg, background={"name": "shut3", "laser_off": "shutter"})})
@@ -532,7 +539,15 @@ def test_shutter_used_only_once_shown_to_block_on_si(tmp_path):
     r = api.shutter_verify()
     assert r["ok"] and r["sensitivity"] <= 0.05 and r["record"]["laser_nm"] == 532, r.get("error")
     assert r["record"]["leak_frac"] <= 0.05 and "reference_cps" in r["record"]
-    assert r["shutter_closed"]["laser_shutter"]["during_checked"] is True
+    # judged on the worst of several closed spectra; the failures before this pass are in the record (2026-11-23)
+    assert len(r["closed"]) == 3 and r["worst_leak_frac"] == max(r["leak_fracs"])
+    assert r["record"]["failed_attempts_before"] == 2 and "earlier attempt" in r["note"]
+    assert [a["status"] for a in r["record"]["attempts"]][-3:] == ["not_conclusive", "leak", "blocked"]
+    # the burst check: one more closed spectrum of another exposure, counts per acquisition compared
+    r2 = api.shutter_verify(2.0, 2, 8.0)
+    assert r2["ok"] and len(r2["closed"]) == 3 and r2["burst_check"]["exposure_ratio"] == pytest.approx(4)
+    assert r2["record"]["failed_attempts_before"] == 0
+    assert r["closed"][0]["laser_shutter"]["during_checked"] is True
     assert api.validate({"b": bg})["b"]["ok"]
     assert SH.gate(P.load(), 637.75) and "637.75 nm" in SH.gate(P.load(), 637.75)     # per laser
     # another way of moving it, or too old: verify again

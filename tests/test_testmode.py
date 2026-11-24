@@ -234,6 +234,8 @@ def test_laser_on_for_viewing(tmp_path):
     (config.active_bridge_dir() / "sim_confirm_no").unlink()
     r = api.instrument("laser_on", seconds=10)
     assert r["ok"] and r["open"] == "1"
+    # the parts named; 'seconds' is the whole, the operator's answer included (2026-11-23)
+    assert r["open_for_s"] == 10 and r["seconds"] == pytest.approx(r["confirm_s"] + r["laser_call_s"], abs=0.01)
     assert api.instrument("status")["status"]["laser_open"] == "1"
     api.instrument("set", setup={"grating": 600})                               # another command closes it
     assert api.instrument("status")["status"]["laser_open"] == "0"

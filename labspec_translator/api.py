@@ -764,7 +764,11 @@ def shutter_test(motor: str | None = None) -> dict:
     return out
 
 
-MAX_LEAK_FRAC = 0.001       # shutter.max_leak_frac: what may pass the closed shutter (0.1 % of the open signal)
+# shutter.max_leak_frac: what may pass the closed shutter, as a fraction of the open signal. 0.5 %: on the XploRA
+# (2026-11-23) the closed shutter let through 0.04-0.17 % from run to run (1.3-3.5 counts per acquisition, a burst
+# more likely than a steady leak), so 0.1 % flipped between pass and fail; 0.5 % keeps a margin of about 3 over the
+# worst seen and still refuses a shutter that does not block (86 % in the morning's failure)
+MAX_LEAK_FRAC = 0.005
 HUMAN_ANSWER_S = 0.4        # an operator's Yes faster than this was not a person reading the question
 
 
@@ -801,13 +805,15 @@ def _pct(f: float) -> str:
     return f"{f * 100:.2g} %" if f < 0.1 else f"{f * 100:.0f} %"
 
 
-def shutter_verify(exposure_s: float = 2.0) -> dict:
+def shutter_verify(exposure_s: float = 2.0, repeats: int = 3, burst_s: float | None = None) -> dict:
     """The spectral proof that the laser shutter blocks the beam (TESTING T1.2 step 2), with silicon under the
-    objective, in focus, in the current set-up: a reference spectrum at 520 cm-1 with the laser, then the same with
-    laser_off 'shutter'. It passes when what passes the closed shutter is at most shutter.max_leak_frac (0.1 %) of
-    the open signal, measured with a reference strong enough to see a leak of that size; only
-    then is the record written that lets ls6t use the shutter for this laser (shutter.py). Two accumulations with
-    LabSpec's spike removal each, so a cosmic ray is not taken for the line."""
+    objective, in focus, in the current set-up: a reference spectrum at 520 cm-1 with the laser, then `repeats`
+    spectra with laser_off 'shutter' (and, with burst_s, one more of that exposure: a burst at the start or end of
+    each acquisition gives the same counts at any exposure, a steady leak counts in proportion). Judged on the WORST
+    closed spectrum: what passes may be at most shutter.max_leak_frac of the open signal, measured with a reference
+    strong enough to see a leak of that size. Every attempt, passed or not, goes to shutter_verified.json's
+    'attempts'; only a pass writes the record that lets ls6t use the shutter for this laser (shutter.py). Two
+    accumulations with LabSpec's spike removal each, so a cosmic ray is not taken for the line."""
     from .profile import filter_pct, laser_key, shift_to_nm
     prof = P.load()
     gate = P.review_gate(prof) if config.mode() == "labspec" else None
@@ -820,8 +826,12 @@ def shutter_verify(exposure_s: float = 2.0) -> dict:
     if runner.read_json(runner.lock_path(), None):
         return {"ok": False, "error": "a request holds the instrument: wait or cancel it"}
     ex = float(exposure_s)
-    if not 0 < ex <= float(prof["limits"].get("max_exposure_s", 60)):
-        return {"ok": False, "error": "exposure_s: above 0, within limits.max_exposure_s"}
+    mx = float(prof["limits"].get("max_exposure_s", 60))
+    repeats = int(repeats)
+    if not 0 < ex <= mx or (burst_s is not None and not 0 < float(burst_s) <= mx):
+        return {"ok": False, "error": "exposure_s and burst_s: above 0, within limits.max_exposure_s"}
+    if not 1 <= repeats <= 10:
+        return {"ok": False, "error": "repeats: 1 to 10 closed-shutter spectra"}
     b = Bridge()
     if config.mode() == "sim":
         from . import sim as S
@@ -829,6 +839,10 @@ def shutter_verify(exposure_s: float = 2.0) -> dict:
     d = config.home() / "shutter_verify" / time.strftime("%Y%m%d_%H%M%S")
     d.mkdir(parents=True, exist_ok=True)
     out: dict = {"ok": False, "motor": motor, "by": str((prof.get("shutter") or {}).get("by", "label")), "folder": str(d)}
+    limit = float((prof.get("shutter") or {}).get("max_leak_frac", MAX_LEAK_FRAC))
+    detect = float(prof["checks"].get("detect_snr", 5.0))
+    closed_plan = [(ex, f"closed_{i + 1}") for i in range(repeats)] + \
+                  ([(float(burst_s), "closed_burst_check")] if burst_s else [])
     try:
         st = b.call("status", timeout_s=15, **runner.motor_args(prof))
         laser, grating = runner._f(st.get("laser_nm")), runner._f(st.get("grating"))
@@ -841,80 +855,121 @@ def shutter_verify(exposure_s: float = 2.0) -> dict:
         if laser is None or pct is None or pct > min(caps) + 1e-9:
             return {"ok": False, "error": f"laser {st.get('laser_nm')}, filter {st.get('filter')!r}: a known laser "
                                           f"and a filter within the caps ({min(caps):g} %) first (instrument set)"}
-        out.update(laser_nm=laser, grating=grating, filter=st.get("filter"), objective=st.get("objective"))
-        txt = (f"ls6t shutter verification ({motor}): silicon under the objective, in focus. The laser fires twice for "
-               f"2 x {ex:g} s at {laser:g} nm, filter {st.get('filter')}: once as a reference, once with the "
-               "shutter closed (the Si line must then be gone). Continue?")
+        out.update(laser_nm=laser, grating=grating, filter=st.get("filter"), objective=st.get("objective"),
+                   max_leak_frac=limit)
+        txt = (f"ls6t shutter verification ({motor}): silicon under the objective, in focus. The laser fires "
+               f"{1 + len(closed_plan)} times (2 accumulations each) at {laser:g} nm, filter {st.get('filter')}: once "
+               f"as a reference ({ex:g} s), then {len(closed_plan)} times with the shutter closed (the Si line must "
+               "then be gone). Continue?")
         yes, dt, err = _operator_yes(b, txt)
         if not yes:
             return {"ok": False, "error": err, "confirm_s": dt}
         nm = shift_to_nm(520.7, laser)
         mode = 10 + plan.SPIKE_MODES["double"] + (plan.ACQ_NO_ICS if plan.ics_off(prof, laser, grating) else 0)
-        common = dict(mode=mode, exposure_s=ex, accumulations=2, from_nm=round(nm, 4), to_nm=round(nm, 4),
-                      ae_off=runner.ae_off(prof), **runner.motor_args(prof))
-        meas = {}
-        for tag, extra in (("reference", {}), ("shutter_closed", dict(laser_off=1))):
+        base = dict(mode=mode, accumulations=2, from_nm=round(nm, 4), to_nm=round(nm, 4),
+                    ae_off=runner.ae_off(prof), **runner.motor_args(prof))
+
+        def take(tag, seconds, extra):
             f = d / f"{tag}.txt"
-            r = b.call("acquire", timeout_s=120 + 3 * ex, out=str(f), sample=f"shutter verification {tag}",
-                       **common, **extra)
+            r = b.call("acquire", timeout_s=120 + 3 * seconds, out=str(f), sample=f"shutter verification {tag}",
+                       exposure_s=seconds, **base, **extra)
             if not r.get("ok"):
-                out["error"] = f"{tag}: {r.get('error')}"
-                out[tag] = {k: v for k, v in r.items() if k.startswith("shutter")}
-                return out
+                raise RuntimeError(f"{tag}: {r.get('error')}")
             sp = spectra.read(f)
-            used = spectra.acq_exposure(sp["meta"]) or ex
+            used = spectra.acq_exposure(sp["meta"]) or seconds
             x, _ = spectra.to_shift(sp["x"], sp["meta"].get("x_unit", "nm"), laser)
             xs, ys = spectra.sort_xy(x, sp["y"])
-            sig = spectra.line_signal(xs, ys, 520.7, 30.0) / used
-            noise = spectra.noise_sigma(ys) / used
-            meas[tag] = {"si_signal_cps": round(sig, 3), "noise_cps": round(noise, 4), "exposure_used_s": used,
-                         "snr": round(sig / noise, 1) if noise > 0 else None, "file": str(f)}
-            if tag == "shutter_closed":
-                warns: list = []
-                meas[tag]["laser_shutter"] = runner.shutter_report(r, warns, verified=True)
-                out["warnings"] = warns
-        out.update(meas)
-        ref, off = meas["reference"], meas["shutter_closed"]
-        detect = float(prof["checks"].get("detect_snr", 5.0))
-        # 2026-11-23: a 99.96 % block (0.04 % left, SNR 14.8 against a 1185 cps reference) failed "undetectable":
-        # a strong reference shows any real shutter's residue. The rule: the leak at most shutter.max_leak_frac of
-        # the open signal; 'not conclusive' only when the test could not see a leak of that size
-        limit = float((prof.get("shutter") or {}).get("max_leak_frac", MAX_LEAK_FRAC))
-        verdict = leak_verdict(ref, off, detect, limit)
-        out.update({k: v for k, v in verdict.items() if k != "status"}, ratio=verdict["leak_frac"])
-        sens, ratio = verdict["sensitivity"], verdict["leak_frac"]
-        if verdict["status"] == "not_conclusive":
-            out["error"] = (f"not conclusive: the reference Si line is too weak (signal-to-noise {ref['snr']}): the "
-                            f"closed-shutter spectrum could only show a leak above {_pct(sens)} (the limit is "
-                            f"{_pct(limit)}, shutter.max_leak_frac). Focus on the silicon, a stronger filter (e.g. "
-                            "10 %, within the caps) or --seconds longer")
-            return out
-        blocked = verdict["status"] == "blocked"
-        out["blocked"] = blocked
-        if not blocked:
-            out["error"] = (f"NOT BLOCKED: with the shutter closed the Si line is still {_pct(ratio)} of the "
-                            f"reference (signal-to-noise {off['snr']}; the limit is {_pct(limit)}). ls6t will not "
-                            "use the shutter: keep "
-                            "motors.laser_shutter null (ls6t profile set motors.laser_shutter null) and run "
-                            "`ls6t instrument shutter-test` to see which move blocks")
-            return out
-        during = (off.get("laser_shutter") or {}).get("during_checked")
-        rec = {"laser_nm": laser, "time": time.time(), "date": time.strftime("%Y-%m-%dT%H:%M:%S"),
-               "version": __version__, "rev": SH.REV, "motor": motor, "by": out["by"], "grating": grating,
-               "filter": st.get("filter"), "objective": st.get("objective"), "leak_frac": out["leak_frac"],
-               "max_leak_frac": limit, "leak_detected": out["leak_detected"], "sensitivity": out["sensitivity"],
-               "reference_cps": ref["si_signal_cps"], "closed_cps": off["si_signal_cps"],
-               "reference_snr": ref["snr"], "during_checked": during, "folder": str(d)}
-        SH.record(rec)
-        out.update(ok=True, record=rec,
-                   next=f"ls6t may now use the shutter with the {laser:g} nm laser (laser_off 'shutter', laser_on, "
-                        "snapshots with the laser) for "
-                        f"{float((prof.get('shutter') or {}).get('verify_max_days', SH.MAX_DAYS)):g} days; verify "
-                        "each laser you use the shutter with")
+            sig = spectra.line_signal(xs, ys, 520.7, 30.0)
+            noise = spectra.noise_sigma(ys)
+            m = {"exposure_used_s": used, "si_counts": round(sig, 3),        # per accumulation, as LabSpec stores
+                 "si_signal_cps": round(sig / used, 4), "noise_cps": round(noise / used, 5),
+                 "snr": round(sig / noise, 1) if noise > 0 else None, "file": str(f)}
+            if extra:
+                m["laser_shutter"] = runner.shutter_report(r, [], verified=True)
+            return m
+
+        ref = take("reference", ex, {})
+        closed = []
+        for seconds, tag in closed_plan:
+            m = take(tag, seconds, dict(laser_off=1))
+            m.update(tag=tag, **{k: v for k, v in leak_verdict(ref, m, detect, limit).items()})
+            closed.append(m)
+    except RuntimeError as exc:
+        out["error"] = str(exc)
+        SH.attempt({"laser_nm": out.get("laser_nm"), "ok": False, "error": out["error"], "version": __version__})
         return out
     except BridgeError as exc:
         out["error"] = str(exc)
         return out
+    out.update(reference=ref, closed=closed)
+    fracs = [c["leak_frac"] for c in closed]
+    worst = max(closed, key=lambda c: c["leak_frac"])
+    out.update(worst_leak_frac=worst["leak_frac"], leak_fracs=fracs, leak_frac=worst["leak_frac"],
+               ratio=worst["leak_frac"], sensitivity=max(c["sensitivity"] for c in closed),
+               leak_detected=any(c["leak_detected"] for c in closed))
+    # a burst at the start / end of each acquisition, or a steady leak? (2026-11-23: 1.3-3.5 counts per acquisition
+    # in every run, whatever the run-to-run spread)
+    same = [c for c in closed if abs(c["exposure_used_s"] - ref["exposure_used_s"]) < 1e-6]
+    long_ = [c for c in closed if c["tag"] == "closed_burst_check"]
+    if long_ and same:
+        c_short = sum(c["si_counts"] for c in same) / len(same)
+        t_ratio = long_[0]["exposure_used_s"] / same[0]["exposure_used_s"]
+        c_ratio = long_[0]["si_counts"] / c_short if c_short > 0 else None
+        out["burst_check"] = {
+            "counts_short": round(c_short, 3), "counts_long": long_[0]["si_counts"], "exposure_ratio": round(t_ratio, 3),
+            "counts_ratio": round(c_ratio, 3) if c_ratio is not None else None,
+            "reading": (None if c_ratio is None else
+                        "a burst per acquisition (the counts do not grow with the exposure)" if c_ratio < 1 + 0.3 * (t_ratio - 1)
+                        else "a steady leak (the counts grow with the exposure)" if c_ratio > 1 + 0.7 * (t_ratio - 1)
+                        else "between a burst and a steady leak")}
+    statuses = [c["status"] for c in closed]
+    status = "leak" if "leak" in statuses else "not_conclusive" if "not_conclusive" in statuses else "blocked"
+    out["blocked"] = status == "blocked"
+    attempt = {"laser_nm": out["laser_nm"], "ok": status == "blocked", "status": status, "version": __version__,
+               "worst_leak_frac": out["worst_leak_frac"], "leak_fracs": fracs, "max_leak_frac": limit,
+               "exposure_s": ex, "burst_check": out.get("burst_check"), "folder": str(d)}
+    SH.attempt(attempt)
+    if status == "not_conclusive":
+        out["error"] = (f"not conclusive: the reference Si line is too weak (signal-to-noise {ref['snr']}): the "
+                        f"closed-shutter spectra could only show a leak above {_pct(out['sensitivity'])} (the limit "
+                        f"is {_pct(limit)}, shutter.max_leak_frac). Focus on the silicon, a stronger filter (e.g. "
+                        "10 %, within the caps) or --seconds longer")
+        return out
+    if status == "leak":
+        out["error"] = (f"NOT BLOCKED: with the shutter closed the Si line was up to {_pct(worst['leak_frac'])} of the "
+                        f"reference ({', '.join(_pct(f) for f in fracs)}; the limit is {_pct(limit)}). ls6t will not "
+                        "use the shutter. If the shutter is known to block (shutter-test) and the leak is a small "
+                        "burst per acquisition (--burst-seconds), the limit may be the question "
+                        "(shutter.max_leak_frac); otherwise keep motors.laser_shutter null and run `ls6t instrument "
+                        "shutter-test` to see which move blocks")
+        return out
+    prev = SH.attempts(laser)[:-1]                       # before this one
+    last_pass = max((i for i, a in enumerate(prev) if a.get("ok")), default=-1)
+    earlier = [a for a in prev[last_pass + 1:] if not a.get("ok")]      # the failures since the previous pass
+    rec = {"laser_nm": laser, "time": time.time(), "date": time.strftime("%Y-%m-%dT%H:%M:%S"),
+           "version": __version__, "rev": SH.REV, "motor": motor, "by": out["by"], "grating": grating,
+           "filter": st.get("filter"), "objective": st.get("objective"), "leak_frac": out["worst_leak_frac"],
+           "worst_leak_frac": out["worst_leak_frac"], "leak_fracs": fracs, "max_leak_frac": limit,
+           "leak_detected": out["leak_detected"], "sensitivity": out["sensitivity"],
+           "reference_cps": ref["si_signal_cps"], "closed_cps": [c["si_signal_cps"] for c in closed],
+           "closed_counts": [c["si_counts"] for c in closed], "exposure_s": ex,
+           "burst_check": out.get("burst_check"), "reference_snr": ref["snr"],
+           "during_checked": (closed[0].get("laser_shutter") or {}).get("during_checked"),
+           "failed_attempts_before": len(earlier),
+           "attempts": [{k: a.get(k) for k in ("date", "status", "worst_leak_frac", "version")}
+                        for a in SH.attempts(laser)][-20:],
+           "folder": str(d)}
+    SH.record(rec)
+    out.update(ok=True, record=rec,
+               next=f"ls6t may now use the shutter with the {laser:g} nm laser (laser_off 'shutter', laser_on, "
+                    "snapshots with the laser) for "
+                    f"{float((prof.get('shutter') or {}).get('verify_max_days', SH.MAX_DAYS)):g} days; verify "
+                    "each laser you use the shutter with")
+    if earlier:
+        out["note"] = (f"{len(earlier)} earlier attempt(s) with this laser did not pass (their worst leaks: "
+                       + ", ".join(_pct(a.get("worst_leak_frac") or 0) for a in earlier[-5:])
+                       + "); they are kept in the record's 'attempts'")
+    return out
 
 
 def labspec_calibration(b: Bridge | None = None) -> dict:
@@ -996,7 +1051,12 @@ def laser(on: bool, seconds: float | None = None) -> dict:
         if not yes:
             return {"ok": False, "error": err, "confirm_s": dt}
         r = b.call("laser", timeout_s=30, state="on", seconds=secs, m_laser_shutter=shutter, **runner.shutter_args(prof))
-        r["confirm_s"] = dt                  # how long the operator took to answer (TESTING: was it asked?)
+        # 2026-11-23: 'seconds' (the bridge call alone, 1.5 s) read as if a repeated laser_on took 0.2 s without
+        # asking; the parts are named, and 'seconds' is the whole of it, the operator's answer included
+        r["laser_call_s"] = runner._f(r.get("seconds"))
+        r["confirm_s"] = dt                  # how long the operator took to answer
+        r["seconds"] = round(dt + (r["laser_call_s"] or 0.0), 2)
+        r["open_for_s"] = secs               # how long the shutter stays open
         if r.get("ok"):
             r["note"] = (f"the shutter closes by itself after {secs:g} s, or with instrument laser_off, or when the "
                          "operator closes the ls6t window")

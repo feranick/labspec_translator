@@ -40,6 +40,23 @@ def record(rec: dict) -> dict:
     return rec
 
 
+def attempt(a: dict) -> dict:
+    """Every verification attempt, passed or not (2026-11-23: passes and fails alternated around the limit; a pass
+    after failures must show)."""
+    d = store.read(FILE)
+    a = dict(a, time=time.time(), date=time.strftime("%Y-%m-%dT%H:%M:%S"))
+    d.setdefault("attempts", []).append(a)
+    d["attempts"] = d["attempts"][-100:]
+    store.write(FILE, d)
+    return a
+
+
+def attempts(laser_nm=None) -> list:
+    """Every attempt kept for this laser (or all), oldest first."""
+    al = store.read(FILE).get("attempts") or []
+    return [a for a in al if laser_nm is None or _key(a.get("laser_nm")) == _key(laser_nm)]
+
+
 def gate(prof: dict, laser_nm=None) -> str | None:
     """None when ls6t may rely on the shutter for this laser; else why not (said to the LLM and the person)."""
     motor = (prof.get("motors") or {}).get("laser_shutter")

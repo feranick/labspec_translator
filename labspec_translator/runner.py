@@ -18,6 +18,7 @@ import numpy as np
 
 from . import __version__, BRIDGE_PROTOCOL, config, plan, spectra, video
 from . import spot as SP
+from . import store
 from . import shutter as SH
 from . import profile as P
 from .bridge import replace_retry, Bridge, BridgeError, BridgeGone, BridgeTimeout
@@ -2010,26 +2011,47 @@ def run_background(name: str, study: dict, ctx: Ctx) -> dict:
         unreliable.append("the background is saturated: a shorter exposure, or less white light")
     # narrow lines in a background: the laser not blocked? Cosmic rays first out (a 5-point median: one to three
     # pixels): on 2026-11-23 two good backgrounds (8 counts at most, no Si line) were rejected for spikes at 415 /
-    # 516 / 737 and 269 / 358 / 558 cm-1, in other places each time
+    # 516 / 737 and 269 / 358 / 558 cm-1, in other places each time. Then a third had 'lines' of a few counts at 480 /
+    # 594 / 661: noise. A line counts only above checks.background_line_min_counts (20), and is warned about only
+    # when it recurs (within 5 cm-1) in another background with this laser: real lamp or room-light lines repeat
+    narrow_info = None
     try:
         from scipy.signal import medfilt
         shift, _ = spectra.to_shift(sp["x"], sp["meta"].get("x_unit", "nm"), laser)
         xs, ysr = spectra.sort_xy(shift, sp["y"])
+        if per_s:
+            ysr = ysr * ex                                      # in counts, as the detector saw them
         sig_raw = spectra.noise_sigma(ysr - spectra.baseline(xs, ysr, 3))     # the noise from the spectrum as taken
         ysr = medfilt(ysr, 5) if len(ysr) >= 5 else ysr
         yc = ysr - spectra.baseline(xs, ysr, 3)
-        narrow = spectra.find_peaks(xs, yc, 3, sig_raw or None, 25.0)
+        found = spectra.find_peaks(xs, yc, 5, sig_raw or None, 25.0)
+        min_counts = float(prof["checks"].get("background_line_min_counts", 20.0))
+        lines = [{"cm1": round(v, 1), "counts": round(float(np.interp(v, xs, yc)), 1)} for v in found]
+        strong = [ln for ln in lines if ln["counts"] >= min_counts]
+        hist = store.read("background_lines.json")
+        key = SH._key(laser)
+        prev = (hist.get(key) or [])[-10:]
+        recurring = [ln for ln in strong if any(abs(ln["cm1"] - q) <= 5.0 for e in prev for q in e.get("lines", []))]
+        hist.setdefault(key, []).append({"date": time.strftime("%Y-%m-%dT%H:%M:%S"), "background": bname,
+                                         "lines": [ln["cm1"] for ln in strong]})
+        hist[key] = hist[key][-20:]
+        store.write("background_lines.json", hist)
+        narrow_info = {"min_counts": min_counts, "found": lines, "above_min": strong,
+                       "recurring": [ln["cm1"] for ln in recurring], "backgrounds_compared": len(prev)}
+        narrow = [ln["cm1"] for ln in recurring]
         verified = SH.records().get(SH._key(laser)) if off == "shutter" else None
         if narrow and off == "shutter":
             # the shutter has been shown to block this laser on Si (shutter.py), so these are the lamp or the room's
             # light more likely than the laser; said, kept
-            warnings.append(f"the background has narrow lines at {', '.join(f'{v:.0f}' for v in narrow)} cm-1 (after "
-                            "spike removal) with the laser shutter closed: the white lamp or room light? The shutter "
-                            f"was shown to block this laser on Si on {(verified or {}).get('date', '?')}; if these are "
-                            "the sample's Raman lines, run ls6t instrument shutter-verify again")
-        elif narrow:
-            warnings.append(f"the background has narrow lines at {', '.join(f'{v:.0f}' for v in narrow)} cm-1: was "
-                            "the laser blocked? (a Raman line in the background would be subtracted from samples)")
+            warnings.append(f"the background has lines at {', '.join(f'{v:.0f}' for v in narrow)} cm-1 that recur in "
+                            "earlier backgrounds (after spike removal, above "
+                            f"{min_counts:g} counts) with the laser shutter closed: the white lamp or room light? The "
+                            f"shutter was shown to block this laser on Si on {(verified or {}).get('date', '?')}; if these "
+                            "are the sample's Raman lines, run ls6t instrument shutter-verify again")
+        elif strong and off != "shutter":
+            warnings.append(f"the background has narrow lines at {', '.join(str(round(ln['cm1'])) for ln in strong)} "
+                            "cm-1: was the laser blocked? (a Raman line in the background would be subtracted from "
+                            "samples)")
     except ValueError:
         pass
     meta = {"name": bname, "laser_nm": laser, "grating": _f(su["after"].get("grating")),
@@ -2045,6 +2067,7 @@ def run_background(name: str, study: dict, ctx: Ctx) -> dict:
               "background": {**stored, "max_cps": round(float(np.max(cps)), 3), "mean_cps": round(float(np.mean(cps)), 3)},
               "spectra": [{"file": str(out), "exposure_s": ex, "max_counts": sat["max_counts"]}],
               **({"laser_shutter": shut} if shut else {}),
+              **({"narrow_lines": narrow_info} if narrow_info else {}),
               "instrument": {"laser_nm": laser, "grating": meta["grating"], "objective": meta["objective"]},
               "seconds": {"total": round(time.time() - t_start, 2),
                           # the acquisition alone (the bridge's call): two backgrounds in a row after a grating

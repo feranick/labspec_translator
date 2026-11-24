@@ -32,7 +32,7 @@ DEFAULT_PROFILE: dict = {
                "illumination_light": None},   # the light source's mode (XploRA: uLight), read only
     # the laser shutter's positions (OLConfig on the XploRA: Off / On); ls6t moves it by label and reads it back
     # (2026-11-23: moved by value 0, unchecked, it did not block the beam). by: label or value
-    "shutter": {"off": "Off", "on": "On", "by": "label", "verify_max_days": 30, "max_leak_frac": 0.001},
+    "shutter": {"off": "Off", "on": "On", "by": "label", "verify_max_days": 30, "max_leak_frac": 0.005},
     # LabSpec's AutoExposure is a template value (Template SET/GET_VALUE "AutoExposure", 0 / 1, in the third
     # argument); SET_VALUE acts on the live settings (TESTING T3.19, passed 2026-11-23): for a fixed exposure the
     # bridge switches it off and puts it back after. false: AE is left alone (a different exposure stops the study)

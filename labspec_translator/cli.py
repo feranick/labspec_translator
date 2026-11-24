@@ -100,6 +100,9 @@ def main(argv=None) -> int:
                                       "shutter-verify"])
     s.add_argument("--motor", help="shutter-test: the laser shutter's motor (default: the profile's, or discovery's "
                                    "candidate)")
+    s.add_argument("--repeats", type=int, default=3, help="shutter-verify: closed-shutter spectra, judged on the worst")
+    s.add_argument("--burst-seconds", type=float, help="shutter-verify: one more closed spectrum of this exposure: a "
+                                                       "burst per acquisition gives the same counts at any exposure")
     s.add_argument("--seconds", type=float, help="laser-on: how long (at most limits.max_laser_on_s)")
     s.add_argument("--um", type=float, help="video-scale: the stage move in µm (default: 0.4 x the field's smaller side, "
                                             "~23 µm x100, ~240 µm x10)")
@@ -208,7 +211,7 @@ def main(argv=None) -> int:
         if a.action == "shutter-test":
             _print(api.shutter_test(a.motor))
         elif a.action == "shutter-verify":
-            _print(api.shutter_verify(a.seconds or 2.0))
+            _print(api.shutter_verify(a.seconds or 2.0, a.repeats, a.burst_seconds))
         else:
             _print(api.instrument(a.action.replace("-", "_"), camera=a.camera, seconds=a.seconds, um=a.um))
     elif a.cmd == "bridge":

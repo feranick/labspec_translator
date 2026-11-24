@@ -256,7 +256,17 @@ With the maintainer, go through:
   measured with a reference strong enough to see a leak of that size (`sensitivity`; else "not conclusive": a
   stronger filter such as 10 %, or longer). From .23.16: on .23.15 a 99.96 % block (0.04 % left, seen at SNR 14.8
   against 1185 cps) failed the earlier rule "undetectable", which any real shutter fails against a strong reference.
-  Only a
+  **On .23.18 (2026-11-23, 10 %, 2 × 2 s), six runs:** 0.107 %, 0.164 %, 0.172 % (fail at 0.1 %) before a LabSpec
+  restart, 0.058 %, 0.089 % (pass) after it; 0.042 % on .15 with 5 s. The shutter blocks ≥ 99.8 % every time (2–7 µW
+  at the sample); the closed signal is 1.3–3.5 counts per acquisition in every run, more like a short burst at the
+  start or end of each acquisition than a steady leak. **Both runs after the LabSpec restart were lower than the three
+  before it:** if that repeats, something in LabSpec's state raises the leak (note the time since LabSpec started with
+  each run). **From .23.19:** `--repeats N` closed spectra (default 3), judged on the worst (`worst_leak_frac`,
+  `leak_fracs`, counts per accumulation in `closed[].si_counts`); `--burst-seconds S` adds one closed spectrum of
+  another exposure (`burst_check`: a burst gives the same counts at any exposure, a steady leak counts in proportion;
+  try `--seconds 2 --burst-seconds 8`); every attempt, passed or not, is kept (`attempts` in `shutter_verified.json`;
+  a pass records `failed_attempts_before` and the recent attempts); the default limit is 0.5 % (about 3 × the worst
+  seen; a profile saved earlier may still say 0.001: `ls6t profile set shutter.max_leak_frac 0.005`). Only a
   pass writes the record (`shutter_verified.json`: date, laser, version, motor, how it is moved, the ratio,
   `during_checked`) without which ls6t refuses every use of the shutter: `laser_off: "shutter"` (background, cutoff;
   without it they default to `operator`), `laser_on`, snapshots with the laser and `spot` 'shutter'. A record is
@@ -282,6 +292,11 @@ With the maintainer, go through:
   `{"off": "Off", "on": "On", "by": "label"}`), refuses to acquire unless it reads back Off, watches it during the
   acquisition (cancels if LabSpec opens it) and records it (`laser_shutter` in the background's result); a background
   with Raman lines while the shutter was trusted is not stored and is unreliable.
+  **Narrow lines in backgrounds (.23.19):** with a verified shutter, three backgrounds (7.8 counts at most in 2 s
+  against 257 for Si open) still showed "lines" of a few counts at nine different places (415, 516, 737; 269, 358,
+  558; 480, 594, 661): noise. A line now counts only above `checks.background_line_min_counts` (20 counts) and is
+  warned about only when it recurs within 5 cm⁻¹ in another background with the same laser
+  (`background_lines.json`); the result lists them all (`narrow_lines`: `found`, `above_min`, `recurring`).
   **Can the bridge read the shutter during an acquisition? (.23.14)** LabSpec's Acq has held the script until the
   spectrum was taken (the extended-range acquisitions that looked stuck). Then the "during" reads start only
   afterwards, and LabSpec could open the shutter for the acquisition and close it again unseen. In step 2, note in
@@ -622,6 +637,9 @@ own second step (its window, its measure, or the timing around the filter move: 
 operator's Yes in LabSpec); a repeated laser_on that took 0.2 s in all cannot have been answered by a person. From
 .23.16 the answer is timed (`confirm_s`) and a Yes faster than 0.4 s is not taken: repeat `ls6t instrument
 laser-on --seconds 5` twice and note `confirm_s` and whether LabSpec showed the question both times.
+**(b) passed on .23.18:** two laser_on in a row both waited for the operator (`confirm_s` 2.54 and 3.16 s); the earlier
+"0.2 s" was the `seconds` field, which left the confirmation out. From .23.19 `seconds` is the whole (confirmation
+included), with `confirm_s`, `laser_call_s` and `open_for_s` named.
 
 **T3.19 LabSpec's AutoExposure (2026-11-23, .23.13).** With AutoExposure On in LabSpec (status bar "AE"), a
 spectrum asking 2 s ran 15 s while ls6t reported 2 s (this explains most of the 23–64 s acquisitions of T3.17).
