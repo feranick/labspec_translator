@@ -163,6 +163,31 @@ def laser_line_reference(laser, grating) -> float | None:
     return float(v) if v is not None else None
 
 
+def recurring_spikes(per_point: list) -> list:
+    """Spike positions found in at least 2 spectra and 30 % of them, within two pixels: lines, not cosmic rays. They
+    are taken out of every spectrum's spikes; returns where they were (cm-1)."""
+    n = len(per_point)
+    if n < 2:
+        return []
+    need = max(2, int(math.ceil(0.3 * n)))
+    allpos = [(i, float(c), float(r.get("_spike_tol") or 3.0)) for i, r in enumerate(per_point)
+              for c in (r.get("spike_cm1") or [])]
+    lines = []
+    for i, c, tol in allpos:
+        hits = {j for j, c2, _ in allpos if abs(c2 - c) <= tol}
+        if len(hits) >= need and not any(abs(c - l_) <= tol for l_ in lines):
+            lines.append(round(c, 1))
+    if not lines:
+        return []
+    for r in per_point:
+        tol = float(r.get("_spike_tol") or 3.0)
+        kept = [c for c in (r.get("spike_cm1") or []) if not any(abs(c - l_) <= tol for l_ in lines)]
+        if len(kept) != len(r.get("spike_cm1") or []):
+            r["spikes"] = max(0, int(r.get("spikes") or 0) - (len(r["spike_cm1"]) - len(kept)))
+            r["spike_cm1"] = kept
+    return sorted(lines)
+
+
 def same_spot_check(kind: str, per_point: list, warnings: list, unreliable: list) -> dict | None:
     """Spectra at the same spot should agree. 2026-11-23: in a request, point 0 had Si at 520.3 cm-1 (FWHM 3.9) and
     points 1-4 at 512 cm-1 (FWHM 9-10, area kept): every spectrum after the first was wrong, and nothing in LabSpec's
@@ -2943,6 +2968,8 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
             sat_points.append(rec["point"])
         if a["spikes"]:
             spike_points.append(rec["point"])
+            xs_ = np.asarray(a["_x"], float)
+            rec["_spike_tol"] = 2.0 * float(np.median(np.abs(np.diff(xs_)))) if xs_.size > 1 else 3.0
         lo, hi = rng.get("from_cm1"), rng.get("to_cm1")
         if lo is not None and hi is not None and not rng.get("single"):
             tol_r = max(3.0, 0.005 * (hi - lo))      # a pixel or two short is not a gap (997.6 for 1000, 2026-11-23)
@@ -2959,7 +2986,15 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
     if sat_points:
         unreliable.append(f"saturated in {len(sat_points)} of {n} spectra: choose a stronger filter or a shorter "
                           "exposure")
-    checks["spikes"] = {"points": spike_points[:50], "count": len(spike_points)}
+    # a spike that comes back at the same place in many spectra is a line (the Si or the laser line at 600 gr/mm can
+    # be as narrow as a cosmic ray), not a cosmic ray, which almost never repeats (Nicola, 2026-11-24)
+    recurring = recurring_spikes(per_point)
+    if recurring:
+        spike_points = [r["point"] for r in per_point if r.get("spikes")]
+    for r in per_point:
+        r.pop("_spike_tol", None)
+    checks["spikes"] = {"points": spike_points[:50], "count": len(spike_points),
+                        **({"recurring_cm1": recurring} if recurring else {})}
     if spike_points and spike_mode == "none":
         # with LabSpec's spike removal on, what remains is usually a narrow Raman line, not a cosmic ray
         warnings.append(f"cosmic-ray spikes left in {len(spike_points)} spectra (spike removal is off: use 'double')")

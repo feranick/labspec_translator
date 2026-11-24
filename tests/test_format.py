@@ -203,3 +203,15 @@ def test_spikes_are_narrow_and_located():
     assert SP.spikes(y) == [200]
     a = SP.analyze(x, y, {"peaks": [{"name": "Si", "near_cm1": 520.7}]}, 10.0, 5.0)
     assert a["spike_cm1"] == [round(float(x[200]), 1)]
+
+
+def test_recurring_spikes_are_lines():
+    """At 600 gr/mm the Si and laser lines can be as narrow as a cosmic ray (Nicola, 2026-11-24): a 'spike' that
+    comes back at the same place in many spectra is a line and is taken out; a lone one stays."""
+    from labspec_translator import runner
+    pts = [{"point": k, "spikes": 2, "spike_cm1": [520.4 + 0.3 * (k % 2), 300.0 + 37 * k], "_spike_tol": 4.0}
+           for k in range(5)]
+    assert runner.recurring_spikes(pts) == [520.4]
+    assert all(p["spikes"] == 1 and len(p["spike_cm1"]) == 1 and p["spike_cm1"][0] != 520.4 for p in pts)
+    one = [{"point": 0, "spikes": 1, "spike_cm1": [520.4]}]
+    assert runner.recurring_spikes(one) == [] and one[0]["spikes"] == 1

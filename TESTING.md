@@ -893,6 +893,12 @@ level (a sharp Si or laser line, about 3 pixels at 1200 gr/mm, could pass the ol
 laser-line hops, Si near 520.7, the map growing; (2) the same with the shutter automatic: the map in front, growing,
 "um" axes; (3) a 2 s series: the validation warning, `median_s` about 3.5 s, `t_start` in each spectrum; and the spike
 count with `spike_cm1`.
+**Spikes at 600 gr/mm (.24.6, review):** there the Si and laser lines can be as narrow as a cosmic ray, so the width
+test alone may flag them. A spike that comes back within two pixels in at least two spectra and 30 % of a study's
+spectra is now taken as a line and removed from every spectrum's count (`checks.spikes.recurring_cm1` says where); a
+cosmic ray almost never repeats. A single spectrum keeps the width test (and a fitted peak's exclusion). **Test:** a
+5-point series at 600 gr/mm on Si, 1 accumulation: `recurring_cm1` near 520 (and 0 if the laser line is in the
+window), few or no spikes left.
 **runner.log was empty after the crash:** from 2026.11.24.2 every bridge command is written to the request's
 `runner.log` when it is sent and when it returns (`-> view kind=mapex`, `<- acquire ok=1 2.4 s`, marked `[shutter
 held]`), each line flushed at once, so the last call before a hang or crash is always there.
