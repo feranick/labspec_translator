@@ -163,19 +163,40 @@ def laser_line_reference(laser, grating) -> float | None:
     return float(v) if v is not None else None
 
 
+def _poisson_tail(k: int, lam: float) -> float:
+    """P(X >= k) for a Poisson count with mean lam."""
+    if k <= 0:
+        return 1.0
+    term, cdf = math.exp(-lam), 0.0
+    for i in range(k):
+        cdf += term
+        term *= lam / (i + 1)
+    return max(0.0, 1.0 - cdf)
+
+
+LINE_P = 1e-3      # a spike position is a line when its recurrence is this unlikely by chance
+
+
 def recurring_spikes(per_point: list) -> list:
-    """Spike positions found in at least 2 spectra and 30 % of them, within two pixels: lines, not cosmic rays. They
-    are taken out of every spectrum's spikes; returns where they were (cm-1)."""
-    n = len(per_point)
-    if n < 2:
-        return []
-    need = max(2, int(math.ceil(0.3 * n)))
+    """Spike positions that recur in more spectra than chance allows are lines (the Si or the laser line, as narrow
+    as a cosmic ray at 600 gr/mm), not cosmic rays: taken out of every spectrum's spikes; returns where they were.
+    With n spikes over P pixels in all, another spectrum has one within +/- 2 pixels by chance with mean
+    lam = (n - 1) x 5 / P; a position counts as a line when at least 3 spectra have it and that many is unlikely
+    (P < LINE_P) under lam, whatever the fraction of spectra: a minority phase's narrow line in 10 % of a map's
+    points is a line too (Nicola, 2026-11-24). Only counts and warnings change: ls6t never alters the data."""
     allpos = [(i, float(c), float(r.get("_spike_tol") or 3.0)) for i, r in enumerate(per_point)
               for c in (r.get("spike_cm1") or [])]
+    if len({i for i, _, _ in allpos}) < 3:
+        return []
+    npix = [int(r.get("_npix") or 0) for r in per_point if r.get("_npix")]
+    p_ = float(np.median(npix)) if npix else 1024.0
+    lam = (len(allpos) - 1) * 5.0 / max(p_, 1.0)
     lines = []
     for i, c, tol in allpos:
-        hits = {j for j, c2, _ in allpos if abs(c2 - c) <= tol}
-        if len(hits) >= need and not any(abs(c - l_) <= tol for l_ in lines):
+        spectra_with = {j for j, c2, _ in allpos if abs(c2 - c) <= tol}
+        k_other = len(spectra_with) - 1
+        if len(spectra_with) >= 3 and _poisson_tail(k_other, lam) < LINE_P \
+                and not any(abs(c - l_) <= tol for l_ in lines):
             lines.append(round(c, 1))
     if not lines:
         return []
@@ -316,7 +337,8 @@ class Ctx:
                                                                        else "LabSpec's setting")
         laser_off = str(params.get("laser_off", "0")) == "1"
         self._log(f"-> {verb} " + " ".join(f"{k}={v}" for k, v in params.items()
-                                             if k in ("motor", "value", "action", "kind", "state", "mode", "exposure_s")))
+                                             if k in ("motor", "value", "action", "kind", "state", "mode", "exposure_s",
+                                                      "id", "index", "axis_x", "axis_y")))
         if self.hold_wanted and not self.holding and verb in ("acquire", "map_native", "guide") and not laser_off:
             self._hold_on()
         if verb == "acquire":
@@ -342,6 +364,8 @@ class Ctx:
             raise Stop(self._held_warning(str(exc)), "timeout") from exc
         self.beat()
         self._log(f"<- {verb} ok={int(bool(r.get('ok')))} {r.get('seconds', '')} s"
+                  + "".join(f" {k}={r[k]}" for k in ("id", "mapex_return", "map_create_return", "view")
+                            if r.get(k) not in (None, ""))
                   + (f" error={r.get('error')}" if r.get("error") else ""))
         if self.holding and (verb not in HOLD_VERBS or laser_off or (verb == "shutter_hold" and params.get("state") == "off")):
             self.holding = False                 # the bridge let it go (bridge_main.vbs, LaserGuard)
@@ -953,7 +977,6 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
     cur_xy = (_f(before.get("x_um")), _f(before.get("y_um")))
     stage = prof.get("stage", {})
     per_point = []
-    t_series0 = None
     view = None
     native = study.get("save_native", True)
     stop_exc = None
@@ -991,6 +1014,7 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
         except Stop as exc:
             stop_exc = exc
     warmup_info = None
+    t_last_start = time.time()
     live_on = bool((prof.get("display") or {}).get("live_view"))
     pending_views: list = []
     for k, p in enumerate(pts if not native_map else []):
@@ -1001,7 +1025,9 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
             _progress(sd, stage="measuring", point=k, points=len(pts),
                       eta_min=_eta(t_start, k, len(pts), study, prof))
             if kind == "series" and k > 0:
-                wait_until = t_series0 + k * float(study["series"].get("interval_s", 0))
+                # start to start from the previous spectrum's start: a late spectrum does not make the next one
+                # start early to catch up (a fixed grid from the first start did: 0.4 s after a slow one)
+                wait_until = t_last_start + float(study["series"].get("interval_s", 0))
                 while time.time() < wait_until:
                     if ctx.cancelled():
                         raise Stop("cancelled", "cancel")
@@ -1076,9 +1102,8 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
                 params["remark"] = str(study["sample"]["notes"])[:200]     # LabSpec's Remark, after "ls6t <seq>"
             if native and kind != "map":             # series too (2026-11-23: no .l6s for series spectra)
                 params["native"] = str(sd / "spectra" / f"p{k:05d}.l6s")
-            if kind == "series" and k == 0:
-                t_series0 = time.time()
             t_a = time.time()
+            t_last_start = t_a
             r = ctx.call("acquire", timeout_s=_acq_timeout(study, prof, rng), **params)
             # when this spectrum's acquisition was sent (series: start to start), and when LabSpec began it
             t_sent = round(t_a - t_start, 3)
@@ -2970,6 +2995,7 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
             spike_points.append(rec["point"])
             xs_ = np.asarray(a["_x"], float)
             rec["_spike_tol"] = 2.0 * float(np.median(np.abs(np.diff(xs_)))) if xs_.size > 1 else 3.0
+            rec["_npix"] = int(xs_.size)
         lo, hi = rng.get("from_cm1"), rng.get("to_cm1")
         if lo is not None and hi is not None and not rng.get("single"):
             tol_r = max(3.0, 0.005 * (hi - lo))      # a pixel or two short is not a gap (997.6 for 1000, 2026-11-23)
@@ -2986,13 +3012,14 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
     if sat_points:
         unreliable.append(f"saturated in {len(sat_points)} of {n} spectra: choose a stronger filter or a shorter "
                           "exposure")
-    # a spike that comes back at the same place in many spectra is a line (the Si or the laser line at 600 gr/mm can
-    # be as narrow as a cosmic ray), not a cosmic ray, which almost never repeats (Nicola, 2026-11-24)
+    # a spike that comes back at the same place more often than chance allows is a line (the Si or the laser line at
+    # 600 gr/mm can be as narrow as a cosmic ray), not a cosmic ray, which almost never repeats (Nicola, 2026-11-24)
     recurring = recurring_spikes(per_point)
     if recurring:
         spike_points = [r["point"] for r in per_point if r.get("spikes")]
     for r in per_point:
         r.pop("_spike_tol", None)
+        r.pop("_npix", None)
     checks["spikes"] = {"points": spike_points[:50], "count": len(spike_points),
                         **({"recurring_cm1": recurring} if recurring else {})}
     if spike_points and spike_mode == "none":

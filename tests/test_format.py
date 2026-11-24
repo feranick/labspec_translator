@@ -206,12 +206,26 @@ def test_spikes_are_narrow_and_located():
 
 
 def test_recurring_spikes_are_lines():
-    """At 600 gr/mm the Si and laser lines can be as narrow as a cosmic ray (Nicola, 2026-11-24): a 'spike' that
-    comes back at the same place in many spectra is a line and is taken out; a lone one stays."""
+    """At 600 gr/mm the Si and laser lines can be as narrow as a cosmic ray: a 'spike' that recurs at the same place
+    more often than chance allows is a line and is taken out (Nicola, 2026-11-24), however few of the spectra have it
+    (a minority phase in 10 % of a map); lone cosmic rays stay; the data are never changed."""
     from labspec_translator import runner
-    pts = [{"point": k, "spikes": 2, "spike_cm1": [520.4 + 0.3 * (k % 2), 300.0 + 37 * k], "_spike_tol": 4.0}
-           for k in range(5)]
+    pts = [{"point": k, "spikes": 2, "spike_cm1": [520.4 + 0.3 * (k % 2), 300.0 + 37 * k], "_spike_tol": 4.0,
+            "_npix": 1024} for k in range(5)]
     assert runner.recurring_spikes(pts) == [520.4]
     assert all(p["spikes"] == 1 and len(p["spike_cm1"]) == 1 and p["spike_cm1"][0] != 520.4 for p in pts)
-    one = [{"point": 0, "spikes": 1, "spike_cm1": [520.4]}]
-    assert runner.recurring_spikes(one) == [] and one[0]["spikes"] == 1
+    # a 100-point map: a narrow line at 1085 in 10 points (a minority phase) and 30 random cosmic rays
+    import random
+    rnd = random.Random(3)
+    m = [{"point": k, "spikes": 0, "spike_cm1": [], "_spike_tol": 4.0, "_npix": 1024} for k in range(100)]
+    for k in range(0, 100, 10):
+        m[k]["spike_cm1"].append(1085.0)
+    for _ in range(30):
+        m[rnd.randrange(100)]["spike_cm1"].append(round(rnd.uniform(100, 3000), 1))
+    for p in m:
+        p["spikes"] = len(p["spike_cm1"])
+    assert runner.recurring_spikes(m) == [1085.0]
+    assert sum(p["spikes"] for p in m) == 30
+    assert runner._poisson_tail(2, 0.01) < 1e-3 < runner._poisson_tail(1, 0.01)
+    one = [{"point": 0, "spikes": 1, "spike_cm1": [520.4]}, {"point": 1, "spikes": 1, "spike_cm1": [520.4]}]
+    assert runner.recurring_spikes(one) == [] and one[0]["spikes"] == 1       # two spectra are not enough

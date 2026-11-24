@@ -899,6 +899,21 @@ spectra is now taken as a line and removed from every spectrum's count (`checks.
 cosmic ray almost never repeats. A single spectrum keeps the width test (and a fitted peak's exclusion). **Test:** a
 5-point series at 600 gr/mm on Si, 1 accumulation: `recurring_cm1` near 520 (and 0 if the laser line is in the
 window), few or no spikes left.
+**From .24.7 (review):** the 30 % rule would have missed a minority phase's narrow line (in 10 % of a map's points it
+stayed a "spike" at every one). A position is now a line when at least 3 spectra have a spike there and that many is
+unlikely by chance: with n spikes over P pixels in all, another spectrum has one within ±2 pixels with mean
+(n − 1) × 5 / P, and the count must have a Poisson probability below 0.001. **Spikes never change the data:** ls6t only
+counts and warns (and, at `spike: "none"`, says so); LabSpec's own spike removal (`spike: single / double`) is the
+only thing that alters a spectrum, during the acquisition.
+**Also in .24.7:** a series waits `interval_s` from the previous spectrum's start (a fixed grid from the first start
+let a spectrum after a slow one start early to catch up), and `runner.log` gives each view's `id`, `index`, `axis_x`,
+`axis_y` and the answer's `mapex_return`, to check the grid LabSpec was given.
+**Live map not shown as a map on .24.5 (2026-11-24, open):** no map during the acquisition, and at the end the Maps tab
+shows curves, nothing to click. The axes ls6t sends are the grid's (`axis_x` from `map.x_um`, `axis_y` from
+`map.y_um`, index iy × nx + ix), as in the offline test that gave a real map. To check first: `display.live_view` on
+for that run; the map engine (with `map.engine` 'auto' a large map goes to LabSpec's own engine, which has no ls6t live
+view); then the run's `runner.log` view lines (`axis_x`, `axis_y`, `mapex_return`), the map's size and steps, and a
+screenshot of the Maps tab.
 **runner.log was empty after the crash:** from 2026.11.24.2 every bridge command is written to the request's
 `runner.log` when it is sent and when it returns (`-> view kind=mapex`, `<- acquire ok=1 2.4 s`, marked `[shutter
 held]`), each line flushed at once, so the last call before a hang or crash is always there.
