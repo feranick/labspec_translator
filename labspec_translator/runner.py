@@ -857,6 +857,46 @@ def _run_kind(name: str, study: dict, ctx: Ctx) -> dict:
     return run_study(name, study, ctx)
 
 
+def _live_view(ctx: Ctx, view, name: str, kind: str, study: dict, rng: dict, data_id, p: dict, vval, out: Path,
+               warnings: list):
+    """One spectrum into LabSpec's live view (MapEx for an X/Y map, a profile for a series or a depth profile).
+    Returns the view's state: None (not made yet), its name, or False (not available)."""
+    zonly = kind == "map" and plan.map_shape(study)[:2] == (1, 1)     # a depth profile
+    try:
+        nx_, ny_, nz_ = plan.map_shape(study) if kind == "map" else (1, 1, 1)
+        grid = kind == "map" and not zonly and nz_ == 1
+        vfrom, vto = rng.get("from_nm"), rng.get("to_nm")
+        if kind == "map" and not grid and (not vfrom or not vto):
+            xs_ = spectra.read(out)["x"]
+            vfrom, vto = float(np.min(xs_)), float(np.max(xs_))
+        gx = {}
+        if grid:
+            m_ = study.get("map", {})
+            gx = dict(axis_x=",".join(f"{v:g}" for v in (plan.axis_values(m_["x_um"]) if m_.get("x_um") else [0.0])),
+                      axis_y=",".join(f"{v:g}" for v in (plan.axis_values(m_["y_um"]) if m_.get("y_um") else [0.0])),
+                      index=int(p.get("iy", 0)) * nx_ + int(p.get("ix", 0)))
+        if kind == "map" and not grid and not zonly:
+            return False         # LabSpec's Map() returned E_FAIL whatever its range (2026-11-24)
+        if view is None:
+            vr = ctx.call("view", timeout_s=30, action="create", name=name, vfrom=vfrom, vto=vto,
+                          kind="mapex" if grid else "profile", id=data_id, x=p["x_um"], y=p["y_um"], value=vval,
+                          label="time" if kind == "series" else ("Z" if zonly else "XY"),
+                          unit="s" if kind == "series" else "um", **gx)
+            if not vr["ok"]:
+                warnings.append(f"live view in LabSpec not available: {vr.get('error')}")
+                return False
+            return vr.get("view")
+        if view:
+            vr = ctx.call("view", timeout_s=30, action="add", name=name, id=data_id, x=p["x_um"], y=p["y_um"],
+                          value=vval, vfrom=vfrom, vto=vto, **gx)
+            if not vr["ok"]:
+                warnings.append(f"live view: {vr.get('error')}")
+                return False
+        return view
+    except Stop:
+        raise
+
+
 def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
     prof = ctx.prof
     sd = sd or ctx.folder / name
@@ -926,6 +966,8 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
         except Stop as exc:
             stop_exc = exc
     warmup_info = None
+    live_on = bool((prof.get("display") or {}).get("live_view"))
+    pending_views: list = []
     for k, p in enumerate(pts if not native_map else []):
         if ctx.cancelled():
             stop_exc = Stop("cancelled", "cancel")
@@ -997,6 +1039,9 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
             out = sd / "spectra" / f"p{k:05d}.txt"
             params = dict(acq)
             params.pop("verb", None)
+            if live_on and kind == "map" and "mode" in params and (int(params["mode"]) // 10) % 10 == 1:
+                # the live map stays in front: LabSpec's AUTO_SHOW brought each new spectrum over it (2026-11-24)
+                params["mode"] = int(params["mode"]) - 10
             params["out"] = str(out)
             params["sample"] = study.get("sample", {}).get("name", name)
             # LabSpec's Title / Project / Site: the study, the request, the sample's site (or cleared)
@@ -1025,47 +1070,32 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
                    "auto_exposure": ae_record(r), "optics_check": optics_record(r), "t_start": t_sent,
                    **({"settled_s": _f(r.get("settled_s"))} if r.get("settled_s") not in (None, "") else {})}
             per_point.append(rec)
-            # live view in LabSpec: the map or the series grows as it is measured
-            if kind in ("map", "series") and r.get("id") and (prof.get("display") or {}).get("live_view"):
-                # off by default: on 2026-11-24 LabSpec froze, then crashed, in the MapEx live view
-                zonly = kind == "map" and plan.map_shape(study)[:2] == (1, 1)     # a depth profile
+            # live view in LabSpec: the map or the series grows as it is measured (off by default: display.live_view).
+            # Never a display call with the shutter held (2026-11-24: each view released the hold and the 637.75 nm
+            # laser hopped at every point): with the hold the views are made after the last spectrum
+            if kind in ("map", "series") and r.get("id") and live_on:
                 vval = rec["t"] if kind == "series" else p["dz_um"]
-                try:
-                    nx_, ny_, nz_ = plan.map_shape(study) if kind == "map" else (1, 1, 1)
-                    grid = kind == "map" and not zonly and nz_ == 1
-                    vfrom, vto = rng.get("from_nm"), rng.get("to_nm")
-                    if kind == "map" and not grid and (not vfrom or not vto):
-                        # Map() averages the intensity between From and To: never 0 - 0 (E_FAIL, 2026-11-23)
-                        xs_ = spectra.read(out)["x"]
-                        vfrom, vto = float(np.min(xs_)), float(np.max(xs_))
-                    gx = {}
-                    if grid:
-                        m_ = study.get("map", {})
-                        gx = dict(axis_x=",".join(f"{v:g}" for v in (plan.axis_values(m_["x_um"]) if m_.get("x_um") else [0.0])),
-                                  axis_y=",".join(f"{v:g}" for v in (plan.axis_values(m_["y_um"]) if m_.get("y_um") else [0.0])),
-                                  index=int(p.get("iy", 0)) * nx_ + int(p.get("ix", 0)))
-                    if kind == "map" and not grid and not zonly:
-                        view = False         # LabSpec's Map() returned E_FAIL whatever its range (2026-11-24)
-                    if view is None:
-                        vr = ctx.call("view", timeout_s=30, action="create", name=name, vfrom=vfrom, vto=vto,
-                                      kind="mapex" if grid else ("map" if kind == "map" and not zonly else "profile"),
-                                      id=r["id"], x=p["x_um"], y=p["y_um"], value=vval,
-                                      label="time" if kind == "series" else ("Z" if zonly else "XY"),
-                                      unit="s" if kind == "series" else "um", **gx)
-                        view = vr.get("view") if vr["ok"] else False
-                        if not vr["ok"]:
-                            warnings.append(f"live view in LabSpec not available: {vr.get('error')}")
-                    elif view:
-                        vr = ctx.call("view", timeout_s=30, action="add", name=name, id=r["id"],
-                                      x=p["x_um"], y=p["y_um"], value=vval, vfrom=vfrom, vto=vto, **gx)
-                        if not vr["ok"]:
-                            warnings.append(f"live view: {vr.get('error')}")
-                            view = False
-                except Stop:
-                    raise
+                if ctx.holding:
+                    pending_views.append((r["id"], p, vval, out))
+                else:
+                    view = _live_view(ctx, view, name, kind, study, rng, r["id"], p, vval, out, warnings)
         except Stop as exc:
             stop_exc = exc
             break
+    if pending_views:
+        if ctx.holding:
+            # the hold ends with the last spectrum, before LabSpec's display is touched
+            ctx.holding = False
+            try:
+                rel = ctx.call("shutter_hold", timeout_s=30, state="off")
+                ctx.hold_log.append({"released": bool(rel.get("ok")), "by": "end of the spectra, before the live view"})
+            except Stop as exc:
+                stop_exc = stop_exc or exc
+        for did, p_, vval_, out_ in pending_views:
+            try:
+                view = _live_view(ctx, view, name, kind, study, rng, did, p_, vval_, out_, warnings)
+            except Stop:
+                break
     if vd.get("after") and per_point and stop_exc is None:
         try:
             snaps["after"] = _snapshot(ctx, name, sd, "after", bool(vd.get("with_laser")), warnings, laser)
@@ -3000,12 +3030,20 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
         asked = float((study.get("series") or {}).get("interval_s", 0) or 0)
         if len(ts) > 1:
             gaps = [round(b - a, 3) for a, b in zip(ts, ts[1:])]
-            sp_ = {"asked_s": asked, "mean_s": round(sum(gaps) / len(gaps), 3), "min_s": min(gaps),
+            # the first gap carries one-off costs (the shutter hold, LabSpec's first display): the median, and the
+            # gaps after the first, are what the series keeps (2026-11-24: 9.63 s, then 3.53, 3.55, 3.52)
+            later = gaps[1:] or gaps
+            med = sorted(later)[len(later) // 2] if len(later) % 2 else \
+                (sorted(later)[len(later) // 2 - 1] + sorted(later)[len(later) // 2]) / 2
+            sp_ = {"asked_s": asked, "median_s": round(med, 3), "mean_after_first_s": round(sum(later) / len(later), 3),
+                   "first_s": gaps[0], "mean_s": round(sum(gaps) / len(gaps), 3), "min_s": min(gaps),
                    "max_s": max(gaps), "start_to_start_s": gaps}
             out["series"]["spacing"] = sp_
+            sp_["mean_s_all"] = sp_.pop("mean_s")
+            sp_["mean_s"] = sp_["median_s"]          # what the warning below judges
             if asked > 0 and abs(sp_["mean_s"] - asked) > max(0.2, 0.1 * asked):
                 settled = [r.get("settled_s") for r in per_point if r.get("settled_s")]
-                warnings.append(f"the spectra were {sp_['mean_s']:.2f} s apart (start to start) for the "
+                warnings.append(f"the spectra were {sp_['mean_s']:.2f} s apart (start to start, median) for the "
                                 f"{asked:g} s asked" + (f": the laser's pause between acquisitions "
                                                         f"(settle_s, up to {max(settled):.1f} s) made them longer"
                                                         if settled and sp_["mean_s"] > asked else
@@ -3261,8 +3299,8 @@ def parse_native_map(path, study: dict, prof: dict, x0, y0, zref) -> list:
 def _point_summary(r: dict) -> dict:
     keys = ("point", "offset", "stage", "file", "native", "t", "exposure_s", "accumulations", "max_counts",
             "saturated", "noise_sigma", "spikes", "from_cm1", "to_cm1", "peaks", "bands", "x_correction", "background",
-            "ics", "auto_exposure", "optics_check")
-    return {k: r.get(k) for k in keys if k not in ("auto_exposure", "optics_check") or r.get(k)}
+            "ics", "auto_exposure", "optics_check", "t_start")
+    return {k: r.get(k) for k in keys if k not in ("auto_exposure", "optics_check", "t_start") or r.get(k) is not None}
 
 
 def _quantities(per_point, process) -> dict:

@@ -873,3 +873,28 @@ def test_series_spacing_runner_log_and_laser_defaults():
     assert st["studies"]["s"]["checks"]["laser_line"]["mode"] == "correct"
     prof["lasers"][lk].update(laser_reference="report", calibration_max_age_h=None)
     P.save(prof)
+
+
+def test_live_view_never_cycles_the_held_shutter(tmp_path):
+    """2026-11-24 on .24.3: with the live view on, every view call released the shutter hold and the next point held
+    it again, so the 637.75 nm laser hopped at every point. With the hold, the views are now made after the last
+    spectrum (the hold released first); a live map acquires without AUTO_SHOW so the map stays in front."""
+    _profile_with_shutter(tmp_path)
+    P.save(dict(P.load(), display={"live_view": True}))
+    sim = S.ensure(config.active_bridge_dir())
+    sim.views.clear()
+    mp = {"m": {"kind": "map", "sample": {"name": "Si"}, "setup": SETUP,
+                "acquire": {"center_cm1": 520, "exposure_s": 0.2, "shutter": "hold"},
+                "map": {"x_um": [0, 4, 2], "y_um": [0, 4, 2], "engine": "points"}}}
+    st = run_inline(mp)
+    m = st["studies"]["m"]
+    assert m["shutter_hold"]["times_held"] == 1 and m["shutter_hold"]["released"], m["shutter_hold"]
+    assert sim.views["m"]["n"] == 9 and not any("held" in w for w in m["warnings"])
+    log = (Path(st["request"]) / "runner.log").read_text().splitlines()
+    first_view = next(i for i, l in enumerate(log) if "-> view" in l)
+    assert all("[shutter held]" not in l for l in log[first_view:] if "-> view" in l)
+    # without the hold the map grows as measured
+    sim.views.clear()
+    mp["m"]["acquire"]["shutter"] = "auto"
+    st = run_inline(mp)
+    assert sim.views["m"]["n"] == 9 and "shutter_hold" not in st["studies"]["m"]

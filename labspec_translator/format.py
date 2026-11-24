@@ -687,6 +687,17 @@ def validate_study(name: str, study: dict, prof: dict) -> dict:
                 errors.append("series.count: an integer >= 1")
             if se.get("interval_s") is not None and (not _num(se["interval_s"]) or se["interval_s"] < 0):
                 errors.append("series.interval_s: seconds >= 0")
+            elif se.get("interval_s"):
+                # each spectrum takes its exposure plus LabSpec's overheads: 2 s asked gave 3.5 s with 1 s
+                # exposures on the XploRA (2026-11-24)
+                try:
+                    one = plan.acquire_seconds(study, prof, plan.acq_range(study, prof, s.get("laser_nm")))
+                except (KeyError, ValueError, TypeError):
+                    one = None
+                if one and float(se["interval_s"]) < one:
+                    warnings.append(f"series.interval_s {se['interval_s']:g} s is shorter than one spectrum "
+                                    f"takes (about {one:.1f} s with LabSpec's overheads): they will be about "
+                                    f"{one:.1f} s apart")
     elif study.get("series") is not None:
         errors.append("series: only with kind 'series'")
 

@@ -862,6 +862,25 @@ with the hold: the map grows in LabSpec point by point; then the same without th
 **Not dark:** with ShutterMode automatic, "laser off" in LabSpec's status bar does not keep the beam off an
 acquisition: LabSpec opens the shutter for each Acq (`mapex_live` variant 6, point 0: Si at 654 counts). A dark
 acquisition needs ShutterMode manual with the shutter closed (what `laser_off: "shutter"` does).
+**Live view on .24.3 (2026-11-24):** the MapEx fix works (3 × 3 Si maps at 637.75 nm, one create and eight adds, all
+ok, held and automatic). But each `view` released the shutter hold (it is not among the commands that keep it, since
+.24.2) and the next point held it again: a held map was released 9 times "by: view", laser line −2.4 to −12.8 cm⁻¹, Si
+513.8 ± 3.1 (unreliable), and the re-holds cost 13.8 s of 42 s; a 2 s series the same. The automatic-shutter map
+had no hops (about 6 s per point, as the ≥ 5 s pause). And the map window came to the front after point 0 only:
+LabSpec's AUTO_SHOW brought each new spectrum over it. **From 2026.11.24.4:** with the shutter held, the live view is
+made after the last spectrum, once the hold is released (no display call with the shutter open, as asked after the
+crash, and no cycling); without the hold it grows point by point; a live X/Y map acquires without AUTO_SHOW so the map
+stays in front. **Test:** the held 3 × 3 map with the live view: `shutter_hold.times_held` 1, laser line steady, the
+map appears at the end; the automatic one: the map in front and growing, and check the "um" axes.
+**Series spacing (.24.3, 2 s asked):** start to start 9.63, 3.53, 3.55, 3.52 s: the first gap carries one-off costs
+(the hold, the first display). From .24.4 `series.spacing` gives `median_s`, `mean_after_first_s` and `first_s`, the
+warning judges the median, every spectrum's `t_start` is in `spectra[]` (it was recorded but not shown), and
+validation warns when `interval_s` is shorter than one spectrum takes (1 s exposures take about 3.5 s here).
+**Notes:** spikes flagged in most 0.5–1 s spectra are likely real cosmic rays: with one accumulation LabSpec cannot
+remove them (its removal compares accumulations); use `accumulations: 2` with `spike: "double"`. The heartbeat's
+`blocking_s` (about 124 s during an acquisition) is the allowance, the longest the acquisition may hold the bridge
+(the request's acquisition timeout), not the time elapsed. The heartbeat is UTF-16 on purpose (Windows account
+folders can have non-ASCII names); read it as UTF-16, as ls6t does.
 **runner.log was empty after the crash:** from 2026.11.24.2 every bridge command is written to the request's
 `runner.log` when it is sent and when it returns (`-> view kind=mapex`, `<- acquire ok=1 2.4 s`, marked `[shutter
 held]`), each line flushed at once, so the last call before a hang or crash is always there.
