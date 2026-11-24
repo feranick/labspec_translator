@@ -1670,8 +1670,19 @@ Sub VAcquireInner(cmd, res)
     res("t_acquire_total_s") = Secs(Elapsed(tAll))
 End Sub
 
+Function NumList(s)
+    ' "0,2,4" -> an array of doubles (MapEx's axes)
+    Dim parts, i, a()
+    parts = Split(s, ",")
+    ReDim a(UBound(parts))
+    For i = 0 To UBound(parts)
+        a(i) = CDbl(ParseNum(parts(i)))
+    Next
+    NumList = a
+End Function
+
 Sub VView(cmd, res)
-    Dim name, action, kind, id, arr, dataId, mapId, pid, r, p, fv, tv
+    Dim name, action, kind, id, arr, dataId, mapId, pid, r, p, fv, tv, ax, ay
     Dim vals(1), labels(1), units(1), disp(1)
     name = GetP(cmd, "name", "view")
     action = GetP(cmd, "action", "")
@@ -1689,20 +1700,36 @@ Sub VView(cmd, res)
     tv = ParseNum(GetP(cmd, "vto", "0"))
     On Error Resume Next
     If action = "create" Then
-        If kind = "map" Then
+        If kind = "mapex" Then
+            ' a map of known size: MapEx, as HORIBA's own map macro does (macros\horiba.vbm: MapEx(CREATE_MAP, 0,
+            ' SpectrumID, index, AxisX, AxisY, Labels, Units), then ADD_TO_MAP with index = iy * SizeX + ix).
+            ' 2026-11-23: Map() returned E_FAIL with the range 0 - 0 (its From / To average the intensity)
+            ax = NumList(GetP(cmd, "axis_x", "0"))
+            ay = NumList(GetP(cmd, "axis_y", "0"))
+            mapId = LabSpec.MapEx(LS_CREATE_MAP, 0, id, CLng(ParseNum(GetP(cmd, "index", "0"))), ax, ay, labels, units)
+            res("mapex_return") = mapId
+            If Err.Number = 0 And mapId > 0 Then
+                LabSpec.Exec mapId, LS_SHOW_DATA, p
+                gViews(name) = Array("mapex", 0, mapId, ax, ay)
+            ElseIf Err.Number = 0 Then
+                Fail res, "LabSpec could not create the map (MapEx returned " & mapId & "; LabSpec's last error: " & _
+                          LabSpecError() & ")"
+            End If
+        ElseIf kind = "map" Then
             r = LabSpec.Map(LS_CREATE_MAP, dataId, mapId, id, vals, labels, units, disp, fv, tv)
             res("map_create_return") = r
             ' 2026-11-23: a 3 x 3 map with one window (637.75 nm, 1200) got r < 0: once more without the spectral
             ' range given (LabSpec's own then), and LabSpec's last error said
+            res("map_create_range") = fv & "-" & tv
             If Err.Number = 0 And r < 0 And (fv <> 0 Or tv <> 0) Then
-                res("map_create_range") = fv & "-" & tv
                 fv = 0
                 tv = 0
                 r = LabSpec.Map(LS_CREATE_MAP, dataId, mapId, id, vals, labels, units, disp, fv, tv)
                 res("map_create_return_2") = r
             End If
             If Err.Number = 0 And r < 0 Then Fail res, "LabSpec could not create the map (Map returned " & r & _
-                                                       "; " & LabSpecError() & ")"
+                                                       ", spectral range " & res("map_create_range") & _
+                                                       "; LabSpec's last error: " & LabSpecError() & ")"
             If Err.Number = 0 And r >= 0 Then
                 LabSpec.Exec mapId, LS_SHOW_DATA, p
                 gViews(name) = Array("map", dataId, mapId)
@@ -1721,7 +1748,16 @@ Sub VView(cmd, res)
         Fail res, "no view " & name
     ElseIf action = "add" Then
         arr = gViews(name)
-        If arr(0) = "map" Then
+        If arr(0) = "mapex" Then
+            mapId = LabSpec.MapEx(LS_ADD_TO_MAP, arr(2), id, CLng(ParseNum(GetP(cmd, "index", "0"))), arr(3), arr(4), _
+                                  labels, units)
+            If Err.Number = 0 And mapId > 0 Then
+                gViews(name) = Array("mapex", 0, mapId, arr(3), arr(4))
+            Else
+                mapId = arr(2)
+            End If
+            LabSpec.Exec mapId, LS_SHOW_DATA, p
+        ElseIf arr(0) = "map" Then
             dataId = arr(1)
             mapId = arr(2)
             r = LabSpec.Map(LS_ADD_TO_MAP, dataId, mapId, id, vals, labels, units, disp, fv, tv)

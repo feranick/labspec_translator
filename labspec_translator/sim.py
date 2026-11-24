@@ -870,12 +870,16 @@ class SimLabSpec:
         name = p.get("name", "view")
         action = p.get("action")
         if action == "create":
-            self.views[name] = {"kind": p.get("kind"), "n": 1}
+            if p.get("kind") == "map" and not (float(p.get("vfrom") or 0) or float(p.get("vto") or 0)):
+                return {"ok": 0, "error": "LabSpec could not create the map (Map returned -2147467259)"}
+            self.views[name] = {"kind": p.get("kind"), "n": 1, "index": [p.get("index")],
+                                "axis_x": p.get("axis_x"), "axis_y": p.get("axis_y")}
             return {"view": name}
         if name not in self.views:
             return {"ok": 0, "error": f"no view {name!r}"}
         if action == "add":
             self.views[name]["n"] += 1
+            self.views[name]["index"].append(p.get("index"))
             return {"view": name, "n": self.views[name]["n"]}
         if action == "save":
             return self.v_save({"path": p["path"], "id": name})

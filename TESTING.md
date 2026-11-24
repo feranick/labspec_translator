@@ -813,6 +813,33 @@ list each try (`reselect.laser_nm`, `via`, `got`, `ok`). A wrong grating reading
 (`until_target_stable`) ends the wait at once (it is a refusal); 120 s stays the limit for a turret still moving.
 **Test:** the reproduction through `instrument set`: does the first try (the same laser again) or the second (via
 another laser) bring 2400, or neither (then only the bridge restart)?
+**Passed on .23.28 (2026-11-23):** (1) 785 → 637.75 → 2400 via `set`: stuck at first, cleared by the first try (the
+same laser again, `via: null`), 12.95 s in all. (2) `filters` from 1200 (`run_20261123_234644_7db84e`): to 2400
+directly, held once, reliable, reference again 1.099, 1 % = 1.260 %. `until_target_s` appears only when the grating
+first read a wrong position (the extra wait); a move that arrives directly has `settle_s` alone. Across three good
+runs 1 % read 1.176, 0.971 and 1.260 % (σ ≈ 0.15 points, like the reference's ±10 %): **from .23.29** the
+`profile_command` is the mean of the last runs with the same reference, offered once there are 3
+(`performance.filters_min_runs`; `average` gives mean, runs and spread per filter), and every filter not measured is
+listed with why (`skipped`, and a warning: above the cap, or the exposure it would need beyond
+`filters.max_exposure_s`, as the 0.1 % at 2 s × 100).
+**Calibrations (.23.28, `run_20261123_235031_79dcca`, Si, 1 %, 2 × 2 s):** 637.75@1800 +3.50 (corrected); 532@1200
+−0.85 and 785.04@1200 −0.76 (within tolerance, stored); 637.75@600 not trusted: Si at 529.62, FWHM 13.0, at the edge of
+the 30 cm⁻¹ window. **From 2026.11.24.1** the fit window scales with the grating (30 cm⁻¹ at 1200 and finer, 60 at 600, at
+most 90; `calibration.window_cm1` sets it), and `calibration.video_before: false` in the profile drops the frame each
+calibration took first (17–20 s each; a study's `video.before` still decides for itself). The warning "no stored
+calibration for 637.75@1200" is right: that batch calibrated 637.75 with 1800 and 600 only (each grating has its own
+zero); a 637.75@1200 calibration clears it.
+**Live map view in LabSpec (open):** on .23.28 `Map` returned −2147467259 (0x80004005, E_FAIL) with LabSpec's last error
+empty; the retry without the spectral range did not run, because the range was already 0 (one window). The bridge's
+call follows the 2018 manual (`Map(CREATE_MAP, DataID, MapID, SpectrumID, Values, Labels, Units, Display, From, To)`);
+it has not been checked against 6.8.1's help. **Checked (2026-11-24):** in 6.8.1's `HELP\VBS\Map.html`, From / To
+are the range whose average intensity colours the map (never 0 – 0, which is what a one-window study sent), and for a
+map of known size the help and HORIBA's own map macro (`macros\horiba.vbm`) use `MapEx(CREATE_MAP, 0, SpectrumID,
+index, AxisX, AxisY, Labels, Units)`, then `ADD_TO_MAP` with index = iy × SizeX + ix. **From 2026.11.24.1** the live
+view of an X/Y map uses MapEx that way; a map with Z still uses `Map()`, now with the spectrum's own range. **Test:** a
+3 × 3 map: LabSpec shows the map growing point by point, no "live view" warning.
+**Zero drift:** 637.75@1200 read −1.06 cm⁻¹ (Si 519.64, corrected) late on 2026-11-23, about +0.3 earlier that day:
+this laser's zero moves by about 1 cm⁻¹ within a day; `calibration.max_age_h` (24) may be long for it.
 **Passed on .23.27 (2026-11-23):** 785 → 637.75 → 2400 through `instrument set` reached 2400 with the laser selected
 again (`retried_after_laser_reselect` ok), no bridge restart; 123 s in all, the full 120 s wait before the retry (from
 .23.28 a stable wrong reading ends it after 10 s). LabSpec's interface kept showing 1800 until its next dialog, but the

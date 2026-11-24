@@ -130,6 +130,20 @@ def _warmup(ctx: Ctx, acq: dict, sd: Path, seconds: float) -> dict:
 LASER_JUMP_CM1 = 1.5     # the laser line moving more than this between spectra: a mode hop
 
 
+def calibration_window(study: dict, grating, n_lines: int) -> float:
+    """The fit window for a calibration's reference lines: calibration.window_cm1 if given, else scaled with the
+    grating's dispersion (30 cm-1 at 1200 gr/mm and finer, 60 at 600, at most 90; 20 for several close lines at fine
+    gratings). 2026-11-23: with the 600 the Si line (FWHM 13) sat at the edge of a 30 cm-1 window: not trusted."""
+    w = (study.get("calibration") or {}).get("window_cm1")
+    if w:
+        return float(w)
+    base = 20.0 if n_lines > 1 else 30.0
+    g = _f(grating)
+    if g and g < 1200:
+        base = min(90.0, base * 1200.0 / g)
+    return base
+
+
 def laser_line_fit(shift, y) -> dict | None:
     """The laser line (Rayleigh) near 0 cm-1, when the spectrum covers -15 to +15 cm-1; else None."""
     s = np.asarray(shift, float)
@@ -856,7 +870,9 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
     stop_exc = None
     t_acq = 0.0
     vd = study.get("video") or {}
-    want_before = vd.get("before", kind == "calibration")
+    # a calibration takes a frame first unless the profile's calibration.video_before is false (17-20 s each in a
+    # batch of calibrations, 2026-11-23) or the study says otherwise
+    want_before = vd.get("before", kind == "calibration" and bool((prof.get("calibration") or {}).get("video_before", True)))
     focus_scans: list = []
     snaps: dict = {}
     # LabSpec's own map engine: not the same as save_native (`native` above), which this name once overwrote, so no
@@ -987,20 +1003,31 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
                 zonly = kind == "map" and plan.map_shape(study)[:2] == (1, 1)     # a depth profile
                 vval = rec["t"] if kind == "series" else p["dz_um"]
                 try:
+                    nx_, ny_, nz_ = plan.map_shape(study) if kind == "map" else (1, 1, 1)
+                    grid = kind == "map" and not zonly and nz_ == 1
+                    vfrom, vto = rng.get("from_nm"), rng.get("to_nm")
+                    if kind == "map" and not grid and (not vfrom or not vto):
+                        # Map() averages the intensity between From and To: never 0 - 0 (E_FAIL, 2026-11-23)
+                        xs_ = spectra.read(out)["x"]
+                        vfrom, vto = float(np.min(xs_)), float(np.max(xs_))
+                    gx = {}
+                    if grid:
+                        m_ = study.get("map", {})
+                        gx = dict(axis_x=",".join(f"{v:g}" for v in (plan.axis_values(m_["x_um"]) if m_.get("x_um") else [0.0])),
+                                  axis_y=",".join(f"{v:g}" for v in (plan.axis_values(m_["y_um"]) if m_.get("y_um") else [0.0])),
+                                  index=int(p.get("iy", 0)) * nx_ + int(p.get("ix", 0)))
                     if view is None:
-                        vr = ctx.call("view", timeout_s=30, action="create", name=name, vfrom=rng.get("from_nm"),
-                                      vto=rng.get("to_nm"),
-                                      kind="map" if kind == "map" and not zonly else "profile", id=r["id"],
-                                      x=p["x_um"], y=p["y_um"], value=vval,
+                        vr = ctx.call("view", timeout_s=30, action="create", name=name, vfrom=vfrom, vto=vto,
+                                      kind="mapex" if grid else ("map" if kind == "map" and not zonly else "profile"),
+                                      id=r["id"], x=p["x_um"], y=p["y_um"], value=vval,
                                       label="time" if kind == "series" else ("Z" if zonly else "XY"),
-                                      unit="s" if kind == "series" else "um")
+                                      unit="s" if kind == "series" else "um", **gx)
                         view = vr.get("view") if vr["ok"] else False
                         if not vr["ok"]:
                             warnings.append(f"live view in LabSpec not available: {vr.get('error')}")
                     elif view:
                         vr = ctx.call("view", timeout_s=30, action="add", name=name, id=r["id"],
-                                      x=p["x_um"], y=p["y_um"], value=vval, vfrom=rng.get("from_nm"),
-                                      vto=rng.get("to_nm"))
+                                      x=p["x_um"], y=p["y_um"], value=vval, vfrom=vfrom, vto=vto, **gx)
                         if not vr["ok"]:
                             warnings.append(f"live view: {vr.get('error')}")
                             view = False
@@ -1971,7 +1998,11 @@ def run_filters(name: str, study: dict, ctx: Ctx) -> dict:
     _progress(sd, state="running", stage="setup", started=t_start, estimate_min=plan.estimate(study, prof)["minutes"])
     su = _setup(name, study, ctx, warnings, unreliable, checks, 1)
     laser = su["laser"]
-    steps = [s for s in plan.filters_steps(study, prof, laser) if s.get("exposure_s")]
+    all_steps = plan.filters_steps(study, prof, laser)
+    steps = [s for s in all_steps if s.get("exposure_s")]
+    for s_ in all_steps:
+        if not s_.get("exposure_s"):
+            warnings.append(f"filter {s_['label']} not measured: {s_.get('skip')}")
     before_filter = su["before"].get("filter")
     nm = round(shift_to_nm(fp["line_cm1"], laser), 4)
     rows = []
@@ -2049,11 +2080,26 @@ def run_filters(name: str, study: dict, ctx: Ctx) -> dict:
     if measured and not unreliable:
         rec = perf.record("filters", perf.key(laser), {"reference": ref["label"], "measured_pct": measured,
                                                         "line_cm1": fp["line_cm1"]}, str(ctx.folder))
-    proposal = None
+    # the proposal from several runs (2026-11-23: 1 % read 1.176, 0.971 and 1.260 % in three good runs, about the
+    # reference's own drift): the mean of the last runs with the same reference, offered once there are enough
+    proposal, avg = None, None
     if measured and not unreliable:
-        new = dict(prof.get("filters", {}))
-        new.update({k: round(v, 4) for k, v in measured.items()})
-        proposal = ("ls6t profile set filters '" + json.dumps(new) + "'")
+        hist = [e.get("measured_pct") or {} for e in ((perf.get("filters", perf.key(laser)) or {}).get("history") or [])
+                if e.get("reference") == ref["label"]][-5:]
+        avg = {}
+        for lab in measured:
+            vals = [float(h[lab]) for h in hist if h.get(lab) is not None]
+            if vals:
+                m_ = sum(vals) / len(vals)
+                sd_ = (sum((v - m_) ** 2 for v in vals) / (len(vals) - 1)) ** 0.5 if len(vals) > 1 else None
+                avg[lab] = {"mean_pct": round(m_, 4), "runs": len(vals),
+                            **({"std_pct": round(sd_, 4)} if sd_ is not None else {})}
+        need = int((prof.get("performance") or {}).get("filters_min_runs", 3))
+        runs = min((a["runs"] for a in avg.values()), default=0)
+        if runs >= need:
+            new = dict(prof.get("filters", {}))
+            new.update({k: a["mean_pct"] for k, a in avg.items()})
+            proposal = ("ls6t profile set filters '" + json.dumps(new) + "'")
     if repeat:
         checks["reference_repeat"] = {"signal_cps": repeat["signal_cps"], "ratio_to_first": drift,
                                       "file": repeat["file"]}
@@ -2062,7 +2108,12 @@ def run_filters(name: str, study: dict, ctx: Ctx) -> dict:
               "sample": study.get("sample", {}),
               "filters": {"reference": ref["label"] if ref else None, "line_cm1": fp["line_cm1"], "steps": rows,
                           "flagged": flagged, "measurements": rec["n"] if rec else 0,
-                          "profile_command": proposal,
+                          "profile_command": proposal, "average": avg,
+                          "skipped": [{"label": s_["label"], "why": s_.get("skip")} for s_ in
+                                      plan.filters_steps(study, prof, laser) if not s_.get("exposure_s")],
+                          **({} if proposal or not avg else
+                             {"profile_command_note": f"offered from {int((prof.get('performance') or {}).get('filters_min_runs', 3))} "
+                                                     "runs with the same reference (the mean): repeat the study"}),
                           "note": "relative to the reference filter (the strongest allowed); the profile's caps "
                                   "use the filters' values: a person decides whether to set the measured ones "
                                   "(profile_command)"},
@@ -2725,8 +2776,9 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
     process = dict(study.get("process", {}))
     ref_lines = plan.calibration_lines(study, prof, rng) if kind == "calibration" else []
     if kind == "calibration" and not process.get("peaks"):
-        process["peaks"] = [{"name": f"ref{i}" if len(ref_lines) > 1 else "Si", "near_cm1": c, "window_cm1": 20
-                             if len(ref_lines) > 1 else 30} for i, c in enumerate(ref_lines)]
+        win = calibration_window(study, grating, len(ref_lines))
+        process["peaks"] = [{"name": f"ref{i}" if len(ref_lines) > 1 else "Si", "near_cm1": c, "window_cm1": win}
+                            for i, c in enumerate(ref_lines)]
     # ls6t's own spectral correction (from an earlier calibration), never on a calibration itself
     corr = xcal.get(laser, grating) if kind != "calibration" else None
     if kind != "calibration" and laser:

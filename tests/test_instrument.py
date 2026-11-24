@@ -17,7 +17,17 @@ def test_filter_transmission_check():
     assert r["filters"]["reference"] == "100%" and set(steps) == {"100%", "50%", "25%", "10%"}   # 1%: 20 s > 5
     assert steps["50%"]["measured_pct"] == pytest.approx(50, rel=0.08)
     assert steps["25%"]["measured_pct"] == pytest.approx(15, rel=0.1) and any("25%" in f for f in r["filters"]["flagged"])
-    assert "ls6t profile set filters" in r["filters"]["profile_command"]
+    # one run: no proposal yet (the mean of 3 runs is offered); the filters not measured say why
+    assert r["filters"]["profile_command"] is None and "repeat the study" in r["filters"]["profile_command_note"]
+    sk = {d["label"]: d["why"] for d in r["filters"]["skipped"]}
+    assert "max_exposure_s" in sk["1%"] and "max_exposure_s" in sk["0.1%"]
+    assert any("filter 1% not measured" in w for w in r["warnings"])
+    for _ in range(2):
+        st2 = run_inline({"f": {"kind": "filters", "sample": {"name": "Si"},
+                                "setup": {"laser_nm": 532, "grating": 1800, "objective": "x100"},
+                                "filters": {"exposure_s": 0.2, "max_exposure_s": 5}}})
+    r2 = st2["studies"]["f"]["filters"]
+    assert "ls6t profile set filters" in r2["profile_command"] and r2["average"]["50%"]["runs"] == 3
     # the reference again at the end (drift), and each step's exposure as LabSpec used it (2026-11-23)
     assert r["checks"]["reference_repeat"]["ratio_to_first"] == pytest.approx(1.0, abs=0.1)
     assert steps["50%"]["exposure_used_s"] == pytest.approx(0.4) and steps["50%"]["filter_read_back"] == "50%"

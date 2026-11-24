@@ -16,7 +16,7 @@ TOP_KEYS = {"kind", "sample", "setup", "acquire", "focus", "points", "map", "ser
             "calibration", "background", "filters", "cutoff"}
 FILTERS_KEYS = {"line_cm1", "window_cm1", "labels", "exposure_s", "max_exposure_s"}
 CUTOFF_KEYS = {"from_cm1", "to_cm1", "light", "laser_off", "plateau_cm1"}
-CAL_KEYS = {"reference", "lines_cm1", "tol_cm1", "adjust"}
+CAL_KEYS = {"reference", "lines_cm1", "tol_cm1", "adjust", "window_cm1"}
 BG_KEYS = {"name", "laser_off"}
 DEPTH_KEYS = {"from_um", "to_um", "step_um", "refractive_index", "engine", "swift"}
 MOVE_KEYS = {"x_um", "y_um", "to_um", "dz_um", "stay", "snapshot", "travel", "focus"}
@@ -126,7 +126,9 @@ def study_format(status: dict | None = None) -> dict:
                     "snapshot: true}; setup may only give the objective",
             "calibration": "(kind calibration) {reference: si | polystyrene | cyclohexane | naphthalene | "
                            "diamond, lines_cm1: [...] (your own), tol_cm1 (1), adjust: none | labspec | ls6t | auto "
-                           "(LabSpec's AutoCalibration when enabled in the profile, else guided like labspec)}",
+                           "(LabSpec's AutoCalibration when enabled in the profile, else guided like labspec), "
+                           "window_cm1 (the fit window: 30 at 1200 gr/mm and finer, 60 at 600); a video frame is "
+                           "taken first unless video.before is false (or the profile's calibration.video_before)}",
             "background": "(kind background) {name, laser_off: shutter | operator}; acquire as for the spectra "
                           "it will correct (same grating and range)",
             "filters": "(kind filters) {line_cm1 (520.7), window_cm1 (30), labels (all within the caps), "
@@ -325,6 +327,9 @@ def validate_study(name: str, study: dict, prof: dict) -> dict:
             errors.append("calibration.adjust: none, labspec, ls6t or auto")
         if cal.get("tol_cm1") is not None and (not _num(cal["tol_cm1"]) or cal["tol_cm1"] <= 0):
             errors.append("calibration.tol_cm1: > 0")
+        if cal.get("window_cm1") is not None and (not _num(cal["window_cm1"]) or not 5 <= cal["window_cm1"] <= 200):
+            errors.append("calibration.window_cm1: the fit window around each line, 5 to 200 cm-1 (default: 30 at "
+                          "1200 gr/mm and finer, scaled up for coarser gratings, 60 at 600)")
     for k in ("filters", "cutoff"):
         if study.get(k) is not None and kind != k:
             errors.append(f"{k}: only with kind '{k}'")
@@ -347,9 +352,9 @@ def validate_study(name: str, study: dict, prof: dict) -> dict:
         steps = plan.filters_steps(study, prof, plan.laser_nm(study, prof))
         if len([s_ for s_ in steps if s_.get("exposure_s")]) < 2:
             errors.append("filters: fewer than two filters can be measured within the caps and exposure limits")
-        skipped = [s_["label"] for s_ in steps if not s_.get("exposure_s")]
-        if skipped:
-            warnings.append(f"filters {', '.join(skipped)}: would need more than filters.max_exposure_s: not measured")
+        for s_ in steps:
+            if not s_.get("exposure_s"):
+                warnings.append(f"filter {s_['label']} not measured: {s_.get('skip', 'no exposure within the limits')}")
     if kind == "cutoff":
         cp = study.get("cutoff") or {}
         if not isinstance(cp, dict):

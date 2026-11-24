@@ -787,3 +787,35 @@ def test_grating_refused_after_785_is_retried_after_reselecting_the_laser():
     st = run_inline({"s": {"kind": "spectrum", "sample": {"name": "Si"}, "setup": dict(SETUP, grating=2400),
                            "acquire": {"center_cm1": 520, "exposure_s": 1}}})
     assert not st["studies"]["s"]["ok"] and "end-bridge" in st["studies"]["s"]["why"]
+
+
+def test_calibration_window_scales_with_the_grating_and_frame_is_optional():
+    """2026-11-23: with the 600 gr/mm the Si line (FWHM 13) sat at the edge of the 30 cm-1 window and the calibration
+    was not trusted; and each calibration of a batch took a video frame first (17-20 s)."""
+    assert runner.calibration_window({}, 1800, 1) == 30 and runner.calibration_window({}, 600, 1) == 60
+    assert runner.calibration_window({}, 300, 1) == 90
+    assert runner.calibration_window({"calibration": {"window_cm1": 45}}, 600, 1) == 45
+    assert not F.validate({"c": {"kind": "calibration", "setup": SETUP, "calibration": {"window_cm1": 1}}})["c"]["ok"]
+    S.ensure(config.active_bridge_dir())
+    P.save(dict(P.load(), calibration=dict(P.load()["calibration"], video_before=False)))
+    st = run_inline({"c": {"kind": "calibration", "sample": {"name": "Si"}, "setup": dict(SETUP, grating=600),
+                           "acquire": {"exposure_s": 1}}})
+    c = st["studies"]["c"]
+    assert "video" not in c or not c.get("video")
+    assert c["calibration"]["trusted"] and c["calibration"]["lines"][0]["measured_cm1"] is not None
+
+
+def test_live_map_view_uses_mapex_like_horiba():
+    """2026-11-23: LabSpec's Map() returned E_FAIL for the live view (its From / To were 0 - 0). A map of known size
+    now goes through MapEx, as HORIBA's map macro does (index = iy * SizeX + ix)."""
+    sim = S.ensure(config.active_bridge_dir())
+    st = run_inline({"m": {"kind": "map", "sample": {"name": "Si"}, "setup": SETUP,
+                           "acquire": {"center_cm1": 520, "exposure_s": 0.2},
+                           "map": {"x_um": [0, 4, 2], "y_um": [0, 2, 2], "engine": "points"}}})
+    m = st["studies"]["m"]
+    assert not any("live view" in w for w in m["warnings"]), m["warnings"]
+    v = sim.views["m"]
+    assert v["kind"] == "mapex" and v["axis_x"] == "0,2,4" and v["axis_y"] == "0,2"
+    assert sorted(int(i) for i in v["index"]) == list(range(6))
+    text = api.compose_vbs(config.active_bridge_dir(), config.home())["ls6t_bridge.vbs"]
+    assert "LabSpec.MapEx(LS_CREATE_MAP, 0, id" in text and "LabSpec.MapEx(LS_ADD_TO_MAP, arr(2), id" in text

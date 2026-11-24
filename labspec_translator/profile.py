@@ -105,6 +105,8 @@ DEFAULT_PROFILE: dict = {
     # FWHM} (optional, e.g. from the instrument's specification) is checked too
     "performance": {"filters_tol": 0.3, "resolution_tol": 1.25, "resolution_cm1": {}},
     "calibration": {"max_age_h": 24.0, "max_retries": 2,
+                    # a video frame before each calibration (false: none, for batches; a study's video.before wins)
+                    "video_before": True,
                     # LabSpec's own AutoCalibration, run by the bridge (calibration.adjust 'auto'): off until it was
                     # tried with the maintainer (TESTING T4.9); script: its .vbs; sample: what it needs under the
                     # objective, told to the operator first

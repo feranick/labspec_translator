@@ -734,15 +734,24 @@ def filters_steps(study: dict, prof: dict, laser) -> list[dict]:
     for lab in labels:
         pct = prof.get("filters", {}).get(str(lab))
         pct = pct if pct is not None else filter_pct(lab)
-        if pct is None or pct <= 0 or pct > cap + 1e-9:
+        if pct is None or pct <= 0:
+            continue
+        if pct > cap + 1e-9:
+            # listed with why, not measured (2026-11-23: a skipped filter had no note)
+            rows.append({"label": str(lab), "nominal_pct": float(pct), "exposure_s": None,
+                         "skip": f"above the cap for this laser ({cap:g} %)"})
             continue
         rows.append({"label": str(lab), "nominal_pct": float(pct)})
     rows.sort(key=lambda r: -r["nominal_pct"])
-    if rows:
-        ref = rows[0]["nominal_pct"]
-        for r in rows:
+    usable = [r for r in rows if not r.get("skip")]
+    if usable:
+        ref = usable[0]["nominal_pct"]
+        for r in usable:
             e = fp["exposure_s"] * ref / r["nominal_pct"]
             r["exposure_s"] = round(e, 3) if e <= fp["max_exposure_s"] else None
+            if r["exposure_s"] is None:
+                r["skip"] = (f"would need {e:.0f} s to match the reference's counts, more than filters.max_exposure_s "
+                             f"({fp['max_exposure_s']:g} s)")
     return rows
 
 
