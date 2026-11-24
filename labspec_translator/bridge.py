@@ -168,9 +168,18 @@ def blocking_allowance(hb: dict) -> float:
 
 
 def diagnose(hb: dict | None, folder=None) -> str:
-    """One explanation of a bridge that does not answer, from its heartbeat, the same whether a call was about to be
-    sent or was waiting: never started, ended normally, ended by LabSpec (last heartbeat idle), or stuck in a
-    command (last heartbeat busy)."""
+    """One explanation of a bridge that does not answer, from its heartbeat; first, if its last heartbeat says the
+    laser shutter was held open by ls6t, that the laser may still reach the sample (2026-11-24)."""
+    msg = _diagnose(hb, folder)
+    if hb and str(hb.get("shutter_held", "0")) == "1":
+        from .runner import LASER_MAY_BE_ON
+        return LASER_MAY_BE_ON + " " + msg
+    return msg
+
+
+def _diagnose(hb: dict | None, folder=None) -> str:
+    """never started, ended normally, ended by LabSpec (last heartbeat idle), or stuck in a command (last heartbeat
+    busy); the same whether a call was about to be sent or was waiting."""
     others = other_accounts(folder) if folder else []
     if others and (not hb or hb.get("state") == "stopped" or hb.get("age_s", 0) > 30):
         o = others[0]

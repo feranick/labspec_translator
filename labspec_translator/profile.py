@@ -104,6 +104,9 @@ DEFAULT_PROFILE: dict = {
     # spectral resolution (FWHM) worse than resolution_tol x its baseline is reported; resolution_cm1 {grating: max
     # FWHM} (optional, e.g. from the instrument's specification) is checked too
     "performance": {"filters_tol": 0.3, "resolution_tol": 1.25, "resolution_cm1": {}},
+    # LabSpec's live display of a map or series as it is measured: off until it has passed on the instrument
+    # (2026-11-24: the MapEx view froze, then crashed, LabSpec)
+    "display": {"live_view": False},
     "calibration": {"max_age_h": 24.0, "max_retries": 2,
                     # a video frame before each calibration (false: none, for batches; a study's video.before wins)
                     "video_before": True,
@@ -324,6 +327,8 @@ def load(path: Path | None = None) -> dict:
             v.setdefault("unstable_multi", False)      # true: refuse multi-spectrum studies; "warn": warn
             v.setdefault("settle_s", 0)                # a pause between spectra with this laser (its mode holds)
             v.setdefault("hold_shutter", False)        # the shutter held open across a study's spectra
+            v.setdefault("laser_reference", "report")  # 'correct': follow the laser line when it is in the window
+            v.setdefault("calibration_max_age_h", None)  # a shorter life for this laser's calibrations
     return prof
 
 

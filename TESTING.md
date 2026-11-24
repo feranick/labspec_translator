@@ -838,6 +838,35 @@ map of known size the help and HORIBA's own map macro (`macros\horiba.vbm`) use 
 index, AxisX, AxisY, Labels, Units)`, then `ADD_TO_MAP` with index = iy × SizeX + ix. **From 2026.11.24.1** the live
 view of an X/Y map uses MapEx that way; a map with Z still uses `Map()`, now with the spectrum's own range. **Test:** a
 3 × 3 map: LabSpec shows the map growing point by point, no "live view" warning.
+**Failed on 2026.11.24.1, serious (`run_20261124_090756_087048`, `run_20261124_090921_4db97c`; 3 × 3, 637.75 nm,
+1200, 1 %, `hold_shutter`):** point 0 measured, then the bridge hung in `view` (the MapEx create), no map window; the
+first time LabSpec froze (restarted by hand), the second it crashed. The shutter hold was on both times, so the beam
+may have stayed on the sample until LabSpec was restarted. **From 2026.11.24.2:** the live view is off
+(`display.live_view: false`; on only for a test); a display call (`view`, video) is never made with the shutter held
+(the bridge lets the hold go first: `view` is no longer among the commands that keep it); the heartbeat says
+`shutter_held`, and when the bridge stops answering while it was held, every message (status, a stopped request)
+starts with "THE LASER MAY STILL REACH THE SAMPLE" and how to switch it off. After such a crash: switch the laser off
+in LabSpec's status bar (or at its supply / key if LabSpec does not respond), restart LabSpec, check that the shutter
+reads Off and ShutterMode is 0. The MapEx call itself (arguments as HORIBA's macro, axes as doubles, labels "X"/"Y",
+units "mkm") stays to be understood before the live view is tried again, without the hold.
+**runner.log was empty after the crash:** from 2026.11.24.2 every bridge command is written to the request's
+`runner.log` when it is sent and when it returns (`-> view kind=mapex`, `<- acquire ok=1 2.4 s`, marked `[shutter
+held]`), each line flushed at once, so the last call before a hang or crash is always there.
+**The 637.75 nm "zero drift" is the laser's wavelength (2026-11-24, `run_20261124_091431_0d748d`):** nine hours after
+the 637.75@1200 calibration Si read 521.67–522.21 corrected (+1.3), but the laser line moved with it (−4.69 at the
+calibration, −3.13 … −2.63 now) and Si from the laser line stayed 524.8–525.0: about 0.07 nm overnight, +0.5 cm⁻¹ within
+a 30 s series. **From 2026.11.24.2** a laser can default to following its line (`lasers.<k>.laser_reference:
+"correct"`, used whenever the line is in the window) and give its calibrations a shorter life
+(`lasers.<k>.calibration_max_age_h`, e.g. 2): `ls6t profile set lasers.637.75.laser_reference correct` and
+`lasers.637.75.calibration_max_age_h 2`.
+**Series spacing (2026-11-24):** 2 s asked gave 1.66 s (`run_20261124_091707_5c0dc5`, held), 6 s gave 7.8–7.9 s
+(`run_20261124_091431_0d748d`, not held: the laser's 5 s pause after each acquisition came on top, since a 1 s
+exposure takes about 2.5–3 s with LabSpec's overheads). `interval_s` is start to start; ls6t waits until each
+spectrum's start time. **From 2026.11.24.2** each spectrum has `t_start` (when its acquisition was sent), the series
+has `spacing` (asked, mean, min, max, every start-to-start gap) with a warning and the reason when it differs from the
+interval by more than 10 %; whether a series is held now counts each acquisition's real duration (6 s with 1 s
+exposures is held, so the pause no longer stretches it). The 1.66 s for 2 s is not explained by the code (it waits
+until start₀ + k × interval): repeat it and send `series.spacing` and `t_start`.
 **Zero drift:** 637.75@1200 read −1.06 cm⁻¹ (Si 519.64, corrected) late on 2026-11-23, about +0.3 earlier that day:
 this laser's zero moves by about 1 cm⁻¹ within a day; `calibration.max_age_h` (24) may be long for it.
 **Passed on .23.27 (2026-11-23):** 785 → 637.75 → 2400 through `instrument set` reached 2400 with the laser selected

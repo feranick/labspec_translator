@@ -34,7 +34,8 @@ Dim gLaserOpen, gLaserT0, gLaserS, gLaserMotor, gLaserOldMode, gLaserOffLabel, g
 Dim gHoldOn, gHoldMotor, gHoldOldMode, gHoldOldIdx, gHoldT0, gHoldMaxS   ' the shutter held open across spectra
 ' the commands that keep it held (runner.HOLD_VERBS lists the same): spectra, LabSpec's own map and the guided loop,
 ' stage and motor moves, the live view, saving data, quick reads
-Const HOLD_VERBS = ",ping,status,acquire,map_native,guide,move_xy,move,view,remove,save,labels,last_error,message,shutter_hold,"
+' (no display call: 2026-11-24 LabSpec froze, then crashed, in the live map view with the shutter held)
+Const HOLD_VERBS = ",ping,status,acquire,map_native,guide,move_xy,move,remove,save,labels,last_error,message,shutter_hold,"
 gHoldOn = False
 Dim gShutterWatch, gShutterOff, gShutterSeen   ' a laser_off acquisition: the shutter read back while it runs
 Dim gShutterReads, gShutterT0, gShutterFirstS  ' how many reads, and when (s after Acq was called)
@@ -79,6 +80,9 @@ Sub Beat(state, force)
     ts.WriteLine "account=" & LS6T_ACCOUNT
     If gAccountVersion <> "" Then ts.WriteLine "account_version=" & gAccountVersion
     If LS6T_DIR_NOTE <> "" Then ts.WriteLine "note=" & LS6T_DIR_NOTE
+    ' the laser shutter held open by ls6t (manual ShutterMode): if the bridge then stops answering, ls6t says the
+    ' laser may still reach the sample (2026-11-24: LabSpec froze and crashed during a held map)
+    ts.WriteLine "shutter_held=" & Bit(gHoldOn)
     ts.Close
     Err.Clear
     On Error GoTo 0
@@ -2723,6 +2727,7 @@ Sub VShutterHold(cmd, res)
     End If
     gHoldT0 = Timer
     gHoldMaxS = ParseNum(GetP(cmd, "max_s", "600"))
+    Beat "busy", True
     res("held") = 1
     res("old_mode") = gHoldOldMode
     res("old_index") = gHoldOldIdx
@@ -2743,6 +2748,7 @@ Sub HoldRelease(why)
     Err.Clear
     On Error GoTo 0
     gHoldOn = False
+    Beat "busy", True                       ' the heartbeat says it at once
     LabSpec.Message "ls6t: laser shutter released (" & why & "; reads '" & MotorLabel(gHoldMotor) & "')", LS_MB_STATUS_BAR
 End Sub
 

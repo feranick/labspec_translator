@@ -827,9 +827,14 @@ def hold_shutter(study: dict, prof: dict, laser) -> bool:
     if not (lk and prof["lasers"][lk].get("hold_shutter")):
         return False
     if study.get("kind") == "series":
-        acq = study.get("acquire") or {}
-        ex = acq.get("exposure_s", 1.0)
-        busy = (float(ex) if isinstance(ex, (int, float)) else 0.0) * int(acq.get("accumulations", 1) or 1)
+        # the time between one spectrum's end and the next one's start, with each acquisition's real duration
+        # (exposure, readout, LabSpec's overheads): 6 s asked with 1 s exposures left about 3.5 s, not 5 (2026-11-24)
+        try:
+            busy = acquire_seconds(study, prof, acq_range(study, prof, laser))
+        except (KeyError, ValueError, TypeError):
+            acq = study.get("acquire") or {}
+            ex = acq.get("exposure_s", 1.0)
+            busy = (float(ex) if isinstance(ex, (int, float)) else 0.0) * int(acq.get("accumulations", 1) or 1)
         gap = float((study.get("series") or {}).get("interval_s", 0) or 0) - busy
         rec = float(prof["lasers"][lk].get("settle_s") or 0)
         if rec > 0 and gap >= rec:

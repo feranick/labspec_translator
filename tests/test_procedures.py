@@ -724,8 +724,11 @@ def test_series_hold_native_and_estimate():
     prof["lasers"][lk].update(hold_shutter=True, settle_s=5)
     P.save(prof)
     ser = {"kind": "series", "sample": {"name": "Si"}, "setup": SETUP,
-           "acquire": {"center_cm1": 520, "exposure_s": 1}, "series": {"count": 3, "interval_s": 8}}
-    assert not plan.hold_shutter(ser, P.load(), 532)            # 7 s between spectra >= 5 s: LabSpec's own shutter
+           "acquire": {"center_cm1": 520, "exposure_s": 1}, "series": {"count": 3, "interval_s": 12}}
+    busy = plan.acquire_seconds(ser, P.load(), plan.acq_range(ser, P.load(), 532))
+    assert not plan.hold_shutter(ser, P.load(), 532)            # 12 s apart: the gap >= 5 s: LabSpec's own shutter
+    # 6 s apart with 1 s exposures leaves less than 5 s once LabSpec's overheads count (2026-11-24): held
+    assert plan.hold_shutter(dict(ser, series={"count": 3, "interval_s": busy + 4}), P.load(), 532)
     fast = dict(ser, series={"count": 3, "interval_s": 2})
     assert plan.hold_shutter(fast, P.load(), 532)               # 1 s apart: held
     assert plan.hold_shutter(dict(ser, acquire=dict(ser["acquire"], shutter="hold")), P.load(), 532)
@@ -809,9 +812,15 @@ def test_live_map_view_uses_mapex_like_horiba():
     """2026-11-23: LabSpec's Map() returned E_FAIL for the live view (its From / To were 0 - 0). A map of known size
     now goes through MapEx, as HORIBA's map macro does (index = iy * SizeX + ix)."""
     sim = S.ensure(config.active_bridge_dir())
-    st = run_inline({"m": {"kind": "map", "sample": {"name": "Si"}, "setup": SETUP,
-                           "acquire": {"center_cm1": 520, "exposure_s": 0.2},
-                           "map": {"x_um": [0, 4, 2], "y_um": [0, 2, 2], "engine": "points"}}})
+    mp = {"m": {"kind": "map", "sample": {"name": "Si"}, "setup": SETUP,
+                "acquire": {"center_cm1": 520, "exposure_s": 0.2},
+                "map": {"x_um": [0, 4, 2], "y_um": [0, 2, 2], "engine": "points"}}}
+    # off by default (2026-11-24: the MapEx view froze, then crashed, LabSpec on the instrument)
+    sim.views.clear()
+    run_inline(mp)
+    assert "m" not in sim.views
+    P.save(dict(P.load(), display={"live_view": True}))
+    st = run_inline(mp)
     m = st["studies"]["m"]
     assert not any("live view" in w for w in m["warnings"]), m["warnings"]
     v = sim.views["m"]
@@ -819,3 +828,45 @@ def test_live_map_view_uses_mapex_like_horiba():
     assert sorted(int(i) for i in v["index"]) == list(range(6))
     text = api.compose_vbs(config.active_bridge_dir(), config.home())["ls6t_bridge.vbs"]
     assert "LabSpec.MapEx(LS_CREATE_MAP, 0, id" in text and "LabSpec.MapEx(LS_ADD_TO_MAP, arr(2), id" in text
+
+
+def test_laser_may_be_on_when_the_bridge_stops_during_a_hold(tmp_path):
+    """2026-11-24: LabSpec froze and crashed with the shutter held; ls6t must say the laser may still reach the
+    sample. The heartbeat carries shutter_held; diagnose and a request's stop say it first; a display call is never
+    made with the shutter held (the bridge lets it go first)."""
+    from labspec_translator import bridge as BR
+    msg = BR.diagnose({"state": "busy", "verb": "view", "age_s": 300, "shutter_held": "1"}, tmp_path)
+    assert msg.startswith("THE LASER MAY STILL REACH THE SAMPLE")
+    assert not BR.diagnose({"state": "busy", "verb": "view", "age_s": 300, "shutter_held": "0"}, tmp_path).startswith("THE LASER")
+    assert "view" not in runner.HOLD_VERBS and "video" not in runner.HOLD_VERBS
+    text = api.compose_vbs(config.active_bridge_dir(), config.home())["ls6t_bridge.vbs"]
+    hv = [l for l in text.splitlines() if l.startswith("Const HOLD_VERBS")][0]
+    assert ",view," not in hv and 'ts.WriteLine "shutter_held=" & Bit(gHoldOn)' in text
+    ctx = runner.Ctx(tmp_path, BR.Bridge(config.active_bridge_dir()), P.load())
+    ctx.holding = True
+    assert ctx._held_warning("no answer").startswith("THE LASER MAY STILL REACH THE SAMPLE")
+
+
+def test_series_spacing_runner_log_and_laser_defaults():
+    """2026-11-24: series spacing reported start to start; every bridge call written to runner.log at once (an empty
+    log after a LabSpec crash); the 637.75 nm laser's wavelength drifts, so it can default to laser_reference
+    'correct' and give its calibrations a shorter life."""
+    bdir = config.active_bridge_dir()
+    S.ensure(bdir)
+    st = run_inline({"s": {"kind": "series", "sample": {"name": "Si"}, "setup": SETUP,
+                           "acquire": {"center_cm1": 520, "exposure_s": 1}, "series": {"count": 3, "interval_s": 1.5}}})
+    s = st["studies"]["s"]
+    sp = s["series"]["spacing"]
+    assert sp["asked_s"] == 1.5 and sp["mean_s"] == pytest.approx(1.5, abs=0.2) and len(sp["start_to_start_s"]) == 2
+    log = (Path(st["request"]) / "runner.log").read_text()
+    assert "-> acquire" in log and "<- acquire ok=1" in log
+    prof = P.load()
+    lk = next(k for k, v in prof["lasers"].items() if abs(v["nm"] - 532) < 1)
+    prof["lasers"][lk].update(laser_reference="correct", calibration_max_age_h=2)
+    P.save(prof)
+    (bdir / "sim_laser_line").write_text("1")
+    st = run_inline({"s": {"kind": "spectrum", "sample": {"name": "Si"}, "setup": dict(SETUP, grating=600),
+                           "acquire": {"center_cm1": 250, "exposure_s": 1}}})
+    assert st["studies"]["s"]["checks"]["laser_line"]["mode"] == "correct"
+    prof["lasers"][lk].update(laser_reference="report", calibration_max_age_h=None)
+    P.save(prof)

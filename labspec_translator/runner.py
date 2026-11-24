@@ -290,6 +290,8 @@ class Ctx:
                                                                        if plan.ics_files(self.prof) is not None
                                                                        else "LabSpec's setting")
         laser_off = str(params.get("laser_off", "0")) == "1"
+        self._log(f"-> {verb} " + " ".join(f"{k}={v}" for k, v in params.items()
+                                             if k in ("motor", "value", "action", "kind", "state", "mode", "exposure_s")))
         if self.hold_wanted and not self.holding and verb in ("acquire", "map_native", "guide") and not laser_off:
             self._hold_on()
         if verb == "acquire":
@@ -310,10 +312,12 @@ class Ctx:
                 rec["spectro_skipped"] = True
             self.calls.append(rec)
         except BridgeGone as exc:
-            raise Stop(str(exc), "bridge") from exc
+            raise Stop(self._held_warning(str(exc)), "bridge") from exc
         except BridgeTimeout as exc:
-            raise Stop(str(exc), "timeout") from exc
+            raise Stop(self._held_warning(str(exc)), "timeout") from exc
         self.beat()
+        self._log(f"<- {verb} ok={int(bool(r.get('ok')))} {r.get('seconds', '')} s"
+                  + (f" error={r.get('error')}" if r.get("error") else ""))
         if self.holding and (verb not in HOLD_VERBS or laser_off or (verb == "shutter_hold" and params.get("state") == "off")):
             self.holding = False                 # the bridge let it go (bridge_main.vbs, LaserGuard)
             self.hold_log.append({"released": True, "by": verb})
@@ -325,6 +329,22 @@ class Ctx:
             if r.get("stopped_by") == "request" or self.cancelled():
                 raise Stop("cancelled", "cancel")
         return r
+
+    def _log(self, line: str) -> None:
+        """One line to the request's runner.log, written and flushed at once (2026-11-24: after LabSpec crashed
+        in a map view the log was empty: the last call before a hang or crash is now always there)."""
+        try:
+            with open(self.folder / "runner.log", "a", encoding="utf-8") as fh:
+                fh.write(f"{time.strftime('%H:%M:%S')} {line}{' [shutter held]' if self.holding else ''}\n")
+                fh.flush()
+        except OSError:
+            pass
+
+    def _held_warning(self, msg: str) -> str:
+        """The bridge stopped answering while ls6t held the laser shutter open: say so first."""
+        if self.holding and LASER_MAY_BE_ON not in msg:
+            return LASER_MAY_BE_ON + " " + msg
+        return msg
 
     def _hold_on(self) -> None:
         """The laser shutter held open (ShutterMode manual) before this study's next acquisition, as HORIBA's
@@ -749,10 +769,14 @@ def _setup(name: str, study: dict, ctx: Ctx, warnings: list, unreliable: list, c
     return {"before": before, "after": after, "laser": laser, "temp": temp, "readback": readback, "rng": rng}
 
 
+LASER_MAY_BE_ON = ("THE LASER MAY STILL REACH THE SAMPLE: ls6t held the laser shutter open (LabSpec's ShutterMode "
+                   "manual) when the bridge stopped answering. Close it now: switch the laser off in LabSpec's status "
+                   "bar if LabSpec responds, otherwise switch the laser off at its power supply or key; after "
+                   "restarting LabSpec, check that the laser shutter reads Off and ShutterMode is automatic (0).")
 NO_HOLD_KINDS = ("move", "background", "cutoff")      # no laser, or the laser off on purpose
 # the bridge commands that keep the shutter held (bridge_main.vbs HOLD_VERBS)
-HOLD_VERBS = ("ping", "status", "acquire", "map_native", "guide", "move_xy", "move", "view", "remove", "save", "labels",
-              "last_error", "message", "shutter_hold")
+HOLD_VERBS = ("ping", "status", "acquire", "map_native", "guide", "move_xy", "move", "remove", "save", "labels",
+              "last_error", "message", "shutter_hold")      # no display call (view, video): released before one
 
 
 def run_any(name: str, study: dict, ctx: Ctx) -> dict:
@@ -986,6 +1010,8 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
                 t_series0 = time.time()
             t_a = time.time()
             r = ctx.call("acquire", timeout_s=_acq_timeout(study, prof, rng), **params)
+            # when this spectrum's acquisition was sent (series: start to start), and when LabSpec began it
+            t_sent = round(t_a - t_start, 3)
             t_acq += time.time() - t_a
             if not r["ok"]:
                 raise Stop(f"point {k}: acquisition failed: {r.get('error')}", "study")
@@ -996,10 +1022,12 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
                    "native": params.get("native"), "id": r.get("id"), "t": round(time.time() - t_start, 3),
                    "exposure_s": _f(r.get("exposure_s")), "accumulations": _f(r.get("accumulations")),
                    "detector_temp_c": _f(r.get("detector_temp_c")), "ics": ctx.last_ics,
-                   "auto_exposure": ae_record(r), "optics_check": optics_record(r)}
+                   "auto_exposure": ae_record(r), "optics_check": optics_record(r), "t_start": t_sent,
+                   **({"settled_s": _f(r.get("settled_s"))} if r.get("settled_s") not in (None, "") else {})}
             per_point.append(rec)
             # live view in LabSpec: the map or the series grows as it is measured
-            if kind in ("map", "series") and r.get("id"):
+            if kind in ("map", "series") and r.get("id") and (prof.get("display") or {}).get("live_view"):
+                # off by default: on 2026-11-24 LabSpec froze, then crashed, in the MapEx live view
                 zonly = kind == "map" and plan.map_shape(study)[:2] == (1, 1)     # a depth profile
                 vval = rec["t"] if kind == "series" else p["dz_um"]
                 try:
@@ -2798,8 +2826,14 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
         age = xcal.age_h(corr)
         warnings.append(f"spectral correction applied: true = {corr['a']:+.3f} + {corr['b']:.6f} x measured "
                         f"(calibration {corr['time']}, {corr['reference']})")
-        if age is not None and age > float(prof.get("calibration", {}).get("max_age_h", 24)):
-            warnings.append(f"the spectral correction is {age:.0f} h old: run a calibration")
+        lkc = P.laser_key(prof, laser) if laser else None
+        max_h = float((prof["lasers"][lkc].get("calibration_max_age_h") if lkc else None)
+                      or prof.get("calibration", {}).get("max_age_h", 24))
+        if age is not None and age > max_h:
+            warnings.append(f"the spectral correction is {age:.1f} h old (more than {max_h:g} h for this laser): run "
+                            "a calibration" + (", or keep the laser line in the window with "
+                                               "acquire.laser_reference 'correct'"
+                                               if lkc and prof["lasers"][lkc].get("calibration_max_age_h") else ""))
     bgname = study.get("acquire", {}).get("subtract_background")
     bg = BG.load(bgname) if bgname else None
     if bgname and bg is None:
@@ -2819,7 +2853,11 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
     axes, ys = [], []
     # the laser line, when the window includes it (2026-11-23: the 637.75 nm laser hopped by ~0.35 nm after the first
     # spectrum of a request: laser line -4.6 -> -12 cm-1 and Si 520.2 -> 512.4, their difference constant)
-    ll_mode = study.get("acquire", {}).get("laser_reference", "report")
+    lk_ = P.laser_key(prof, laser) if laser else None
+    # the laser's own default (2026-11-24: the 637.75 nm laser's wavelength drifts, about 0.07 nm overnight and
+    # +0.5 cm-1 within 30 s: 'correct' follows it whenever the laser line is in the window)
+    ll_mode = study.get("acquire", {}).get("laser_reference") or \
+        ((prof["lasers"][lk_].get("laser_reference") if lk_ else None) or "report")
     ll_ref = laser_line_reference(laser, grating)
     ll_ref_from = "calibration" if ll_ref is not None else None
     for rec in per_point:
@@ -2955,6 +2993,22 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
             warnings.append(f"a peak fit failed at {len(set(failed))} of {n} map points (null in the map)")
     elif kind == "series":
         out["series"] = _series_result(per_point, process)
+        # start to start (2026-11-24: 2 s asked gave 1.66 s, 6 s gave 7.8 s): what was asked and what happened
+        ts = [r.get("t_start") for r in per_point if r.get("t_start") is not None]
+        asked = float((study.get("series") or {}).get("interval_s", 0) or 0)
+        if len(ts) > 1:
+            gaps = [round(b - a, 3) for a, b in zip(ts, ts[1:])]
+            sp_ = {"asked_s": asked, "mean_s": round(sum(gaps) / len(gaps), 3), "min_s": min(gaps),
+                   "max_s": max(gaps), "start_to_start_s": gaps}
+            out["series"]["spacing"] = sp_
+            if asked > 0 and abs(sp_["mean_s"] - asked) > max(0.2, 0.1 * asked):
+                settled = [r.get("settled_s") for r in per_point if r.get("settled_s")]
+                warnings.append(f"the spectra were {sp_['mean_s']:.2f} s apart (start to start) for the "
+                                f"{asked:g} s asked" + (f": the laser's pause between acquisitions "
+                                                        f"(settle_s, up to {max(settled):.1f} s) made them longer"
+                                                        if settled and sp_["mean_s"] > asked else
+                                                        ": each spectrum took longer than the interval"
+                                                        if sp_["mean_s"] > asked else ""))
         out["spectra"] = [_point_summary(r) for r in per_point]
     else:
         out["spectra"] = [_point_summary(r) for r in per_point]
