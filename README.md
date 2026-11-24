@@ -72,7 +72,7 @@ detectors. See `planning.md`.
 On the instrument PC (Windows 11, next to LabSpec 6 and the Claude desktop app), run **`ls6t-setup-<version>.exe`**
 (from the repository's Releases, built for every version): per user, no administrator rights, no network; it brings its
 own Python, writes the LabSpec scripts, and connects the LLM apps it finds (Claude desktop app, Claude Code, ChatGPT desktop app /
-Codex, Gemini CLI, Cursor, GitHub Copilot, Windsurf, LM Studio). Then add the scripts in LabSpec, run the
+Codex, Gemini CLI, Cursor, GitHub Copilot, Windsurf, LM Studio, LM Studio Bionic). Then add the scripts in LabSpec, run the
 discovery and set the machine profile. From source instead: Python 3.10+ and Git, a venv,
 `pip install -e ".[mcp,render,test,windows]"`, `ls6t bridge install`, and the MCP entry in the Claude app by hand.
 The steps, building the installer, the offline install, updating and troubleshooting are in **[INSTALL.md](INSTALL.md)**.
@@ -568,7 +568,7 @@ Claude app ──MCP──> ls6t-mcp ──> request folder + runner process (ls
 | `bench.py` | The benchmarks |
 | `api.py`, `cli.py`, `mcp_server.py` | The functions, the command line, the MCP server |
 | `testmode.py` | Test mode: TESTING.md read as a plan, single bridge commands with guards and the operator's Yes for the laser, the test log and report (`hardware_test`, `ls6t test`) |
-| `clients.py` | `ls6t connect`: finds the LLM apps (Claude desktop app, Claude Code, ChatGPT desktop app / Codex, Gemini CLI, Cursor, GitHub Copilot, Windsurf, LM Studio) and adds or removes the MCP server in their files (JSON or TOML), backed up, other settings kept |
+| `clients.py` | `ls6t connect`: finds the LLM apps (Claude desktop app, Claude Code, ChatGPT desktop app / Codex, Gemini CLI, Cursor, GitHub Copilot, Windsurf, LM Studio, LM Studio Bionic) and adds or removes the MCP server in their files (JSON or TOML), backed up, other settings kept |
 | `winsetup.py` | What the Windows installer does beyond copying files: checks, precompiling, the LabSpec scripts, PATH, the LLM apps (and undoing them) |
 | `installer/` | The Windows installer: `ls6t.nsi` (NSIS), `build_installer.py`, the launchers (`bin/`) |
 | `vbs/common.vbs`, `vbs/bridge_main.vbs`, `vbs/discover_main.vbs`, `vbs/script_motor_main.vbs` | The LabSpec scripts' parts; `ls6t bridge install` puts them together (the script-motor logger is optional: TESTING.md T1.4) |
@@ -595,7 +595,7 @@ the laser was on), `config` (`action` save or load, `path`, `show`), `last_error
 
 `ls6t-mcp` (stdio; `--http PORT` for streamable HTTP on 127.0.0.1). It answers the handshake at once (0.3 s
 measured). Any app that starts local MCP servers can use it: the Claude desktop app, the ChatGPT desktop app / Codex,
-Gemini CLI, Cursor, Claude Code, GitHub Copilot (VS Code, Visual Studio, CLI), Windsurf, LM Studio. `ls6t connect` (and the installer) adds it to those found on the PC ([INSTALL.md, step
+Gemini CLI, Cursor, Claude Code, GitHub Copilot (VS Code, Visual Studio, CLI), Windsurf, LM Studio, LM Studio Bionic. `ls6t connect` (and the installer) adds it to those found on the PC ([INSTALL.md, step
 8](INSTALL.md#8-connect-an-llm-app)).
 
 | Tool | What it does |

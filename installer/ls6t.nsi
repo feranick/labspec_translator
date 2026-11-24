@@ -234,6 +234,8 @@ SectionGroup /e "Connect ls6t to the LLM apps found" SecApps
   SectionEnd
   Section /o "LM Studio (local models)" SecLMStudio
   SectionEnd
+  Section /o "LM Studio Bionic (the agent app)" SecBionic
+  SectionEnd
   Section /o "Also the simulator (ls6t-sim, to practise)" SecSim
   SectionEnd
 SectionGroupEnd
@@ -277,6 +279,9 @@ Section "-setup" SecSetup
   ${If} ${SectionIsSelected} ${SecLMStudio}
     StrCpy $1 "$1 --lmstudio"
   ${EndIf}
+  ${If} ${SectionIsSelected} ${SecBionic}
+    StrCpy $1 "$1 --bionic"
+  ${EndIf}
   ${If} ${SectionIsSelected} ${SecSim}
     StrCpy $1 "$1 --sim"
   ${EndIf}
@@ -308,6 +313,7 @@ SectionEnd
   !insertmacro MUI_DESCRIPTION_TEXT ${SecCopilot} "GitHub Copilot's agent in VS Code and Visual Studio, and Copilot CLI: %USERPROFILE%\.copilot\mcp-config.json."
   !insertmacro MUI_DESCRIPTION_TEXT ${SecWindsurf} "Windsurf (Cascade): %USERPROFILE%\.codeium\windsurf\mcp_config.json."
   !insertmacro MUI_DESCRIPTION_TEXT ${SecLMStudio} "LM Studio, with models running on this PC (nothing leaves it): %USERPROFILE%\.lmstudio\mcp.json. Small local models follow long instructions less reliably."
+  !insertmacro MUI_DESCRIPTION_TEXT ${SecBionic} "LM Studio Bionic keeps its own MCP list (%USERPROFILE%\.lmstudio\apps\bionic\.internal\ng-mcp.json), not LM Studio's mcp.json. Quit Bionic before installing; start it once first if it never ran."
   !insertmacro MUI_DESCRIPTION_TEXT ${SecGemini} "Gemini CLI: %USERPROFILE%\.gemini\settings.json. (The Gemini app and ChatGPT on the web take only internet servers and cannot use ls6t.)"
   !insertmacro MUI_DESCRIPTION_TEXT ${SecPath} "Lets any new PowerShell window run ls6t, ls6t-mcp and ls6t-typelib."
   !insertmacro MUI_DESCRIPTION_TEXT ${SecMenu} "Start menu: ls6t PowerShell, the LabSpec scripts folder, the guides, Uninstall."
@@ -317,7 +323,7 @@ SectionEnd
 ;------------------------------------------------------------------------------------------------- choosing the apps
 
 ; ticks the apps found on this PC (the same checks as labspec_translator.clients.detect). From the command line
-; (/S installs), /CLAUDE /CODEX /GEMINI /CURSOR /CLAUDECODE /COPILOT /WINDSURF /LMSTUDIO /SIM choose instead, and /NOAPPS connects none.
+; (/S installs), /CLAUDE /CODEX /GEMINI /CURSOR /CLAUDECODE /COPILOT /WINDSURF /LMSTUDIO /BIONIC /SIM choose instead, and /NOAPPS connects none.
 !macro TickIf sec
   ${If} $R9 == "1"
     !insertmacro SelectSection ${sec}
@@ -394,6 +400,12 @@ Function .onInit
   ${IfNot} ${Errors}
     StrCpy $R1 "1"
     !insertmacro SelectSection ${SecLMStudio}
+  ${EndIf}
+  ClearErrors
+  ${GetOptions} $R0 "/BIONIC" $R2
+  ${IfNot} ${Errors}
+    StrCpy $R1 "1"
+    !insertmacro SelectSection ${SecBionic}
   ${EndIf}
   ClearErrors
   ${GetOptions} $R0 "/NOAPPS" $R2
@@ -478,6 +490,14 @@ Function .onInit
   ${EndIf}
   !insertmacro FoundExe "lms.exe"
   !insertmacro TickIf ${SecLMStudio}
+  ; LM Studio Bionic (its own MCP list)
+  StrCpy $R9 "0"
+  ${If} ${FileExists} "$PROFILE\.lmstudio\apps\bionic\*.*"
+  ${OrIf} ${FileExists} "$PROGRAMFILES64\Bionic\Bionic.exe"
+  ${OrIf} ${FileExists} "$LOCALAPPDATA\Programs\Bionic\Bionic.exe"
+    StrCpy $R9 "1"
+  ${EndIf}
+  !insertmacro TickIf ${SecBionic}
 FunctionEnd
 
 ; ------------------------------------------------------------------------------------------------ uninstall

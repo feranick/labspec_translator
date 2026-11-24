@@ -98,9 +98,27 @@ def test_connect_detect_and_disconnect(tmp_path, monkeypatch, capsys):
     (u / ".codeium" / "windsurf").mkdir(parents=True)
     (u / ".codeium" / "windsurf-next").mkdir()
     (u / ".lmstudio").mkdir()
+    # LM Studio Bionic keeps its own list (2026-11-24, Nicola: the entry added by hand in its Settings > MCP, with
+    # the paths' backslashes doubled as typed): the id and the other servers kept, the paths made single
+    bi = u / ".lmstudio" / "apps" / "bionic" / ".internal"
+    assert C.files("bionic") == [] and not C.connect(["bionic"], sys.executable)[0]["ok"]     # never started
+    bi.mkdir(parents=True)
+    home_typed = str(tmp_path / "home").replace("\\", "\\\\")
+    (bi / "ng-mcp.json").write_text(json.dumps({"servers": [
+        {"id": "f10c88f9", "name": "ls6t", "enabled": True,
+         "connection": {"type": "stdio", "command": "C:\\\\old\\\\python.exe", "args": ["-m", "labspec_translator.mcp_server"],
+                        "env": {"LS6T_HOME": home_typed, "LS6T_CONFIRM": "request"}}},
+        {"id": "aa", "name": "jumper", "enabled": True, "connection": {"type": "http", "url": "http://127.0.0.1:6699/mcp"}}]}))
+    assert C._undouble("C:\\\\Users\\\\f") == "C:\\Users\\f" and C._undouble("\\\\srv\\x") == "\\\\srv\\x"
     found = C.detect()
-    assert all(found[c] for c in ("claudecode", "copilot", "windsurf", "lmstudio"))
-    assert cli.main(["connect", "claude-code", "copilot", "windsurf", "LM-Studio"]) == 0      # aliases, any case
+    assert all(found[c] for c in ("claudecode", "copilot", "windsurf", "lmstudio", "bionic"))
+    assert cli.main(["connect", "claude-code", "copilot", "windsurf", "LM-Studio", "lm-studio-bionic"]) == 0
+    bs = json.loads((bi / "ng-mcp.json").read_text())["servers"]
+    b = next(x for x in bs if x["name"] == "ls6t")
+    assert b["id"] == "f10c88f9" and b["enabled"] and b["connection"]["command"] == sys.executable
+    assert b["connection"]["type"] == "stdio" and b["connection"]["args"] == C.MODULE_ARGS
+    assert "\\\\" not in b["connection"]["env"]["LS6T_HOME"].lstrip("\\")
+    assert any(x["name"] == "jumper" for x in bs)
     cc = json.loads((u / ".claude.json").read_text())
     assert cc["numStartups"] == 7 and cc["projects"] == {"C:/x": {"mcpServers": {}}}
     assert cc["mcpServers"]["ls6t"]["type"] == "stdio" and cc["mcpServers"]["ls6t"]["command"] == sys.executable
@@ -122,7 +140,8 @@ def test_connect_detect_and_disconnect(tmp_path, monkeypatch, capsys):
     capsys.readouterr()
     assert cli.main(["connect", *C.CLIENTS, "--remove"]) == 0
     out = json.loads(capsys.readouterr().out)
-    assert sorted(sum((r["removed"] for r in out["files"]), [])) == ["ls6t"] * 9 + ["ls6t-sim"]
+    assert sorted(sum((r["removed"] for r in out["files"]), [])) == ["ls6t"] * 10 + ["ls6t-sim"]
+    assert [x["name"] for x in json.loads((bi / "ng-mcp.json").read_text())["servers"]] == ["jumper"]
     assert json.loads((u / ".claude.json").read_text())["numStartups"] == 7
     assert set(json.loads((tmp_path / "u" / ".cursor" / "mcp.json").read_text())["mcpServers"]) == {"other"}
     assert json.loads((tmp_path / "u" / ".gemini" / "settings.json").read_text())["mcpServers"] == {}

@@ -1,6 +1,6 @@
 """clients.py — connecting ls6t's MCP server to the LLM apps on this computer (`ls6t connect`, and the installer).
 
-Each app keeps its MCP servers in its own file. ls6t knows eight that start local (stdio) servers:
+Each app keeps its MCP servers in its own file. ls6t knows nine that start local (stdio) servers:
 
 | client  | app                                                     | file                                             |
 |---------|---------------------------------------------------------|--------------------------------------------------|
@@ -12,6 +12,7 @@ Each app keeps its MCP servers in its own file. ls6t knows eight that start loca
 | copilot | GitHub Copilot (VS Code / Visual Studio agent, Copilot CLI) | %COPILOT_HOME%\mcp-config.json or ~/.copilot/mcp-config.json |
 | windsurf | Windsurf (Cascade)                                     | ~/.codeium/windsurf/mcp_config.json (and windsurf-next's when present) |
 | lmstudio | LM Studio (local models: nothing leaves the PC)        | ~/.lmstudio/mcp.json                             |
+| bionic  | LM Studio Bionic (the agent app; its own list)          | ~/.lmstudio/apps/bionic/.internal/ng-mcp.json ({"servers": [...]}) |
 
 The Gemini app and ChatGPT on the web take only remote servers (an internet address): ls6t does not offer the
 instrument to the internet, so they cannot use it.
@@ -45,11 +46,12 @@ ENTRY = "ls6t"
 SIM_ENTRY = "ls6t-sim"
 MODULE_ARGS = ["-m", "labspec_translator.mcp_server"]
 TOOL_TIMEOUT_S = 3600          # a tool may wait for the operator's answer in LabSpec
-CLIENTS = ("claude", "codex", "gemini", "cursor", "claudecode", "copilot", "windsurf", "lmstudio")
+CLIENTS = ("claude", "codex", "gemini", "cursor", "claudecode", "copilot", "windsurf", "lmstudio", "bionic")
 LABELS = {"claude": "Claude desktop app", "codex": "ChatGPT desktop app / Codex", "gemini": "Gemini CLI",
           "cursor": "Cursor", "claudecode": "Claude Code", "copilot": "GitHub Copilot (VS Code, Visual Studio, CLI)",
-          "windsurf": "Windsurf", "lmstudio": "LM Studio"}
-ALIASES = {"claude-code": "claudecode", "lm-studio": "lmstudio", "vscode": "copilot", "github-copilot": "copilot"}
+          "windsurf": "Windsurf", "lmstudio": "LM Studio", "bionic": "LM Studio Bionic"}
+ALIASES = {"claude-code": "claudecode", "lm-studio": "lmstudio", "vscode": "copilot", "github-copilot": "copilot",
+           "lm-studio-bionic": "bionic", "lmstudio-bionic": "bionic"}
 
 
 def _norm(p) -> str:
@@ -237,6 +239,122 @@ def lmstudio_file() -> Path:
     return _home() / ".lmstudio" / "mcp.json"
 
 
+def bionic_dir() -> Path:
+    return _home() / ".lmstudio" / "apps" / "bionic"
+
+
+def bionic_file() -> Path:
+    """LM Studio Bionic's own list of MCP servers (2026-11-24, Nicola: Bionic did not take the ls6t entry from
+    LM Studio's mcp.json; the one added in its Settings > MCP landed here, as {"servers": [{id, name, enabled,
+    connection: {type: "stdio", command, args, env}}]})."""
+    return bionic_dir() / ".internal" / "ng-mcp.json"
+
+
+def bionic_install() -> Path | None:
+    """Bionic.exe, from the location Bionic records (C:\\Program Files\\Bionic on the XploRA PC), else the usual
+    places."""
+    try:
+        p = json.loads((bionic_dir() / ".internal" / "app-install-location.json").read_text(encoding="utf-8-sig"))
+        if p.get("path") and Path(p["path"]).exists():
+            return Path(p["path"])
+    except (OSError, ValueError, AttributeError):
+        pass
+    if os.name == "nt":
+        for base in (os.environ.get("ProgramFiles"), os.environ.get("LOCALAPPDATA") and
+                     str(Path(os.environ["LOCALAPPDATA"]) / "Programs")):
+            if base and (Path(base) / "Bionic" / "Bionic.exe").exists():
+                return Path(base) / "Bionic" / "Bionic.exe"
+    return None
+
+
+def bionic_running() -> bool:
+    """Bionic open now (Windows): it reads its list when it starts, and may write it back when it quits."""
+    if os.name != "nt":
+        return False
+    import subprocess
+    try:
+        out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq Bionic.exe", "/FO", "CSV", "/NH"], capture_output=True,
+                             text=True, timeout=15, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return "bionic.exe" in (out or "").lower()
+
+
+def _undouble(v):
+    """A Windows path typed with JSON's escaping into a form (C:\\\\Users: two backslashes in the value) back to one;
+    a network path's leading \\\\ stays."""
+    if not isinstance(v, str) or "\\\\" not in v:
+        return v
+    lead = "\\\\" if v.startswith("\\\\") and not v.startswith("\\\\\\") else ""
+    body = v[len(lead):]
+    while "\\\\" in body:
+        body = body.replace("\\\\", "\\")
+    return lead + body
+
+
+def bionic_servers(cfg: dict) -> dict:
+    """Bionic's list as {name: {command, args, env}} (as the other apps' entries)."""
+    out = {}
+    for e in (cfg or {}).get("servers") or []:
+        if isinstance(e, dict) and e.get("name"):
+            c = e.get("connection") or {}
+            out[e["name"]] = {"command": c.get("command"), "args": c.get("args") or [], "env": c.get("env") or {},
+                              "url": c.get("url"), "enabled": e.get("enabled", True)}
+    return out
+
+
+def bionic_merge(cfg: dict, name: str, python: str, defaults: dict, forced: dict | None = None) -> tuple[dict, str]:
+    """cfg (Bionic's ng-mcp.json) with the server `name` running this Python: its id and on/off kept, the person's
+    env settings kept (paths typed with doubled backslashes made single)."""
+    import uuid
+    cfg = dict(cfg or {})
+    servers = [dict(e) for e in (cfg.get("servers") or []) if isinstance(e, dict)]
+    idx = next((i for i, e in enumerate(servers) if e.get("name") == name), None)
+    old = servers[idx] if idx is not None else None
+    oc = (old or {}).get("connection") or {}
+    env = dict(defaults)
+    if isinstance(oc.get("env"), dict):
+        env.update({k: _undouble(v) for k, v in oc["env"].items() if _real(v)})
+    env.update(forced or {})
+    new = {**(old or {}), "id": (old or {}).get("id") or str(uuid.uuid4()), "name": name,
+           "enabled": (old or {}).get("enabled", True),
+           "connection": {**{k: v for k, v in oc.items() if k not in ("command", "args", "env", "url")},
+                          "type": "stdio", "command": str(python), "args": list(MODULE_ARGS), "env": env}}
+    if idx is None:
+        servers.append(new)
+        note = f"added '{name}'"
+    else:
+        servers[idx] = new
+        oldc = _undouble(oc.get("command") or "")
+        note = (f"updated '{name}'" if _norm(oldc) == _norm(python) else
+                f"replaced '{name}' (it ran {oc.get('command') or oc.get('url')})")
+        if not new["enabled"]:
+            note += " (it is switched off in Bionic's Settings > MCP: switch it on there)"
+    cfg["servers"] = servers
+    return cfg, note
+
+
+def bionic_remove(cfg: dict, name: str, python: str) -> tuple[dict, bool]:
+    cfg = dict(cfg or {})
+    servers = [e for e in (cfg.get("servers") or []) if isinstance(e, dict)]
+    keep = [e for e in servers if not (e.get("name") == name and
+                                       _norm(_undouble((e.get("connection") or {}).get("command") or "")) == _norm(python))]
+    if len(keep) == len(servers):
+        return cfg, False
+    cfg["servers"] = keep
+    return cfg, True
+
+
+def _servers(client: str, path: Path) -> dict:
+    """{name: entry} from one app's file (raises OSError / ValueError as the readers do)."""
+    if client == "codex":
+        return ((tomllib.loads(path.read_text(encoding="utf-8")) if (tomllib and path.exists()) else {})
+                .get("mcp_servers") or {})
+    if client == "bionic":
+        return bionic_servers(read_json(path))
+    return read_json(path).get("mcpServers") or {}
+
+
 def files(client: str, create: bool = False) -> list[Path]:
     if client == "claude":
         return claude_files(create)
@@ -254,6 +372,9 @@ def files(client: str, create: bool = False) -> list[Path]:
         return windsurf_files(True)
     if client == "lmstudio":
         return [lmstudio_file()]
+    if client == "bionic":
+        # Bionic writes its folder when it first runs: without it there is no list to add to
+        return [bionic_file()] if (bionic_dir().is_dir() or create and bionic_install()) else []
     raise ValueError(f"client {client!r}: {', '.join(CLIENTS)}")
 
 
@@ -287,6 +408,10 @@ def detect() -> dict:
     found["windsurf"] += [str(p.parent) for p in windsurf_files()]
     if lmstudio_file().parent.is_dir():
         found["lmstudio"].append(str(lmstudio_file().parent))
+    if bionic_dir().is_dir():
+        found["bionic"].append(str(bionic_dir()))
+    if bionic_install():
+        found["bionic"].append(str(bionic_install()))
     if os.name == "nt" and local:
         for client, sub in (("windsurf", "Windsurf"), ("lmstudio", "LM Studio")):
             if (Path(local) / "Programs" / sub).is_dir():
@@ -489,16 +614,13 @@ def existing_env() -> dict:
     for client in CLIENTS:
         for p in files(client):
             try:
-                if client == "codex":
-                    if tomllib is None or not p.exists():
-                        continue
-                    env = ((tomllib.loads(p.read_text(encoding="utf-8")).get("mcp_servers") or {}).get(ENTRY) or {}
-                           ).get("env") or {}
-                else:
-                    env = (read_json(p).get("mcpServers", {}).get(ENTRY) or {}).get("env") or {}
+                if not p.exists():
+                    continue
+                env = (_servers(client, p).get(ENTRY) or {}).get("env") or {}
             except (OSError, ValueError):
                 continue
-            env = {k: str(v) for k, v in env.items() if k.startswith("LS6T_") and k != "LS6T_MODE" and _real(v)}
+            env = {k: str(_undouble(v)) for k, v in env.items() if k.startswith("LS6T_") and k != "LS6T_MODE"
+                   and _real(v)}
             if env:
                 return env
     return {}
@@ -513,6 +635,11 @@ def connect(clients: list, python: str, sim: bool = False, main: bool = True, te
     shared.pop("LS6T_TEST_MODE", None)
     tm = {} if test is None else {"LS6T_TEST_MODE": "1" if test else "0"}
     for client in clients:
+        if client == "bionic" and not files(client, create=True):
+            reports.append({"client": client, "app": LABELS[client], "file": str(bionic_file()), "ok": False,
+                            "error": "Bionic's folder is not there (it was never started for this user): start Bionic "
+                                     "once, quit it, then `ls6t connect bionic`"})
+            continue
         for path in files(client, create=True):
             rep = {"client": client, "app": LABELS[client], "file": str(path)}
             try:
@@ -527,6 +654,17 @@ def connect(clients: list, python: str, sim: bool = False, main: bool = True, te
                                              forced={"LS6T_MODE": "sim", **tm})
                         notes.append(n)
                     rep["backup"] = _str(_backup_and_write(path, text))
+                elif client == "bionic":
+                    cfg = read_json(path)
+                    notes = []
+                    if main:
+                        cfg, n = bionic_merge(cfg, ENTRY, python, {**default_env(), **shared}, forced=tm)
+                        notes.append(n)
+                    if sim:
+                        cfg, n = bionic_merge(cfg, SIM_ENTRY, python, {**default_env(True), **_home_only(shared)},
+                                              forced={"LS6T_MODE": "sim", **tm})
+                        notes.append(n)
+                    rep["backup"] = _str(write_json(path, cfg))
                 else:
                     cfg = read_json(path)
                     notes = []
@@ -544,6 +682,9 @@ def connect(clients: list, python: str, sim: bool = False, main: bool = True, te
                     rep["warning"] = ("a Claude Code session is running, and Claude Code rewrites this file while it "
                                       "runs: end it, then check with `ls6t connect check claudecode` (if the entry "
                                       "is gone: `ls6t connect claudecode`)")
+                if client == "bionic" and bionic_running():
+                    rep["warning"] = ("Bionic is open: quit it fully and start it again to load ls6t (if ls6t is not "
+                                      "under Settings > MCP then, run `ls6t connect bionic` with Bionic closed)")
                 if client == "claude" and claude_is_running():
                     rep["warning"] = ("the Claude app is running and rewrites this file when it quits: quit it fully "
                                       "(tray icon > Quit), then run `ls6t connect claude` again")
@@ -604,6 +745,14 @@ def disconnect(clients: list, python: str) -> list[dict]:
                             rep["removed"].append(name)
                     if rep["removed"]:
                         _backup_and_write(path, text)
+                elif client == "bionic":
+                    cfg = read_json(path)
+                    for name in (ENTRY, SIM_ENTRY):
+                        cfg, gone = bionic_remove(cfg, name, python)
+                        if gone:
+                            rep["removed"].append(name)
+                    if rep["removed"]:
+                        write_json(path, cfg)
                 else:
                     cfg = read_json(path)
                     for name in (ENTRY, SIM_ENTRY):
@@ -636,16 +785,13 @@ def status(python: str | None = None) -> dict:
         entries = {}
         for p in files(client):
             try:
-                if client == "codex":
-                    servers = ((tomllib.loads(p.read_text(encoding="utf-8")) if (tomllib and p.exists()) else {})
-                               .get("mcp_servers") or {})
-                else:
-                    servers = read_json(p).get("mcpServers") or {}
+                servers = _servers(client, p)
             except (OSError, ValueError) as exc:
                 entries[str(p)] = {"error": str(exc)}
                 continue
             entries[str(p)] = {n: {"command": (servers.get(n) or {}).get("command"),
-                                   "this_python": _norm((servers.get(n) or {}).get("command", "")) == _norm(python)}
+                                   "this_python": _norm(_undouble((servers.get(n) or {}).get("command") or ""))
+                                   == _norm(python)}
                                for n in (ENTRY, SIM_ENTRY) if n in servers}
         out[client] = {"app": LABELS[client], "found": found[client], "files": entries}
     return out
@@ -657,11 +803,7 @@ def _entries(client: str) -> list:
     out = []
     for p in files(client):
         try:
-            if client == "codex":
-                servers = (tomllib.loads(p.read_text(encoding="utf-8")).get("mcp_servers") or {}) \
-                    if (tomllib and p.exists()) else {}
-            else:
-                servers = read_json(p).get("mcpServers") or {}
+            servers = _servers(client, p)
         except (OSError, ValueError):
             continue
         if isinstance(servers.get(ENTRY), dict):

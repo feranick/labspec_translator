@@ -108,12 +108,12 @@ trusting numbers, the safety rules and the polling etiquette.
 | `ls6t spot status / forget [--objective --laser]` | The beam's offsets |
 | `ls6t references show / clear correction [LASER@GRATING] / clear background NAME / clear spot` | Everything ls6t remembers between sessions |
 | `ls6t connect check [APP]` | Start each app's ls6t entry as the app would (stdio handshake): its tools and start-up time, or the error |
-| `ls6t connect [APP... --sim --remove]` | Which LLM apps are on the PC and which run ls6t; add or remove the MCP server in the Claude desktop app (`claude`), the ChatGPT desktop app / Codex (`codex`), Gemini CLI (`gemini`), Cursor (`cursor`), Claude Code (`claudecode`), GitHub Copilot (`copilot`), Windsurf (`windsurf`), LM Studio (`lmstudio`), or every app found (`auto`) |
+| `ls6t connect [APP... --sim --remove]` | Which LLM apps are on the PC and which run ls6t; add or remove the MCP server in the Claude desktop app (`claude`), the ChatGPT desktop app / Codex (`codex`), Gemini CLI (`gemini`), Cursor (`cursor`), Claude Code (`claudecode`), GitHub Copilot (`copilot`), Windsurf (`windsurf`), LM Studio (`lmstudio`), LM Studio Bionic (`bionic`), or every app found (`auto`) |
 | `ls6t test plan / step ID / record ID RESULT / report` | TESTING.md's tests: progress, one test, recording a result and answers, the filled-in results table (`LS6T_HOME\testing`) |
 | `ls6t sim [--seconds S]` | Run the simulator by hand |
 | `ls6t-typelib [--path F] [--format text/markdown/json] [--out F] [--list]` | (a separate program, any OS) Read LabSpec's ActiveX type library straight from the file and list every method and property of the installed version; `NEW` marks those not in the 2018 manual, and words of interest are flagged. Read-only: nothing starts or moves |
 | `ls6t run-request FOLDER` | What the detached runner runs (internal) |
-| `ls6t-setup-<version>.exe` | The Windows installer: per user, offline, with its own Python; the LabSpec scripts, PATH, Start menu and the LLM apps found (Claude, Claude Code, ChatGPT / Codex, Gemini CLI, Cursor, GitHub Copilot, Windsurf, LM Studio); its last page can open prompts to try ([PROMPTS.md](PROMPTS.md)); updates in place; uninstalls keeping the data (INSTALL.md) |
+| `ls6t-setup-<version>.exe` | The Windows installer: per user, offline, with its own Python; the LabSpec scripts, PATH, Start menu and the LLM apps found (Claude, Claude Code, ChatGPT / Codex, Gemini CLI, Cursor, GitHub Copilot, Windsurf, LM Studio, LM Studio Bionic); its last page can open prompts to try ([PROMPTS.md](PROMPTS.md)); updates in place; uninstalls keeping the data (INSTALL.md) |
 
 Only the command line can record alignment baselines, change the profile, or clear what is remembered. An LLM can
 read them, not change them.

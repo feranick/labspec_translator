@@ -40,7 +40,7 @@
                                      add (or remove) the MCP server in: claude (Claude desktop app), codex (ChatGPT
                                      desktop app, Codex CLI and IDE extension), gemini (Gemini CLI), cursor (Cursor),
                                      claudecode (Claude Code), copilot (GitHub Copilot: VS Code, Visual Studio,
-                                     Copilot CLI), windsurf (Windsurf), lmstudio (LM Studio), or auto (every
+                                     Copilot CLI), windsurf (Windsurf), lmstudio (LM Studio), bionic (LM Studio Bionic), or auto (every
                                      app found); --sim also adds 'ls6t-sim' (the simulator); --test turns test
                                      mode on for those entries (the hardware_test tool), --no-test off
   ls6t test plan | step ID | report  TESTING.md's tests: the plan with results so far, one test, the report
@@ -143,7 +143,7 @@ def main(argv=None) -> int:
     s.add_argument("--study")
     s.add_argument("--attempt", type=int)
     s = sub.add_parser("connect")
-    s.add_argument("apps", nargs="*", help="claude, codex, gemini, cursor, claudecode, copilot, windsurf, lmstudio, or auto (every app found)")
+    s.add_argument("apps", nargs="*", help="claude, codex, gemini, cursor, claudecode, copilot, windsurf, lmstudio, bionic, or auto (every app found)")
     s.add_argument("--sim", action="store_true", help="also add 'ls6t-sim' (the simulator)")
     s.add_argument("--remove", action="store_true", help="remove this install's entries instead")
     s.add_argument("--test", dest="test", action="store_true", default=None, help="test mode on (hardware_test)")
