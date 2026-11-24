@@ -477,6 +477,8 @@ def _instrument(action, camera, setup, seconds, um=None) -> dict:
             return r
         if action == "video_scale":
             return video_scale(b, um)
+        if action == "clearance":
+            return clearance(b)
         if action == "end_bridge":
             # the bridge ends itself cleanly (laser closed, window closed, heartbeat 'stopped'): before the operator
             # uses LabSpec's live video buttons, which end a running script abruptly. A person starts it again.
@@ -1122,6 +1124,74 @@ def _move_timing(r: dict) -> dict:
         out["labspec_prompt"] = "LabSpec refused MOTOR_NO_MESSAGE: it may have asked the operator again"
     if r.get("bridge_move_n") not in (None, ""):
         out["bridge_move_n"] = int(float(r["bridge_move_n"]))     # 1: the first move since this bridge started
+    return out
+
+
+CLEARANCE_MAX_WD = 1.5        # a measured clearance over this x the nominal working distance is not believed
+
+
+def clearance(b: Bridge) -> dict:
+    """The objective's clearance, measured with the operator on a flat sample (the Si wafer): the operator focuses
+    with the objective in place; then moves Z by hand toward the sample, slowly and watching the gap from the side,
+    to the closest gap they judge safe (never touching); ls6t reads both Z positions and stores focus -> closest per
+    objective (objective_clearance.json). From then on ls6t never moves toward the sample past
+    limits.clearance_fraction (0.5) of it, nor past its working-distance limit (the smaller wins). Z goes back to the
+    focus afterwards (away from the sample). Nothing moves toward the sample under ls6t's control here."""
+    prof = P.load()
+    if runner.read_json(runner.lock_path(), None):
+        return {"ok": False, "error": "the instrument is busy with a request: wait or cancel it"}
+    sign, known = plan.into_sign(prof)
+    if not known:
+        return {"ok": False, "error": "the profile does not say which Z direction approaches the objective: set "
+                                      "stage.z_into_sample first (TESTING T3.17)"}
+    st = b.call("status", timeout_s=15, **runner.motor_args(prof))
+    obj = st.get("objective")
+    if not obj:
+        return {"ok": False, "error": "LabSpec reports no objective: select it in LabSpec first"}
+    wd = plan.working_distance_um(prof, obj)
+    q1 = (f"ls6t: clearance of the {obj} objective. Put a FLAT sample (the Si wafer) under it and focus on its surface "
+          "by hand in LabSpec (white light, live video). Yes when it is in focus; No to cancel.")
+    if b.call("confirm", timeout_s=3600, text=q1).get("answer") != "yes":
+        return {"ok": False, "error": "cancelled by the operator", "objective": obj}
+    z_focus = _fnum(b.call("status", timeout_s=15, **runner.motor_args(prof)).get("z_um"))
+    q2 = (f"ls6t: now move Z TOWARD the sample by hand (LabSpec's Z control or the joystick), slowly, watching the "
+          f"gap between the {obj} objective and the sample from the side, to the closest gap you judge safe. NEVER "
+          f"let it touch. Its nominal working distance is about {wd or 0:g} µm. Yes when you are there; No to cancel "
+          "(then move back up yourself).")
+    if b.call("confirm", timeout_s=3600, text=q2).get("answer") != "yes":
+        return {"ok": False, "error": "cancelled by the operator: move Z back up (away from the sample) by hand",
+                "objective": obj}
+    z_close = _fnum(b.call("status", timeout_s=15, **runner.motor_args(prof)).get("z_um"))
+    out = {"objective": obj, "z_focus_um": z_focus, "z_closest_um": z_close, "nominal_wd_um": wd}
+    if z_focus is None or z_close is None:
+        return {"ok": False, "error": "the Z position could not be read", **out}
+    gap = round((z_close - z_focus) * sign, 2)
+    out["clearance_um"] = gap
+    err = None
+    if gap <= 0:
+        err = ("Z did not move toward the sample (" + (f"{-gap:g} µm away" if gap < 0 else "unchanged") + "): check "
+               "stage.z_into_sample, and move toward the sample")
+    elif wd and gap > CLEARANCE_MAX_WD * wd:
+        err = (f"{gap:g} µm is more than {CLEARANCE_MAX_WD:g} x the nominal working distance ({wd:g} µm): another "
+               "objective in place, or stage.z_into_sample the wrong way round")
+    back = b.call("move", timeout_s=120, motor=prof["motors"]["z"], mode="value", value=round(z_focus, 3))
+    out["z_back_um"] = _fnum(back.get("value"))
+    if not back.get("ok"):
+        out["warning"] = f"Z could not be moved back to the focus ({back.get('error')}): move it up by hand"
+    if err:
+        return {"ok": False, "error": err + "; nothing stored", **out}
+    store_ = plan.clearance_store()
+    prev = store_.get(str(obj))
+    store_[str(obj)] = {"clearance_um": gap, "z_focus_um": z_focus, "z_closest_um": z_close, "nominal_wd_um": wd,
+                        "time": time.strftime("%Y-%m-%dT%H:%M:%S")}
+    plan.clearance_store(store_)
+    zl = plan.z_limits(prof, obj)
+    out.update(ok=True, stored=True, previous=prev, toward_limit_um=zl["toward_um"], toward_from=zl["toward_from"],
+               note=(f"ls6t now moves the {obj} at most {zl['toward_um']:g} µm toward the sample from a focus "
+                     f"({zl['toward_from']})"))
+    if wd and gap < 0.3 * wd:
+        out["warning"] = (f"the clearance ({gap:g} µm) is under a third of the nominal working distance ({wd:g} µm): "
+                          "right for a thick or tilted holder, but check the focus was on the sample's surface")
     return out
 
 

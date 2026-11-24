@@ -34,7 +34,8 @@ ACQ_KEYS = {"range_cm1", "center_cm1", "exposure_s", "accumulations", "auto_expo
             "subtract_background", "ics", "laser_reference", "warmup_s", "shutter",
             "range_placement"}
 AE_KEYS = {"target_counts", "min_s", "max_s", "test_s"}
-FOCUS_KEYS = {"autofocus", "every", "dz_um", "scan"}
+FOCUS_KEYS = {"autofocus", "every", "dz_um", "scan", "camera"}
+CAMERA_KEYS = {"range_um", "step_um", "settle_s"}
 MAP_KEYS = {"x_um", "y_um", "z_um", "snake", "engine", "swift"}
 SERIES_KEYS = {"count", "interval_s"}
 PROCESS_KEYS = {"baseline", "peaks", "auto_peaks", "bands"}
@@ -121,9 +122,11 @@ def study_format(status: dict | None = None) -> dict:
                        "spectrum to the last, as HORIBA's mapping scripts do; needs the verified shutter; default "
                        "the profile's lasers.<laser>.hold_shutter)}",
             "focus": "{autofocus: laser | raman | video (LabSpec's routines) | scan (ls6t's focus scan on the "
-                     "Raman line) (before the first point; map: also every N points with 'every'), dz_um: Z "
-                     "offset from the focus (spectrum, series), scan: {range_um (10), step_um (1), line_cm1 (Si), "
-                     "window_cm1 (30), exposure_s (0.5)}}",
+                     "Raman line) | camera (ls6t's: the top camera's sharpness under white light, no laser; refused "
+                     "on a featureless view) (before the first point; map: also every N points with 'every'), "
+                     "dz_um: Z offset from the focus (spectrum, series), scan: {range_um (10), step_um (1), line_cm1 "
+                     "(Si), window_cm1 (30), exposure_s (0.5)}, camera: {range_um (10 steps), step_um (about half "
+                     "the depth of field: x100 2), settle_s (0.5)}}",
             "move": "(kind move) {x_um, y_um | to_um: [x, y] (absolute, from a snapshot), dz_um, stay: true, "
                     "snapshot: true}; setup may only give the objective",
             "calibration": "(kind calibration) {reference: si | polystyrene | cyclohexane | naphthalene | "
@@ -252,7 +255,7 @@ def _z_safety(study: dict, prof: dict, errors: list, warnings: list) -> None:
             dzs.append(float(b["dz_um"]))
     from_below = bool(((study.get("focus") or {}).get("scan") or {}).get("from_below"))
     if (kind == "focus" or (isinstance(study.get("focus"), dict) and study["focus"].get("autofocus") == "scan")) \
-            and not from_below:
+            and not from_below and (study.get("focus") or {}).get("autofocus") != "camera":
         try:
             half = float(plan.scan_params(study, prof)["range_um"]) / 2
             dzs += [half, -half]
@@ -441,8 +444,14 @@ def validate_study(name: str, study: dict, prof: dict) -> dict:
         if not isinstance(fo, dict):
             errors.append("focus: {scan: {...}}")
             fo = {}
-        _unknown(fo, {"scan"}, "focus (kind focus)", errors)
-        _validate_scan(fo.get("scan") or {}, prof, errors)
+        _unknown(fo, {"scan", "autofocus", "camera"}, "focus (kind focus)", errors)
+        if fo.get("autofocus") not in (None, "scan", "camera"):
+            errors.append("focus.autofocus with kind 'focus': scan (the Raman line, default) or camera (the video's "
+                          "sharpness, no laser)")
+        if fo.get("autofocus") == "camera":
+            _validate_camera(fo, prof, errors)
+        else:
+            _validate_scan(fo.get("scan") or {}, prof, errors)
         if errors:
             return {"ok": False, "errors": errors, "warnings": warnings}
         inner = validate_study(name, plan.focus_spectrum_study(study, prof), prof)
@@ -623,10 +632,14 @@ def validate_study(name: str, study: dict, prof: dict) -> dict:
         f = {}
     _unknown(f, FOCUS_KEYS, "focus", errors)
     if f.get("autofocus") is not None and f["autofocus"] not in plan.AUTOFOCUS:
-        errors.append(f"focus.autofocus {f['autofocus']!r}: use laser, raman, video or scan")
+        errors.append(f"focus.autofocus {f['autofocus']!r}: use laser, raman, video (LabSpec's), scan (ls6t's, on the "
+                      "Raman line) or camera (ls6t's, on the video's sharpness)")
     sc = f.get("scan")
-    if sc is not None or f.get("autofocus") == "scan" or kind == "focus":
+    cam_af = f.get("autofocus") == "camera"
+    if (sc is not None or f.get("autofocus") == "scan" or kind == "focus") and not cam_af:
         _validate_scan(sc or {}, prof, errors)
+    if cam_af or f.get("camera") is not None:
+        _validate_camera(f, prof, errors)
     if f.get("every") is not None and (not isinstance(f["every"], int) or f["every"] < 1):
         errors.append("focus.every: an integer >= 1 (points between autofocus runs)")
     if f.get("dz_um") is not None and (not _num(f["dz_um"]) or abs(f["dz_um"]) > lim["max_dz_um"]):
@@ -893,6 +906,24 @@ def _validate_engine(study: dict, m: dict, prof: dict, errors: list, warnings: l
             warnings.append("map.engine 'native': the autofocus runs once, before the map")
         warnings.append("map.engine 'native': LabSpec runs the map; ls6t checks the spectra when it ends (a stop "
                         "still cancels it)")
+
+
+def _validate_camera(f: dict, prof: dict, errors: list):
+    """focus.camera {range_um, step_um, settle_s}; the camera autofocus needs the Z direction."""
+    lim = prof["limits"]
+    cm = f.get("camera") or {}
+    if not isinstance(cm, dict):
+        errors.append("focus.camera: {range_um, step_um, settle_s}")
+    else:
+        _unknown(cm, CAMERA_KEYS, "focus.camera", errors)
+        for k, lo, hi in (("range_um", 1.0, 2 * float(lim["max_dz_um"])), ("step_um", 0.1, 50.0),
+                          ("settle_s", 0.0, 10.0)):
+            v = cm.get(k)
+            if v is not None and (not _num(v) or not lo <= v <= hi):
+                errors.append(f"focus.camera.{k}: between {lo:g} and {hi:g}")
+    if f.get("autofocus") == "camera" and not plan.into_sign(prof)[1]:
+        errors.append("focus.autofocus 'camera': needs stage.z_into_sample (which Z direction approaches the "
+                      "objective: TESTING T3.17)")
 
 
 def _validate_scan(sc: dict, prof: dict, errors: list):

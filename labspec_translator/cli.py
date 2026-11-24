@@ -10,6 +10,8 @@
   ls6t bench [NAMES...]              the benchmarks (on the simulator)
   ls6t instrument status|discover|resume|last-error|end-bridge|camera-on|camera-off [--camera N] | laser-on [--seconds S] | laser-off
   ls6t instrument video-scale [--um 15]   measure the video's µm per pixel (the stage moves +X, +Y and back)
+  ls6t instrument clearance          with the operator: the objective's closest safe gap on a flat sample (by hand),
+                                     stored; ls6t then never goes past half of it toward the sample
   ls6t instrument set [--laser-nm 532] [--grating 1800] [--filter 10%] [--objective x100] [--hole 300] [--slit 100]
                      [--illumination bright|dark]
                                      change the set-up now (no laser; the objective asks the operator)
@@ -97,7 +99,7 @@ def main(argv=None) -> int:
     s.add_argument("action", choices=["status", "set", "discover", "resume", "last-error", "snapshot", "config",
                                       "camera-on", "camera-off", "laser-on", "laser-off", "calibration",
                                       "autocal-info", "autocal-run", "end-bridge", "video-scale", "shutter-test",
-                                      "shutter-verify"])
+                                      "shutter-verify", "clearance"])
     s.add_argument("--motor", help="shutter-test: the laser shutter's motor (default: the profile's, or discovery's "
                                    "candidate)")
     s.add_argument("--repeats", type=int, default=3, help="shutter-verify: closed-shutter spectra, judged on the worst")

@@ -407,7 +407,54 @@ def acquire_seconds(study: dict, prof: dict, rng: dict) -> float:
 
 
 SCAN_DEFAULTS = {"range_um": 10.0, "step_um": 1.0, "window_cm1": 30.0, "exposure_s": 0.5}
-AUTOFOCUS = ("laser", "raman", "video", "scan")
+AUTOFOCUS = ("laser", "raman", "video", "scan", "camera")
+CAMERA_DEFAULTS = {"settle_s": 0.5}     # focus.camera: range_um and step_um default by objective (camera_params)
+
+
+def camera_params(study: dict, prof: dict, objective=None) -> dict:
+    """ls6t's camera autofocus (focus.autofocus 'camera'): the coarse step (about half the depth of field: x100 2 µm,
+    x10 25 µm, or half the measured axial FWHM), the range (10 coarse steps: x100 +/-10 µm; toward the sample never
+    past z_limits' toward distance) and the settle time per frame; then a fine pass at a quarter of the step."""
+    c = dict(CAMERA_DEFAULTS)
+    c.update((study.get("focus") or {}).get("camera") or {})
+    obj = objective if objective is not None else (study.get("setup") or {}).get("objective")
+    step = float(c.get("step_um") or coarse_focus_step_um(prof, obj))
+    c["step_um"] = step
+    c["range_um"] = float(c.get("range_um") or 10 * step)
+    c["fine_step_um"] = round(step / 4, 4)
+    return c
+
+
+def camera_seconds(study: dict, prof: dict) -> float:
+    c = camera_params(study, prof)
+    n = int(c["range_um"] / c["step_um"]) + 1 + 9
+    t = prof["timing"]
+    return n * (t["move_s"] + float(c["settle_s"]) + 2 * t["command_s"] + 0.5)
+
+
+CLEARANCE_FRACTION = 0.5    # how much of the measured clearance (focus -> closest safe gap) ls6t may use
+
+
+def clearance_store(new: dict | None = None) -> dict:
+    """Per objective, the clearance measured on a flat sample (`ls6t instrument clearance`): from the focus toward
+    the sample to the closest gap the operator judged safe (LS6T_HOME/objective_clearance.json)."""
+    from . import store
+    if new is not None:
+        try:
+            return store.write("objective_clearance.json", new)
+        except OSError:
+            return new
+    return store.read("objective_clearance.json") or {}
+
+
+def clearance_um(objective) -> float | None:
+    if objective is None:
+        return None
+    rec = clearance_store().get(str(objective))
+    try:
+        return float(rec["clearance_um"]) if rec and rec.get("clearance_um") else None
+    except (TypeError, ValueError):
+        return None
 
 
 def calibration_lines(study: dict, prof: dict, rng: dict | None) -> list[float]:
@@ -489,11 +536,19 @@ def z_limits(prof: dict, objective, purpose: str | None = None) -> dict:
         # gap in LabSpec (runner): limits.depth_toward_wd_fraction, 0.3 by default (x100: ~63 µm of ~210 µm)
         frac = float(lim.get("depth_toward_wd_fraction", 0.3))
     toward = min(max_dz, frac * wd) if wd else min(max_dz, frac * WD_BY_MAG_UM[100])
+    toward_from = "working distance"
+    # the clearance measured with this objective on a flat sample can only make it smaller
+    cl = clearance_um(objective)
+    if cl:
+        cfrac = float(lim.get("clearance_fraction", CLEARANCE_FRACTION))
+        if cfrac * cl < toward:
+            toward, toward_from = cfrac * cl, "measured clearance"
     sign, known = into_sign(prof)
     fv = lim.get("focus_valid_xy_um") or {"100": 200.0, "50": 400.0, "20": 2000.0}
     mag = objective_mag(objective) if objective is not None else 100
     valid = fv.get(str(mag)) if mag is not None else fv.get("100")
     return {"objective": objective, "purpose": purpose, "working_distance_um": wd, "toward_um": round(toward, 1),
+            "toward_from": toward_from, "clearance_um": cl,
             "away_um": away, "toward_sign": sign if known else None,
             "focus_valid_xy_um": float(valid) if valid is not None else None}
 
@@ -921,8 +976,10 @@ def estimate(study: dict, prof: dict, current: dict | None = None) -> dict:
                             "total": round(total, 1)}}
     if study.get("kind") == "focus":
         base = estimate(focus_spectrum_study(study, prof), prof, current)
-        total = base["seconds"]["setup"] + scan_seconds(study, prof)
-        return {"minutes": round(total / 60.0, 2), "points": len(scan_offsets(scan_params(study, prof))),
+        cam = (study.get("focus") or {}).get("autofocus") == "camera"
+        total = base["seconds"]["setup"] + (camera_seconds(study, prof) if cam else scan_seconds(study, prof))
+        return {"minutes": round(total / 60.0, 2), "points": len(scan_offsets(scan_params(study, prof))) if not cam
+                else int(camera_params(study, prof)["range_um"] / camera_params(study, prof)["step_um"]) + 10,
                 "windows": 1, "seconds": {"setup": base["seconds"]["setup"], "setup_parts": base["seconds"].get("setup_parts"),
                                           "per_acquisition": base["seconds"]["per_acquisition"],
                                           "total": round(total, 1)}}
@@ -968,7 +1025,8 @@ def estimate(study: dict, prof: dict, current: dict | None = None) -> dict:
         if p["dz_um"]:
             total += t["move_s"]
         if af and (k == 0 or (every and k % every == 0)):
-            total += scan_seconds(study, prof) if af == "scan" else t["autofocus_s"]
+            total += scan_seconds(study, prof) if af == "scan" else camera_seconds(study, prof) if af == "camera" \
+                else t["autofocus_s"]
         total += acq_s
         held_ = hold_shutter(study, prof, laser)
         if k > 0 and not held_:

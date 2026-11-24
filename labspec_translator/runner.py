@@ -1168,9 +1168,11 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
     if native_map:
         try:
             if af:
-                if af == "scan":
-                    fs = focus_scan(ctx, study, laser, zref if zref is not None else zcur, sd / "focus" / "start",
-                                    warnings)
+                if af in ("scan", "camera"):
+                    fs = (camera_focus(ctx, study, zref if zref is not None else zcur, sd / "focus" / "start",
+                                       warnings) if af == "camera" else
+                          focus_scan(ctx, study, laser, zref if zref is not None else zcur, sd / "focus" / "start",
+                                     warnings))
                     focus_scans.append(fs)
                     if fs.get("found"):
                         zref = zcur = ctx.z_focus = fs["z_um"]
@@ -1233,9 +1235,11 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
                           _f(r.get("y_um")) if _f(r.get("y_um")) is not None else ay)
                 ax, ay = cur_xy
             if af and (k == 0 or (every and k % every == 0)):
-                if af == "scan":
-                    fs = focus_scan(ctx, study, laser, zref if zref is not None else zcur, sd / "focus" / f"p{k:05d}",
-                                    warnings)
+                if af in ("scan", "camera"):
+                    fs = (camera_focus(ctx, study, zref if zref is not None else zcur, sd / "focus" / f"p{k:05d}",
+                                       warnings) if af == "camera" else
+                          focus_scan(ctx, study, laser, zref if zref is not None else zcur, sd / "focus" / f"p{k:05d}",
+                                     warnings))
                     focus_scans.append(fs)
                     if fs.get("found"):
                         zref = zcur = fs["z_um"]
@@ -1764,6 +1768,148 @@ def _scan_signal(ctx: Ctx, laser: float, sc: dict, out: Path) -> float:
     return spectra.line_signal(x, y, line, win) / float(sc["exposure_s"])
 
 
+CAM_MIN_TEXTURE = 3.0      # the sharpest frame's fine structure over the camera's frame-to-frame noise
+CAM_MIN_CONTRAST = 4.0     # the change of sharpness with Z over its own repeat scatter
+
+
+def _cam_frame(ctx: Ctx, base: Path, settle: float) -> tuple:
+    """One top-camera frame, white light, no laser: (decoded frame, luminance)."""
+    v = ctx.prof.get("video", {})
+    base.parent.mkdir(parents=True, exist_ok=True)
+    r = ctx.call("video", timeout_s=90 + settle, out=str(base), settle_s=settle, laser_s=0, formats="",
+                 camera=v.get("camera"), switch_camera=int(bool(v.get("switch_camera"))),
+                 stop_video=int(bool(v.get("stop_from_script"))), **motor_args(ctx.prof))
+    if not r.get("ok") or not r.get("out"):
+        raise Stop(f"camera focus: no video frame ({r.get('error') or 'no file'})", "study")
+    dec = video.decode(r["out"], v.get("packing", "colorref"), v.get("order", "x_fastest"))
+    return dec, video._lum(dec["img"])
+
+
+def _sharpness(lum) -> float:
+    """Gradient energy (Tenengrad) of the frame's central 80 %, over its mean brightness squared: rises as the
+    surface's structure comes into focus, independent of the lamp's level."""
+    from scipy.ndimage import gaussian_filter, sobel
+    a = np.asarray(lum, float)
+    h, w = a.shape
+    a = gaussian_filter(a[h // 10: h - h // 10, w // 10: w - w // 10], 0.7)
+    g = sobel(a, 0) ** 2 + sobel(a, 1) ** 2
+    return float(np.mean(g)) / max(float(np.mean(a)), 1.0) ** 2
+
+
+def _band(a):
+    """The frame's structure from about 1 to 8 pixels (a difference of Gaussians): features, edges, particles."""
+    from scipy.ndimage import gaussian_filter
+    a = np.asarray(a, float)
+    return gaussian_filter(a, 1.0) - gaussian_filter(a, 8.0)
+
+
+def _texture(lum, band_noise: float) -> float:
+    """The frame's structure (_band) over what the camera's noise alone gives in the same band."""
+    return float(np.std(_band(lum))) / max(band_noise, 0.05)
+
+
+def camera_focus(ctx: Ctx, study: dict, z0: float | None, sd: Path, warnings: list) -> dict:
+    """ls6t's camera autofocus: the top camera under white light, no laser. Coarse Z steps (about half the depth of
+    field) from the far side toward the sample, within z_limits (the objective's measured clearance when there is
+    one), then a fine pass around the sharpest frame; the best Z from a parabola through the sharpness. Refused, Z
+    back where it started, when the view has no structure to focus on (texture under CAM_MIN_TEXTURE x the camera's
+    noise), when the sharpness hardly changes with Z, or when the sharpest frame is at the edge of the range."""
+    if z0 is None:
+        raise Stop("the Z position could not be read: a camera focus needs it", "study")
+    prof = ctx.prof
+    zl = plan.z_limits(prof, ctx.objective)
+    if zl["toward_sign"] is None:
+        raise Stop("camera focus: the profile does not say which Z direction approaches the objective "
+                   "(stage.z_into_sample, TESTING T3.17)", "study")
+    cp = plan.camera_params(study, prof, ctx.objective)
+    s, step, settle = zl["toward_sign"], float(cp["step_um"]), float(cp["settle_s"])
+    half = float(cp["range_um"]) / 2
+    toward = min(half, float(zl["toward_um"]))
+    away = min(half, float(zl["away_um"]))
+    sd.mkdir(parents=True, exist_ok=True)
+    res: dict = {"method": "camera", "z_um": None, "z0_um": z0, "found": False, "step_um": step,
+                 "fine_step_um": cp["fine_step_um"], "range_toward_um": round(toward, 2),
+                 "range_away_um": round(away, 2), "toward_limit_from": zl.get("toward_from")}
+    # the camera's own noise: two frames at the start
+    d0, l0 = _cam_frame(ctx, sd / "z_start_a", settle)
+    if video.frame_too_dark(l0):
+        raise Stop("camera focus: the frame is black or without contrast: switch the white light on (bright field) "
+                   "and check the camera", "study")
+    _d1, l1 = _cam_frame(ctx, sd / "z_start_b", settle)
+    diff = np.asarray(l0, float) - np.asarray(l1, float)
+    noise = float(np.std(diff)) / math.sqrt(2)
+    band_noise = float(np.std(_band(diff))) / math.sqrt(2)
+    s_rep = abs(_sharpness(l0) - _sharpness(l1))
+    res["camera_noise"] = round(noise, 3)
+    # coarse: from the far side toward the sample (offsets in the toward direction)
+    n_away, n_tow = int(math.floor(away / step + 1e-9)), int(math.floor(toward / step + 1e-9))
+    offs = [k * step for k in range(-n_away, n_tow + 1)]
+    zs, sh, tex = [], [], []
+    for i, o in enumerate(offs):
+        z = move_z(ctx, z0 + s * o, f"camera focus step {i}", focusing=True)
+        _d, lum = _cam_frame(ctx, sd / f"c{i:03d}", settle)
+        zs.append(z)
+        sh.append(_sharpness(lum))
+        tex.append(_texture(lum, band_noise))
+    k = int(np.argmax(sh))
+    res.update(offsets_um=[round(o, 3) for o in offs], z_steps_um=zs, sharpness=[round(v, 6) for v in sh],
+               texture=[round(v, 2) for v in tex])
+    span = max(sh) - min(sh)
+    scatter = max(s_rep, 0.02 * max(sh))
+    res["contrast_over_noise"] = round(span / scatter, 2) if scatter else None
+    res["texture_at_best"] = round(tex[k], 2)
+    why = None
+    if tex[k] < CAM_MIN_TEXTURE:
+        why = (f"no discernible features: the sharpest view's structure is {tex[k]:.1f} x the camera's noise "
+               f"(at least {CAM_MIN_TEXTURE:g} wanted): a featureless surface; focus on the Raman line "
+               "(focus.autofocus 'scan') or on an edge or a particle")
+    elif span < CAM_MIN_CONTRAST * scatter:
+        why = (f"the sharpness hardly changes with Z ({span / scatter:.1f} x its repeat scatter, at least "
+               f"{CAM_MIN_CONTRAST:g} wanted): out of range, or nothing to focus on")
+    elif not 0 < k < len(sh) - 1:
+        why = ("the sharpest frame is at the " + ("far" if k == 0 else "near") + " end of the range"
+               + (" (the objective's limit toward the sample)" if k == len(sh) - 1 and toward < half else "")
+               + ": start closer to the focus")
+    if why:
+        res["why"] = why
+        res["z_now"] = move_z(ctx, z0, "camera focus: back to the start", focusing=True)
+        res["z_left_at"] = "the starting Z (no focus found)"
+    else:
+        # fine: +/- one coarse step around the best, a quarter step apart, from the far side
+        c0 = offs[k]
+        fo = [round(c0 + j * cp["fine_step_um"], 4) for j in range(-4, 5)
+              if -away <= c0 + j * cp["fine_step_um"] <= toward]
+        fz, fsh = [], []
+        for j, o in enumerate(fo):
+            z = move_z(ctx, z0 + s * o, f"camera focus fine step {j}", focusing=True)
+            _d, lum = _cam_frame(ctx, sd / f"f{j:03d}", settle)
+            fz.append(z)
+            fsh.append(_sharpness(lum))
+        kb = int(np.argmax(fsh))
+        ob = fo[kb]
+        if 0 < kb < len(fsh) - 1:
+            y1, y2, y3 = fsh[kb - 1], fsh[kb], fsh[kb + 1]
+            den = y1 - 2 * y2 + y3
+            if den < 0:
+                ob = fo[kb] + max(-0.5, min(0.5, 0.5 * (y1 - y3) / den)) * cp["fine_step_um"]
+        ob = max(-away, min(toward, ob))
+        zb = move_z(ctx, z0 + s * ob, "camera focus: to the sharpest", focusing=True)
+        res.update(found=True, z_um=round(zb, 3), shift_um=round(s * ob, 3), fine_offsets_um=fo,
+                   fine_sharpness=[round(v, 6) for v in fsh],
+                   z_left_at="the focus found (later spectra and studies use it)")
+    try:
+        from . import render
+        img = render.focus_png(sd / "camera_focus.png",
+                               {"z0_um": z0, "z_steps_um": zs, "signal": sh, "found": res["found"],
+                                "z_um": res.get("z_um"), "shift_um": res.get("shift_um", 0.0), "line_cm1": 0,
+                                "why": res.get("why")})
+        img["what"] = "the camera's sharpness against Z; the focus chosen"
+        res["image"] = img
+    except Exception as exc:  # noqa: BLE001 - a plot is never a reason to fail
+        warnings.append(f"camera focus plot: {exc}")
+    return res
+
+
 def _focus_from_below(ctx: Ctx, study: dict, laser: float, sc: dict, sd: Path, warnings: list) -> dict:
     """The focus searched approaching the sample from the away side (after a retract-travel-return): coarse steps
     from where Z is toward the sample, never past the old focus plus the objective's toward limit, stopping once the
@@ -1832,8 +1978,15 @@ def run_focus(name: str, study: dict, ctx: Ctx) -> dict:
     su = _setup(name, study, ctx, warnings, unreliable, checks, 1)
     _progress(sd, stage="focusing")
     z0 = _f(su["after"].get("z_um"))
-    fs = focus_scan(ctx, study, su["laser"], ctx.z_focus if ctx.z_focus is not None else z0, sd / "focus", warnings)
-    if fs.get("found"):
+    if (study.get("focus") or {}).get("autofocus") == "camera":
+        fs = camera_focus(ctx, study, ctx.z_focus if ctx.z_focus is not None else z0, sd / "focus", warnings)
+    else:
+        fs = focus_scan(ctx, study, su["laser"], ctx.z_focus if ctx.z_focus is not None else z0, sd / "focus",
+                        warnings)
+    if fs.get("found") and fs.get("method") == "camera":
+        ctx.z_focus = fs["z_um"]
+        _focus_here(ctx)
+    elif fs.get("found"):
         ctx.z_focus = fs["z_um"]
         _focus_here(ctx)
         if fs.get("axial_fwhm_um"):

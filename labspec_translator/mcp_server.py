@@ -198,7 +198,10 @@ async def instrument(ctx: Context, action: str = "status", camera: str | int | N
     video_scale (um = the stage move in µm; default 0.4 x the field's smaller side, ~23 µm with the x100, ~240
     with the x10; over half the field's width or height refused; a result whose pixel aspect or rotation disagrees
     with another objective on the same camera is stored but flagged in 'warnings'; no laser; a lit view with visible structure): measures the video's µm per pixel and axis
-    directions for the objective and camera in use, used by every snapshot after.
+    directions for the objective and camera in use, used by every snapshot after. clearance: with the operator at
+    the instrument, a flat sample under the objective in use: the operator focuses, then moves Z by hand to the
+    closest safe gap; stored per objective, ls6t then never moves toward the sample past half of it (Z returns to
+    the focus).
     discover: runs the discovery
     and proposes a machine profile (a person applies it). resume: asks the operator to lift a halt. last_error:
     LabSpec's last error. calibration: LabSpec's spectrometer calibration per grating (read only). autocal_info:

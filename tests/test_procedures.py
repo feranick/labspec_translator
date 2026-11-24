@@ -1263,3 +1263,72 @@ def test_correct_applies_only_real_hops_and_rejects_a_broad_calibration_line():
     (bdir / "sim_laser_line_drift").unlink()
     (bdir / "sim_xshift").unlink()
     xcal.clear()
+
+
+def _set_z_direction(sign="+"):
+    prof = P.load()
+    P.save(dict(prof, stage=dict(prof["stage"], z_into_sample=sign)))
+
+
+def test_objective_clearance_measured_by_hand_limits_moves_toward_the_sample():
+    """Nicola, 2026-11-24: a manual calibration of each objective's closest safe distance to a flat sample, against a
+    crash (especially the x100). The operator focuses, moves Z by hand toward the sample to the closest safe gap;
+    ls6t stores focus -> closest per objective and never goes past half of it (nor past its working-distance
+    limit); Z goes back to the focus."""
+    bdir = config.active_bridge_dir()
+    S.ensure(bdir)
+    plan.clearance_store({})
+    r = api.instrument("clearance")
+    assert not r["ok"] and "z_into_sample" in r["error"]
+    _set_z_direction("+")
+    obj = api.instrument("status")["status"]["objective"]
+    z0 = float(api.instrument("status")["status"]["z_um"])
+    wd_lim = plan.z_limits(P.load(), obj)["toward_um"]
+    (bdir / "sim_operator_dz").write_text("-5")              # moved away: refused, nothing stored
+    r = api.instrument("clearance")
+    assert not r["ok"] and "did not move toward" in r["error"] and plan.clearance_um(obj) is None
+    (bdir / "sim_operator_dz").write_text(str(wd_lim))        # half of it is tighter than the WD limit
+    r = api.instrument("clearance")
+    assert r["ok"] and r["clearance_um"] == pytest.approx(wd_lim, abs=0.01), r
+    assert r["z_back_um"] == pytest.approx(z0, abs=0.01)
+    zl = plan.z_limits(P.load(), obj)
+    assert zl["toward_um"] == pytest.approx(wd_lim / 2, abs=0.1) and zl["toward_from"] == "measured clearance"
+    v = F.validate({"m": {"kind": "spectrum", "sample": {"name": "Si"}, "setup": dict(SETUP, objective=obj),
+                          "acquire": {"center_cm1": 520, "exposure_s": 1}, "points": [{"dz_um": wd_lim * 0.75}]}})["m"]
+    assert not v["ok"]                                        # 3/4 of the old limit is now past the clearance
+    (bdir / "sim_operator_dz").unlink()
+    plan.clearance_store({})
+
+
+def test_camera_autofocus_on_features_and_refused_on_a_featureless_view():
+    """Nicola, 2026-11-24: autofocus with the live camera on a feature; rejected when there are no discernible
+    features. ls6t's focus.autofocus 'camera': top camera, white light, no laser; coarse then fine steps on the
+    frame's sharpness, within the objective's limits."""
+    bdir = config.active_bridge_dir()
+    S.ensure(bdir)
+    _set_z_direction("+")
+    (bdir / "sim_defocus").write_text("3.0")
+    z0 = float(api.instrument("status")["status"]["z_um"])
+    st = {"kind": "focus", "sample": {"name": "Si"}, "setup": SETUP, "focus": {"autofocus": "camera"}}
+    assert F.validate({"f": st})["f"]["ok"]
+    r = run_inline({"f": st})["studies"]["f"]
+    f = r["focus"]
+    assert f["method"] == "camera" and f["found"], f.get("why")
+    assert f["z_um"] == pytest.approx(z0 + 3.0, abs=0.6) and "focus found" in f["z_left_at"]
+    assert f["texture_at_best"] >= runner.CAM_MIN_TEXTURE and r["reliable"]
+    # a featureless view: refused, Z back where it started
+    (bdir / "sim_featureless").write_text("1")
+    r = run_inline({"f": st})["studies"]["f"]
+    f = r["focus"]
+    assert not f["found"] and "no discernible features" in f["why"] and "starting Z" in f["z_left_at"]
+    assert not r["reliable"]
+    (bdir / "sim_featureless").unlink()
+    # in a map, before the first point and every N points
+    mp = {"kind": "map", "sample": {"name": "Si"}, "setup": SETUP, "acquire": {"center_cm1": 520, "exposure_s": 0.2},
+          "map": {"x_um": [0, 2, 2]}, "focus": {"autofocus": "camera", "every": 1}}
+    assert F.validate({"m": mp})["m"]["ok"]
+    m = run_inline({"m": mp})["studies"]["m"]
+    assert m["complete"] and m.get("focus_scans") and all(fs["method"] == "camera" for fs in m["focus_scans"]), \
+        list(m)
+    (bdir / "sim_defocus").unlink()
+    assert not F.validate({"f": dict(st, focus={"autofocus": "camera", "camera": {"step_um": 0}})})["f"]["ok"]

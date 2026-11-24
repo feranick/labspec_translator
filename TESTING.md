@@ -552,6 +552,7 @@ Pass:
 
 Record whether autofocus left a spectrum in LabSpec.
 
+
 ## T5b. Video and the beam (T5b.1, T5b.2, T5b.6 no laser; T5b.3–T5b.5, T5b.7 LASER)
 
 **T5b.1 A frame (Q13, Q41).** Start the live video in LabSpec (or `ls6t instrument camera-on --camera top`), with the
@@ -1249,6 +1250,27 @@ Cancel and check nothing moves. Pass: the Si signal is lowest there (the beam on
 Record `drift_um` each time. If it often exceeds 1 µm within a day, plan a spot study at the start of each
 session (or before aiming at small features).
 
+## T5f. Objective clearance and camera focus (no laser)
+
+**T5f.1 Objective clearance (no laser).** Maintainer at the instrument, watching the gap from the side; x10 first,
+then x50 and x100. Needs `stage.z_into_sample` (T3.17). Flat Si wafer, white light, live video. Run
+`ls6t instrument clearance`: LabSpec asks to focus on the surface (Yes), then to move Z by hand toward the sample,
+slowly, to the closest gap judged safe, never touching (Yes). ls6t reads both Z positions, stores focus -> closest for
+that objective (`objective_clearance.json`) and moves Z back to the focus. Pass: `clearance_um` is plausible against
+the nominal working distance (x100 about 210 µm, x10 about 10 mm: a few mm is enough there); Z is back at the focus;
+`toward_limit_um` is the smaller of half the clearance and the working-distance limit (`toward_from` says which); a
+study asking for more toward the sample is refused at validation. Refused and nothing stored: moving away instead, or
+a gap over 1.5 x the nominal working distance.
+
+**T5f.2 Camera autofocus (no laser).** Needs T3.17; better after T5f.1. Flat Si with a visible particle, scratch or edge
+in the x100 view, white light. Defocus by about 3 µm by hand. Run `{"kind": "focus", "setup": {...}, "focus":
+{"autofocus": "camera"}}`: ls6t takes two frames (the camera's noise), then Z steps of about half the depth of field
+(x100 2 µm) from the far side toward the sample, within the limit of T5f.1, a fine pass at a quarter step, and the
+parabola's best. Pass: `found`, `z_um` within about 0.5 µm of the maintainer's own focus, `texture_at_best` and
+`contrast_over_noise` well above 3 and 4, the plot (`focus/camera_focus.png`) a clear peak. Then a clean,
+featureless area (no particle in view): refused, "no discernible features", Z back at the start. Record the time per
+frame (`timing` of the video command) to size `focus.camera.settle_s`.
+
 ## T6. Maps, depth and focus (LASER)
 
 **T6.1 A small map (Q9, Q10).** On the contrast sample: a map study, 5 × 5 points, 1 µm steps, a short exposure, the
@@ -1433,6 +1455,8 @@ With the LLM app connected (test mode off), in a new chat:
 | T5e.1 | | | | Q23: | |
 | T5e.2 | | | | Q24 (offset raman vs video): | |
 | T5e.3 | | | | Q16 offsets x100 / x10 / x5: Q25 drift: | |
+| T5f.1 | | | | clearance x10 / x50 / x100 (µm), toward limit after: | |
+| T5f.2 | | | | camera focus vs hand focus (µm), texture, featureless refused, s per frame: | |
 | T6.1 | | | | Q10: | |
 | T6.2 | | | | | |
 | T6.3 | | | | Q26 (direction, thickness found vs known): | |

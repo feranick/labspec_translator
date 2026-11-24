@@ -2201,9 +2201,11 @@ Sub VVideo(cmd, res)
         If WriteImage(clone, outBase & ".video.txt", res) Then res("out") = outBase & ".video.txt"
         On Error Resume Next
         For i = 0 To UBound(fmts)
-            r = LabSpec.Save(clone, outBase & "." & fmts(i), fmts(i))
-            res("saved_" & fmts(i)) = Bit(Err.Number = 0 And r = 0)
-            Err.Clear
+            If Trim(fmts(i)) <> "" Then         ' formats "" (the camera focus): the frame for Python only
+                r = LabSpec.Save(clone, outBase & "." & fmts(i), fmts(i))
+                res("saved_" & fmts(i)) = Bit(Err.Number = 0 And r = 0)
+                Err.Clear
+            End If
         Next
         LabSpec.Exec clone, LS_REMOVE_DATA, p
         Err.Clear

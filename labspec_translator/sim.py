@@ -641,18 +641,28 @@ class SimLabSpec:
         xs = x + (np.arange(W) - (W - 1) / 2) * w_um / W
         ys = y + (np.arange(H) - (H - 1) / 2) * w_um / W
         X, Y = np.meshgrid(xs, ys)          # rows: Y, columns: X (X varies fastest in the flat data)
-        base = 150 + 3 * np.sin(X / 9.7) * np.cos(Y / 12.3) + self.rng.normal(0, 3, X.shape)
-        sp = self.specks
+        featureless = (self.dir / "sim_featureless").exists()      # a polished, structureless surface
+        base = 150 + (0 if featureless else 3 * np.sin(X / 9.7) * np.cos(Y / 12.3)) + np.zeros(X.shape)
+        sp = self.specks if not featureless else self.specks[:0]
         near = sp[(np.abs(sp[:, 0] - x) < w_um) & (np.abs(sp[:, 1] - y) < w_um)]
         for sxk, syk, srk, sck in near:
             base = base - sck * np.exp(-((X - sxk) ** 2 + (Y - syk) ** 2) / (2 * srk ** 2))
-        flake = X >= self.x0
+        flake = (X >= self.x0) & (not featureless)
         r = np.where(flake, base - 35, base)
         g = np.where(flake, base - 25, base)
         b = np.where(flake, base - 10, base + 8)
         px, py, pr = self.particle
         dust = np.hypot(X - px, Y - py) <= pr
-        r, g, b = np.where(dust, r - 90, r), np.where(dust, g - 90, g), np.where(dust, b - 80, b)
+        if not featureless:
+            r, g, b = np.where(dust, r - 90, r), np.where(dust, g - 90, g), np.where(dust, b - 80, b)
+        # out of focus the view blurs: about 0.4 µm of blur per µm of defocus (the sample's real focus, sim_defocus)
+        dz = abs(float(self.m["Z"]["value"]) - self._zf_true())
+        if dz > 0.05 and not extended:
+            from scipy.ndimage import gaussian_filter
+            sg = 0.4 * dz / (w_um / W)
+            r, g, b = (gaussian_filter(np.asarray(c, float), sg) for c in (r, g, b))
+        nz = self.rng.normal(0, 3, X.shape)
+        r, g, b = r + nz, g + nz, b + nz
 
         def write(path, r, g, b):
             r, g, b = (np.clip(c, 0, 255).astype(int) for c in (r, g, b))
@@ -860,6 +870,11 @@ class SimLabSpec:
                                      "use 1" for ax in ("x", "y", "z") if p.get(f"{ax}_from") is not None}}
 
     def v_confirm(self, p):
+        # sim_operator_dz: the operator moves Z by this much by hand before answering a question that asks for it
+        # (the objective clearance: "move Z TOWARD the sample by hand")
+        f = self.dir / "sim_operator_dz"
+        if f.exists() and "by hand" in str(p.get("text", "")) and "TOWARD" in str(p.get("text", "")):
+            self.m["Z"]["value"] = float(self.m["Z"]["value"]) + float(f.read_text().strip() or 0)
         if (self.dir / "sim_confirm_no").exists():
             return {"answer": "no"}
         return {"answer": "yes"}

@@ -150,7 +150,7 @@ Studies are given as `{name: study}`; names use letters, digits, `_` and `-`. An
 | `sample` | `{name, notes, sensitive, site}`; `sensitive: true` caps the filter at `limits.sensitive_max_filter_pct`. In the LabSpec file: the name as Sample, the notes in Remark (after `ls6t <seq>`), `site` as Site (else empty), the study's name as Title and `ls6t <request>` as Project. |
 | `setup` | `{laser_nm, grating (gr/mm), filter (a profile label, e.g. "10%"), objective (label), hole_um, slit_um}`. A key left out keeps what LabSpec has; the result records what it was. |
 | `acquire` | `range_cm1: [from, to]` (within one window: acquired centred on it and cut by ls6t, `range_placement: "labspec"` lets LabSpec place it; wider: LabSpec stitches windows) or `center_cm1` (one window); `exposure_s` (per accumulation) or `"auto"` with `auto_exposure: {target_counts, min_s, max_s, test_s}`; `accumulations`; `spike`: `labspec`, `none`, `single`, `double`, `double_auto`; `dark`: `labspec`, `true`, `false`; `subtract_background`: a stored white-light background's name; `laser_reference`: `report` / `correct` (the laser line in the window: follows its steps, a mode hop) / `correct_each` (every spectrum's line, its slow creep too); `shutter`: `auto` / `hold` (the laser shutter held open across the study's spectra, as HORIBA's maps do); `warmup_s` |
-| `focus` | `{autofocus: laser, raman or video (LabSpec's routines), or scan (ls6t's focus scan on the Raman line), before the first point and every N points with every; dz_um; scan: {range_um (10), step_um (1), line_cm1 (Si), window_cm1 (30), exposure_s (0.5)}}` |
+| `focus` | `{autofocus: laser, raman or video (LabSpec's routines), scan (ls6t's focus scan on the Raman line) or camera (ls6t's, the top camera's sharpness under white light; refused on a featureless view), before the first point and every N points with every; dz_um; scan: {range_um (10), step_um (1), line_cm1 (Si), window_cm1 (30), exposure_s (0.5)}}` |
 | `move` | (kind `move`) `{x_um, y_um` or `to_um: [x, y]` (stage coordinates from a snapshot: the beam lands there), `dz_um, stay: true, snapshot: true}`; `setup` may only give the objective |
 | `spot` | (kind `spot`) `{method: auto, shutter, acquisition or raman; feature_um: [x, y] (from a snapshot) or "auto"; refine: true; range_um, step_um (by objective: x100 4 and 0.5 µm); line_cm1 (Si); exposure_s (0.3); acq_exposure_s (2); remember: true}`; `setup` needs `laser_nm` and `objective` |
 | `points` | (spectrum) `[{x_um, y_um, dz_um}]`: offsets from where the operator left the stage |
@@ -286,7 +286,10 @@ Both are motorised on the XploRA and driven through LabSpec: `MoveXY` for the st
 - **In measurements**: `points` (offsets), `map` (`x_um`, `y_um`, `z_um` grids, snake order), `focus.dz_um` (an
   offset from the focus).
 - **Focus**: LabSpec's own autofocus (`focus.autofocus`: `laser`, `raman`, `video`), or ls6t's **focus scan**
-  (`autofocus: "scan"`, or a `focus` study).
+  (`autofocus: "scan"`, or a `focus` study), or ls6t's **camera focus** (`autofocus: "camera"`: the top camera's
+  sharpness under white light, no laser, coarse then fine Z steps within the objective's limits; refused, Z back at
+  the start, on a view with no discernible features). `ls6t instrument clearance` measures each objective's
+  closest safe gap on a flat sample with the operator; ls6t then never moves toward the sample past half of it.
   - The scan steps Z across `range_um` (default ±5 µm, 1 µm steps) around the current focus, with a short
     acquisition at each.
   - It measures the line's height (Si 520.7 cm⁻¹ by default) after a 3-point median, so cosmic rays do not count.
