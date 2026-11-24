@@ -319,6 +319,7 @@ def load(path: Path | None = None) -> dict:
         if isinstance(v, dict):
             v.setdefault("warmup_s", 0)
             v.setdefault("mode_hops", False)
+            v.setdefault("unstable_multi", False)      # true: refuse multi-spectrum studies; "warn": warn
     return prof
 
 

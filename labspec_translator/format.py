@@ -467,6 +467,17 @@ def validate_study(name: str, study: dict, prof: dict) -> dict:
             errors.append(f"setup.laser_nm {s['laser_nm']}: not on this instrument (lasers: {have} nm)")
     else:
         warnings.append("setup.laser_nm not given: the laser LabSpec has selected is used and read back")
+    # a laser that changes between acquisitions (2026-11-23, the XploRA's 637.75 nm: about 8 cm-1 after the first
+    # spectrum of a request; 532 nm stable): studies of several spectra with it are refused (true) or warned about
+    # ('warn'), unless each spectrum is corrected with its own laser line (acquire.laser_reference 'correct')
+    unstable = (prof["lasers"][lk].get("unstable_multi") if lk else None) or False
+    multi = kind in ("map", "series", "depth", "filters") or (kind == "spectrum" and len(study.get("points") or []) > 1)
+    if unstable and multi and (study.get("acquire") or {}).get("laser_reference") != "correct":
+        why = (f"the {prof['lasers'][lk]['nm']:g} nm laser changes between acquisitions on this instrument (profile "
+               f"lasers.{lk}.unstable_multi): every spectrum after the first may be shifted (about 8 cm-1 on "
+               "2026-11-23). Put the laser line in the window and set acquire.laser_reference 'correct', or use "
+               "another laser")
+        (warnings if unstable == "warn" else errors).append(why)
     if s.get("grating") is not None:
         if not _num(s["grating"]) or f"{float(s['grating']):g}" not in prof["gratings"]:
             errors.append(f"setup.grating {s['grating']}: use one of {', '.join(prof['gratings'])} gr/mm")

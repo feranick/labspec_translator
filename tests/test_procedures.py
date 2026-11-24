@@ -619,6 +619,27 @@ def test_laser_mode_hop_is_seen_and_corrected_with_the_laser_line():
     s = st["studies"]["s"]
     assert s["warmup"]["ok"] and not s["checks"]["laser_line"]["jumps"] and not s["checks"]["same_spot"]["disagree"]
     assert not F.validate({"x": dict(st0, acquire=dict(st0["acquire"], laser_reference="maybe"))})["x"]["ok"]
+    # each peak also from the spectrum's own laser line
+    assert s["spectra"][0]["peaks"][0]["from_laser_line_cm1"] == pytest.approx(520.7, abs=1.0)
+    # a laser known to change between acquisitions: multi-spectrum studies refused unless corrected (2026-11-23)
+    prof = P.load()
+    lk = next(k for k, v in prof["lasers"].items() if abs(v["nm"] - 532) < 1)
+    prof["lasers"][lk]["unstable_multi"] = True
+    P.save(prof)
+    v = F.validate({"x": st0})["x"]
+    assert not v["ok"] and any("unstable_multi" in e for e in v["errors"])
+    assert F.validate({"x": dict(st0, acquire=dict(st0["acquire"], laser_reference="correct"))})["x"]["ok"]
+    assert F.validate({"x": dict(st0, points=[{}])})["x"]["ok"]                 # one spectrum: fine
+    prof["lasers"][lk]["unstable_multi"] = "warn"
+    P.save(prof)
+    v = F.validate({"x": st0})["x"]
+    assert v["ok"] and any("unstable_multi" in w for w in v["warnings"])
+    prof["lasers"][lk]["unstable_multi"] = False
+    P.save(prof)
+    # 'correct' without the laser line in the window: said
+    st = run_inline({"s": dict(st0, acquire={"center_cm1": 520, "exposure_s": 1, "laser_reference": "correct"},
+                               setup=SETUP)})
+    assert any("no laser line was found" in u for u in st["studies"]["s"]["unreliable_because"])
     # the diagnostic: the start-of-request status read before every spectrum
     n0 = s["timing"]["bridge_commands"]["status"]["n"]
     P.save(dict(P.load(), timing=dict(P.load()["timing"], status_before_each=True)))

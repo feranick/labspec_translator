@@ -2670,6 +2670,15 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
                 warnings.append(f"point {rec['point']}: the background covers {info['covered_fraction']:.0%} of the "
                                 "spectrum")
         a = spectra.analyze(shift, y, process, min_snr, prof["checks"].get("detect_snr", 5.0))
+        if ll and ll.get("ok"):
+            # each peak also from this spectrum's own laser line (the Raman shift by definition; LabSpec's scale may
+            # carry its own offset between 0 and the band: on the XploRA Si was 524.8 from the line, 520.2 on the scale)
+            base = ll["position_cm1"] + (rec.get("laser_line_correction_cm1") or 0.0)
+            if corr:
+                base = corr["a"] + corr["b"] * base
+            for pk in a["peaks"]:
+                if pk.get("ok") and pk.get("position_cm1") is not None:
+                    pk["from_laser_line_cm1"] = round(float(pk["position_cm1"]) - base, 3)
         rec.update(max_counts=sat["max_counts"], saturated=sat["saturated"], saturated_pixels=sat["pixels"],
                    noise_sigma=a["noise_sigma"], spikes=len(a["spikes"]), from_cm1=a["from_cm1"],
                    to_cm1=a["to_cm1"], peaks=a["peaks"], bands=a["bands"], auto_peaks=a["auto_peaks"])
@@ -2718,6 +2727,11 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
         warnings.append(f"a requested peak was not detected in {len(set(undetected))} spectra (see peaks[].why)")
 
     lls = [(r["point"], r["laser_line"]["position_cm1"]) for r in per_point if (r.get("laser_line") or {}).get("ok")]
+    if ll_mode == "correct" and len(lls) < len(per_point):
+        miss = [r["point"] for r in per_point if not (r.get("laser_line") or {}).get("ok")]
+        unreliable.append(f"acquire.laser_reference 'correct', but no laser line was found in spectra "
+                          f"{', '.join(map(str, miss[:10]))}: the window must include about -15 to +15 cm-1 "
+                          "(those spectra are not corrected)")
     if lls:
         ref0 = ll_ref if ll_ref is not None else lls[0][1]
         jumps = [(p, round(v - ref0, 2)) for p, v in lls if abs(v - ref0) > LASER_JUMP_CM1]

@@ -693,6 +693,17 @@ spectrum by the laser line's move (relative to the line recorded at the last cal
 first spectrum); `acquire.warmup_s` / `lasers.<k>.warmup_s` puts a discarded acquisition first (it did not help
 here); `lasers.<k>.mode_hops: true` makes calibrations say they hold for the mode they were measured in. The
 spectrometer move to a new 1200 centre took 37 s (`t_spectro_call_s`).
+**532 nm is stable (2026-11-23, `run_20261123_203455_558e8e`, same five-point test, 1200, 1 %, 2 s):** laser line
+−8.16 to −8.58 cm⁻¹, Si 518.69–518.85, FWHM 8.5–8.8, heights 879–905. The acquisition sequence is fine; the 637.75 nm
+source changes between acquisitions (hardware: raise with HORIBA). **From .23.22:** `ls6t profile set
+lasers.637.75.unstable_multi true` refuses studies of several spectra with that laser (map, series, depth, filters,
+a spectrum with several points) unless `acquire.laser_reference: "correct"` with the laser line in the window
+(`"warn"`: a warning instead), saying why; with `correct` and no laser line found, the study says so (unreliable);
+each peak also gives `from_laser_line_cm1`, its shift from that spectrum's own laser line.
+The laser-line test already confirmed the hop (the laser line moved with Si; Si − laser constant at 524.3–524.8).
+**`timing.status_before_each` is now also a possible workaround:** if a `status` read resets the 637.75 nm laser,
+running it before every spectrum would make multi-spectrum studies usable with it. Report the five-point result with
+it on; if all five agree, ls6t will accept it in place of `laser_reference: "correct"` for `unstable_multi` lasers.
 
 **T3.19 LabSpec's AutoExposure (2026-11-23, .23.13).** With AutoExposure On in LabSpec (status bar "AE"), a
 spectrum asking 2 s ran 15 s while ls6t reported 2 s (this explains most of the 23–64 s acquisitions of T3.17).
