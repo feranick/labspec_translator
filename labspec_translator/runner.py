@@ -664,14 +664,13 @@ def _setup(name: str, study: dict, ctx: Ctx, warnings: list, unreliable: list, c
             # once more, after selecting the laser again, then stop: a study on the wrong grating is wrong
             # (2026-11-23: after a scripted visit to 785 nm LabSpec kept refusing 2400 (its range ends at 690 nm) and
             # took 1800, also once back on 637.75 nm; selecting 2400 by hand cleared it)
-            reselect_laser(ctx.call, prof)
-            r = ctx.call("move", timeout_s=600, **p, **move_extra(prof, p["motor"], asked_here))
+            r, tried = retry_grating(ctx.call, prof, dict(p, **move_extra(prof, p["motor"], asked_here)), step["value"])
             ok, got = _matches(step, r)
             readback.append({"motor": step["motor"], "asked": step["value"], "got": r.get("label") or r.get("value"),
-                             "ok": bool(r["ok"] and ok), "error": r.get("error") or None, "retry": True,
+                             "ok": bool(r["ok"] and ok), "error": r.get("error") or None, "retry": tried,
                              **_move_timing(r)})
             if not (r["ok"] and ok):
-                raise Stop(f"the grating did not reach {step['value']} (it reads {got}) after two moves: nothing "
+                raise Stop(f"the grating did not reach {step['value']} (it reads {got}) after three moves: nothing "
                            "measured on the wrong grating. After the laser was changed by the bridge (e.g. a visit to "
                            "785 nm), LabSpec can refuse a grating the earlier laser could not use, until the bridge "
                            "script is restarted (2026-11-23): `ls6t instrument end-bridge`, start ls6t_bridge.vbs "
@@ -2626,22 +2625,47 @@ def grating_guard(prof: dict, study: dict, after: dict, laser, rng: dict, path, 
                    "was measured. Check one acquisition in LabSpec by hand with the same grating and centre", "study")
 
 
-def reselect_laser(call, prof: dict) -> dict | None:
-    """Selects the laser LabSpec has now once more (a move to its own value), before a grating move is tried again:
-    LabSpec has refused a grating that the previous laser could not use (2026-11-23: 2400 after a scripted visit to
-    785 nm, though the laser was 637.75 nm again). Whether this refreshes LabSpec's check is to be seen (TESTING
-    T3.16); the read-back says what happened. call(verb, timeout_s=..., **params) is the bridge's."""
+def reselect_laser(call, prof: dict, via: bool = False) -> dict | None:
+    """Selects the laser LabSpec has now once more, before a grating move is tried again: LabSpec has refused a grating
+    that the previous laser could not use (2026-11-23: 2400 after a scripted visit to 785 nm, though the laser was
+    637.75 nm again; a bridge restart cleared it). The move is sent to LabSpec whatever it reads (the bridge's move
+    verb does not skip a position already in place; only set-up steps do). via=True goes through another laser
+    first (the shortest wavelength, which every grating can use) and back, in case LabSpec ignores a move to where
+    it is. No laser fires: this selects the laser path only. call(verb, timeout_s=..., **params) is the bridge's."""
     try:
         st = call("status", timeout_s=15, **motor_args(prof))
         las = _f(st.get("laser_nm"))
         if las is None:
             return None
+        out = {"laser_nm": las, "via": None}
+        if via:
+            others = sorted(float(v["nm"]) for v in (prof.get("lasers") or {}).values()
+                            if abs(float(v["nm"]) - las) > 1)
+            if others:
+                out["via"] = others[0]
+                call("move", timeout_s=600, motor=prof["motors"]["laser"], mode="value", value=others[0])
         r = call("move", timeout_s=600, motor=prof["motors"]["laser"], mode="value", value=las)
-        return {"laser_nm": las, "ok": bool(r.get("ok"))}
+        out["ok"] = bool(r.get("ok")) and P.same_position(r.get("value"), las)
+        return out
     except Stop:
         raise
     except Exception:  # noqa: BLE001
         return None
+
+
+def retry_grating(call, prof: dict, move_params: dict, value) -> tuple[dict, list]:
+    """A grating that did not arrive: the laser selected again, the grating moved again; then, if still not there,
+    through another laser and back, and the grating again. Returns the last move's answer and what was tried."""
+    tried = []
+    r = {}
+    for via in (False, True):
+        tried.append({"reselect": reselect_laser(call, prof, via=via)})
+        r = call("move", timeout_s=600, **move_params)
+        got = r.get("value")
+        tried[-1].update(got=got, ok=bool(r.get("ok")) and P.same_position(got, value))
+        if tried[-1]["ok"]:
+            break
+    return r, tried
 
 
 def move_extra(prof: dict, motor: str, confirmed_now: bool = False) -> dict:
@@ -2656,7 +2680,7 @@ def move_extra(prof: dict, motor: str, confirmed_now: bool = False) -> dict:
     out = {"blocking": 1} if motor in names else {}
     if motor == prof["motors"].get("grating"):
         # read until it is the grating asked (a passing grating can read still for 1.5 s: 2026-11-23)
-        out.update(until_target=1, until_target_s=120)
+        out.update(until_target=1, until_target_s=120, until_target_stable_s=10)
     if confirmed_now and motor == prof["motors"].get("objective") and prof.get("suppress_labspec_prompt", True):
         out["no_message"] = 1
     return out

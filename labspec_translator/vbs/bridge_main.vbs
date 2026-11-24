@@ -886,7 +886,7 @@ Sub VConfig(cmd, res)
 End Sub
 
 Sub VMove(cmd, res)
-    Dim motor, mode, v, posVal, posName, mc, moveId, tmo, waited, t0, t1
+    Dim motor, mode, v, posVal, posName, mc, moveId, tmo, waited, t0, t1, tSt, lastR, curR
     motor = GetP(cmd, "motor", "")
     mode = GetP(cmd, "mode", "value")
     v = GetP(cmd, "value", "")
@@ -984,13 +984,26 @@ Sub VMove(cmd, res)
     If waited And mode <> "index" And GetP(cmd, "until_target", "0") = "1" And res.Exists("settle_stable") Then
         res.Remove "settle_stable"
         t1 = Timer
+        tSt = Timer
+        lastR = Chr(0)
         Do
             If mode = "label" Then
-                If NormLabel(MotorLabel(motor)) = NormLabel(v) Then Exit Do
+                curR = MotorLabel(motor)
+                If NormLabel(curR) = NormLabel(v) Then Exit Do
             Else
-                If CStr(MotorValue(motor)) <> "" Then
-                    If Abs(ParseNum(MotorValue(motor)) - ParseNum(v)) <= 0.5 Then Exit Do
+                curR = MotorValue(motor)
+                If CStr(curR) <> "" Then
+                    If Abs(ParseNum(curR) - ParseNum(v)) <= 0.5 Then Exit Do
                 End If
+            End If
+            ' a wrong reading that stays the same this long is a refusal, not a slow turret (LabSpec took 1800 for
+            ' 2400 and stayed there, 2026-11-23): the caller retries or stops sooner than the limit
+            If CStr(curR) <> CStr(lastR) Then
+                lastR = curR
+                tSt = Timer
+            ElseIf Elapsed(tSt) >= ParseNum(GetP(cmd, "until_target_stable_s", "10")) Then
+                res("until_target_stable") = 1
+                Exit Do
             End If
             If Elapsed(t1) > ParseNum(GetP(cmd, "until_target_s", "120")) Then
                 res("until_target_timeout") = 1

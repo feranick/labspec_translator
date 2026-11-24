@@ -535,7 +535,7 @@ class SimLabSpec:
             if name == "Laser" and (self.dir / "sim_laser_locks_grating").exists():
                 if abs(m["values"][i] - 785.0) < 1:
                     self._grating_lock = True
-                elif i == m["i"]:
+                elif i == m["i"] and (self.dir / "sim_laser_locks_grating").read_text().strip() != "never":
                     self._grating_lock = False
             if name == "Grating" and getattr(self, "_grating_lock", False) and abs(m["values"][i] - 2400) < 0.5:
                 i = int(np.argmin([abs(v - 1800.0) for v in m["values"]]))

@@ -767,9 +767,23 @@ def test_grating_refused_after_785_is_retried_after_reselecting_the_laser():
         api.instrument("set", setup=setup)
     r = api.instrument("set", setup={"grating": 2400})
     g = [d for d in r["moves"] if d["set"] == "grating"][0]
-    assert g["ok"] and g["retried_after_laser_reselect"]["laser_nm"] == 532
+    tried = g["retried_after_laser_reselect"]
+    assert g["ok"] and tried[0]["reselect"]["laser_nm"] == 532 and tried[0]["ok"] and len(tried) == 1
     api.instrument("set", setup={"laser_nm": 785})
     api.instrument("set", setup={"grating": 1200, "laser_nm": 532})
     st = run_inline({"s": {"kind": "spectrum", "sample": {"name": "Si"}, "setup": dict(SETUP, grating=2400),
                            "acquire": {"center_cm1": 520, "exposure_s": 1}}})
     assert st["studies"]["s"]["instrument"]["grating"] == 2400
+
+    # LabSpec keeps refusing (only a bridge restart helps): the laser again, then through another laser and back,
+    # then the study stops with what to do
+    (bdir / "sim_laser_locks_grating").write_text("never")
+    api.instrument("set", setup={"laser_nm": 785})
+    api.instrument("set", setup={"grating": 1200, "laser_nm": 532})
+    r = api.instrument("set", setup={"grating": 2400})
+    g = [d for d in r["moves"] if d["set"] == "grating"][0]
+    tried = g["retried_after_laser_reselect"]
+    assert not g["ok"] and len(tried) == 2 and tried[1]["reselect"]["via"] and "restart" in g["error"]
+    st = run_inline({"s": {"kind": "spectrum", "sample": {"name": "Si"}, "setup": dict(SETUP, grating=2400),
+                           "acquire": {"center_cm1": 520, "exposure_s": 1}}})
+    assert not st["studies"]["s"]["ok"] and "end-bridge" in st["studies"]["s"]["why"]

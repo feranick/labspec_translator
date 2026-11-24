@@ -1111,7 +1111,7 @@ def _move_timing(r: dict) -> dict:
     settle_stable / settle_timeout when it never did."""
     out = {"seconds": r.get("seconds")}
     for k in ("move_call_s", "wait_s", "all_wait_s", "settle_s", "settle_stable", "settle_timeout", "blocking",
-              "until_target_s", "until_target_timeout"):
+              "until_target_s", "until_target_timeout", "until_target_stable"):
         if r.get(k) not in (None, ""):
             out[k] = float(r[k]) if k.endswith("_s") else True
     if r.get("move_id") not in (None, ""):
@@ -1404,9 +1404,8 @@ def set_instrument(setup: dict) -> dict:
             retried = None
             if r.get("ok") and not ok and what == "grating":
                 # the laser selected once more, then the grating again (2026-11-23: 2400 refused after 785 nm)
-                retried = runner.reselect_laser(b.call, prof)
-                r = b.call("move", timeout_s=600, motor=motor, mode=mode, value=value,
-                           **runner.move_extra(prof, motor, False))
+                r, retried = runner.retry_grating(b.call, prof, dict(motor=motor, mode=mode, value=value,
+                                                                     **runner.move_extra(prof, motor, False)), value)
                 got = r.get("label") if mode == "label" else r.get("value")
                 ok = bool(r.get("ok")) and P.same_position(got, value)
             done.append({"set": what, "asked": value, "got": got, "ok": ok, "error": r.get("error") or None,

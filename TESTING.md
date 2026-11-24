@@ -805,6 +805,14 @@ script session (how a script changes the laser, or what LabSpec ties to that scr
 messages say: `ls6t instrument end-bridge`, start `ls6t_bridge.vbs` again, then set the grating again. The first
 `set` after that restart waited 40.7 s in `status_before`: the bridge's start-up (each motor's first status, T3.16)
 was still running.
+**From .23.28 the retry really sends something, and sooner:** the laser move is always sent to LabSpec (the bridge's
+move does not skip a position already in place; only set-up steps do), and if the grating still does not arrive, a
+second try goes through another laser (the shortest wavelength, which every grating can use; no laser fires) and back
+before the grating again; then the study stops. `retried_after_laser_reselect` (set) and the set-up move's `retry`
+list each try (`reselect.laser_nm`, `via`, `got`, `ok`). A wrong grating reading that stays the same for 10 s
+(`until_target_stable`) ends the wait at once (it is a refusal); 120 s stays the limit for a turret still moving.
+**Test:** the reproduction through `instrument set`: does the first try (the same laser again) or the second (via
+another laser) bring 2400, or neither (then only the bridge restart)?
 
 **T3.19 LabSpec's AutoExposure (2026-11-23, .23.13).** With AutoExposure On in LabSpec (status bar "AE"), a
 spectrum asking 2 s ran 15 s while ls6t reported 2 s (this explains most of the 23–64 s acquisitions of T3.17).
