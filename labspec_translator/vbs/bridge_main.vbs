@@ -33,6 +33,7 @@ Dim gVerb, gSeq, gLastSeq, gChunk
 Dim gLaserOpen, gLaserT0, gLaserS, gLaserMotor, gLaserOldMode, gLaserOffLabel, gLaserBy
 Dim gHoldOn, gHoldMotor, gHoldOldMode, gHoldOldIdx, gHoldT0, gHoldMaxS   ' the shutter held open across spectra
 Dim gHoldIdleS, gLastCmdEnd   ' released by the bridge itself when no command came for gHoldIdleS (a lost release)
+Dim gHoldLabel, gHoldLastWhy   ' the shutter's label while held; why the last hold ended
 gHoldIdleS = 60
 gLastCmdEnd = Timer
 ' the commands that keep it held (runner.HOLD_VERBS lists the same): spectra, LabSpec's own map and the guided loop,
@@ -42,6 +43,8 @@ gLastCmdEnd = Timer
 ' the shutter held, the heartbeat's shutter_held makes ls6t say the laser may still reach the sample
 Const HOLD_VERBS = ",ping,status,acquire,map_native,guide,move_xy,move,view,remove,save,labels,last_error,message,shutter_hold,"
 gHoldOn = False
+gHoldLabel = ""
+gHoldLastWhy = ""
 Dim gShutterWatch, gShutterOff, gShutterSeen   ' a laser_off acquisition: the shutter read back while it runs
 Dim gShutterReads, gShutterT0, gShutterFirstS  ' how many reads, and when (s after Acq was called)
 gShutterWatch = ""
@@ -2661,11 +2664,13 @@ Sub VMapNative(cmd, res)
             LabSpec.Acq LS_ACQ_CANCEL, 0, 0, 0, 0
             gStoppedBy = who
             res("cancelled") = 1
+            HoldCheck res, "hold_after_map"
             Exit Sub
         End If
         If Elapsed(t0) > tmo Then
             LabSpec.Acq LS_ACQ_CANCEL, 0, 0, 0, 0
             Fail res, "the map did not finish in " & tmo & " s (cancelled)"
+            HoldCheck res, "hold_after_map"
             Exit Sub
         End If
         BeatNow
@@ -2673,6 +2678,7 @@ Sub VMapNative(cmd, res)
     Loop
     Err.Clear
     On Error GoTo 0
+    HoldCheck res, "hold_after_map"
     res("id") = id
     res("seconds_map") = Elapsed(t0)
     If WriteData(id, outBase & ".map.txt", res, "map") Then res("out") = outBase & ".map.txt"
@@ -2745,7 +2751,7 @@ End Sub
 ' Released (mode and shutter as they were) on 'off', before any other command than the spectra, stage moves and
 ' quick reads, at a halt, when the bridge stops, and after max_s.
 Sub VShutterHold(cmd, res)
-    Dim m, idx
+    Dim m, idx, w
     If GetP(cmd, "state", "") = "off" Then
         res("was_held") = Bit(gHoldOn)
         HoldRelease "asked"
@@ -2774,6 +2780,25 @@ Sub VShutterHold(cmd, res)
             HoldRelease "error"
             Exit Sub
         End If
+        gHoldLabel = res("hold_label")
+        res("renewed") = 0
+        res("previous_release") = gHoldLastWhy
+        ' the laser settles in its mode after the shutter opens (2026-11-24: the 637.75 nm laser's first held spectrum
+        ' had its laser line 9.9 cm-1 wide, then about 6): a wait here, before the first spectrum
+        w = ParseNum(GetP(cmd, "open_wait_s", "0"))
+        If w > 0 Then
+            gBlocking = "shutter_hold" : gBlockingS = w + 5 : Beat "busy", True
+            If Not WaitStoppable(w) Then
+                gBlocking = "" : gBlockingS = 0
+                HoldRelease "stopped"
+                res("cancelled") = 1
+                Exit Sub
+            End If
+            gBlocking = "" : gBlockingS = 0
+            res("open_wait_s") = w
+        End If
+    Else
+        res("renewed") = 1                  ' still held: the shutter did not move
     End If
     gHoldT0 = Timer
     gHoldMaxS = ParseNum(GetP(cmd, "max_s", "600"))
@@ -2783,6 +2808,25 @@ Sub VShutterHold(cmd, res)
     res("old_mode") = gHoldOldMode
     res("old_index") = gHoldOldIdx
     LabSpec.Message "ls6t: laser shutter held open for the spectra (close the ls6t window to stop)", LS_MB_STATUS_BAR
+End Sub
+
+' Whether the hold is still in place as LabSpec reads it: ShutterMode manual and the shutter at its label when held
+' (HORIBA's mapping engine may set the shutter mode itself during a native map)
+Sub HoldCheck(res, tag)
+    Dim md, lab
+    If Not gHoldOn Then
+        res(tag & "_held") = "not held"
+        Exit Sub
+    End If
+    md = LSValue(0, "ShutterMode")
+    lab = MotorLabel(gHoldMotor)
+    res(tag & "_shutter_mode") = md
+    res(tag & "_shutter_label") = lab
+    If CStr(md) = CStr(LS_SHUTTER_MANUAL) And CStr(lab) = CStr(gHoldLabel) Then
+        res(tag & "_held") = "yes"
+    Else
+        res(tag & "_held") = "no"
+    End If
 End Sub
 
 Sub HoldRelease(why)
@@ -2799,6 +2843,7 @@ Sub HoldRelease(why)
     Err.Clear
     On Error GoTo 0
     gHoldOn = False
+    gHoldLastWhy = why
     Beat "busy", True                       ' the heartbeat says it at once
     LabSpec.Message "ls6t: laser shutter released (" & why & "; reads '" & MotorLabel(gHoldMotor) & "')", LS_MB_STATUS_BAR
 End Sub
@@ -3160,6 +3205,9 @@ Sub BridgeMain()
             ElseIf Elapsed(gHoldT0) >= gHoldMaxS Then
                 HoldRelease "time up"
             ElseIf Elapsed(gLastCmdEnd) >= gHoldIdleS Then
+                ' gLastCmdEnd is set when a command's result has been written (HandleFile's end): the clock runs only
+                ' while the bridge is idle, never during a long exposure or a native map, and only this loop (between
+                ' commands) checks it. Elapsed() is midnight-safe.
                 ' no command for this long while held: ls6t has gone or lost its release (2026-11-24: the release
                 ' sent while LabSpec's map held the bridge was dropped; the shutter stayed open until a hand
                 ' laser_off)

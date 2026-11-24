@@ -283,6 +283,8 @@ class SimLabSpec:
         if p.get("state") == "off":
             was = getattr(self, "held", False)
             self.held = False
+            if was:
+                self.hold_last_why = "asked"
             return {"was_held": int(was)}
         motor = p.get("m_laser_shutter", "")
         if motor not in self.m:
@@ -293,7 +295,18 @@ class SimLabSpec:
         lab = self._shutter_to(motor, True, p)
         self.held = True
         self.hold_count = getattr(self, "hold_count", 0) + 1
-        return {"held": 1, "old_mode": 0, "old_index": old, "hold_label": lab}
+        out = {"held": 1, "renewed": 0, "old_mode": 0, "old_index": old, "hold_label": lab,
+               "previous_release": getattr(self, "hold_last_why", "")}
+        w = float(p.get("open_wait_s", 0) or 0)
+        if w > 0:                                   # the laser settling in its mode after the shutter opened
+            who = self._wait(w)
+            if who:
+                self.held = False
+                self.hold_last_why = "stopped"
+                return {**self._stopped(who), "cancelled": 1}
+            out["open_wait_s"] = w
+            self.hold_open_waits = getattr(self, "hold_open_waits", 0) + 1
+        return out
 
     def v_shutter(self, p):
         motor = p.get("motor", "")
@@ -832,9 +845,19 @@ class SimLabSpec:
             for i in range(0, data.size, 256):
                 fh.write(",".join(f"{v:.2f}" for v in data[i:i + 256]) + "\n")
         via = "GetValueSimplePart" if int(float(p.get("chunk", 65536) or 0)) > 0 else "GetValue"
+        # the hold as LabSpec reads it after the map (sim_native_map_drops_hold: HORIBA's engine set the shutter mode
+        # back to automatic itself)
+        if not getattr(self, "held", False):
+            hold = {"hold_after_map_held": "not held"}
+        elif (self.dir / "sim_native_map_drops_hold").exists():
+            hold = {"hold_after_map_held": "no", "hold_after_map_shutter_mode": 0, "hold_after_map_shutter_label": "Off"}
+        else:
+            hold = {"hold_after_map_held": "yes", "hold_after_map_shutter_mode": 1, "hold_after_map_shutter_label": "On"}
         return {"id": 950, "out": str(path), "native_ok": 0, "text_ok": 0, "pixels": int(data.size), "data_via": via,
                 "axes": " ".join(m for m, _ in axes), "seconds_map": round(npts * (ex * acc + speed), 2),
-                "detector_temp_c": self.temp_c}
+                "detector_temp_c": self.temp_c, **hold, "acq_mode": 10 + 2,
+                **{f"{ax}_readback": f"{p.get(ax + '_from')} / {p.get(ax + '_to')} / {p.get(ax + '_step')} / mode 0 / "
+                                     "use 1" for ax in ("x", "y", "z") if p.get(f"{ax}_from") is not None}}
 
     def v_confirm(self, p):
         if (self.dir / "sim_confirm_no").exists():
@@ -1065,8 +1088,15 @@ class SimLabSpec:
         rate = np.zeros_like(nm) if laser_off or self.laser_blocked else self._signal_per_s(nm_true)
         rate = (rate + self._lamp(nm_true)) * self._edge(nm_true)
         if (self.dir / "sim_laser_line").exists() and not laser_off and not self.laser_blocked:
-            # the laser line, leaking through the edge filter, where the laser really is
-            rate = rate + 3000.0 * np.exp(-0.5 * ((1e7 / las - 1e7 / nm_true) / 2.0) ** 2)
+            # the laser line, leaking through the edge filter, where the laser really is; sim_laser_line_drift 'd':
+            # its measured position creeps by d cm-1 per spectrum while the Raman lines stay (the XploRA's 637.75 nm,
+            # 2026-11-24: following it moved Si 520.52 -> 520.00 in a series)
+            ll0 = 0.0
+            fd = self.dir / "sim_laser_line_drift"
+            if fd.exists():
+                self._ll_drift_n = getattr(self, "_ll_drift_n", -1) + 1
+                ll0 = float(fd.read_text().strip() or 0.15) * self._ll_drift_n
+            rate = rate + 3000.0 * np.exp(-0.5 * ((1e7 / las - 1e7 / nm_true - ll0) / 2.0) ** 2)
         if exp <= 0:   # auto exposure: reach the target at the peak, within [min, max]
             target = float(p.get("ae_target", 30000))
             peak = float(rate.max()) or 1.0
@@ -1119,7 +1149,24 @@ class SimLabSpec:
                 **({"shutter_reads": 1 if holds else 12,
                     "shutter_first_read_s": round(time.monotonic() - t_w, 3) if holds else 0.01}
                    if laser_off_asked else {}),
-                **({"spectro_asked_nm": f_nm, "spectro_nm": f_nm} if abs(t_nm - f_nm) < 1e-9 else {})}
+                **({"spectro_asked_nm": f_nm, "spectro_nm": f_nm} if abs(t_nm - f_nm) < 1e-9 else {}),
+                "spectro_after_data": round(self._placed_centre(f_nm, t_nm), 4)}
+
+    def _placed_centre(self, from_nm: float, to_nm: float) -> float:
+        """Where the spectrometer is after an acquisition: From for one window; for a range LabSpec places the window
+        itself, its blue edge at From (the XploRA, 2026-11-24: -100..700 cm-1 at 637.75 nm read 676.75 nm), the last
+        window for several."""
+        if abs(to_nm - from_nm) < 1e-9:
+            c = from_nm
+        else:
+            gr, _ = self._cur("Grating")
+            win = 46800.0 / gr
+            lo, hi = sorted((from_nm, to_nm))
+            n = max(1, int(math.ceil((hi - lo) / win - 1e-9)))
+            c = lo + win / 2 + (n - 1) * win
+        if "Spectro" in self.m:
+            self.m["Spectro"]["value"] = c
+        return c
 
 
 def hist_write(out: str, hist: list):

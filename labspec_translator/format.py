@@ -110,10 +110,11 @@ def study_format(status: dict | None = None) -> dict:
                        "min_s, max_s, test_s}), accumulations, spike: labspec | none | single | double | "
                        "double_auto, dark: labspec | true | false, ics (LabSpec's intensity correction): labspec | "
                        "true | false (labspec: off where the profile's ics.off_for lists the grating@laser), "
-                       "subtract_background: a stored background's name, laser_reference: report | correct (when "
-                       "the window includes the laser line near 0 cm-1: it is fitted in every spectrum; correct "
-                       "shifts each spectrum by the laser line's move, so a laser mode hop does not move the "
-                       "peaks), warmup_s: a discarded acquisition of that many seconds before the first spectrum "
+                       "subtract_background: a stored background's name, laser_reference: report | correct | "
+                       "correct_each (when the window includes the laser line near 0 cm-1: it is fitted in every "
+                       "spectrum; correct shifts the spectra by the laser line's steps, so a laser mode hop does not "
+                       "move the peaks, without following its slow creep; correct_each by every spectrum's own "
+                       "line), warmup_s: a discarded acquisition of that many seconds before the first spectrum "
                        "(the laser fires; default the profile's lasers.<laser>.warmup_s), shutter: auto (LabSpec "
                        "opens and closes the laser shutter around each spectrum) | hold (held open from the first "
                        "spectrum to the last, as HORIBA's mapping scripts do; needs the verified shutter; default "
@@ -490,7 +491,8 @@ def validate_study(name: str, study: dict, prof: dict) -> dict:
         # inside LabSpec's own map)
         settled = plan.hold_shutter(study, prof, s.get("laser_nm")) or \
             (plan.settle_s(prof, s.get("laser_nm")) > 0 and not native)
-    if unstable and multi and (study.get("acquire") or {}).get("laser_reference") != "correct" and not settled:
+    if unstable and multi and (study.get("acquire") or {}).get("laser_reference") not in ("correct", "correct_each") \
+            and not settled:
         why = (f"the {prof['lasers'][lk]['nm']:g} nm laser changes between acquisitions on this instrument (profile "
                f"lasers.{lk}.unstable_multi): every spectrum after the first may be shifted (about 8 cm-1 on "
                "2026-11-23). Hold the shutter open across the spectra (acquire.shutter 'hold', or lasers." + lk +
@@ -595,8 +597,9 @@ def validate_study(name: str, study: dict, prof: dict) -> dict:
     if a.get("ics", "labspec") not in ("labspec", True, False):
         errors.append("acquire.ics: labspec (LabSpec's setting, off where the profile's ics.off_for says), true or "
                       "false")
-    if a.get("laser_reference", "report") not in ("report", "correct"):
-        errors.append("acquire.laser_reference: report or correct")
+    if a.get("laser_reference", "report") not in ("report", "correct", "correct_each"):
+        errors.append("acquire.laser_reference: report, correct (follows the laser line's steps, a mode hop) or "
+                      "correct_each (follows every spectrum's laser line, slow drift too)")
     if a.get("shutter", "auto") not in ("auto", "hold"):
         errors.append("acquire.shutter: auto (LabSpec opens and closes it around each spectrum) or hold (held open "
                       "for all the study's spectra, as HORIBA's mapping scripts do)")

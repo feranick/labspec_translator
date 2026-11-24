@@ -135,6 +135,61 @@ def _warmup(ctx: Ctx, acq: dict, sd: Path, seconds: float) -> dict:
 
 LASER_JUMP_CM1 = 1.5     # the laser line moving more than this between spectra: a mode hop
 ZERO_JUMP_CM1 = 3.0      # followed, but more than this: the corrected zero is uncertain (about 1 cm-1 left)
+WEAK_POINT_FRAC = 0.2    # a spectrum whose signal is under this fraction of the study's median: kept out
+
+
+def screen_points(per_point: list, laser, kind: str = "spectrum", warnings: list | None = None) -> dict:
+    """Spectra to keep out of a study's summaries, {point: why} (2026-11-24: a native map's point 0, taken before the
+    beam was really on: about 6 counts against 150, its laser line fitted at +1.5 instead of -4.3, Si 538.8, and it
+    still entered the map's summary). With the laser line in the window (most spectra have it): a spectrum without
+    it, or whose laser line is under WEAK_POINT_FRAC of the study's median height (the leak through the edge filter
+    hardly depends on the sample, so the beam was not on). Without it: a signal under WEAK_POINT_FRAC of the median,
+    for spectra taken at one place (spectrum, series); in a map a weak point may be off the sample, so it is only
+    said. Needs at least three spectra."""
+    if len(per_point) < 3:
+        return {}
+    spans: dict = {}
+    lines: dict = {}
+    for rec in per_point:
+        if "_sp" not in rec:
+            try:
+                rec["_sp"] = spectra.read(rec["file"])
+            except (OSError, ValueError, KeyError):
+                continue
+        sp = rec["_sp"]
+        y = np.asarray(sp["y"], float)
+        if y.size < 5 or not np.isfinite(y).any():
+            continue
+        spans[rec["point"]] = float(np.nanmax(y) - np.nanmedian(y))
+        try:
+            sh, _ = spectra.to_shift(sp["x"], sp["meta"].get("x_unit", "nm"), laser)
+            lines[rec["point"]] = laser_line_fit(sh, y)
+        except (ValueError, TypeError):
+            pass
+    out: dict = {}
+    have = {p_: float(l_.get("height") or 0.0) for p_, l_ in lines.items() if l_ and l_.get("ok")}
+    if len(have) >= max(2, (len(per_point) + 1) // 2):
+        hmed = float(np.median(list(have.values())))
+        for rec in per_point:
+            p_ = rec["point"]
+            if p_ not in spans:
+                continue
+            if p_ not in have:
+                out[p_] = "no laser line where the study's other spectra have one: the beam was probably not on"
+            elif hmed > 0 and have[p_] < WEAK_POINT_FRAC * hmed:
+                out[p_] = (f"its laser line ({have[p_]:.1f}) is under {WEAK_POINT_FRAC:.0%} of the study's median "
+                           f"({hmed:.1f}): the beam was probably not on yet")
+        return out
+    med = float(np.median(list(spans.values()))) if spans else 0.0
+    weak = {p_: v for p_, v in spans.items() if med > 0 and v < WEAK_POINT_FRAC * med}
+    if kind in ("spectrum", "series"):
+        for p_, v in weak.items():
+            out[p_] = (f"its signal ({v:.1f} above its level) is under {WEAK_POINT_FRAC:.0%} of the study's median "
+                       f"({med:.1f}): the beam was probably not on yet")
+    elif 0 in weak and warnings is not None:
+        warnings.append(f"point 0's signal is under {WEAK_POINT_FRAC:.0%} of the map's median: off the sample, or the "
+                        "beam not yet on (put the laser line in the window to tell)")
+    return out
 
 
 def calibration_window(study: dict, grating, n_lines: int) -> float:
@@ -431,13 +486,19 @@ class Ctx:
     def _hold_on(self) -> None:
         """The laser shutter held open (ShutterMode manual) before this study's next acquisition, as HORIBA's
         mapping scripts do for a map; the bridge keeps it only through HOLD_VERBS."""
-        r = self.call("shutter_hold", timeout_s=30, state="on", max_s=getattr(self, "hold_max_s", 3600),
-                      idle_s=getattr(self, "hold_idle_s", 60), **motor_args(self.prof))
+        w = plan.hold_open_s(self.prof, self.optics[0] if self.optics else None)
+        r = self.call("shutter_hold", timeout_s=30 + w, state="on", max_s=getattr(self, "hold_max_s", 3600),
+                      idle_s=getattr(self, "hold_idle_s", 60), open_wait_s=w, **motor_args(self.prof))
         if not r.get("ok"):
+            if r.get("stopped_by"):
+                raise Stop("stopped by the operator in LabSpec" if r.get("stopped_by") == "operator" else "cancelled",
+                           "operator" if r.get("stopped_by") == "operator" else "cancel")
             raise Stop(f"acquire.shutter 'hold': {r.get('error')}", "study")
         self.holding = True
         self.hold_log.append({"held": True, "shutter_before": r.get("old_index"), "mode_before": r.get("old_mode"),
-                              "label_while_held": r.get("hold_label")})
+                              "label_while_held": r.get("hold_label"),
+                              **({"open_wait_s": _f(r.get("open_wait_s"))} if r.get("open_wait_s") not in (None, "")
+                                 else {})})
 
     def _exposure_used(self, r: dict, params: dict) -> None:
         """The exposure LabSpec really used, from the spectrum's acquisition info. 2026-11-23: with LabSpec's
@@ -901,12 +962,24 @@ def run_any(name: str, study: dict, ctx: Ctx) -> dict:
         # the bridge lets the hold go by itself after this long without a command (a lost release, ls6t gone);
         # a series waits its interval between commands
         ctx.hold_idle_s = 60 + float((study.get("series") or {}).get("interval_s", 0) or 0)
+        if getattr(ctx, "keep_hold", False):
+            # kept into the next study: no command comes while this study's spectra are analysed
+            ctx.hold_idle_s += 120
     if ctx.holding:
         if ctx.hold_wanted:
             # held from the previous study (same laser): this study's own time limit for it
             r_ = ctx.call("shutter_hold", timeout_s=30, state="on", max_s=ctx.hold_max_s, idle_s=ctx.hold_idle_s,
                           **motor_args(ctx.prof))
-            ctx.hold_log.append({"continued": True, "from_previous_study": True, "ok": bool(r_.get("ok"))})
+            if str(r_.get("renewed", "1")) == "1" or not r_.get("ok"):
+                ctx.hold_log.append({"continued": True, "from_previous_study": True, "ok": bool(r_.get("ok"))})
+            else:
+                # the bridge had let it go in between (no command for idle_s while the previous study was analysed,
+                # say): the shutter closed and opened again
+                why = r_.get("previous_release") or "unknown"
+                ctx.hold_log.append({"held": True, "reopened": True, "previous_release": why,
+                                     "shutter_before": r_.get("old_index"), "mode_before": r_.get("old_mode"),
+                                     "label_while_held": r_.get("hold_label")})
+
         else:
             ctx.holding = False
             ctx.call("shutter_hold", timeout_s=30, state="off")
@@ -925,6 +998,12 @@ def run_any(name: str, study: dict, ctx: Ctx) -> dict:
                 ctx.hold_log.append({"released": False, "why": exc.why})
     if isinstance(res, dict) and ctx.hold_log:
         holds = [h for h in ctx.hold_log if "held" in h]
+        for h in ctx.hold_log:
+            if h.get("reopened"):
+                res.setdefault("warnings", []).append(
+                    f"the shutter hold from the previous study had been released by the bridge "
+                    f"({h.get('previous_release')}): the shutter closed and opened again before this study (a mode "
+                    "hop is possible: see the laser line)")
         res["shutter_hold"] = {"held": bool(holds) or any(h.get("continued") for h in ctx.hold_log),
                                "times_held": len(holds),
                                "continued_from_previous_study": any(h.get("continued") for h in ctx.hold_log),
@@ -935,6 +1014,12 @@ def run_any(name: str, study: dict, ctx: Ctx) -> dict:
                                "shutter_before": holds[0].get("shutter_before") if holds else None,
                                "mode_before": holds[0].get("mode_before") if holds else None,
                                "label_while_held": holds[0].get("label_while_held") if holds else None,
+                               "open_wait_s": holds[0].get("open_wait_s", 0.0) if holds else None,
+                               **({"after_native_map": next(h["after_native_map"] for h in ctx.hold_log
+                                                            if "after_native_map" in h)}
+                                  if any("after_native_map" in h for h in ctx.hold_log) else {}),
+                               **({"reopened_after_bridge_release": True}
+                                  if any(h.get("reopened") for h in ctx.hold_log) else {}),
                                "log": ctx.hold_log[-20:]}
         if len(holds) > 1:
             res.setdefault("warnings", []).append(
@@ -1063,6 +1148,8 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
     # LabSpec's own map engine: not the same as save_native (`native` above), which this name once overwrote, so no
     # .l6s was saved for ordinary spectra and their Remark could not be checked (2026-11-23)
     native_map = plan.map_engine(study, prof) == "native"
+    native_warmup = None
+    ctx.native_info = None
     if native_map:
         try:
             if af:
@@ -1081,12 +1168,16 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
                         _focus_here(ctx)
             if want_before:
                 snaps["before"] = _snapshot(ctx, name, sd, "before", bool(vd.get("with_laser")), warnings, laser)
+            if warmup_s(study, prof, laser) > 0:
+                # a discarded acquisition before LabSpec's map starts (2026-11-24: the first point of a native map
+                # was taken before the beam was really on)
+                native_warmup = _warmup(ctx, acq, sd, warmup_s(study, prof, laser))
             t_a = time.time()
             per_point = _native_map(ctx, name, study, sd, rng, laser, acq, x0, y0, zref, warnings)
             t_acq += time.time() - t_a
         except Stop as exc:
             stop_exc = exc
-    warmup_info = None
+    warmup_info = native_warmup
     t_last_start = time.time()
     live_on = bool((prof.get("display") or {}).get("live_view"))
     pending_views: list = []
@@ -1257,6 +1348,7 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
                  "operator": tm["operator_s"], "analysis": round(time.time() - t_an, 2)},
         timing=tm,
         **({"warmup": warmup_info} if warmup_info else {}),
+        **({"native_map": ctx.native_info} if native_map and getattr(ctx, "native_info", None) else {}),
         execution={"mode": config.mode(), "bridge": ctx.bridge_version, "translator": __version__,
                    "protocol": BRIDGE_PROTOCOL})
     if not per_point:
@@ -2981,6 +3073,24 @@ def _stats(vals) -> dict:
             "max": float(a.max())}
 
 
+def window_centre_used(rng: dict, per_point: list) -> tuple:
+    """The spectrometer's real centre (nm) for a study's spectra, and where it comes from. One window centred by ls6t:
+    the centre asked. A range: LabSpec's Acq places the window itself (2026-11-24: -100..700 cm-1 at 637.75 nm, ls6t
+    put the spectrometer at 650.19 nm, Acq moved it to 676.75 nm, the window's blue edge at From and the data cut to
+    the range, so centred about 650.6): the spectrometer's reading after the data. The per-window corrections are
+    kept and looked up by this centre."""
+    if rng.get("single", True):
+        return plan.window_centre(rng), "the centre asked (ls6t placed the spectrometer)"
+    reads = [(r.get("optics_check") or {}).get("spectro_after_data") for r in per_point]
+    reads = [float(v) for v in reads if v not in (None, "")]
+    if reads and rng.get("windows") == 1:
+        return (round(float(np.median(reads)), 4),
+                "the spectrometer's reading after the data (LabSpec placed the window for the range itself)")
+    if rng.get("windows") == 1:
+        return None, "unknown: LabSpec placed the window for the range and the spectrometer was not read"
+    return None, "an extended range (several windows)"
+
+
 def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreliable, checks, grating=None,
             request=None) -> dict:
     from . import background as BG
@@ -2993,7 +3103,11 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
         process["peaks"] = [{"name": f"ref{i}" if len(ref_lines) > 1 else "Si", "near_cm1": c, "window_cm1": win}
                             for i, c in enumerate(ref_lines)]
     # ls6t's own spectral correction (from an earlier calibration), never on a calibration itself
-    corr = xcal.get(laser, grating, plan.window_centre(rng)) if kind != "calibration" else None
+    wc, wc_from = window_centre_used(rng, per_point)
+    if not rng.get("single", True):
+        checks["window_centre"] = {"nm": wc, "from": wc_from,
+                                   "range_centre_nm": plan.window_centre(rng)}
+    corr = xcal.get(laser, grating, wc) if kind != "calibration" else None
     if kind != "calibration" and laser:
         zs = zero_state(laser, grating, prof)
         checks["zero"] = zs
@@ -3020,7 +3134,7 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
         # apart (2026-11-24)
         if corr.get("centre_far"):
             warnings.append(f"the correction was measured with the window centred at {corr['centre_nm']:g} nm, this "
-                            f"study's is {plan.window_centre(rng):g} nm ({corr['centre_distance_nm']:g} nm away): the "
+                            f"study's is {wc:g} nm ({corr['centre_distance_nm']:g} nm away): the "
                             "zero differs between windows by a cm-1 or more; calibrate with this study's window "
                             "(center_cm1 or range_cm1), or keep the laser line in the window with "
                             "acquire.laser_reference 'correct'")
@@ -3059,6 +3173,13 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
     # +0.5 cm-1 within 30 s: 'correct' follows it whenever the laser line is in the window)
     ll_mode = study.get("acquire", {}).get("laser_reference") or \
         ((prof["lasers"][lk_].get("laser_reference") if lk_ else None) or "report")
+    ll_mode_asked = ll_mode
+    # 'correct' follows the laser line's steps (a mode hop), not its slow drift: following every spectrum's line
+    # over-corrected a series (2026-11-24: Si 520.52 -> 520.00 while the laser line crept up; the line's measured
+    # position moves more than the Raman lines, partly its shape on the edge filter). 'correct_each' is the old way.
+    follow_each = ll_mode == "correct_each"
+    if follow_each:
+        ll_mode = "correct"
     # The two zero corrections must not count the same thing twice: a stored correction (xcal) was measured with the
     # laser where it was then. With laser_reference 'correct' each spectrum is first brought back to the laser line
     # of THAT calibration (stored with it), then the correction applies: the stored offset relative to the laser
@@ -3073,6 +3194,72 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
     else:
         ll_ref = laser_line_reference(laser, grating)
         ll_ref_from = "calibration" if ll_ref is not None else None
+    excluded = screen_points(per_point, laser, kind, warnings) if laser else {}
+    for rec in per_point:
+        if rec["point"] in excluded:
+            rec["excluded"] = excluded[rec["point"]]
+    # The laser line of every spectrum first, in acquisition order, with the Raman peaks' raw positions. A plateau
+    # ends where the line steps by more than LASER_JUMP_CM1 from the current one's median AND the Raman peaks moved
+    # with it (a mode hop moves everything). A step the peaks did not follow is a bad laser-line fit (2026-11-24, 600
+    # gr/mm: the line about 2 px wide on the edge filter fitted +3.6 / +5.9 cm-1 off while Si stayed): that spectrum
+    # keeps its plateau and its line is not used. 'correct' follows each plateau's median.
+    plateau_of: dict = {}
+    plateaus: list = []
+    ll_bad: dict = {}
+    hop_info: list = []
+    pk_specs = [(float(pk_["near_cm1"]), float(pk_.get("window_cm1", 40.0))) for pk_ in (process.get("peaks") or [])
+                if isinstance(pk_, dict) and pk_.get("near_cm1") is not None]
+    raw: list = []
+    for rec in per_point:
+        if rec["point"] in excluded:
+            continue
+        if "_sp" not in rec:
+            rec["_sp"] = spectra.read(rec["file"])
+        try:
+            sh_, _ = spectra.to_shift(rec["_sp"]["x"], rec["_sp"]["meta"].get("x_unit", "nm"), laser)
+        except (ValueError, TypeError):
+            continue
+        l_ = laser_line_fit(sh_, rec["_sp"]["y"])
+        if not (l_ and l_.get("ok")):
+            continue
+        xs_, ys_ = spectra.sort_xy(sh_, rec["_sp"]["y"])
+        pks_ = []
+        for near_, win_ in pk_specs:
+            try:
+                f_ = spectra.fit_peak(xs_, ys_, near_, win_)
+            except Exception:                    # a fit that cannot run here only leaves the hop unconfirmed
+                f_ = {}
+            pks_.append(float(f_["position_cm1"]) if f_.get("ok") and f_.get("position_cm1") is not None else None)
+        raw.append((rec["point"], float(l_["position_cm1"]), pks_))
+    cur: list = []
+    for pt, pos_, pks_ in raw:
+        if cur:
+            m_ = float(np.median([v for _, v, _ in cur]))
+            d_ = pos_ - m_
+            if abs(d_) > LASER_JUMP_CM1:
+                moved = []
+                for j, v in enumerate(pks_):
+                    prev = [c[2][j] for c in cur if c[2][j] is not None]
+                    if v is not None and prev:
+                        moved.append(v - float(np.median(prev)))
+                if moved and abs(float(np.median(moved)) - d_) > max(0.5 * abs(d_), 1.0):
+                    ll_bad[pt] = (f"the laser line fitted {d_:+.1f} cm-1 from its neighbours while the Raman peaks "
+                                  f"moved {float(np.median(moved)):+.1f}: a bad fit (a narrow line on the edge "
+                                  "filter), not a hop; not used")
+                    plateau_of[pt] = m_
+                    continue
+                hop_info.append({"point": pt, "moved_cm1": round(d_, 2),
+                                 "confirmed_by_peaks": (round(float(np.median(moved)), 2) if moved else None)})
+                plateaus.append(cur)
+                cur = []
+        cur.append((pt, pos_, pks_))
+    if cur:
+        plateaus.append(cur)
+    plateaus = [[(pt, v) for pt, v, _ in pl] for pl in plateaus]
+    for pl in plateaus:
+        med = float(np.median([v for _, v in pl]))
+        for pt, _ in pl:
+            plateau_of[pt] = med
     for rec in per_point:
         sp = rec.pop("_sp") if "_sp" in rec else spectra.read(rec["file"])
         try:
@@ -3089,10 +3276,16 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
         ll = laser_line_fit(shift, y)
         if ll:
             rec["laser_line"] = ll
-            if ll_ref is None and ll.get("ok"):
-                ll_ref, ll_ref_from = ll["position_cm1"], f"the study's first laser line (point {rec['point']})"
+            if ll_ref is None and ll.get("ok") and rec["point"] not in excluded and rec["point"] not in ll_bad:
+                if rec["point"] in plateau_of:
+                    ll_ref, ll_ref_from = plateau_of[rec["point"]], "the study's first laser-line plateau (median)"
+                else:
+                    ll_ref, ll_ref_from = ll["position_cm1"], f"the study's first laser line (point {rec['point']})"
+            if rec["point"] in ll_bad:
+                ll["suspect"] = ll_bad[rec["point"]]
             if ll_mode == "correct" and ll.get("ok") and ll_ref is not None:
-                d = ll["position_cm1"] - ll_ref
+                d = (plateau_of.get(rec["point"], ll["position_cm1"])
+                     if not follow_each or rec["point"] in ll_bad else ll["position_cm1"]) - ll_ref
                 shift = shift - d
                 rec["laser_line_correction_cm1"] = round(-d, 3)
         if corr:
@@ -3166,7 +3359,13 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
                             "and without ICS are not comparable")
     checks["range"] = {"pass": not cover_short, "points": cover_short[:50]}
     if cover_short:
-        warnings.append(f"{len(cover_short)} spectra do not cover the whole range asked for")
+        got_ = next((r for r in per_point if r["point"] in cover_short), {})
+        warnings.append(f"{len(cover_short)} spectra do not cover the whole range asked for (point {got_.get('point')}: "
+                        f"{got_.get('from_cm1')} to {got_.get('to_cm1')} cm-1 for {rng.get('from_cm1')} to "
+                        f"{rng.get('to_cm1')})" + (f"; LabSpec placed the window itself (centre {wc:g} nm): ask a "
+                                                    "slightly wider range_cm1, or center_cm1 for one window centred "
+                                                    "where ls6t puts it" if wc is not None and rng.get("windows") == 1
+                                                    else ""))
     weak = [r["point"] for r in per_point for pk in r.get("peaks", [])
             if pk.get("ok") and pk.get("snr") is not None and pk["snr"] < min_snr]
     failed = [r["point"] for r in per_point for pk in r.get("peaks", [])
@@ -3179,13 +3378,27 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
     if undetected and kind != "map" and process.get("peaks"):
         warnings.append(f"a requested peak was not detected in {len(set(undetected))} spectra (see peaks[].why)")
 
-    lls = [(r["point"], r["laser_line"]["position_cm1"]) for r in per_point if (r.get("laser_line") or {}).get("ok")]
+    lls = [(r["point"], r["laser_line"]["position_cm1"]) for r in per_point
+           if (r.get("laser_line") or {}).get("ok") and r["point"] not in excluded and r["point"] not in ll_bad]
+    if ll_bad:
+        checks["laser_line_bad_fits"] = {str(p_): w_ for p_, w_ in list(ll_bad.items())[:50]}
+        warnings.append(f"the laser-line fit is not trusted at points {', '.join(map(str, list(ll_bad)[:10]))}: the "
+                        "Raman peaks did not move with it (not a hop; those spectra keep their neighbours' zero)")
+    if excluded:
+        checks["excluded_points"] = {str(p_): w_ for p_, w_ in list(excluded.items())[:50]}
+        warnings.append(f"{len(excluded)} spectra kept out of the summaries (points "
+                        f"{', '.join(map(str, list(excluded)[:10]))}): "
+                        + "; ".join(f"{p_}: {w_}" for p_, w_ in list(excluded.items())[:3]))
+        if len(excluded) > max(1, len(per_point) // 10):
+            unreliable.append(f"{len(excluded)} of {len(per_point)} spectra are weak or lack the laser line "
+                              "(checks.excluded_points)")
     followed = any(r.get("laser_line_correction_cm1") is not None for r in per_point)
     # after a hop the laser line sits deeper in the edge filter (clipped) and may be multimode: following it left
     # about 1 cm-1 (2026-11-24: Si 519.57 and 520.05 after hops of -8.0 and -8.9 cm-1, lines 1.5-2 x as wide). A
     # jump over 3 cm-1, or a laser line over 1.2 x its calibration's (or the study's narrowest) width: zero uncertain
     widths = [float(r["laser_line"]["fwhm_cm1"]) for r in per_point
-              if (r.get("laser_line") or {}).get("ok") and r["laser_line"].get("fwhm_cm1")]
+              if (r.get("laser_line") or {}).get("ok") and r["laser_line"].get("fwhm_cm1") and r["point"] not in ll_bad
+              and r["point"] not in excluded]
     ref_w = float(corr["laser_line_fwhm_cm1"]) if corr and corr.get("laser_line_fwhm_cm1") else \
         (min(widths) if widths else None)
     uncertain = []
@@ -3195,7 +3408,7 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
         if c_ is not None and abs(float(c_)) > ZERO_JUMP_CM1:
             why.append(f"the laser line moved {-float(c_):+.1f} cm-1 (a hop)")
         w_ = (r.get("laser_line") or {}).get("fwhm_cm1")
-        if ref_w and w_ and float(w_) > 1.2 * ref_w:
+        if ref_w and w_ and float(w_) > 1.2 * ref_w and r["point"] not in ll_bad:
             why.append(f"the laser line is {float(w_) / ref_w:.1f} x as wide as {'at the calibration' if corr and corr.get('laser_line_fwhm_cm1') else 'the narrowest here'}")
         if why:
             r["zero_uncertain"] = "; ".join(why)
@@ -3211,7 +3424,15 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
         how = f"the laser line only (each spectrum brought back to {ll_ref_from})"
     else:
         how = "none"
-    checks["zero_correction"] = {"method": how, "laser_reference": ll_mode,
+    checks["zero_correction"] = {"method": how, "laser_reference": ll_mode_asked,
+                                 **({"follows": "every spectrum's laser line (slow drift too)" if follow_each else
+                                     "the laser line's steps: each spectrum its plateau's median (a mode hop "
+                                     "starts a new plateau; the slow drift within one is not followed)",
+                                     "plateaus": [{"points": [p_ for p_, _ in pl],
+                                                   "laser_line_cm1": round(float(np.median([v for _, v in pl])), 3),
+                                                   "drift_cm1": round(pl[-1][1] - pl[0][1], 3)}
+                                                  for pl in plateaus][:20] if not follow_each else None}
+                                    if followed else {}),
                                  **({"stored": {k: corr.get(k) for k in ("a", "b", "time", "centre_nm",
                                                                         "laser_line_cm1") if corr.get(k) is not None}}
                                     if corr else {}),
@@ -3232,13 +3453,28 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
                           "(those spectra are not corrected)")
     if lls:
         ref0 = ll_ref if ll_ref is not None else lls[0][1]
-        jumps = [(p, round(v - ref0, 2)) for p, v in lls if abs(v - ref0) > LASER_JUMP_CM1]
-        checks["laser_line"] = {"reference_cm1": round(ref0, 3), "reference_from": ll_ref_from, "mode": ll_mode,
+        # jumps judged spectrum to spectrum, against the current plateau (a hop), not against the calibration's line
+        # (2026-11-24: a map steady at -4.1..-4.5 was reported as "moved by +1.6 at points 4-8"): the drift since the
+        # calibration is reported on its own
+        jumps = [(h["point"], h["moved_cm1"]) for h in hop_info]
+        checks["laser_line"] = {"reference_cm1": round(ref0, 3), "reference_from": ll_ref_from, "mode": ll_mode_asked,
                                 "positions_cm1": {str(p): round(v, 3) for p, v in lls},
-                                "jumps": [{"point": p, "moved_cm1": d} for p, d in jumps]}
+                                "jumps": hop_info[:50],
+                                "points_after_a_jump": [pt for pl in plateaus[1:] for pt, _ in pl][:200]}
+        cal_ref = (float(corr["laser_line_cm1"]) if corr and corr.get("laser_line_cm1") is not None
+                   else laser_line_reference(laser, grating))
+        if cal_ref is not None:
+            dr = round(float(np.median([v for _, v in lls])) - cal_ref, 2)
+            checks["laser_line"]["drift_since_calibration_cm1"] = dr
+            if abs(dr) > LASER_JUMP_CM1:
+                warnings.append(f"the laser line sits {dr:+.1f} cm-1 from where it was at the calibration (drift "
+                                "since then, or a calibration made with another spectrometer window), not a hop"
+                                + ("; followed (laser_reference)" if ll_mode == "correct" else ""))
         if jumps:
+            after_ = checks["laser_line"]["points_after_a_jump"]
             msg = (f"the laser line moved by {', '.join(f'{d:+.1f}' for _, d in jumps[:6])} cm-1 at point(s) "
-                   f"{', '.join(str(p) for p, _ in jumps[:6])} (a laser mode hop?): every Raman shift there moves with it")
+                   f"{', '.join(str(p) for p, _ in jumps[:6])} (a laser mode hop: the Raman peaks moved with it), "
+                   f"{len(after_)} spectra on from there: every Raman shift there moves with it")
             if ll_mode == "correct":
                 warnings.append(msg + "; corrected (acquire.laser_reference 'correct')")
             else:
@@ -3343,6 +3579,7 @@ def _calibration_result(study, prof, rec, ref_lines, laser, grating, rng, reques
     from . import xcal
     cal = study.get("calibration") or {}
     refname = cal.get("reference", "si")
+    wc, wc_from = window_centre_used(rng, [rec])
     tol = float(cal.get("tol_cm1", prof["checks"]["si_tol_cm1"]))
     lines = []
     for ref, pk in zip(ref_lines, rec.get("peaks") or []):
@@ -3353,7 +3590,7 @@ def _calibration_result(study, prof, rec, ref_lines, laser, grating, rng, reques
     ok = [l for l in lines if l["measured_cm1"] is not None]
     res: dict = {"reference": refname, "lines": lines, "tol_cm1": tol, "adjust": cal.get("adjust", "none"),
                  "applies_to": {"laser_nm": laser, "grating": _f(grating), "key": xcal.key(laser, grating),
-                                "window_centre_nm": plan.window_centre(rng),
+                                "window_centre_nm": wc, "window_centre_from": wc_from,
                                 "what": combo(laser, grating) + " only: LabSpec keeps a zero per grating"}}
     if not ok:
         res.update(pass_=False, why="no reference line found: check the sample and its focus")
@@ -3419,7 +3656,7 @@ def _calibration_result(study, prof, rec, ref_lines, laser, grating, rng, reques
     checks["calibration"]["outcome"] = res["outcome"]
     if res["adjust"] == "ls6t" and res["trusted"]:
         llc = (rec.get("laser_line") or {})
-        st = xcal.store(laser, grating, a, b, refname, lines, request, centre_nm=plan.window_centre(rng),
+        st = xcal.store(laser, grating, a, b, refname, lines, request, centre_nm=wc,
                         laser_line_cm1=llc.get("position_cm1") if llc.get("ok") else None,
                         laser_line_fwhm_cm1=llc.get("fwhm_cm1") if llc.get("ok") else None)
         res["stored_correction"] = st
@@ -3464,6 +3701,22 @@ def _native_map(ctx: Ctx, name: str, study: dict, sd: Path, rng: dict, laser: fl
                  accumulations=acq.get("accumulations", 1), mode_flags=flags, swift=bool(m.get("swift")),
                  acq_time=mp.get("acq_time", "interface"), chunk=int(mp.get("export_chunk", 65536) or 0),
                  **params, **motor_args(prof))
+    # what LabSpec took for each axis (GetMappingParams after setting them), how it was started, how long it took
+    ctx.native_info = {k: r[k] for k in r if str(k).endswith("_readback")}
+    ctx.native_info.update({k: _f(r.get(k)) if k != "axes" else r.get(k)
+                            for k in ("acq_mode", "seconds_map", "axes") if r.get(k) not in (None, "")})
+    # the hold as LabSpec read it at the end of the map: HORIBA's mapping engine may set the shutter mode itself
+    ha = r.get("hold_after_map_held")
+    if ha not in (None, "") and ctx.holding:
+        after = {"held": ha == "yes", "shutter_mode": r.get("hold_after_map_shutter_mode"),
+                 "shutter_label": r.get("hold_after_map_shutter_label"), "read": "from LabSpec, after the map"}
+        ctx.hold_log.append({"after_native_map": after})
+        if ha != "yes":
+            ctx.keep_hold = False          # put back as it was at the study's end, held again by the next study
+            warnings.append(f"the shutter hold was not in place at the end of LabSpec's map (ShutterMode "
+                            f"{after['shutter_mode']}, shutter '{after['shutter_label']}'): LabSpec's mapping engine "
+                            "set the shutter itself, so the laser may have been cycled between points (a mode hop on "
+                            "the 637.75 nm laser): see the laser line, or map with map.engine 'ls6t'")
     if not r["ok"]:
         if r.get("stopped_by"):
             raise Stop("stopped by the operator in LabSpec" if r.get("stopped_by") == "operator" else "cancelled",
@@ -3549,23 +3802,25 @@ def parse_native_map(path, study: dict, prof: dict, x0, y0, zref) -> list:
 def _point_summary(r: dict) -> dict:
     keys = ("point", "offset", "stage", "file", "native", "t", "exposure_s", "accumulations", "max_counts",
             "saturated", "noise_sigma", "spikes", "spike_cm1", "spike_info", "from_cm1", "to_cm1", "peaks", "bands",
-            "x_correction", "laser_line_correction_cm1", "zero_uncertain",
+            "x_correction", "laser_line_correction_cm1", "zero_uncertain", "excluded",
             "background",
             "ics", "auto_exposure", "optics_check", "t_start")
     return {k: r.get(k) for k in keys if k not in ("auto_exposure", "optics_check", "t_start",
-                                                    "laser_line_correction_cm1", "zero_uncertain")
+                                                    "laser_line_correction_cm1", "zero_uncertain", "excluded")
             or r.get(k) is not None}
 
 
 def _quantities(per_point, process) -> dict:
+    """Per-point values for maps and series; a spectrum kept out (`excluded`: weak, no laser line) gives none."""
     q: dict = {}
     for r in per_point:
+        out_ = bool(r.get("excluded"))
         for i, pk in enumerate(r.get("peaks", []) or []):
             nm = pk.get("name") or f"peak{i}"
             for f in ("position_cm1", "fwhm_cm1", "height", "area", "snr"):
-                q.setdefault(nm, {}).setdefault(f, []).append(pk.get(f) if pk.get("ok") else None)
+                q.setdefault(nm, {}).setdefault(f, []).append(pk.get(f) if pk.get("ok") and not out_ else None)
         for bn, val in (r.get("bands") or {}).items():
-            q.setdefault(bn, {}).setdefault("area", []).append(val)
+            q.setdefault(bn, {}).setdefault("area", []).append(None if out_ else val)
         q.setdefault("max_counts", {}).setdefault("value", []).append(r.get("max_counts"))
     return q
 

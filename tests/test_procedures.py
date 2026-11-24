@@ -613,7 +613,8 @@ def test_laser_mode_hop_is_seen_and_corrected_with_the_laser_line():
     st = run_inline({"s": st0})
     s = st["studies"]["s"]
     ll = s["checks"]["laser_line"]
-    assert [j["point"] for j in ll["jumps"]] == [1, 2] and ll["jumps"][0]["moved_cm1"] == pytest.approx(-8.7, abs=0.6)
+    assert [j["point"] for j in ll["jumps"]] == [1] and ll["jumps"][0]["moved_cm1"] == pytest.approx(-8.7, abs=0.6)
+    assert ll["points_after_a_jump"] == [1, 2] and ll["jumps"][0]["confirmed_by_peaks"] == pytest.approx(-8.7, abs=0.6)
     assert not s["reliable"] and any("laser line moved" in u for u in s["unreliable_because"])
     sim = S.ensure(bdir)
     sim._shift_armed = False                                    # a new 'first spectrum'
@@ -1035,3 +1036,185 @@ def test_focus_scan_judges_noise_and_says_where_z_was_left():
     text = api.compose_vbs(bdir, config.home())["ls6t_bridge.vbs"]
     nm = text.split("Sub VMapNative")[1].split("End Sub")[0]
     assert "LabSpec.Acq mode, tval, 0, 0, 0" in nm and "LabSpec.GetMappingParams mname" in nm
+
+
+def test_correct_follows_the_laser_lines_steps_not_its_slow_drift():
+    """2026-11-24: 'correct' followed every spectrum's laser line, and a slow creep of the line (more than the Raman
+    lines moved) dragged Si from 520.52 to 520.00 in a series. 'correct' now follows plateaus (a hop starts a new
+    one); 'correct_each' keeps following every spectrum."""
+    bdir = config.active_bridge_dir()
+    sim = S.ensure(bdir)
+    (bdir / "sim_laser_line").write_text("1")
+    (bdir / "sim_laser_line_drift").write_text("0.25")
+    st0 = {"kind": "spectrum", "sample": {"name": "Si"}, "setup": dict(SETUP, grating=600),
+           "acquire": {"center_cm1": 250, "exposure_s": 1, "laser_reference": "correct"}, "points": [{}] * 6,
+           "process": {"peaks": [{"name": "Si", "near_cm1": 520.7, "window_cm1": 30}]}}
+    sim._ll_drift_n = -1
+    s = run_inline({"s": st0})["studies"]["s"]
+    pos = [p["peaks"][0]["position_cm1"] for p in s["spectra"]]
+    zc = s["checks"]["zero_correction"]
+    assert len(zc["plateaus"]) == 1 and zc["plateaus"][0]["drift_cm1"] == pytest.approx(1.25, abs=0.4), zc
+    assert max(pos) - min(pos) < 0.5, pos                              # not dragged by the creep
+    sim._ll_drift_n = -1
+    s = run_inline({"s": dict(st0, acquire=dict(st0["acquire"], laser_reference="correct_each"))})["studies"]["s"]
+    pos_e = [p["peaks"][0]["position_cm1"] for p in s["spectra"]]
+    assert pos_e[0] - pos_e[-1] == pytest.approx(1.25, abs=0.4), pos_e     # the old way follows it
+    assert "every spectrum" in s["checks"]["zero_correction"]["follows"]
+    (bdir / "sim_laser_line_drift").unlink()
+    # a hop still starts a new plateau and is corrected
+    (bdir / "sim_shift_after_first").write_text("1")
+    sim._shift_armed = False
+    s = run_inline({"s": dict(st0, points=[{}] * 3)})["studies"]["s"]
+    zc = s["checks"]["zero_correction"]
+    assert [pl["points"] for pl in zc["plateaus"]] == [[0], [1, 2]], zc
+    pos = [p["peaks"][0]["position_cm1"] for p in s["spectra"]]
+    assert max(pos) - min(pos) < 1.0, pos
+    (bdir / "sim_shift_after_first").unlink()
+
+
+def test_hold_open_wait_native_map_hold_read_back_and_reopened_hold(tmp_path):
+    """2026-11-24: the 637.75 nm laser's first held spectrum had a laser line 9.9 cm-1 wide: the hold waits after
+    opening the shutter (lasers.<k>.hold_open_s; by default settle_s, or 5 s for a laser marked mode_hops). HORIBA's
+    mapping engine may set the shutter mode itself: the native map's result says whether the hold was still in place,
+    as LabSpec read it. A hold the bridge let go between studies is reported as opened again."""
+    _profile_with_shutter(tmp_path)
+    prof = P.load()
+    lk = next(k for k, v in prof["lasers"].items() if abs(v["nm"] - 532) < 1)
+    assert plan.hold_open_s(prof, 532) == 0.0
+    prof["lasers"][lk].update(mode_hops=True)
+    P.save(prof)
+    assert plan.hold_open_s(P.load(), 532) == plan.HOLD_OPEN_DEFAULT_S
+    prof["lasers"][lk].update(settle_s=3.5)
+    P.save(prof)
+    assert plan.hold_open_s(P.load(), 532) == 3.5
+    sim = S.ensure(config.active_bridge_dir())
+    sim.hold_open_waits = 0
+    one = {"kind": "spectrum", "sample": {"name": "Si"}, "setup": SETUP,
+           "acquire": {"center_cm1": 520, "exposure_s": 0.2, "shutter": "hold"}, "points": [{}, {}]}
+    e0 = plan.estimate(dict(one, acquire=dict(one["acquire"], shutter="auto")), P.load())["seconds"]["total"]
+    e1 = plan.estimate(one, P.load())["seconds"]["total"]
+    assert e1 == pytest.approx(e0 - 3.5 + 3.5, abs=0.5)          # one settle_s less between spectra, one wait more
+    st = run_inline({"a": one, "b": one})
+    a, b = st["studies"]["a"]["shutter_hold"], st["studies"]["b"]["shutter_hold"]
+    assert a["open_wait_s"] == 3.5 and b["continued_from_previous_study"] and sim.hold_open_waits == 1
+    # native map: the hold read back from LabSpec after the map
+    nat = {"kind": "map", "sample": {"name": "x"}, "setup": SETUP,
+           "acquire": {"center_cm1": 520, "exposure_s": 0.2, "shutter": "hold"},
+           "map": {"x_um": [0, 2, 1], "y_um": [0, 0, 1], "engine": "native"}}
+    st = run_inline({"m": nat})
+    m = st["studies"]["m"]
+    assert m["shutter_hold"]["after_native_map"]["held"] is True, m.get("shutter_hold")
+    bdir = config.active_bridge_dir()
+    (bdir / "sim_native_map_drops_hold").write_text("1")
+    st = run_inline({"m": nat, "s": one})
+    m = st["studies"]["m"]
+    assert m["shutter_hold"]["after_native_map"]["held"] is False
+    assert any("not in place at the end of LabSpec's map" in w for w in m["warnings"])
+    assert not m["shutter_hold"]["kept_for_next_study"]           # released, held again by the next study
+    (bdir / "sim_native_map_drops_hold").unlink()
+    # the bridge let the hold go between studies (no command for idle_s): the next study says it was opened again
+    orig = sim.v_shutter_hold
+
+    def drop_then_hold(p):
+        if p.get("state") != "off" and getattr(sim, "held", False) and getattr(sim, "_drop_once", False):
+            sim._drop_once = False
+            sim.held = False
+            sim.hold_last_why = "no command for 60 s"
+        return orig(p)
+    sim.v_shutter_hold = drop_then_hold
+    sim._drop_once = False
+    try:
+        import labspec_translator.runner as R
+        real_run_kind = R._run_kind
+
+        def arm_after_a(name, study, ctx):
+            out = real_run_kind(name, study, ctx)
+            if name == "a":
+                sim._drop_once = True
+            return out
+        R._run_kind = arm_after_a
+        try:
+            st = run_inline({"a": one, "b": one})
+        finally:
+            R._run_kind = real_run_kind
+    finally:
+        sim.v_shutter_hold = orig
+    b = st["studies"]["b"]
+    assert b["shutter_hold"].get("reopened_after_bridge_release"), b["shutter_hold"]
+    assert any("released by the bridge (no command for 60 s)" in w for w in b["warnings"])
+    prof = P.load()
+    prof["lasers"][lk].update(mode_hops=False, settle_s=0)
+    P.save(prof)
+
+
+def test_range_uses_the_spectrometers_real_centre():
+    """2026-11-24: for a range (-100..700 cm-1) LabSpec's Acq placed the window itself (676.75 nm read after it), while
+    ls6t keyed the per-window correction by the range's centre (650.63). The spectrometer's reading after the data is
+    the centre used to store and look up corrections."""
+    from labspec_translator import xcal
+    xcal.clear()
+    setup = dict(SETUP, grating=1200)
+    acq = {"range_cm1": [300, 700], "exposure_s": 1}
+    st = run_inline({"c": {"kind": "calibration", "sample": {"name": "Si"}, "setup": setup, "acquire": acq,
+                           "calibration": {"adjust": "ls6t"}}})
+    cal = st["studies"]["c"]["calibration"]
+    rng = plan.acq_range({"kind": "calibration", "setup": setup, "acquire": acq}, P.load(), 532)
+    win = 46800.0 / 1200
+    assert cal["applies_to"]["window_centre_nm"] == pytest.approx(rng["from_nm"] + win / 2, abs=0.01), cal["applies_to"]
+    assert "reading" in cal["applies_to"]["window_centre_from"]
+    assert cal["stored_correction"]["centre_nm"] == pytest.approx(rng["from_nm"] + win / 2, abs=0.01)
+    sp = {"kind": "spectrum", "sample": {"name": "Si"}, "setup": setup, "acquire": acq,
+          "process": {"peaks": [{"name": "Si", "near_cm1": 520.7, "window_cm1": 30}]}}
+    s = run_inline({"s": sp})["studies"]["s"]
+    wc = s["checks"]["window_centre"]
+    assert wc["nm"] == pytest.approx(rng["from_nm"] + win / 2, abs=0.01) and wc["range_centre_nm"] != wc["nm"]
+    assert not any("window centred at" in w and "away" in w for w in s["warnings"])     # the same window: no far
+    xcal.clear()
+
+
+def test_weak_points_kept_out_bad_laser_line_fits_and_native_readbacks():
+    """2026-11-24, native map: point 0 was taken before the beam was on (6 counts against 150, laser line at +1.5,
+    Si 538.8) and entered the summary; the laser line 1.6 cm-1 from its calibration position was called a hop at
+    every later point; the axis readbacks were missing. At 600 gr/mm the laser line's fit jumped +3.6 / +5.9 while Si
+    stayed: a hop is now confirmed by the Raman peaks, and a laser-line step they do not follow is a bad fit."""
+    x = np.linspace(-200, 800, 800)
+    nm = 1e7 / (1e7 / 532.0 - x)
+
+    def rec(k, scale):
+        y = 300 + scale * (100 * np.exp(-0.5 * (x / 3) ** 2) + 50 * np.exp(-0.5 * ((x - 520.7) / 3) ** 2))
+        return {"point": k, "_sp": {"x": nm, "y": y, "meta": {"x_unit": "nm"}}}
+    pts = [rec(0, 0.04)] + [rec(k, 1.0) for k in range(1, 5)]
+    ex = runner.screen_points(pts, 532.0, "map")
+    assert list(ex) == [0] and "laser line" in ex[0]           # the leak through the edge filter: the beam was off
+    x = np.linspace(200, 800, 600)                               # no laser line in the window
+    nm = 1e7 / (1e7 / 532.0 - x)
+    no_ll = [rec(0, 0.04)] + [rec(k, 1.0) for k in range(1, 5)]
+    w_: list = []
+    assert runner.screen_points(no_ll, 532.0, "map", w_) == {} and "off the sample" in w_[0]   # a map: only said
+    assert list(runner.screen_points(no_ll, 532.0, "series")) == [0]                          # one place: out
+    pts[0]["excluded"] = ex[0]
+    pts[0]["peaks"] = [{"name": "Si", "ok": True, "position_cm1": 538.8}]
+    for r in pts[1:]:
+        r["peaks"] = [{"name": "Si", "ok": True, "position_cm1": 521.4}]
+    q = runner._quantities(pts, {})
+    assert q["Si"]["position_cm1"][0] is None and q["Si"]["position_cm1"][1] == 521.4
+    # the laser line alone stepping (a bad fit): no hop, the series stays reliable
+    bdir = config.active_bridge_dir()
+    sim = S.ensure(bdir)
+    (bdir / "sim_laser_line").write_text("1")
+    (bdir / "sim_laser_line_drift").write_text("2.5")
+    sim._ll_drift_n = -1
+    st0 = {"kind": "spectrum", "sample": {"name": "Si"}, "setup": dict(SETUP, grating=600),
+           "acquire": {"center_cm1": 250, "exposure_s": 1, "laser_reference": "correct"}, "points": [{}] * 3,
+           "process": {"peaks": [{"name": "Si", "near_cm1": 520.7, "window_cm1": 30}]}}
+    s = run_inline({"s": st0})["studies"]["s"]
+    assert not s["checks"]["laser_line"]["jumps"] and set(s["checks"]["laser_line_bad_fits"]) == {"1", "2"}, \
+        s["checks"]["laser_line"]
+    pos = [p["peaks"][0]["position_cm1"] for p in s["spectra"]]
+    assert max(pos) - min(pos) < 0.5 and not any("mode hop" in u for u in s["unreliable_because"])
+    (bdir / "sim_laser_line_drift").unlink()
+    # a native map gives LabSpec's axis readbacks
+    nat = {"kind": "map", "sample": {"name": "x"}, "setup": SETUP, "acquire": {"center_cm1": 520, "exposure_s": 0.2},
+           "map": {"x_um": [0, 2, 1], "y_um": [0, 0, 1], "engine": "native"}}
+    m = run_inline({"m": nat})["studies"]["m"]
+    assert "x_readback" in m["native_map"] and "y_readback" in m["native_map"] and m["native_map"]["seconds_map"]

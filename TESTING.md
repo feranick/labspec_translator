@@ -954,9 +954,45 @@ left about 1 cm⁻¹ (Si 519.57 and 520.05 after −8.0 and −8.9 cm⁻¹; line
 jumped more than 3 cm⁻¹, or is over 1.2 × as wide as at the calibration (or the study's narrowest), is flagged
 `zero_uncertain` (with `checks.zero_correction.uncertain_points` and a warning); corrections now keep the laser line's
 width too. (3) With a range (From ≠ To) LabSpec's Acq places the spectrometer itself (676.75 nm read after Acq for data
-centred near 650.6): ls6t no longer warns about that move. The real centre is the data's, which is what the key uses
-(650.63, computed from the range). "−89.7 instead of −100" is real: LabSpec's window did not reach −100. (4)
-Interpolation is still to test: calibrate at two centres more than 1 nm apart and take a spectrum between them.
+centred near 650.6): ls6t no longer warns about that move. **Corrected in 2026.11.24.11:** the real centre is the
+spectrometer's, 676.75 nm. For a range that fits one window LabSpec puts the window's blue edge at From (−100 cm⁻¹ =
+633.7 nm; 633.7 + half the 1200 window ≈ 677.6, as read) and returns only From…To, so the *data* look centred at
+650.6 while the grating sat at 676.75. "−89.7 instead of −100" is the window's first pixels landing just inside From.
+ls6t now keys per-window corrections by the spectrometer's reading after the data (`checks.window_centre`:
+`nm`, `from`, `range_centre_nm`; the calibration's `applies_to.window_centre_from`). **The correction stored as
+"650.63" on .24.9 was measured at 676.75:** recalibrate that range (or clear it with `ls6t references clear correction 637.75@1200`
+and calibrate again) before relying on it. (4) **Interpolation passed (Nicola, .24.9):** a window centred at 655.30 nm got
++1.21, halfway between +2.01 at 650.63 and +0.46 at 659.66 (laser line −5.14 interpolated), Si 521.13. Since the
+650.63 end was really 676.75 (above), repeat it after recalibrating: Si should come closer to 520.7.
+**Follow-up on .24.10 (2026-11-24):** (a) the bridge's idle lease counts from the end of its last command (when the
+result is written), only between commands: a long exposure or a native map never triggers it (midnight-safe). A hold
+kept into the next study gets 120 s more for the analysis in between; if the bridge still let it go, the next study
+says so (`shutter_hold.reopened_after_bridge_release` and a warning). (b) `laser_reference: "correct"` now follows the
+laser line's **steps** (a hop starts a new plateau; each spectrum uses its plateau's median), not its slow creep, which
+dragged Si 520.52 → 520.00 in a series; `"correct_each"` keeps the old per-spectrum following.
+`checks.zero_correction.plateaus` lists them with their drift. (c) After the hold opens the shutter ls6t waits
+`lasers.<k>.hold_open_s` before the first spectrum (default: the laser's `settle_s`, else 5 s for a laser marked
+`mode_hops` / `unstable_multi`), for the first-spectrum width (9.9 cm⁻¹ against about 6); `shutter_hold.open_wait_s`.
+(d) A native map's `shutter_hold.after_native_map` says whether the hold was still in place at the end, as LabSpec
+read it (ShutterMode and the shutter's label); if HORIBA's engine changed it, a warning and the hold is put back at the
+study's end. **Tests:** a 10-spectrum held series with 637.75 and `correct`: Si within about 0.2 cm⁻¹ and one plateau;
+the first spectrum's laser-line FWHM like the others; a native map with `acquire.shutter: "hold"`: `after_native_map`.
+**Native map works (.24.10, 3 × 3, 2 µm, 637.75 / 1200 / 1 %, centre 300, 1 s × 2, held):** LabSpec's map window
+filled point by point, 27.9 s (about 60 s with the points engine); hold released afterwards. Point 0 was taken before
+the beam was really on (about 6 counts against 150, laser line +1.5, Si 538.8) and entered the summary. **From
+2026.11.24.11:** such a spectrum (no laser line where most others have one, or its laser line under 20 % of the median height; without
+the line in the window, a signal under 20 % of the median for a spectrum or series, only a warning for a map) is kept out of the summaries (`spectra[].excluded`, `checks.excluded_points`); a held native map now waits
+`hold_open_s` after opening the shutter (5 s for the 637.75 with its `settle_s`), and `warmup_s` also runs before
+LabSpec's map. "Moved by +1.6 at points 4–8" was the line's distance from the calibration, not a hop: jumps are now
+judged spectrum to spectrum (and confirmed by the Raman peaks moving with the laser line), and the distance from the
+calibration is `checks.laser_line.drift_since_calibration_cm1`. The axis readbacks are in `native_map`. Si 0.7 high
+with `correct`: the correction it used ("650.63") was measured with the spectrometer at 676.75 nm (the range
+calibration, above), whose laser line sits elsewhere; recalibrate (with the range or the map's window) on .24.11.
+**600 gr/mm series (.24.10):** spikes pass (two real cosmic rays, 46 and 48 σ). A "mode hop" of the laser line (+3.6 /
++5.9, 1.5–1.8 × wider) with Si steady was a bad fit of the 2-pixel line on the edge filter: **from .24.11** a laser-line
+step the Raman peaks do not follow is listed in `checks.laser_line_bad_fits`, is not a hop and is not used for
+`correct`. The 600 zero (Si 522.85 with the 09:12 correction, no window centre): recalibrate. **Test:** the same series:
+no hop, reliable, `laser_line_bad_fits` at those points.
 **Native map on .24.9, safety (3 × 3, 2 µm, 637.75 / 1200 / 1 %, 1 s × 2):** the map held the bridge about a minute
 (LabSpec's own map acquisition); ls6t called the bridge gone after 20 s ("busy in map_native"), and the shutter release
 it then sent was withdrawn from the bridge's queue, so the shutter stayed held open (laser_shutter On, ShutterMode 1,

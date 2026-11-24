@@ -824,6 +824,26 @@ def settle_s(prof: dict, laser) -> float:
     return s
 
 
+HOLD_OPEN_DEFAULT_S = 5.0   # a laser marked mode_hops / unstable_multi without its own settle_s
+
+
+def hold_open_s(prof: dict, laser) -> float:
+    """The wait after the shutter hold opens the shutter, before the first spectrum (the laser settling in its mode:
+    2026-11-24, the 637.75 nm laser's first held spectrum had its laser line 9.9 cm-1 wide, then about 6):
+    lasers.<k>.hold_open_s; by default the laser's settle_s (the time it needs after a shutter cycle), or 5 s for a
+    laser marked mode_hops or unstable_multi, else none."""
+    lk = laser_key(prof, laser) if laser is not None else None
+    if not lk:
+        return 0.0
+    L = prof["lasers"][lk]
+    if L.get("hold_open_s") is not None:
+        return max(0.0, float(L["hold_open_s"]))
+    st = float(L.get("settle_s") or 0.0)
+    if st > 0:
+        return st
+    return HOLD_OPEN_DEFAULT_S if (L.get("mode_hops") or L.get("unstable_multi")) else 0.0
+
+
 def hold_shutter(study: dict, prof: dict, laser) -> bool:
     """Whether a study's spectra are taken with the laser shutter held open between them (acquire.shutter 'hold', or
     the laser's lasers.<k>.hold_shutter unless the study says 'auto'), as HORIBA's mapping scripts do. A series whose
@@ -934,8 +954,11 @@ def estimate(study: dict, prof: dict, current: dict | None = None) -> dict:
         if af and (k == 0 or (every and k % every == 0)):
             total += scan_seconds(study, prof) if af == "scan" else t["autofocus_s"]
         total += acq_s
-        if k > 0 and not hold_shutter(study, prof, laser):
+        held_ = hold_shutter(study, prof, laser)
+        if k > 0 and not held_:
             total += settle_s(prof, laser)          # the pause between spectra (a laser that needs it)
+        if k == 0 and held_:
+            total += hold_open_s(prof, laser)       # the laser settling after the hold opens the shutter
     vd = study.get("video") or {}
     v = prof.get("video", {})
     shots = int(bool(vd.get("before", study.get("kind") == "calibration"))) + int(bool(vd.get("after")))

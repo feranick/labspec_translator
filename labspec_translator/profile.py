@@ -329,7 +329,10 @@ def load(path: Path | None = None) -> dict:
             v.setdefault("unstable_multi", False)      # true: refuse multi-spectrum studies; "warn": warn
             v.setdefault("settle_s", 0)                # a pause between spectra with this laser (its mode holds)
             v.setdefault("hold_shutter", False)        # the shutter held open across a study's spectra
-            v.setdefault("laser_reference", "report")  # 'correct': follow the laser line when it is in the window
+            v.setdefault("hold_open_s", None)          # the wait after the hold opens it (None: settle_s, or 5 s
+            # for a laser marked mode_hops / unstable_multi)
+            v.setdefault("laser_reference", "report")  # 'correct': follow the laser line's steps (hops) when it is in
+            # the window; 'correct_each': every spectrum's laser line (its slow drift too)
             v.setdefault("calibration_max_age_h", None)  # a shorter life for this laser's calibrations
     return prof
 
