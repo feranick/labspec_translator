@@ -700,6 +700,10 @@ lasers.637.75.unstable_multi true` refuses studies of several spectra with that 
 a spectrum with several points) unless `acquire.laser_reference: "correct"` with the laser line in the window
 (`"warn"`: a warning instead), saying why; with `correct` and no laser line found, the study says so (unreliable);
 each peak also gives `from_laser_line_cm1`, its shift from that spectrum's own laser line.
+`profile set` and laser names (.23.23): `lasers.637.75.…` finds the laser by its wavelength whatever its key in the
+profile ('638' with nm 637.75 on the XploRA, which is why `lasers.637.75.power_mw` answered "no '637'"); a key can
+also be quoted (`lasers."638".unstable_multi`), and an unknown key lists the ones there. Hand-editing `profile.json`
+(`LS6T_HOME\profile.json`, the laser's entry under "lasers") remains an alternative; the profile stays reviewed.
 The laser-line test already confirmed the hop (the laser line moved with Si; Si − laser constant at 524.3–524.8).
 **`timing.status_before_each` is now also a possible workaround:** if a `status` read resets the 637.75 nm laser,
 running it before every spectrum would make multi-spectrum studies usable with it. Report the five-point result with

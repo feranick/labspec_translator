@@ -655,20 +655,37 @@ def import_discovery(text: str, base: dict | None = None) -> tuple[dict, list[st
 
 def set_key(prof: dict, dotted: str, value) -> dict:
     """profile[a][b]... = value (for `ls6t profile set`, a person's edit); the key must exist already. Keys with a dot
-    of their own ('lasers.637.75.power_mw', 2026-11-23) are matched against the profile: at each level the longest
-    run of parts that is a key there wins; 'lasers["637.75"].power_mw' works too."""
+    of their own are matched against the profile: at each level the longest run of parts that is a key there wins;
+    a key can be quoted ('lasers."637.75".power_mw', 'lasers["637.75"].power_mw'); and under 'lasers' a laser is
+    also found by its wavelength ('lasers.637.75…' finds the laser stored as '638' with nm 637.75: 2026-11-23,
+    `profile set lasers.637.75.power_mw 40` answered "no '637' in the profile")."""
     import re
-    # a bracketed key is one part, dots and all
-    parts = [m.group(1) or m.group(2) for m in re.finditer(r"\[[\"']?([^\"'\]]+)[\"']?\]|([^.\[\]]+)", dotted)]
+    # a bracketed or quoted key is one part, dots and all
+    parts = [m.group(1) or m.group(2) or m.group(3) for m in
+             re.finditer(r"\[[\"']?([^\"'\]]+)[\"']?\]|[\"']([^\"']+)[\"']|([^.\[\]\"']+)", dotted)]
     cur, i = prof, 0
     while True:
         if not isinstance(cur, dict):
             raise KeyError(f"{dotted}: {'.'.join(parts[:i])} is not a group of keys")
         hit = next((j for j in range(len(parts), i, -1) if ".".join(parts[i:j]) in cur), None)
+        k = ".".join(parts[i:hit]) if hit else None
+        if hit is None and i > 0 and parts[i - 1] == "lasers":
+            # a laser by its wavelength, the longest numeric run first
+            for j in range(len(parts), i, -1):
+                try:
+                    nm = float(".".join(parts[i:j]))
+                except ValueError:
+                    continue
+                k = next((kk for kk, v in cur.items() if isinstance(v, dict) and v.get("nm") is not None
+                          and abs(float(v["nm"]) - nm) < 0.01), None)
+                if k:
+                    hit = j
+                    break
         if hit is None:
-            raise KeyError(f"{dotted}: no {parts[i]!r} in the profile" if i < len(parts) - 1 else
-                           f"{dotted}: no such key in the profile")
-        k = ".".join(parts[i:hit])
+            have = ", ".join(sorted(map(str, cur))) if isinstance(cur, dict) else ""
+            raise KeyError(f"{dotted}: no {parts[i]!r} in the profile" + (f" (here: {have})" if have else "")
+                           if i < len(parts) - 1 else f"{dotted}: no such key in the profile"
+                           + (f" (here: {have})" if have else ""))
         if hit == len(parts):
             cur[k] = value
             return prof

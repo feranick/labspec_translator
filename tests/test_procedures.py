@@ -94,6 +94,15 @@ def test_profile_set(tmp_path):
         k = "637.75"
     assert api.profile_set(f"lasers.{k}.power_mw", "40")["ok"] and P.load()["lasers"][k]["power_mw"] == 40
     assert api.profile_set(f'lasers["{k}"].power_mw', "41")["ok"] and P.load()["lasers"][k]["power_mw"] == 41
+    # by wavelength, the laser stored under another key (the XploRA: '638' with nm 637.75), and quoted
+    prof = P.load()
+    prof["lasers"]["638"] = dict(prof["lasers"].get("638", {}), nm=637.75, power_mw=35, max_filter_pct=100)
+    prof["lasers"].pop("637.75", None)
+    P.save(prof)
+    assert api.profile_set("lasers.637.75.unstable_multi", "true")["ok"] and P.load()["lasers"]["638"]["unstable_multi"]
+    assert api.profile_set('lasers."638".mode_hops', "true")["ok"] and P.load()["lasers"]["638"]["mode_hops"]
+    with pytest.raises(KeyError, match="here: "):
+        api.profile_set("lasers.640.power_mw", "1")
 
 
 # --------------------------------------------------------------------------------------------- stage and focus

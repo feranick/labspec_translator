@@ -113,7 +113,7 @@ ls6t instrument snapshot --extended          # LabSpec's extended video (the sta
 ls6t instrument config list | save NAME | load NAME   # LabSpec's whole configuration (maintainer)
 ls6t bridge call <verb> key=value ...        # one bridge command, for the maintainer (TESTING.md)
 ls6t profile show | default | import <dump>
-ls6t profile set <key> <JSON value>          # one profile value, e.g. video.laser_offset_um "[1.4, -0.6]", lasers.637.75.power_mw 40
+ls6t profile set <key> <JSON value>          # one profile value, e.g. video.laser_offset_um "[1.4, -0.6]", lasers.637.75.power_mw 40 (a laser by key or wavelength; keys may be quoted)
 ls6t references show                         # spectral corrections, backgrounds, beam offsets, alignment
 ls6t references clear correction [LASER@GRATING] | background NAME | spot
 ls6t alignment status                        # per laser: baseline, last check, age
