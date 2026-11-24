@@ -2986,8 +2986,20 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
     # +0.5 cm-1 within 30 s: 'correct' follows it whenever the laser line is in the window)
     ll_mode = study.get("acquire", {}).get("laser_reference") or \
         ((prof["lasers"][lk_].get("laser_reference") if lk_ else None) or "report")
-    ll_ref = laser_line_reference(laser, grating)
-    ll_ref_from = "calibration" if ll_ref is not None else None
+    # The two zero corrections must not count the same thing twice: a stored correction (xcal) was measured with the
+    # laser where it was then. With laser_reference 'correct' each spectrum is first brought back to the laser line
+    # of THAT calibration (stored with it), then the correction applies: the stored offset relative to the laser
+    # line. If the correction has no laser line (calibrated without it in the window), the spectra are brought to the
+    # study's first laser line (the drift within the study) and the stored offset applies as measured: the laser's
+    # move since the calibration is then not covered, and the result says so (zero_correction).
+    if corr and ll_mode == "correct":
+        if corr.get("laser_line_cm1") is not None:
+            ll_ref, ll_ref_from = float(corr["laser_line_cm1"]), f"the stored correction's calibration ({corr['time']})"
+        else:
+            ll_ref, ll_ref_from = None, None          # the first spectrum's, below
+    else:
+        ll_ref = laser_line_reference(laser, grating)
+        ll_ref_from = "calibration" if ll_ref is not None else None
     for rec in per_point:
         sp = rec.pop("_sp") if "_sp" in rec else spectra.read(rec["file"])
         try:
@@ -3005,7 +3017,7 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
         if ll:
             rec["laser_line"] = ll
             if ll_ref is None and ll.get("ok"):
-                ll_ref, ll_ref_from = ll["position_cm1"], f"point {rec['point']}"
+                ll_ref, ll_ref_from = ll["position_cm1"], f"the study's first laser line (point {rec['point']})"
             if ll_mode == "correct" and ll.get("ok") and ll_ref is not None:
                 d = ll["position_cm1"] - ll_ref
                 shift = shift - d
@@ -3021,7 +3033,8 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
             if info["covered_fraction"] < 0.98:
                 warnings.append(f"point {rec['point']}: the background covers {info['covered_fraction']:.0%} of the "
                                 "spectrum")
-        a = spectra.analyze(shift, y, process, min_snr, prof["checks"].get("detect_snr", 5.0))
+        a = spectra.analyze(shift, y, process, min_snr, prof["checks"].get("detect_snr", 5.0),
+                            float(prof["detector"].get("e_per_count") or 1.0))
         _spikes_where_meaningful(a, laser, grating, ll)
         if ll and ll.get("ok"):
             # each peak also from this spectrum's own laser line (the Raman shift by definition; LabSpec's scale may
@@ -3094,6 +3107,26 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
         warnings.append(f"a requested peak was not detected in {len(set(undetected))} spectra (see peaks[].why)")
 
     lls = [(r["point"], r["laser_line"]["position_cm1"]) for r in per_point if (r.get("laser_line") or {}).get("ok")]
+    followed = any(r.get("laser_line_correction_cm1") is not None for r in per_point)
+    if corr and followed:
+        how = ("the stored correction relative to the laser line: each spectrum brought back to the laser line of the "
+               "correction's calibration, then the correction" if corr.get("laser_line_cm1") is not None else
+               "the laser line within the study (to its first spectrum), then the stored correction as measured: the "
+               "laser's move since that calibration is not covered (calibrate with the laser line in the window)")
+    elif corr:
+        how = "the stored correction only (true = a + b x measured)"
+    elif followed:
+        how = f"the laser line only (each spectrum brought back to {ll_ref_from})"
+    else:
+        how = "none"
+    checks["zero_correction"] = {"method": how, "laser_reference": ll_mode,
+                                 **({"stored": {k: corr.get(k) for k in ("a", "b", "time", "centre_nm",
+                                                                        "laser_line_cm1") if corr.get(k) is not None}}
+                                    if corr else {}),
+                                 **({"laser_line_reference_cm1": round(ll_ref, 3), "laser_line_reference_from":
+                                     ll_ref_from} if followed and ll_ref is not None else {})}
+    if corr and followed and corr.get("laser_line_cm1") is None:
+        warnings.append("zero: " + how)
     if ll_mode == "correct" and len(lls) < len(per_point):
         miss = [r["point"] for r in per_point if not (r.get("laser_line") or {}).get("ok")]
         unreliable.append(f"acquire.laser_reference 'correct', but no laser line was found in spectra "
@@ -3285,7 +3318,9 @@ def _calibration_result(study, prof, rec, ref_lines, laser, grating, rng, reques
                           f"zero for {combo(laser, grating)}")
     checks["calibration"]["outcome"] = res["outcome"]
     if res["adjust"] == "ls6t" and res["trusted"]:
-        st = xcal.store(laser, grating, a, b, refname, lines, request, centre_nm=plan.window_centre(rng))
+        llc = (rec.get("laser_line") or {})
+        st = xcal.store(laser, grating, a, b, refname, lines, request, centre_nm=plan.window_centre(rng),
+                        laser_line_cm1=llc.get("position_cm1") if llc.get("ok") else None)
         res["stored_correction"] = st
         warnings.append(f"ls6t now corrects later spectra ({xcal.key(laser, grating)}): true = {a:+.3f} + "
                         f"{b:.6f} x measured")

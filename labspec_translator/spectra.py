@@ -122,7 +122,7 @@ def noise_sigma(y) -> float:
     return float(1.4826 * mad / math.sqrt(6.0))
 
 
-def spikes(y, sigma: float | None = None, k: float = 12.0) -> list[int]:
+def spikes(y, sigma: float | None = None, k: float = 12.0, e_per_count: float = 1.0) -> list[int]:
     """Indices of single- or two-pixel spikes (cosmic rays) standing k sigma above a 5-point median."""
     y = np.asarray(y, float)
     if y.size < 7:
@@ -145,7 +145,9 @@ def spikes(y, sigma: float | None = None, k: float = 12.0) -> list[int]:
         base = float(np.median(y[max(0, i - 7):i + 8]))             # the local level, wider than any spike
         # and well above the counting noise of that level: with a very smooth noise estimate (sigma 0.12-0.17
         # counts, 2026-11-24) 12 sigma is two counts, and single-pixel noise passed
-        if y[i] - base < max(k * s, 3.0 * math.sqrt(max(base, 1.0)), 5.0):
+        # (the counting noise of `base` counts is sqrt(base / e_per_count) counts: profile detector.e_per_count, the
+        # CCD's electrons per count; 1 unless set)
+        if y[i] - base < max(k * s, 3.0 * math.sqrt(max(base, 1.0) / max(e_per_count, 1e-3)), 5.0):
             continue
         half = base + (y[i] - base) / 2.0
         lo, hi = max(0, i - 3), min(y.size, i + 4)
@@ -327,7 +329,8 @@ def band(x, y, lo: float, hi: float) -> float | None:
 
 # --------------------------------------------------------------------------------------------- one spectrum
 
-def analyze(shift, y, process: dict, min_snr: float = 10.0, detect_snr: float = 5.0) -> dict:
+def analyze(shift, y, process: dict, min_snr: float = 10.0, detect_snr: float = 5.0,
+            e_per_count: float = 1.0) -> dict:
     """Baseline, noise, spikes, peaks and bands of one spectrum (x in cm-1, ascending)."""
     process = process or {}
     x, y = sort_xy(shift, y)
@@ -343,7 +346,7 @@ def analyze(shift, y, process: dict, min_snr: float = 10.0, detect_snr: float = 
     out: dict = {"points": int(x.size), "from_cm1": round(float(x.min()), 3) if x.size else None,
                  "to_cm1": round(float(x.max()), 3) if x.size else None,
                  "noise_sigma": round(sigma, 4) if math.isfinite(sigma) else None,
-                 "baseline_degree": deg, "spikes": spikes(y, sigma)}
+                 "baseline_degree": deg, "spikes": spikes(y, sigma, e_per_count=e_per_count)}
     specs = process.get("peaks")
     auto = False
     if not specs:

@@ -57,7 +57,8 @@ DEFAULT_PROFILE: dict = {
     "blocking_motors": [],
     "holes_um": None,              # null: any value LabSpec accepts
     "slits_um": None,
-    "detector": {"full_scale": 65535, "max_temp_c": -50.0, "pixels": 1024},
+    # e_per_count: the CCD's electrons per count (the spike test's counting-noise floor); 1 unless known
+    "detector": {"full_scale": 65535, "max_temp_c": -50.0, "pixels": 1024, "e_per_count": 1.0},
     "stage": {"x_um": None, "y_um": None, "z_um": None,    # absolute limits [min, max]; null: only the relative ones
               "z_into_sample": None,                      # "+" or "-": which Z direction focuses deeper (TESTING)
               "retract_for_objective_change": False},     # lower the stage by limits.retract_um before a lens change

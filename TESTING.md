@@ -931,6 +931,18 @@ noise through); each spike gives its height (`spike_info`: cm⁻¹, counts, sigm
 makes for the study's window no longer counts as "moved / busy around point 0" in `optics_check`. (5) The live view is
 on by default. **Test:** calibrate 637.75@1200 in both windows, then a spectrum in each: each gets its own correction,
 and a third window between them an interpolated one.
+**The two zero corrections (.24.9, review):** a stored correction already holds the laser's position at its
+calibration, so following the laser line as well could count the zero twice. Now a correction keeps the laser line it
+was measured with (when the window had it), and with `laser_reference: "correct"` each spectrum is first brought back
+to THAT laser line, then the correction applies: the stored offset relative to the laser line. A correction measured
+without the laser line in the window: the spectra are brought to the study's first laser line (the drift within the
+study), then the correction applies as measured, and a warning says the laser's move since the calibration is not
+covered. Without `correct`: the stored correction only. `checks.zero_correction` says which (`method`, the stored
+`a`, `b`, `centre_nm`, `laser_line_cm1`, and the laser-line reference used). **Test:** calibrate 637.75@1200 with the
+laser line in the window (`range_cm1` from about −100), then a spectrum with `laser_reference: "correct"` some hours
+later: Si near 520.7 and `method` "the stored correction relative to the laser line". The spike floor's counting
+noise assumes one electron per count unless `detector.e_per_count` says otherwise (the 5-count minimum covers low
+signal).
 **runner.log was empty after the crash:** from 2026.11.24.2 every bridge command is written to the request's
 `runner.log` when it is sent and when it returns (`-> view kind=mapex`, `<- acquire ok=1 2.4 s`, marked `[shutter
 held]`), each line flushed at once, so the last call before a hang or crash is always there.

@@ -935,3 +935,38 @@ def test_correction_kept_per_window_centre():
                            "acquire": {"center_cm1": 900}}})
     assert any("window centred at" in w and "zero differs between windows" in w for w in st["studies"]["s"]["warnings"])
     assert list(xcal.load().values())[0]["by_centre"]
+
+
+def test_laser_line_and_stored_correction_do_not_count_the_zero_twice():
+    """2026-11-24 (review): with laser_reference 'correct' and a stored correction, each spectrum is brought back to
+    the laser line of the correction's calibration, then the correction applies (the stored offset relative to the
+    laser line); the result says which was done (checks.zero_correction)."""
+    from labspec_translator import xcal
+    xcal.clear()
+    bdir = config.active_bridge_dir()
+    sim = S.ensure(bdir)
+    (bdir / "sim_laser_line").write_text("1")
+    (bdir / "sim_xshift").write_text("1.5,1.0")               # the scale reads 1.5 cm-1 high, laser line included
+    setup = dict(SETUP, grating=600)
+    acq = {"center_cm1": 250, "exposure_s": 1}
+    st = run_inline({"c": {"kind": "calibration", "sample": {"name": "Si"}, "setup": setup, "acquire": acq,
+                           "calibration": {"adjust": "ls6t"}}})
+    stored = st["studies"]["c"]["calibration"]["stored_correction"]
+    assert stored["laser_line_cm1"] == pytest.approx(1.5, abs=0.3) and stored["centre_nm"]
+    # then the laser moves by 8.7 cm-1 (sim_shift_after_first replaces the scale's error for later spectra)
+    (bdir / "sim_xshift").unlink()
+    (bdir / "sim_shift_after_first").write_text("1")
+    sim._shift_armed = True
+    sp = {"kind": "spectrum", "sample": {"name": "Si"}, "setup": setup,
+          "acquire": dict(acq, laser_reference="correct"),
+          "process": {"peaks": [{"name": "Si", "near_cm1": 520.7, "window_cm1": 30}]}}
+    st = run_inline({"s": sp})
+    s = st["studies"]["s"]
+    zc = s["checks"]["zero_correction"]
+    assert "relative to the laser line" in zc["method"] and zc["stored"]["laser_line_cm1"] == stored["laser_line_cm1"]
+    assert s["peaks_by_name"]["Si"]["position_cm1"] == pytest.approx(520.7, abs=0.6)
+    # report mode: the stored correction only
+    st = run_inline({"s": dict(sp, acquire=acq)})
+    assert st["studies"]["s"]["checks"]["zero_correction"]["method"].startswith("the stored correction only")
+    (bdir / "sim_shift_after_first").unlink()
+    xcal.clear()
