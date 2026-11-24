@@ -660,6 +660,22 @@ def _setup(name: str, study: dict, ctx: Ctx, warnings: list, unreliable: list, c
         from .api import _move_timing
         readback.append({"motor": step["motor"], "asked": step["value"], "got": r.get("label") or r.get("value"),
                          "ok": bool(r["ok"] and ok), "error": r.get("error") or None, **_move_timing(r)})
+        if p["motor"] == prof["motors"]["grating"] and r.get("ok") and not ok:
+            # once more, after selecting the laser again, then stop: a study on the wrong grating is wrong
+            # (2026-11-23: after a scripted visit to 785 nm LabSpec kept refusing 2400 (its range ends at 690 nm) and
+            # took 1800, also once back on 637.75 nm; selecting 2400 by hand cleared it)
+            reselect_laser(ctx.call, prof)
+            r = ctx.call("move", timeout_s=600, **p, **move_extra(prof, p["motor"], asked_here))
+            ok, got = _matches(step, r)
+            readback.append({"motor": step["motor"], "asked": step["value"], "got": r.get("label") or r.get("value"),
+                             "ok": bool(r["ok"] and ok), "error": r.get("error") or None, "retry": True,
+                             **_move_timing(r)})
+            if not (r["ok"] and ok):
+                raise Stop(f"the grating did not reach {step['value']} (it reads {got}) after two moves: nothing "
+                           "measured on the wrong grating. After the laser was changed by the bridge (e.g. a visit to "
+                           "785 nm), LabSpec can refuse a grating the earlier laser could not use, until the bridge "
+                           "script is restarted (2026-11-23): `ls6t instrument end-bridge`, start ls6t_bridge.vbs "
+                           "again in LabSpec, and run the study again (or select the grating by hand)", "study")
         if p["motor"] == prof["motors"]["grating"] and r.get("ok"):
             note_grating_set(step["value"], r.get("value"), f"study {name}")
         if not r["ok"] or not ok:
@@ -2610,6 +2626,24 @@ def grating_guard(prof: dict, study: dict, after: dict, laser, rng: dict, path, 
                    "was measured. Check one acquisition in LabSpec by hand with the same grating and centre", "study")
 
 
+def reselect_laser(call, prof: dict) -> dict | None:
+    """Selects the laser LabSpec has now once more (a move to its own value), before a grating move is tried again:
+    LabSpec has refused a grating that the previous laser could not use (2026-11-23: 2400 after a scripted visit to
+    785 nm, though the laser was 637.75 nm again). Whether this refreshes LabSpec's check is to be seen (TESTING
+    T3.16); the read-back says what happened. call(verb, timeout_s=..., **params) is the bridge's."""
+    try:
+        st = call("status", timeout_s=15, **motor_args(prof))
+        las = _f(st.get("laser_nm"))
+        if las is None:
+            return None
+        r = call("move", timeout_s=600, motor=prof["motors"]["laser"], mode="value", value=las)
+        return {"laser_nm": las, "ok": bool(r.get("ok"))}
+    except Stop:
+        raise
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def move_extra(prof: dict, motor: str, confirmed_now: bool = False) -> dict:
     """{'blocking': 1} for the motors moved the blocking way (profile blocking_motors, by role; the grating by
     default: with NO_WAIT it reported idle at once and once stopped part way, 2026-11-20). {'no_message': 1} only
@@ -2620,6 +2654,9 @@ def move_extra(prof: dict, motor: str, confirmed_now: bool = False) -> dict:
     roles = prof.get("blocking_motors", []) or []
     names = {prof["motors"].get(r) for r in roles if prof["motors"].get(r)}
     out = {"blocking": 1} if motor in names else {}
+    if motor == prof["motors"].get("grating"):
+        # read until it is the grating asked (a passing grating can read still for 1.5 s: 2026-11-23)
+        out.update(until_target=1, until_target_s=120)
     if confirmed_now and motor == prof["motors"].get("objective") and prof.get("suppress_labspec_prompt", True):
         out["no_message"] = 1
     return out

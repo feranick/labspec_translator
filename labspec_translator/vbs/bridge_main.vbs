@@ -978,6 +978,31 @@ Sub VMove(cmd, res)
     ' then the position, read until it is the one asked: a motor passing through other positions (the pinhole read
     ' 100 on its way from 500 to 300) or reporting idle early (the slit is the slowest) is not taken as arrived
     If waited And mode <> "index" Then SettleReadback motor, mode, v, tmo, res
+    ' until_target (the grating): 2026-11-23, a move 1200 -> 2400 read 1800 for 1.5 s (taken as settled), the next
+    ' commands (the shutter hold) went to LabSpec and the turret stayed at 1800. Read until it is the position asked,
+    ' however long a passing position reads still, then every motor idle again
+    If waited And mode <> "index" And GetP(cmd, "until_target", "0") = "1" And res.Exists("settle_stable") Then
+        res.Remove "settle_stable"
+        t1 = Timer
+        Do
+            If mode = "label" Then
+                If NormLabel(MotorLabel(motor)) = NormLabel(v) Then Exit Do
+            Else
+                If CStr(MotorValue(motor)) <> "" Then
+                    If Abs(ParseNum(MotorValue(motor)) - ParseNum(v)) <= 0.5 Then Exit Do
+                End If
+            End If
+            If Elapsed(t1) > ParseNum(GetP(cmd, "until_target_s", "120")) Then
+                res("until_target_timeout") = 1
+                Exit Do
+            End If
+            If StopRequested() <> "" Then Exit Do
+            BeatNow
+            LabSpec.Pause 250
+        Loop
+        res("until_target_s") = Secs(Elapsed(t1))
+        waited = WaitMotor("", 0, tmo, res)
+    End If
     res("motor") = motor
     res("value") = MotorValue(motor)
     res("label") = MotorLabel(motor)
@@ -2629,6 +2654,8 @@ Sub VShutterHold(cmd, res)
         Exit Sub
     End If
     If gLaserOpen Then LaserClose "before shutter_hold"
+    ' every motor idle first: a turret still turning must not be interrupted (2026-11-23: it stayed at 1800)
+    res("motors_waited") = Bit(WaitMotor("", 0, 120, res))
     If Not gHoldOn Then
         gHoldOldMode = LSValue(0, "ShutterMode")
         On Error Resume Next

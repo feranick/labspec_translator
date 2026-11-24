@@ -736,3 +736,40 @@ def test_series_hold_native_and_estimate():
     st = run_inline({"s": dict(ser, series={"count": 2, "interval_s": 1})})
     s = st["studies"]["s"]
     assert all(p_.get("native", "").endswith(".l6s") and Path(p_["native"]).exists() for p_ in s["spectra"])
+
+
+def test_grating_move_must_arrive():
+    """2026-11-23: a move 1200 -> 2400 read 1800 for 1.5 s, was taken as settled, and the study ran on the 1800. The
+    grating is now read until it is the one asked, moved once more if not, and the study stops if it still is not."""
+    bdir = config.active_bridge_dir()
+    S.ensure(bdir)
+    sp = {"kind": "spectrum", "sample": {"name": "Si"}, "setup": dict(SETUP, grating=2400),
+          "acquire": {"center_cm1": 520, "exposure_s": 1}}
+    (bdir / "sim_grating_stuck_once").write_text("2400:1800")
+    st = run_inline({"s": sp})
+    s = st["studies"]["s"]
+    moves = [m for m in s["setup"]["moves"] if m["motor"] == "Grating"]
+    assert s["reliable"] and moves[-1].get("retry") and moves[-1]["ok"] and s["instrument"]["grating"] == 2400
+    (bdir / "sim_grating_stuck").write_text("2400:1800")
+    api.instrument("set", setup={"grating": 1200})
+    st = run_inline({"s": sp})
+    assert not st["studies"]["s"]["ok"] and "did not reach 2400" in st["studies"]["s"]["why"]
+    assert runner.move_extra(P.load(), "Grating").get("until_target") == 1
+
+
+def test_grating_refused_after_785_is_retried_after_reselecting_the_laser():
+    """2026-11-23: after a scripted visit to 785 nm, LabSpec took 1800 for every move to 2400, also once back on
+    637.75 nm. ls6t selects the laser once more and moves the grating again (in set and in a study's set-up)."""
+    bdir = config.active_bridge_dir()
+    S.ensure(bdir)
+    (bdir / "sim_laser_locks_grating").write_text("1")
+    for setup in ({"grating": 2400}, {"laser_nm": 785}, {"grating": 1200}, {"laser_nm": 532}):
+        api.instrument("set", setup=setup)
+    r = api.instrument("set", setup={"grating": 2400})
+    g = [d for d in r["moves"] if d["set"] == "grating"][0]
+    assert g["ok"] and g["retried_after_laser_reselect"]["laser_nm"] == 532
+    api.instrument("set", setup={"laser_nm": 785})
+    api.instrument("set", setup={"grating": 1200, "laser_nm": 532})
+    st = run_inline({"s": {"kind": "spectrum", "sample": {"name": "Si"}, "setup": dict(SETUP, grating=2400),
+                           "acquire": {"center_cm1": 520, "exposure_s": 1}}})
+    assert st["studies"]["s"]["instrument"]["grating"] == 2400

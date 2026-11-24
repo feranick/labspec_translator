@@ -530,11 +530,24 @@ class SimLabSpec:
                 i = int(np.argmin(diffs))
                 if diffs[i] > 0.5:
                     return {"ok": 0, "error": f"{name}: no position at {val}"}
+            # sim_laser_locks_grating: after the laser was moved to 785 nm, 2400 ends at 1800 until the laser is
+            # selected again (a move to the laser it already is) - LabSpec on 2026-11-23
+            if name == "Laser" and (self.dir / "sim_laser_locks_grating").exists():
+                if abs(m["values"][i] - 785.0) < 1:
+                    self._grating_lock = True
+                elif i == m["i"]:
+                    self._grating_lock = False
+            if name == "Grating" and getattr(self, "_grating_lock", False) and abs(m["values"][i] - 2400) < 0.5:
+                i = int(np.argmin([abs(v - 1800.0) for v in m["values"]]))
             stuck = self.dir / "sim_grating_stuck"      # "2400:1800": a move to 2400 ends at 1800, no error
-            if name == "Grating" and stuck.exists():
-                to, at = stuck.read_text().strip().split(":")
-                if abs(m["values"][i] - float(to)) < 0.5:
-                    i = int(np.argmin([abs(v - float(at)) for v in m["values"]]))
+            once = self.dir / "sim_grating_stuck_once"   # the same, for the next such move only
+            for f_ in (stuck, once):
+                if name == "Grating" and f_.exists():
+                    to, at = f_.read_text().strip().split(":")
+                    if abs(m["values"][i] - float(to)) < 0.5:
+                        i = int(np.argmin([abs(v - float(at)) for v in m["values"]]))
+                        if f_ is once:
+                            f_.unlink()
             m["i"] = i
         else:
             m["value"] = float(val)

@@ -1099,8 +1099,10 @@ def _grating_short(b: Bridge, prof: dict, asked, got, r: dict) -> str:
                 msg += f"; LabSpec's range for grating {lab}: SpMin {vals.get('SpMin')}, SpMax {vals.get('SpMax')}"
     except BridgeError:
         pass
-    return (msg + ". LabSpec may not allow this grating with this laser (or at the spectrometer's current position): "
-            "set the laser and the grating together, or ask the maintainer (TESTING T3.16)")
+    return (msg + ". After the bridge changed the laser (e.g. a visit to 785 nm), LabSpec refuses a grating the earlier "
+            "laser could not use until the bridge script is restarted (2026-11-23): `ls6t instrument end-bridge`, "
+            "start ls6t_bridge.vbs again in LabSpec, then set the grating again. Otherwise LabSpec may not allow this "
+            "grating with this laser (or at the spectrometer's current position) (TESTING T3.16)")
 
 
 def _move_timing(r: dict) -> dict:
@@ -1108,7 +1110,8 @@ def _move_timing(r: dict) -> dict:
     reported idle), all_wait_s (until every motor did), settle_s (until the read-back showed the position asked);
     settle_stable / settle_timeout when it never did."""
     out = {"seconds": r.get("seconds")}
-    for k in ("move_call_s", "wait_s", "all_wait_s", "settle_s", "settle_stable", "settle_timeout", "blocking"):
+    for k in ("move_call_s", "wait_s", "all_wait_s", "settle_s", "settle_stable", "settle_timeout", "blocking",
+              "until_target_s", "until_target_timeout"):
         if r.get(k) not in (None, ""):
             out[k] = float(r[k]) if k.endswith("_s") else True
     if r.get("move_id") not in (None, ""):
@@ -1398,8 +1401,16 @@ def set_instrument(setup: dict) -> dict:
                        mode=mode, value=value, **runner.move_extra(prof, motor, what == "objective" and obj_asked))
             got = r.get("label") if mode == "label" else r.get("value")
             ok = bool(r.get("ok")) and P.same_position(got, value)
+            retried = None
+            if r.get("ok") and not ok and what == "grating":
+                # the laser selected once more, then the grating again (2026-11-23: 2400 refused after 785 nm)
+                retried = runner.reselect_laser(b.call, prof)
+                r = b.call("move", timeout_s=600, motor=motor, mode=mode, value=value,
+                           **runner.move_extra(prof, motor, False))
+                got = r.get("label") if mode == "label" else r.get("value")
+                ok = bool(r.get("ok")) and P.same_position(got, value)
             done.append({"set": what, "asked": value, "got": got, "ok": ok, "error": r.get("error") or None,
-                         **_move_timing(r)})
+                         **_move_timing(r), **({"retried_after_laser_reselect": retried} if retried else {})})
             if r.get("ok") and what == "grating":
                 runner.note_grating_set(value, got, "instrument set")
             if r.get("ok") and not ok and what == "grating":

@@ -777,6 +777,34 @@ drive after a grating change?) — it is `t_spectro_call_s` in `timing`. (c) The
 series whose spectra are further apart than the laser's `settle_s` is not held (the beam is off the sample between
 spectra): with `lasers.637.75.settle_s 5` and `hold_shutter true`, a series 5 s or more apart lets LabSpec's shutter
 cycle, faster ones are held; `acquire.shutter` in a study decides otherwise.
+**Filters held (.23.26, `run_20261123_224625_a8b563`):** `times_held` 1, released; the reference again 1.027; 1 % = 1.176 %
+of 10 %, as plain spectra: the filters study is right when held. **But the set-up move 1200 → 2400 ended at 1800**
+(`got: 1800 (450-850nm)`, `settle_stable` after 1.5 s, `wait_s` 0.06), and the study ran on the 1800 (10 % 1956 cps
+against 1406 at 2400); the same move worked at 22:10 without the hold. The turret read 1800 for 1.5 s on its way, the
+bridge took it as settled, and the next commands (the hold among them) went to LabSpec mid-move. **From .23.27:** a
+grating move is read until it is the grating asked (`until_target`, up to 120 s, however long a passing position
+reads still), then every motor idle; the hold waits for every motor idle before touching the shutter; a grating that
+still is not the one asked is moved once more, and the study stops if it still is not (nothing measured on the wrong
+grating). **Test:** the same filters study from 1200: the grating move's `until_target_s` and the result's grating
+2400.
+**Correction, the 1800 was LabSpec's refusal (2026-11-23, reproduced on .23.26, nothing fired):** grating 2400 →
+laser 785.04 (grating stays 2400) → grating 1200 → laser 637.75 → grating 2400: stops at 1800, stable, no error.
+Before the visit to 785 nm, 1200 → 2400 worked; selecting 2400 by hand in LabSpec (then a bridge restart) cleared it.
+LabSpec seems to keep judging grating choices against the 785 nm laser after a scripted change back (2400's range
+ends at 690 nm, so it takes the nearest usable grating). The same was seen on 2026-11-20 (1200 → 2400 stopped at 1800
+with 637.75 nm; 1800 → 2400 with a switch to 785 worked). **From .23.27** a grating that does not arrive is tried
+once more after selecting the laser LabSpec has again (a move to its own value), in `instrument set`
+(`retried_after_laser_reselect`) and in a study's set-up; if it still does not arrive the study stops and says to
+select it by hand in LabSpec. **Test:** the reproduction above through `ls6t instrument set`; does the reselect clear
+it? If not, the next try is LabSpec's Template (`SET_VALUE "Laser"`, which acts on the live settings for
+AutoExposure), and otherwise only the hand selection; also note whether the hand selection alone, without the bridge
+restart, clears it.
+**A bridge restart alone clears it (2026-11-23):** after the stuck state (785.04 → 637.75 via `set`, 2400 stopped at
+1800), restarting only the bridge, LabSpec untouched, let 1800 → 2400 work at once: the state lives in the bridge's
+script session (how a script changes the laser, or what LabSpec ties to that script). Until the cause is found the
+messages say: `ls6t instrument end-bridge`, start `ls6t_bridge.vbs` again, then set the grating again. The first
+`set` after that restart waited 40.7 s in `status_before`: the bridge's start-up (each motor's first status, T3.16)
+was still running.
 
 **T3.19 LabSpec's AutoExposure (2026-11-23, .23.13).** With AutoExposure On in LabSpec (status bar "AE"), a
 spectrum asking 2 s ran 15 s while ls6t reported 2 s (this explains most of the 23–64 s acquisitions of T3.17).

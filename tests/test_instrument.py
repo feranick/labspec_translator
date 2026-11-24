@@ -386,10 +386,10 @@ def test_grating_blocking_short_stop_timing_and_keepalive(tmp_path):
     assert 'GetP(cmd, "blocking", "0") = "1"' in mv and "moveId = LabSpec.MoveMotor(motor, posVal, posName, mc)\n" in mv
     assert 'Execute "BeatNow"' in br                    # the start-up inventory keeps the heartbeat going
     prof = P.load()
-    assert runner.move_extra(prof, prof["motors"]["grating"]) == {}       # blocking changed nothing: off (.37)
+    assert runner.move_extra(prof, prof["motors"]["grating"]) == {"until_target": 1, "until_target_s": 120}   # blocking off (.37); read until there
     P.save(dict(prof, blocking_motors=["grating"]))
     prof = P.load()
-    assert runner.move_extra(prof, prof["motors"]["grating"]) == {"blocking": 1}
+    assert runner.move_extra(prof, prof["motors"]["grating"]) == {"blocking": 1, **{"until_target": 1, "until_target_s": 120}}
     assert runner.move_extra(prof, prof["motors"]["filter"]) == {}
     S.ensure(config.active_bridge_dir())
     r = api.instrument("set", setup={"grating": 600})
@@ -928,7 +928,7 @@ def test_no_labspec_prompt_after_ls6t_asked_and_black_frame(tmp_path):
     m = prof["motors"]
     assert runner.move_extra(prof, m["objective"], True) == {"no_message": 1}
     assert runner.move_extra(prof, m["objective"], False) == {}
-    assert runner.move_extra(prof, m["grating"], True) == {}                  # only the objective
+    assert runner.move_extra(prof, m["grating"], True) == {"until_target": 1, "until_target_s": 120}      # no_message: only the objective
     assert runner.move_extra(dict(prof, suppress_labspec_prompt=False), m["objective"], True) == {}
     S.ensure(config.active_bridge_dir())
     r = api.instrument("set", setup={"objective": "x50"})
