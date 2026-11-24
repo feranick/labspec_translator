@@ -914,6 +914,23 @@ shows curves, nothing to click. The axes ls6t sends are the grid's (`axis_x` fro
 for that run; the map engine (with `map.engine` 'auto' a large map goes to LabSpec's own engine, which has no ls6t live
 view); then the run's `runner.log` view lines (`axis_x`, `axis_y`, `mapex_return`), the map's size and steps, and a
 screenshot of the Maps tab.
+**Results on .24.7 (2026-11-24 afternoon, 637.75 nm / 1200 / 1 % / x100, Si):** the live map works (3 × 3, held, live
+view on: it grew in LabSpec, R/G/B cursor images clickable, axes "um"; 1 create + 8 adds + save, axes 0,2,4, snake
+indices; `times_held` 1, laser line −5.27 … −4.70, Si 519.81 ± 0.13, reliable; the earlier "curves" were the live view
+off). A 2 s held series met its interval (2.008, 2.006, 2.003 s after a first 3.22; `median_s` 2.006). Si and the laser
+line are no longer flagged as spikes. **Changes in 2026.11.24.8:** (1) **corrections per window centre**: two Si
+calibrations a minute apart, one window centred on Si and one for −100 … 700 cm⁻¹, gave −0.72 and −2.40 cm⁻¹ (and Si
+from the laser line 523.2–524.4: the dispersion differs too), each overwriting the other; ls6t now keeps a correction
+per window centre, applies the one for a study's centre (or interpolates between two), and warns when only a distant
+one exists or the study has several windows; the calibration says its `window_centre_nm`. Calibrate with the window
+your studies use, or keep the laser line in the window with `laser_reference: "correct"`. (2) **Series validation
+with the hold**: about the exposure + 1 s per spectrum (`timing.held_overhead_s`), not 3.8 s. (3) **Spikes**: not
+on the window's first or last three pixels, below the measured cut-off, or within 20 cm⁻¹ (or 3 FWHM) of the laser
+line; a spike must also stand 3 √(level) and 5 counts above its local level (a very smooth noise estimate let 2-count
+noise through); each spike gives its height (`spike_info`: cm⁻¹, counts, sigma). (4) The spectrometer move ls6t
+makes for the study's window no longer counts as "moved / busy around point 0" in `optics_check`. (5) The live view is
+on by default. **Test:** calibrate 637.75@1200 in both windows, then a spectrum in each: each gets its own correction,
+and a third window between them an interpolated one.
 **runner.log was empty after the crash:** from 2026.11.24.2 every bridge command is written to the request's
 `runner.log` when it is sent and when it returns (`-> view kind=mapex`, `<- acquire ok=1 2.4 s`, marked `[shutter
 held]`), each line flushed at once, so the last call before a hang or crash is always there.

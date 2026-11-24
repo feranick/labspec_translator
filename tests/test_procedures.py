@@ -815,7 +815,8 @@ def test_live_map_view_uses_mapex_like_horiba():
     mp = {"m": {"kind": "map", "sample": {"name": "Si"}, "setup": SETUP,
                 "acquire": {"center_cm1": 520, "exposure_s": 0.2},
                 "map": {"x_um": [0, 4, 2], "y_um": [0, 2, 2], "engine": "points"}}}
-    # off by default (2026-11-24: the MapEx view froze, then crashed, LabSpec on the instrument)
+    # off when the profile says so (it was off by default after the 2026-11-24 crash; on again from .24.8)
+    P.save(dict(P.load(), display={"live_view": False}))
     sim.views.clear()
     run_inline(mp)
     assert "m" not in sim.views
@@ -909,3 +910,28 @@ def test_live_view_never_cycles_the_held_shutter(tmp_path):
     mp["m"]["acquire"]["shutter"] = "auto"
     st = run_inline(mp)
     assert sim.views["m"]["n"] == 9 and "shutter_hold" not in st["studies"]["m"]
+
+
+def test_correction_kept_per_window_centre():
+    """2026-11-24: two Si calibrations a minute apart in two windows gave -0.72 and -2.40 cm-1 and each overwrote the
+    other. Corrections are kept per window centre; a study gets the one for its centre, interpolated between two,
+    or the nearest with a warning."""
+    from labspec_translator import xcal
+    xcal.clear()
+    xcal.store(637.75, 1200, 0.72, 1.0, "si", [], centre_nm=661.0)
+    xcal.store(637.75, 1200, 2.40, 1.0, "si", [], centre_nm=652.0)
+    assert xcal.get(637.75, 1200, 661.3)["a"] == 0.72 and xcal.get(637.75, 1200, 652.0)["a"] == 2.40
+    mid = xcal.get(637.75, 1200, 656.5)
+    assert mid["a"] == pytest.approx(1.56, abs=0.01) and mid["interpolated_between_nm"] == [652.0, 661.0]
+    far = xcal.get(637.75, 1200, 670.0)
+    assert far["centre_far"] and far["a"] == 0.72
+    assert xcal.get(637.75, 1200)["a"] == 2.40            # no centre: the last measured
+    xcal.clear()
+    S.ensure(config.active_bridge_dir())
+    (config.active_bridge_dir() / "sim_xshift").write_text("1.5,1.0")
+    st = run_inline({"c": {"kind": "calibration", "sample": {"name": "Si"}, "setup": SETUP,
+                           "calibration": {"adjust": "ls6t"}},
+                     "s": {"kind": "spectrum", "sample": {"name": "Si"}, "setup": SETUP,
+                           "acquire": {"center_cm1": 900}}})
+    assert any("window centred at" in w and "zero differs between windows" in w for w in st["studies"]["s"]["warnings"])
+    assert list(xcal.load().values())[0]["by_centre"]

@@ -93,7 +93,13 @@ def optics_record(r: dict) -> dict | None:
     sp = [out[k] for k in ("spectro_before_acq", "spectro_after_acq_call", "spectro_after_data") if out.get(k) is not None]
     if len(sp) >= 2:
         out["spectro_moved_nm"] = round(max(sp) - min(sp), 4)
-    out["motor_busy"] = bool(out.get("motors_busy_before_acq") or out.get("motors_busy_after_acq_call"))
+    # a motor busy just before Acq, right after the bridge's own spectrometer move to the study's window, is that
+    # move settling (2026-11-24: warned at point 0); a motor busy once Acq has returned is what matters
+    own_move = r.get("t_spectro_call_s") not in (None, "") and str(r.get("spectro_skipped", "")) != "1"
+    out["motor_busy"] = bool(out.get("motors_busy_after_acq_call") or
+                             (out.get("motors_busy_before_acq") and not own_move))
+    if own_move:
+        out["spectro_moved_by_ls6t"] = True
     return out
 
 
@@ -177,6 +183,29 @@ def _poisson_tail(k: int, lam: float) -> float:
 LINE_P = 1e-3      # a spike position is a line when its recurrence is this unlikely by chance
 
 
+def _spikes_where_meaningful(a: dict, laser, grating, ll: dict | None) -> None:
+    """Not a cosmic ray: a flag on the window's first or last pixels, below the edge filter's measured cut-off, or on
+    the laser line's wings (2026-11-24: of 9 flags in 5 spectra, most were there). Removes them from a's spikes."""
+    from . import perf
+    x = np.asarray(a.get("_x"), float)
+    if not a.get("spikes") or x.size < 8:
+        return
+    lo_x, hi_x = float(x[3]), float(x[-4])                  # x ascending: three pixels in from each edge
+    cut = perf.cutoff_for(laser, grating) if laser else None
+    wing = max(20.0, 3.0 * float((ll or {}).get("fwhm_cm1") or 0))
+    keep = []
+    for i in a["spikes"]:
+        xi = float(x[i])
+        if xi < lo_x or xi > hi_x or (cut is not None and xi < float(cut)) or abs(xi) <= wing:
+            continue
+        keep.append(i)
+    if len(keep) != len(a["spikes"]):
+        kept = {round(float(x[i]), 1) for i in keep}
+        a["spike_cm1"] = [c for c in a.get("spike_cm1", []) if c in kept]
+        a["spike_info"] = [s for s in a.get("spike_info", []) if s["cm1"] in kept]
+        a["spikes"] = keep
+
+
 def recurring_spikes(per_point: list) -> list:
     """Spike positions that recur in more spectra than chance allows are lines (the Si or the laser line, as narrow
     as a cosmic ray at 600 gr/mm), not cosmic rays: taken out of every spectrum's spikes; returns where they were.
@@ -206,6 +235,7 @@ def recurring_spikes(per_point: list) -> list:
         if len(kept) != len(r.get("spike_cm1") or []):
             r["spikes"] = max(0, int(r.get("spikes") or 0) - (len(r["spike_cm1"]) - len(kept)))
             r["spike_cm1"] = kept
+            r["spike_info"] = [s_ for s_ in (r.get("spike_info") or []) if s_.get("cm1") in kept]
     return sorted(lines)
 
 
@@ -2890,7 +2920,7 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
         process["peaks"] = [{"name": f"ref{i}" if len(ref_lines) > 1 else "Si", "near_cm1": c, "window_cm1": win}
                             for i, c in enumerate(ref_lines)]
     # ls6t's own spectral correction (from an earlier calibration), never on a calibration itself
-    corr = xcal.get(laser, grating) if kind != "calibration" else None
+    corr = xcal.get(laser, grating, plan.window_centre(rng)) if kind != "calibration" else None
     if kind != "calibration" and laser:
         zs = zero_state(laser, grating, prof)
         checks["zero"] = zs
@@ -2906,8 +2936,24 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
                             + "); each grating has its own zero in LabSpec")
     if corr:
         age = xcal.age_h(corr)
+        where = (f", measured with the window centred at {corr['centre_nm']:g} nm" if corr.get("centre_nm") is not None
+                 else "")
+        if corr.get("interpolated_between_nm"):
+            where = (f", interpolated between the windows centred at {corr['interpolated_between_nm'][0]:g} and "
+                     f"{corr['interpolated_between_nm'][1]:g} nm")
         warnings.append(f"spectral correction applied: true = {corr['a']:+.3f} + {corr['b']:.6f} x measured "
-                        f"(calibration {corr['time']}, {corr['reference']})")
+                        f"(calibration {corr['time']}, {corr['reference']}{where})")
+        # the zero (and the dispersion) differ between spectrometer windows: 1.7 cm-1 between two windows a minute
+        # apart (2026-11-24)
+        if corr.get("centre_far"):
+            warnings.append(f"the correction was measured with the window centred at {corr['centre_nm']:g} nm, this "
+                            f"study's is {plan.window_centre(rng):g} nm ({corr['centre_distance_nm']:g} nm away): the "
+                            "zero differs between windows by a cm-1 or more; calibrate with this study's window "
+                            "(center_cm1 or range_cm1), or keep the laser line in the window with "
+                            "acquire.laser_reference 'correct'")
+        elif corr.get("centre_unknown"):
+            warnings.append("the correction's window centre is not known (an extended range here, or a calibration "
+                            "stored before 2026.11.24.8): the zero differs between windows")
         lkc = P.laser_key(prof, laser) if laser else None
         max_h = float((prof["lasers"][lkc].get("calibration_max_age_h") if lkc else None)
                       or prof.get("calibration", {}).get("max_age_h", 24))
@@ -2976,6 +3022,7 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
                 warnings.append(f"point {rec['point']}: the background covers {info['covered_fraction']:.0%} of the "
                                 "spectrum")
         a = spectra.analyze(shift, y, process, min_snr, prof["checks"].get("detect_snr", 5.0))
+        _spikes_where_meaningful(a, laser, grating, ll)
         if ll and ll.get("ok"):
             # each peak also from this spectrum's own laser line (the Raman shift by definition; LabSpec's scale may
             # carry its own offset between 0 and the band: on the XploRA Si was 524.8 from the line, 520.2 on the scale)
@@ -2987,6 +3034,7 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
                     pk["from_laser_line_cm1"] = round(float(pk["position_cm1"]) - base, 3)
         rec.update(max_counts=sat["max_counts"], saturated=sat["saturated"], saturated_pixels=sat["pixels"],
                    noise_sigma=a["noise_sigma"], spikes=len(a["spikes"]), spike_cm1=a.get("spike_cm1", [])[:20],
+                   spike_info=a.get("spike_info", [])[:20],
                    from_cm1=a["from_cm1"],
                    to_cm1=a["to_cm1"], peaks=a["peaks"], bands=a["bands"], auto_peaks=a["auto_peaks"])
         if sat["saturated"]:
@@ -3067,8 +3115,9 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
     ss = same_spot_check(kind, per_point, warnings, unreliable) if kind in ("spectrum", "series") else None
     if ss:
         checks["same_spot"] = ss
-    moved = [r["point"] for r in per_point if (r.get("optics_check") or {}).get("spectro_moved_nm", 0) > 0.005
-             or (r.get("optics_check") or {}).get("motor_busy")]
+    moved = [r["point"] for r in per_point if (r.get("optics_check") or {}).get("motor_busy")
+             or ((r.get("optics_check") or {}).get("spectro_moved_nm", 0) > 0.005
+                 and not (r.get("optics_check") or {}).get("spectro_moved_by_ls6t"))]
     if moved:
         warnings.append(f"the spectrometer moved, or a motor was busy, around the acquisition of point(s) "
                         f"{', '.join(map(str, moved[:10]))} (optics_check)")
@@ -3121,7 +3170,7 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
         out["peaks_by_name"] = {pk["name"]: pk for pk in first.get("peaks", []) if pk.get("name")}
         out["bands"] = first.get("bands", {})
     if kind == "calibration" and per_point:
-        out["calibration"] = _calibration_result(study, prof, per_point[0], ref_lines, laser, grating, request,
+        out["calibration"] = _calibration_result(study, prof, per_point[0], ref_lines, laser, grating, rng, request,
                                                  checks, unreliable, warnings)
     return out
 
@@ -3153,7 +3202,8 @@ def zero_state(laser, grating, prof: dict) -> dict:
     return out
 
 
-def _calibration_result(study, prof, rec, ref_lines, laser, grating, request, checks, unreliable, warnings) -> dict:
+def _calibration_result(study, prof, rec, ref_lines, laser, grating, rng, request, checks, unreliable,
+                        warnings) -> dict:
     """The reference lines measured against their true positions: the offset (the zero) and, with lines far enough
     apart, the scale (the dispersion coefficient): true = a + b x measured. adjust 'ls6t' remembers it and applies
     it to later spectra (same laser and grating)."""
@@ -3170,6 +3220,7 @@ def _calibration_result(study, prof, rec, ref_lines, laser, grating, request, ch
     ok = [l for l in lines if l["measured_cm1"] is not None]
     res: dict = {"reference": refname, "lines": lines, "tol_cm1": tol, "adjust": cal.get("adjust", "none"),
                  "applies_to": {"laser_nm": laser, "grating": _f(grating), "key": xcal.key(laser, grating),
+                                "window_centre_nm": plan.window_centre(rng),
                                 "what": combo(laser, grating) + " only: LabSpec keeps a zero per grating"}}
     if not ok:
         res.update(pass_=False, why="no reference line found: check the sample and its focus")
@@ -3234,7 +3285,7 @@ def _calibration_result(study, prof, rec, ref_lines, laser, grating, request, ch
                           f"zero for {combo(laser, grating)}")
     checks["calibration"]["outcome"] = res["outcome"]
     if res["adjust"] == "ls6t" and res["trusted"]:
-        st = xcal.store(laser, grating, a, b, refname, lines, request)
+        st = xcal.store(laser, grating, a, b, refname, lines, request, centre_nm=plan.window_centre(rng))
         res["stored_correction"] = st
         warnings.append(f"ls6t now corrects later spectra ({xcal.key(laser, grating)}): true = {a:+.3f} + "
                         f"{b:.6f} x measured")
@@ -3361,7 +3412,8 @@ def parse_native_map(path, study: dict, prof: dict, x0, y0, zref) -> list:
 
 def _point_summary(r: dict) -> dict:
     keys = ("point", "offset", "stage", "file", "native", "t", "exposure_s", "accumulations", "max_counts",
-            "saturated", "noise_sigma", "spikes", "spike_cm1", "from_cm1", "to_cm1", "peaks", "bands", "x_correction",
+            "saturated", "noise_sigma", "spikes", "spike_cm1", "spike_info", "from_cm1", "to_cm1", "peaks", "bands",
+            "x_correction",
             "background",
             "ics", "auto_exposure", "optics_check", "t_start")
     return {k: r.get(k) for k in keys if k not in ("auto_exposure", "optics_check", "t_start") or r.get(k) is not None}

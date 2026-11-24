@@ -74,6 +74,15 @@ def laser_nm(study: dict, prof: dict) -> float | None:
     return float(prof["lasers"][k]["nm"]) if k else float(v)
 
 
+def window_centre(rng: dict) -> float | None:
+    """The spectrometer's centre (nm) for a one-window acquisition; None for an extended range (several windows)."""
+    if rng.get("center_nm") is not None:
+        return float(rng["center_nm"])
+    if rng.get("windows") == 1 and rng.get("from_nm") is not None and rng.get("to_nm") is not None:
+        return round((float(rng["from_nm"]) + float(rng["to_nm"])) / 2, 4)
+    return None
+
+
 def acq_range(study: dict, prof: dict, laser: float | None) -> dict:
     """The acquisition range: {from_cm1, to_cm1, from_nm, to_nm, windows, single}. With center_cm1, one window
     (LabSpec's From = To); with range_cm1, LabSpec stitches as many windows as it takes (extended range)."""

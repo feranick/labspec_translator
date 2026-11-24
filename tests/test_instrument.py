@@ -1259,11 +1259,11 @@ def test_maintainer_session_2026_11_23_afternoon(tmp_path):
     checks, unreliable, warnings = {}, [], []
     rec = {"peaks": [{"ok": True, "position_cm1": 525.12, "fwhm_cm1": 9.0, "snr": 4.0,
                       "warning": "the fitted peak sits at the edge of its window: widen window_cm1 or move near_cm1"}]}
-    cal = runner._calibration_result(study, prof, rec, [520.7], 532.0, 1200, "r", checks, unreliable, warnings)
+    cal = runner._calibration_result(study, prof, rec, [520.7], 532.0, 1200, {}, "r", checks, unreliable, warnings)
     assert cal["trusted"] is False and len(cal["not_trusted_because"]) == 1 and "stored_correction" not in cal
     assert any("not measured well enough" in u for u in unreliable)
     good = {"peaks": [{"ok": True, "position_cm1": 520.33, "fwhm_cm1": 5.0, "snr": 80.0}]}
-    cal = runner._calibration_result(study, prof, good, [520.7], 532.0, 1200, "r", {}, [], [])
+    cal = runner._calibration_result(study, prof, good, [520.7], 532.0, 1200, {}, "r", {}, [], [])
     assert cal["trusted"] and cal["pass"] and cal["stored_correction"]
     # the bridge's start-up inventory only when needed
     br = Path(api.install_bridge(tmp_path / "vbs")["files"]["ls6t_bridge.vbs"]).read_text()

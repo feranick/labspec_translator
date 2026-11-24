@@ -68,7 +68,7 @@ DEFAULT_PROFILE: dict = {
                "max_laser_on_s": 60.0},     # longest the laser may be left on for viewing (instrument laser_on)
     # measured on the XploRA (2026-11-21): laser 1.6-2.8 s, grating 0.1-0.3 s (5 s kept: whether the turret turns
     # then is still to see, TESTING T3.16), filter ~1 s, pinhole 2-6 s, slit 2-3 s; the objective: the operator
-    "timing": {"acquire_settle_s": 0.0, "status_before_each": False, "command_s": 0.3, "move_s": 2.0, "laser_s": 3.0, "grating_s": 5.0, "objective_s": 20.0,
+    "timing": {"acquire_settle_s": 0.0, "status_before_each": False, "held_overhead_s": 1.0, "command_s": 0.3, "move_s": 2.0, "laser_s": 3.0, "grating_s": 5.0, "objective_s": 20.0,
                "xy_um_per_s": 2000.0, "xy_settle_s": 0.3, "autofocus_s": 10.0, "readout_s": 0.5,
                "window_move_s": 2.0},
     # video snapshots: where the beam really is relative to LabSpec's laser position (µm, measured: TESTING T5b),
@@ -106,7 +106,8 @@ DEFAULT_PROFILE: dict = {
     "performance": {"filters_tol": 0.3, "resolution_tol": 1.25, "resolution_cm1": {}},
     # LabSpec's live display of a map or series as it is measured: off until it has passed on the instrument
     # (2026-11-24: the MapEx view froze, then crashed, LabSpec)
-    "display": {"live_view": False, "live_view_while_held": True},
+    # (on from 2026.11.24.8: the MapEx view passed on the instrument, held and not)
+    "display": {"live_view": True, "live_view_while_held": True},
     "calibration": {"max_age_h": 24.0, "max_retries": 2,
                     # a video frame before each calibration (false: none, for batches; a study's video.before wins)
                     "video_before": True,

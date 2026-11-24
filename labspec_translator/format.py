@@ -691,7 +691,15 @@ def validate_study(name: str, study: dict, prof: dict) -> dict:
                 # each spectrum takes its exposure plus LabSpec's overheads: 2 s asked gave 3.5 s with 1 s
                 # exposures on the XploRA (2026-11-24)
                 try:
-                    one = plan.acquire_seconds(study, prof, plan.acq_range(study, prof, s.get("laser_nm")))
+                    if plan.hold_shutter(study, prof, s.get("laser_nm")):
+                        # with the shutter held, LabSpec's Acq takes about the exposure + 1 s (2026-11-24: 2 s
+                        # with 1 s exposures, met), not the 3.5 s of a cycled shutter
+                        acq_ = study.get("acquire") or {}
+                        ex_ = acq_.get("exposure_s", 1.0)
+                        one = (float(ex_) if isinstance(ex_, (int, float)) else 1.0) * int(acq_.get("accumulations", 1)) \
+                            + float((prof.get("timing") or {}).get("held_overhead_s", 1.0))
+                    else:
+                        one = plan.acquire_seconds(study, prof, plan.acq_range(study, prof, s.get("laser_nm")))
                 except (KeyError, ValueError, TypeError):
                     one = None
                 if one and float(se["interval_s"]) < one:

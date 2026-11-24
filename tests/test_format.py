@@ -229,3 +229,21 @@ def test_recurring_spikes_are_lines():
     assert runner._poisson_tail(2, 0.01) < 1e-3 < runner._poisson_tail(1, 0.01)
     one = [{"point": 0, "spikes": 1, "spike_cm1": [520.4]}, {"point": 1, "spikes": 1, "spike_cm1": [520.4]}]
     assert runner.recurring_spikes(one) == [] and one[0]["spikes"] == 1       # two spectra are not enough
+
+
+def test_spikes_not_on_edges_cutoff_or_laser_and_with_height():
+    """2026-11-24: what was left looked like noise and edges: flags on the first / last pixels, below the cut-off and
+    on the laser line's wings are not cosmic rays; each spike gives its height; single-pixel noise at a very low
+    noise estimate does not pass."""
+    import numpy as np
+    from labspec_translator import runner, spectra as SP
+    x = np.linspace(-200, 800, 1000)
+    y = np.full(x.size, 300.0)
+    y[400] += 8.0                                    # a few counts on a smooth level: noise, not a spike
+    assert SP.spikes(y, sigma=0.15) == []
+    y = 300.0 + np.random.default_rng(2).normal(0, 3, x.size)
+    y[0] += 3000; y[100] += 3000; y[205] += 3000; y[600] += 3000      # edge, -100 cm-1, laser wing (5), 400
+    a = SP.analyze(x, y, {"peaks": [{"name": "Si", "near_cm1": 520.7}]}, 10.0, 5.0)
+    runner._spikes_where_meaningful(a, None, None, {"fwhm_cm1": 3.0})
+    assert [round(c) for c in a["spike_cm1"]] == [-100, 401]          # no cut-off known here: -100 stays
+    assert all(i["counts"] > 1000 and i["sigma"] for i in a["spike_info"])
