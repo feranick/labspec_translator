@@ -1094,8 +1094,11 @@ class SimLabSpec:
             ll0 = 0.0
             fd = self.dir / "sim_laser_line_drift"
             if fd.exists():
-                self._ll_drift_n = getattr(self, "_ll_drift_n", -1) + 1
-                ll0 = float(fd.read_text().strip() or 0.15) * self._ll_drift_n
+                if not getattr(self, "_ll_drift_n_fixed", False):
+                    self._ll_drift_n = getattr(self, "_ll_drift_n", -1) + 1
+                    ll0 = float(fd.read_text().strip() or 0.15) * self._ll_drift_n
+                else:                                   # a constant offset of the line alone
+                    ll0 = float(fd.read_text().strip() or 0.15)
             rate = rate + 3000.0 * np.exp(-0.5 * ((1e7 / las - 1e7 / nm_true - ll0) / 2.0) ** 2)
         if exp <= 0:   # auto exposure: reach the target at the peak, within [min, max]
             target = float(p.get("ae_target", 30000))

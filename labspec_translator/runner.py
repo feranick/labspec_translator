@@ -136,6 +136,21 @@ def _warmup(ctx: Ctx, acq: dict, sd: Path, seconds: float) -> dict:
 LASER_JUMP_CM1 = 1.5     # the laser line moving more than this between spectra: a mode hop
 ZERO_JUMP_CM1 = 3.0      # followed, but more than this: the corrected zero is uncertain (about 1 cm-1 left)
 WEAK_POINT_FRAC = 0.2    # a spectrum whose signal is under this fraction of the study's median: kept out
+FOLLOW_MIN_CM1 = 3.0     # 'correct' applies a laser-line step only above this (and with the Raman peaks moving too)
+LASER_LINE_MAX_WIDTH = 2.0   # a calibration's laser line wider than this x its reference line: not a reference
+
+
+def laser_line_too_broad(ll_fwhm, lines) -> str | None:
+    """Why a calibration's laser line is no reference, or None (2026-11-24, 600 gr/mm: FWHM 19.4 cm-1, three times
+    Si's, fitted 1.3 cm-1 off from one spectrum to the next while Si stayed)."""
+    w = [float(l_["fwhm_cm1"]) for l_ in (lines or []) if l_.get("fwhm_cm1") and l_.get("measured_cm1") is not None]
+    if not ll_fwhm or not w:
+        return None
+    ref = float(np.median(w))
+    if float(ll_fwhm) > LASER_LINE_MAX_WIDTH * ref:
+        return (f"its laser line is {float(ll_fwhm):.1f} cm-1 wide, {float(ll_fwhm) / ref:.1f} x the reference line's "
+                f"{ref:.1f}: too broad to be a reference (a narrow line on the edge filter)")
+    return None
 
 
 def screen_points(per_point: list, laser, kind: str = "spectrum", warnings: list | None = None) -> dict:
@@ -2579,6 +2594,12 @@ def run_background(name: str, study: dict, ctx: Ctx) -> dict:
         from scipy.signal import medfilt
         shift, _ = spectra.to_shift(sp["x"], sp["meta"].get("x_unit", "nm"), laser)
         xs, ysr = spectra.sort_xy(shift, sp["y"])
+        if rng.get("crop_cm1"):
+            # a range acquired centred in one window: only the range asked (the window's edge-filter side is not)
+            lo_c, hi_c = sorted(float(v) for v in rng["crop_cm1"])
+            m_ = (xs >= lo_c) & (xs <= hi_c)
+            if m_.sum() >= 10:
+                xs, ysr = xs[m_], ysr[m_]
         if per_s:
             ysr = ysr * ex                                      # in counts, as the detector saw them
         sig_raw = spectra.noise_sigma(ysr - spectra.baseline(xs, ysr, 3))     # the noise from the spectrum as taken
@@ -3186,11 +3207,17 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
     # line. If the correction has no laser line (calibrated without it in the window), the spectra are brought to the
     # study's first laser line (the drift within the study) and the stored offset applies as measured: the laser's
     # move since the calibration is then not covered, and the result says so (zero_correction).
+    ll_ref_cal = False
     if corr and ll_mode == "correct":
-        if corr.get("laser_line_cm1") is not None:
+        broad = laser_line_too_broad(corr.get("laser_line_fwhm_cm1"), corr.get("lines"))
+        if corr.get("laser_line_cm1") is not None and not broad:
             ll_ref, ll_ref_from = float(corr["laser_line_cm1"]), f"the stored correction's calibration ({corr['time']})"
+            ll_ref_cal = True
         else:
-            ll_ref, ll_ref_from = None, None          # the first spectrum's, below
+            ll_ref, ll_ref_from = None, None          # the study's first plateau, below
+            if broad:
+                warnings.append(f"the stored correction's laser line is not used as the reference ({broad}): the "
+                                "study's first laser-line plateau is")
     else:
         ll_ref = laser_line_reference(laser, grating)
         ll_ref_from = "calibration" if ll_ref is not None else None
@@ -3206,6 +3233,7 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
     plateau_of: dict = {}
     plateaus: list = []
     ll_bad: dict = {}
+    ll_bad_idx: dict = {}
     hop_info: list = []
     pk_specs = [(float(pk_["near_cm1"]), float(pk_.get("window_cm1", 40.0))) for pk_ in (process.get("peaks") or [])
                 if isinstance(pk_, dict) and pk_.get("near_cm1") is not None]
@@ -3243,6 +3271,7 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
                     if v is not None and prev:
                         moved.append(v - float(np.median(prev)))
                 if moved and abs(float(np.median(moved)) - d_) > max(0.5 * abs(d_), 1.0):
+                    ll_bad_idx[pt] = len(plateaus)
                     ll_bad[pt] = (f"the laser line fitted {d_:+.1f} cm-1 from its neighbours while the Raman peaks "
                                   f"moved {float(np.median(moved)):+.1f}: a bad fit (a narrow line on the edge "
                                   "filter), not a hop; not used")
@@ -3255,11 +3284,60 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
         cur.append((pt, pos_, pks_))
     if cur:
         plateaus.append(cur)
+    raw_pk = {pt: pks_ for pl in plateaus for pt, _, pks_ in pl}
     plateaus = [[(pt, v) for pt, v, _ in pl] for pl in plateaus]
     for pl in plateaus:
         med = float(np.median([v for _, v in pl]))
         for pt, _ in pl:
             plateau_of[pt] = med
+    # Which plateaus 'correct' follows (2026-11-24: three cases where following a small laser-line offset made Si
+    # worse, the line on the edge filter's slope moving about twice as much as the Raman lines; 600 gr/mm: -1.28
+    # applied, Si 519.18 instead of 520.46): only a step over FOLLOW_MIN_CM1 from the reference that the Raman peaks
+    # follow too. The peaks' reference: where the calibration's lines would read in this window (the stored
+    # correction inverted), or the study's first plateau.
+    plateau_step: dict = {}
+    plateau_report: list = []
+    if ll_mode == "correct" and not follow_each and plateaus:
+        if ll_ref is None:
+            ll_ref = float(np.median([v for _, v in plateaus[0]]))
+            ll_ref_from = "the study's first laser-line plateau (median)"
+        ref_pk: dict = {}
+        if ll_ref_cal:
+            for j, (near_, win_) in enumerate(pk_specs):
+                for ln in corr.get("lines") or []:
+                    if ln.get("reference_cm1") is not None and abs(float(ln["reference_cm1"]) - near_) <= win_ / 2:
+                        ref_pk[j] = (float(ln["reference_cm1"]) - float(corr["a"])) / float(corr["b"] or 1.0)
+                        break
+        else:
+            for j in range(len(pk_specs)):
+                v_ = [raw_pk[pt][j] for pt, _ in plateaus[0] if raw_pk.get(pt) and raw_pk[pt][j] is not None]
+                if v_:
+                    ref_pk[j] = float(np.median(v_))
+        fmin = float(prof["checks"].get("laser_follow_min_cm1", FOLLOW_MIN_CM1))
+        for pl in plateaus:
+            med = float(np.median([v for _, v in pl]))
+            d_ = med - ll_ref
+            moved = []
+            for j, r0 in ref_pk.items():
+                v_ = [raw_pk[pt][j] for pt, _ in pl if raw_pk.get(pt) and raw_pk[pt][j] is not None]
+                if v_:
+                    moved.append(float(np.median(v_)) - r0)
+            dpk = float(np.median(moved)) if moved else None
+            why = None
+            if abs(d_) <= fmin:
+                why = (f"{d_:+.2f} cm-1 from the reference, not over {fmin:g}: not a hop (the laser line on the edge "
+                       "filter moves more than the Raman lines)")
+            elif dpk is not None and abs(dpk - d_) > max(0.5 * abs(d_), 1.0):
+                why = f"the Raman peaks moved {dpk:+.2f} cm-1, not {d_:+.2f}: not a hop"
+            for pt, _ in pl:
+                plateau_step[pt] = 0.0 if why else d_
+            plateau_report.append({"points": [pt for pt, _ in pl], "laser_line_cm1": round(med, 3),
+                                   "drift_cm1": round(pl[-1][1] - pl[0][1], 3), "step_cm1": round(d_, 3),
+                                   "raman_moved_cm1": None if dpk is None else round(dpk, 3),
+                                   "applied": why is None, **({"not_applied_because": why} if why else {})})
+        for pt, idx_ in ll_bad_idx.items():
+            if idx_ < len(plateaus) and plateaus[idx_]:
+                plateau_step[pt] = plateau_step.get(plateaus[idx_][0][0], 0.0)
     for rec in per_point:
         sp = rec.pop("_sp") if "_sp" in rec else spectra.read(rec["file"])
         try:
@@ -3268,6 +3346,13 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
             warnings.append(f"point {rec['point']}: {exc}")
             continue
         y = sp["y"]
+        # a range acquired centred in one window: cut to the range (by the measured axis, the same for every point)
+        crop = None
+        if rng.get("crop_cm1"):
+            lo_c, hi_c = sorted(float(v) for v in rng["crop_cm1"])
+            crop = (np.asarray(shift) >= lo_c) & (np.asarray(shift) <= hi_c)
+            if crop.sum() < 10:
+                crop = None
         if sp["meta"].get("y_unit", "cnt").lower().startswith("cnt/s") and rec.get("exposure_s"):
             y_counts = y * rec["exposure_s"]
         else:
@@ -3284,10 +3369,15 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
             if rec["point"] in ll_bad:
                 ll["suspect"] = ll_bad[rec["point"]]
             if ll_mode == "correct" and ll.get("ok") and ll_ref is not None:
-                d = (plateau_of.get(rec["point"], ll["position_cm1"])
-                     if not follow_each or rec["point"] in ll_bad else ll["position_cm1"]) - ll_ref
-                shift = shift - d
-                rec["laser_line_correction_cm1"] = round(-d, 3)
+                if follow_each and rec["point"] not in ll_bad:
+                    d = ll["position_cm1"] - ll_ref
+                elif follow_each:
+                    d = plateau_of.get(rec["point"], ll["position_cm1"]) - ll_ref
+                else:
+                    d = plateau_step.get(rec["point"])
+                if d is not None:
+                    shift = shift - d
+                    rec["laser_line_correction_cm1"] = round(-d, 3)
         if corr:
             shift = corr["a"] + corr["b"] * shift
             rec["x_correction"] = {"a": corr["a"], "b": corr["b"]}
@@ -3299,6 +3389,8 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
             if info["covered_fraction"] < 0.98:
                 warnings.append(f"point {rec['point']}: the background covers {info['covered_fraction']:.0%} of the "
                                 "spectrum")
+        if crop is not None:
+            shift, y = np.asarray(shift)[crop], np.asarray(y)[crop]
         a = spectra.analyze(shift, y, process, min_snr, prof["checks"].get("detect_snr", 5.0),
                             float(prof["detector"].get("e_per_count") or 1.0))
         _spikes_where_meaningful(a, laser, grating, ll)
@@ -3324,7 +3416,7 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
             rec["_spike_tol"] = 2.0 * float(np.median(np.abs(np.diff(xs_)))) if xs_.size > 1 else 3.0
             rec["_npix"] = int(xs_.size)
         lo, hi = rng.get("from_cm1"), rng.get("to_cm1")
-        if lo is not None and hi is not None and not rng.get("single"):
+        if lo is not None and hi is not None and (not rng.get("single") or rng.get("crop_cm1")):
             tol_r = max(3.0, 0.005 * (hi - lo))      # a pixel or two short is not a gap (997.6 for 1000, 2026-11-23)
             if a["from_cm1"] > lo + tol_r or a["to_cm1"] < hi - tol_r:
                 cover_short.append(rec["point"])
@@ -3426,12 +3518,10 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
         how = "none"
     checks["zero_correction"] = {"method": how, "laser_reference": ll_mode_asked,
                                  **({"follows": "every spectrum's laser line (slow drift too)" if follow_each else
-                                     "the laser line's steps: each spectrum its plateau's median (a mode hop "
-                                     "starts a new plateau; the slow drift within one is not followed)",
-                                     "plateaus": [{"points": [p_ for p_, _ in pl],
-                                                   "laser_line_cm1": round(float(np.median([v for _, v in pl])), 3),
-                                                   "drift_cm1": round(pl[-1][1] - pl[0][1], 3)}
-                                                  for pl in plateaus][:20] if not follow_each else None}
+                                     f"a hop only: a plateau's step from the reference over "
+                                     f"{float(prof['checks'].get('laser_follow_min_cm1', FOLLOW_MIN_CM1)):g} cm-1 "
+                                     "that the Raman peaks follow too; otherwise the stored correction alone",
+                                     "plateaus": plateau_report[:20] if not follow_each else None}
                                     if followed else {}),
                                  **({"stored": {k: corr.get(k) for k in ("a", "b", "time", "centre_nm",
                                                                         "laser_line_cm1") if corr.get(k) is not None}}
@@ -3655,7 +3745,12 @@ def _calibration_result(study, prof, rec, ref_lines, laser, grating, rng, reques
                           f"zero for {combo(laser, grating)}")
     checks["calibration"]["outcome"] = res["outcome"]
     if res["adjust"] == "ls6t" and res["trusted"]:
-        llc = (rec.get("laser_line") or {})
+        llc = dict(rec.get("laser_line") or {})
+        broad = laser_line_too_broad(llc.get("fwhm_cm1"), lines) if llc.get("ok") else None
+        if broad:
+            res["laser_line_rejected"] = broad
+            warnings.append(f"the calibration's laser line is not kept as a reference: {broad}")
+            llc = {}
         st = xcal.store(laser, grating, a, b, refname, lines, request, centre_nm=wc,
                         laser_line_cm1=llc.get("position_cm1") if llc.get("ok") else None,
                         laser_line_fwhm_cm1=llc.get("fwhm_cm1") if llc.get("ok") else None)

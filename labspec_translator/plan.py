@@ -110,6 +110,22 @@ def acq_range(study: dict, prof: dict, laser: float | None) -> dict:
             a, b = shift_to_nm(lo, laser), shift_to_nm(hi, laser)
             out.update(from_nm=round(a, 4), to_nm=round(b, 4))
             out["windows"] = max(1, math.ceil((b - a) / win_nm - 1e-9)) if win_nm else None
+            # A range that fits one window is acquired centred on it (From = To) and cut to From..To by ls6t
+            # (2026-11-24: given From != To, LabSpec put From at the window's blue edge, the data on the CCD's edge,
+            # and Si read 2.09 cm-1 off where centred windows needed no correction). acquire.range_placement
+            # 'labspec' keeps LabSpec's way. The width: measured with this grating and laser, else the profile's.
+            wl = None
+            if grating is not None:
+                try:
+                    wl = (window_store().get(f"{float(grating):g}@{float(laser):g}") or {}).get("width_nm")
+                except (OSError, ValueError, TypeError):
+                    wl = None
+            wl = float(wl) if wl else win_nm
+            if acq.get("range_placement", "centre") == "centre" and wl and (b - a) <= 0.9 * wl:
+                c = round((a + b) / 2, 4)
+                out.update(single=True, windows=1, center_nm=c, from_nm=c, to_nm=c, crop_cm1=[lo, hi],
+                           note="a range within one window: acquired centred on it (From = To), cut to the range "
+                                "by ls6t")
         else:
             out["windows"] = None
         return out

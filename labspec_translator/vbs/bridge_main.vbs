@@ -2542,7 +2542,7 @@ End Sub
 ' map is written for ls6t (out & ".map.txt": axes and values) and saved as .l6s (and LabSpec's text export).
 Sub VMapNative(cmd, res)
     Dim ax, i, mname, f, t, st, n, ex, acc, sw, swOk, id, t0, started, who, tmo, outBase, r, mode, tval, axes
-    Dim gf, gt, gs, gm, gu
+    Dim gf, gt, gs, gm, gu, tMap
     outBase = GetP(cmd, "out", "")
     gChunk = CLng(ParseNum(GetP(cmd, "chunk", "65536")))
     ex = ParseNum(GetP(cmd, "exposure_s", "1"))
@@ -2625,6 +2625,7 @@ Sub VMapNative(cmd, res)
     gBlocking = "map_native"
     gBlockingS = tmo
     Beat "busy", True
+    tMap = Timer                ' LabSpec's Acq may hold the bridge for the whole map (2026-11-24: 0.0 s reported)
     If GetP(cmd, "horiba_start", "1") = "1" Then
         LabSpec.Acq mode, tval, 0, 0, 0
     Else
@@ -2680,7 +2681,7 @@ Sub VMapNative(cmd, res)
     On Error GoTo 0
     HoldCheck res, "hold_after_map"
     res("id") = id
-    res("seconds_map") = Elapsed(t0)
+    res("seconds_map") = Elapsed(tMap)
     If WriteData(id, outBase & ".map.txt", res, "map") Then res("out") = outBase & ".map.txt"
     On Error Resume Next
     r = LabSpec.Save(id, outBase & ".l6s", "")

@@ -31,7 +31,8 @@ GUIDE_MODES = ("reach", "drop", "maximize")
 VIDEO_KEYS = {"before", "after", "with_laser"}
 SETUP_KEYS = {"laser_nm", "grating", "filter", "objective", "hole_um", "slit_um", "laser_pol", "raman_pol"}
 ACQ_KEYS = {"range_cm1", "center_cm1", "exposure_s", "accumulations", "auto_exposure", "spike", "dark",
-            "subtract_background", "ics", "laser_reference", "warmup_s", "shutter"}
+            "subtract_background", "ics", "laser_reference", "warmup_s", "shutter",
+            "range_placement"}
 AE_KEYS = {"target_counts", "min_s", "max_s", "test_s"}
 FOCUS_KEYS = {"autofocus", "every", "dz_um", "scan"}
 MAP_KEYS = {"x_um", "y_um", "z_um", "snake", "engine", "swift"}
@@ -600,6 +601,9 @@ def validate_study(name: str, study: dict, prof: dict) -> dict:
     if a.get("laser_reference", "report") not in ("report", "correct", "correct_each"):
         errors.append("acquire.laser_reference: report, correct (follows the laser line's steps, a mode hop) or "
                       "correct_each (follows every spectrum's laser line, slow drift too)")
+    if a.get("range_placement", "centre") not in ("centre", "labspec"):
+        errors.append("acquire.range_placement: centre (a range within one window is acquired centred on it and cut "
+                      "by ls6t) or labspec (LabSpec places the window, From at its blue edge)")
     if a.get("shutter", "auto") not in ("auto", "hold"):
         errors.append("acquire.shutter: auto (LabSpec opens and closes it around each spectrum) or hold (held open "
                       "for all the study's spectra, as HORIBA's mapping scripts do)")

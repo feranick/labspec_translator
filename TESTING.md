@@ -993,6 +993,16 @@ calibration, above), whose laser line sits elsewhere; recalibrate (with the rang
 step the Raman peaks do not follow is listed in `checks.laser_line_bad_fits`, is not a hop and is not used for
 `correct`. The 600 zero (Si 522.85 with the 09:12 correction, no window centre): recalibrate. **Test:** the same series:
 no hop, reliable, `laser_line_bad_fits` at those points.
+**Per-window zero on .24.11 (after clearing 637.75@1200):** centred at 300 cm⁻¹ (650.19 nm) +0.01, centred on Si
+(659.66) −0.02, range −100…700 placed by LabSpec (676.75) −2.09: the 2 cm⁻¹ is only where LabSpec puts From at the
+window's edge. Interpolation passed (+0.008). Native map passed (9 good points, Si 520.80 ± 0.17, readbacks,
+`after_native_map` held). **From 2026.11.24.12** a range within one window is acquired centred on it and cut by ls6t
+(`range_placement: "labspec"` for the old way); `correct` applies a laser-line step only over 3 cm⁻¹ with the Raman
+peaks moving too (Si 521.01 with `correct` against 520.28 without at 655.30 nm; 519.18 against 520.46 at 600 gr/mm),
+and `zero_correction.plateaus` shows each step and whether it was applied; a calibration laser line over 2 × Si's width
+(600: 19.4 cm⁻¹) is not kept as a reference. **Tests:** −100…700 range: Si within 0.1 of a centred window, no
+correction needed; the 600 series with `correct`: `applied` false, Si ≈ 520.5; `native_map.seconds_map` ≈ the map's
+time.
 **Native map on .24.9, safety (3 × 3, 2 µm, 637.75 / 1200 / 1 %, 1 s × 2):** the map held the bridge about a minute
 (LabSpec's own map acquisition); ls6t called the bridge gone after 20 s ("busy in map_native"), and the shutter release
 it then sent was withdrawn from the bridge's queue, so the shutter stayed held open (laser_shutter On, ShutterMode 1,

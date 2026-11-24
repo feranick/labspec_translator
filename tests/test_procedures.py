@@ -1154,7 +1154,7 @@ def test_range_uses_the_spectrometers_real_centre():
     from labspec_translator import xcal
     xcal.clear()
     setup = dict(SETUP, grating=1200)
-    acq = {"range_cm1": [300, 700], "exposure_s": 1}
+    acq = {"range_cm1": [300, 700], "exposure_s": 1, "range_placement": "labspec"}
     st = run_inline({"c": {"kind": "calibration", "sample": {"name": "Si"}, "setup": setup, "acquire": acq,
                            "calibration": {"adjust": "ls6t"}}})
     cal = st["studies"]["c"]["calibration"]
@@ -1169,6 +1169,16 @@ def test_range_uses_the_spectrometers_real_centre():
     wc = s["checks"]["window_centre"]
     assert wc["nm"] == pytest.approx(rng["from_nm"] + win / 2, abs=0.01) and wc["range_centre_nm"] != wc["nm"]
     assert not any("window centred at" in w and "away" in w for w in s["warnings"])     # the same window: no far
+    # by default a range within one window is acquired centred on it and cut to the range (2026-11-24: the 2 cm-1
+    # was only in LabSpec-placed ranges)
+    acq_c = {"range_cm1": [300, 700], "exposure_s": 1}
+    rc = plan.acq_range({"kind": "spectrum", "setup": setup, "acquire": acq_c}, P.load(), 532)
+    assert rc["single"] and rc["from_nm"] == rc["to_nm"] == rc["center_nm"] and rc["crop_cm1"] == [300.0, 700.0]
+    s = run_inline({"s": dict(sp, acquire=acq_c)})["studies"]["s"]
+    assert "window_centre" not in s["checks"] and s["checks"]["range"]["pass"]
+    assert s["spectra"][0]["from_cm1"] >= 299 and s["spectra"][0]["to_cm1"] <= 701
+    assert plan.acq_range({"kind": "spectrum", "setup": setup, "acquire": {"range_cm1": [300, 3000]}},
+                          P.load(), 532)["single"] is False                                   # wider: LabSpec stitches
     xcal.clear()
 
 
@@ -1218,3 +1228,38 @@ def test_weak_points_kept_out_bad_laser_line_fits_and_native_readbacks():
            "map": {"x_um": [0, 2, 1], "y_um": [0, 0, 1], "engine": "native"}}
     m = run_inline({"m": nat})["studies"]["m"]
     assert "x_readback" in m["native_map"] and "y_readback" in m["native_map"] and m["native_map"]["seconds_map"]
+
+
+def test_correct_applies_only_real_hops_and_rejects_a_broad_calibration_line():
+    """2026-11-24: three cases where following a small laser-line offset made Si worse (1200 interpolation +0.73,
+    a 1200 series, 600 gr/mm -1.28 -> Si 519.18 instead of 520.46). 'correct' now applies a plateau's step only over
+    3 cm-1 and only when the Raman peaks moved with it; each plateau says what was not applied. A calibration whose
+    laser line is over twice as wide as its reference line keeps no laser line."""
+    from labspec_translator import xcal
+    assert runner.laser_line_too_broad(19.4, [{"fwhm_cm1": 6.5, "measured_cm1": 532.4}])
+    assert runner.laser_line_too_broad(8.1, [{"fwhm_cm1": 6.0, "measured_cm1": 520.7}]) is None
+    xcal.clear()
+    bdir = config.active_bridge_dir()
+    sim = S.ensure(bdir)
+    (bdir / "sim_laser_line").write_text("1")
+    (bdir / "sim_xshift").write_text("1.5,1.0")
+    setup = dict(SETUP, grating=600)
+    acq = {"center_cm1": 250, "exposure_s": 1}
+    st = run_inline({"c": {"kind": "calibration", "sample": {"name": "Si"}, "setup": setup, "acquire": acq,
+                           "calibration": {"adjust": "ls6t"}}})
+    assert st["studies"]["c"]["calibration"]["stored_correction"]["laser_line_cm1"] == pytest.approx(1.5, abs=0.3)
+    sp = {"kind": "spectrum", "sample": {"name": "Si"}, "setup": setup, "points": [{}] * 2,
+          "acquire": dict(acq, laser_reference="correct"),
+          "process": {"peaks": [{"name": "Si", "near_cm1": 520.7, "window_cm1": 30}]}}
+    for step in (2.0, 5.0):                       # the laser line alone moves: under 3, then not followed by Si
+        (bdir / "sim_laser_line_drift").write_text(str(step))
+        sim._ll_drift_n_fixed = True              # every spectrum here: the line `step` from the calibration's
+        s = run_inline({"s": sp})["studies"]["s"]
+        pl = s["checks"]["zero_correction"]["plateaus"]
+        assert pl and not any(p["applied"] for p in pl), pl
+        assert "not_applied_because" in pl[0]
+        assert s["peaks_by_name"]["Si"]["position_cm1"] == pytest.approx(520.7, abs=0.6), step
+    sim._ll_drift_n_fixed = False
+    (bdir / "sim_laser_line_drift").unlink()
+    (bdir / "sim_xshift").unlink()
+    xcal.clear()
