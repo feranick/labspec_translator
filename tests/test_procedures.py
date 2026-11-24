@@ -828,6 +828,9 @@ def test_live_map_view_uses_mapex_like_horiba():
     assert sorted(int(i) for i in v["index"]) == list(range(6))
     text = api.compose_vbs(config.active_bridge_dir(), config.home())["ls6t_bridge.vbs"]
     assert "LabSpec.MapEx(LS_CREATE_MAP, 0, id" in text and "LabSpec.MapEx(LS_ADD_TO_MAP, arr(2), id" in text
+    # the axes as declared arrays (a Variant holding an array crashed LabSpec in MapEx, 2026-11-24), units "um"
+    assert text.count("axA, ayA, labels, units") == 1 and text.count("axA, ayA, _") == 1
+    assert 'units(0) = "um"' in text and '"mkm"' not in text.split("Sub VView")[1].split("End Sub")[0]
 
 
 def test_laser_may_be_on_when_the_bridge_stops_during_a_hold(tmp_path):

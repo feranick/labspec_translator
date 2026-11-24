@@ -1686,7 +1686,7 @@ Function NumList(s)
 End Function
 
 Sub VView(cmd, res)
-    Dim name, action, kind, id, arr, dataId, mapId, pid, r, p, fv, tv, ax, ay
+    Dim name, action, kind, id, arr, dataId, mapId, pid, r, p, fv, tv, ax, ay, axA(), ayA(), k
     Dim vals(1), labels(1), units(1), disp(1)
     name = GetP(cmd, "name", "view")
     action = GetP(cmd, "action", "")
@@ -1696,8 +1696,8 @@ Sub VView(cmd, res)
     vals(1) = ParseNum(GetP(cmd, "y", "0"))
     labels(0) = "X"
     labels(1) = "Y"
-    units(0) = "mkm"      ' LabSpec's name for micrometres
-    units(1) = "mkm"
+    units(0) = "um"       ' mkm was shown literally on LabSpec's map axes (2026-11-24)
+    units(1) = "um"
     disp(0) = 1
     disp(1) = 0
     fv = ParseNum(GetP(cmd, "vfrom", "0"))
@@ -1710,7 +1710,18 @@ Sub VView(cmd, res)
             ' 2026-11-23: Map() returned E_FAIL with the range 0 - 0 (its From / To average the intensity)
             ax = NumList(GetP(cmd, "axis_x", "0"))
             ay = NumList(GetP(cmd, "axis_y", "0"))
-            mapId = LabSpec.MapEx(LS_CREATE_MAP, 0, id, CLng(ParseNum(GetP(cmd, "index", "0"))), ax, ay, labels, units)
+            ' MapEx takes its axes as declared arrays: a Variant holding an array (what NumList returns, or what a
+            ' dictionary keeps) crashed LabSpec in MapEx CREATE (2026-11-24, reproduced offline by Nicola). Copied
+            ' into arrays declared here, before every call
+            ReDim axA(UBound(ax))
+            For k = 0 To UBound(ax)
+                axA(k) = CDbl(ax(k))
+            Next
+            ReDim ayA(UBound(ay))
+            For k = 0 To UBound(ay)
+                ayA(k) = CDbl(ay(k))
+            Next
+            mapId = LabSpec.MapEx(LS_CREATE_MAP, 0, id, CLng(ParseNum(GetP(cmd, "index", "0"))), axA, ayA, labels, units)
             res("mapex_return") = mapId
             If Err.Number = 0 And mapId > 0 Then
                 LabSpec.Exec mapId, LS_SHOW_DATA, p
@@ -1753,7 +1764,17 @@ Sub VView(cmd, res)
     ElseIf action = "add" Then
         arr = gViews(name)
         If arr(0) = "mapex" Then
-            mapId = LabSpec.MapEx(LS_ADD_TO_MAP, arr(2), id, CLng(ParseNum(GetP(cmd, "index", "0"))), arr(3), arr(4), _
+            ax = arr(3)
+            ay = arr(4)
+            ReDim axA(UBound(ax))
+            For k = 0 To UBound(ax)
+                axA(k) = CDbl(ax(k))
+            Next
+            ReDim ayA(UBound(ay))
+            For k = 0 To UBound(ay)
+                ayA(k) = CDbl(ay(k))
+            Next
+            mapId = LabSpec.MapEx(LS_ADD_TO_MAP, arr(2), id, CLng(ParseNum(GetP(cmd, "index", "0"))), axA, ayA, _
                                   labels, units)
             If Err.Number = 0 And mapId > 0 Then
                 gViews(name) = Array("mapex", 0, mapId, arr(3), arr(4))

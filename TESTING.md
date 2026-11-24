@@ -849,6 +849,19 @@ starts with "THE LASER MAY STILL REACH THE SAMPLE" and how to switch it off. Aft
 in LabSpec's status bar (or at its supply / key if LabSpec does not respond), restart LabSpec, check that the shutter
 reads Off and ShutterMode is 0. The MapEx call itself (arguments as HORIBA's macro, axes as doubles, labels "X"/"Y",
 units "mkm") stays to be understood before the live view is tried again, without the hold.
+**Cause found (2026-11-24, Nicola, `mapex_test.vbs` / `mapex_live.vbs`):** not the hold (the live variant with the
+shutter automatic crashed the same way at the view create of point 0). Offline, with loaded spectra and no laser, the
+only difference between a pass and a crash in MapEx CREATE is how the axes are passed: a declared array (`Dim ax()`,
+`ReDim`, filled) passes; a Variant holding an array (what the bridge's `NumList` returned, and what its views
+dictionary kept for ADD) crashes LabSpec. `Map()` takes no axis arrays, which is why it never crashed (it returns
+E_FAIL here whatever its range, so it is no longer used). **From 2026.11.24.3** the bridge copies the axes into
+arrays declared in VView before every MapEx call (CREATE and ADD), the units are "um", and a map with Z gets no live
+view (only `Map()` would do it). No other LabSpec call in the bridge passes an array held in a Variant. The live view
+stays off by default until it passes: **test** `ls6t profile set display.live_view true`, a 3 × 3 map at 637.75 nm
+with the hold: the map grows in LabSpec point by point; then the same without the hold.
+**Not dark:** with ShutterMode automatic, "laser off" in LabSpec's status bar does not keep the beam off an
+acquisition: LabSpec opens the shutter for each Acq (`mapex_live` variant 6, point 0: Si at 654 counts). A dark
+acquisition needs ShutterMode manual with the shutter closed (what `laser_off: "shutter"` does).
 **runner.log was empty after the crash:** from 2026.11.24.2 every bridge command is written to the request's
 `runner.log` when it is sent and when it returns (`-> view kind=mapex`, `<- acquire ok=1 2.4 s`, marked `[shutter
 held]`), each line flushed at once, so the last call before a hang or crash is always there.

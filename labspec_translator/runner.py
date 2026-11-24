@@ -1044,6 +1044,8 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
                         gx = dict(axis_x=",".join(f"{v:g}" for v in (plan.axis_values(m_["x_um"]) if m_.get("x_um") else [0.0])),
                                   axis_y=",".join(f"{v:g}" for v in (plan.axis_values(m_["y_um"]) if m_.get("y_um") else [0.0])),
                                   index=int(p.get("iy", 0)) * nx_ + int(p.get("ix", 0)))
+                    if kind == "map" and not grid and not zonly:
+                        view = False         # LabSpec's Map() returned E_FAIL whatever its range (2026-11-24)
                     if view is None:
                         vr = ctx.call("view", timeout_s=30, action="create", name=name, vfrom=vfrom, vto=vto,
                                       kind="mapex" if grid else ("map" if kind == "map" and not zonly else "profile"),
