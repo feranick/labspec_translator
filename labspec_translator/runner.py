@@ -4149,6 +4149,12 @@ def _calibration_result(study, prof, rec, ref_lines, laser, grating, rng, reques
                                                                          and rng.get("from_cm1") is not None) else None)
         res["stored_as"] = (("one correction for every window of " if st.get("pooled") else "per window centre: ")
                             + combo(laser, grating) + " (" + st["pool"]["why"] + ")")
+        if st.get("drift_at_centre"):
+            dr = st["drift_at_centre"]
+            warnings.append(f"the zero at this window moved {dr['cm1']:+.2f} cm-1 since {dr['since']}"
+                            + (f"; the corrections at {', '.join(str(o['centre_nm']) for o in st.get('older_centres', []))}"
+                               " nm are older and still carry that drift: calibrate them again"
+                               if st.get("older_centres") else ""))
         res["stored_correction"] = st
         warnings.append(f"ls6t now corrects later spectra ({xcal.key(laser, grating)}): true = {a:+.3f} + "
                         f"{b:.6f} x measured")

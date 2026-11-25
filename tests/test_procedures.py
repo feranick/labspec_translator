@@ -1460,7 +1460,7 @@ def test_calibration_repeats_pooled_at_coarse_gratings_and_run_order():
     assert F.validate({"c": st})["c"]["ok"]
     c = run_inline({"c": st})["studies"]["c"]["calibration"]
     assert c["repeats"]["n"] == 3 and c["repeats"]["sd_cm1"] >= 0 and c["cm1_per_pixel"] >= 2.0, c.get("repeats")
-    assert "one window measured so far" in c["stored_as"]
+    assert "one window measured in this session" in c["stored_as"]
     xcal.clear()
     # pooled only when the centres differ by less than the repeats' scatter (Nicola, 2026-11-24)
     rep = lambda sd: {"n": 5, "sd_cm1": sd}
@@ -1475,6 +1475,25 @@ def test_calibration_repeats_pooled_at_coarse_gratings_and_run_order():
                        repeats=rep(0.3), cm1_per_px=2.6)
     assert not r.get("pooled") and "real window dependence" in r["pool"]["why"]
     assert xcal.get(532, 1200, 540.63, "centred")["a"] == -4.05
+    xcal.clear()
+    # the means' standard errors, not the SD: a real 0.8 cm-1 difference (repeats 5, SD 0.5) is not pooled
+    xcal.store(637.75, 1200, -0.4, 1.0, "si", [], centre_nm=650.19, pool="auto", repeats={"n": 5, "sd_cm1": 0.5})
+    r = xcal.store(637.75, 1200, 0.4, 1.0, "si", [], centre_nm=659.66, pool="auto", repeats={"n": 5, "sd_cm1": 0.5})
+    assert not r.get("pooled") and "standard errors (0.63)" in r["pool"]["why"], r["pool"]
+    xcal.clear()
+    # entries hours apart are not compared; the drift at a window measured again is reported
+    xcal.store(637.75, 600, -12.11, 1.0, "si", [], centre_nm=659.66, request="morning", pool="auto",
+               repeats={"n": 5, "sd_cm1": 0.5})
+    xcal.store(637.75, 600, -12.0, 1.0, "si", [], centre_nm=650.19, request="morning", pool="auto",
+               repeats={"n": 5, "sd_cm1": 0.5})
+    d = xcal.load()
+    for v in list(d["637.75@600"]["by_centre"].values()) + [d["637.75@600"]]:
+        v["time"] = "2026-11-24T09:12:00"
+    xcal._save(d)
+    r = xcal.store(637.75, 600, -9.6, 1.0, "si", [], centre_nm=659.66, request="evening", pool="auto",
+                   repeats={"n": 5, "sd_cm1": 0.5})
+    assert not r.get("pooled") and "older centre" in r["pool"]["why"]
+    assert r["drift_at_centre"]["cm1"] == pytest.approx(2.51, abs=0.01) and r["older_centres"][0]["centre_nm"] == 650.19
     xcal.clear()
     for cen, a_ in ((540.63, -4.05), (547.16, -2.18)):                            # no repeats, coarse, real
         r = xcal.store(532, 1200, a_, 1.0, "si", [], centre_nm=cen, pool="auto", cm1_per_px=2.6)

@@ -131,57 +131,111 @@ def store(laser_nm, grating, a: float, b: float, reference: str, lines: list, re
         rec["range_cm1"] = sorted(float(v) for v in range_cm1)
         br[range_key(range_cm1)] = rec
     by = dict((d.get(k) or {}).get("by_centre") or {})
+    drift = None
     if centre_nm is not None:
-        by[f"{float(centre_nm):.2f}"] = rec
-    pooled, why = pool_decision(by, pool, cm1_per_px)
+        ck = f"{float(centre_nm):.2f}"
+        old = by.get(ck)
+        if old and old.get("request") != request and _t(rec) - _t(old) > POOL_WINDOW_H * 3600:
+            # the same window measured again later: the drift since then, which older entries elsewhere still carry
+            drift = {"centre_nm": float(centre_nm), "since": old.get("time"),
+                     "cm1": round(float(rec["a"]) - float(old["a"]), 3)}
+        by[ck] = rec
+    pooled, why, cents = pool_decision(by, pool, cm1_per_px, rec)
     rec["pool"] = {"pooled": pooled, "why": why}
+    _fr, older = fresh_entries(by, rec)
     top = dict(rec)
+    if drift:
+        top["drift_at_centre"] = drift
+    if older:
+        top["older_centres"] = [{"centre_nm": float(c), "time": v.get("time")} for c, v in older]
     if pooled:
-        # one correction for every window: the mean of the per-centre entries (kept, so later evidence can undo it)
-        ents = [v for v in by.values() if v.get("placement") != "labspec"] or [rec]
+        # one correction for every window: the mean of the compared centres (all entries kept, so later evidence
+        # can undo it)
+        ents = [by[c] for c in cents] or [rec]
         top.update(a=round(float(sum(e["a"] for e in ents) / len(ents)), 5),
                    b=round(float(sum(e.get("b", 1.0) for e in ents) / len(ents)), 7), pooled=True,
-                   pooled_from=sorted(float(c) for c, v in by.items() if v in ents) if by else [])
+                   pooled_from=sorted(float(c) for c in cents))
         top.pop("centre_nm", None)
     d[k] = dict(top, **({"by_centre": by} if by else {}), **({"by_range": br} if br else {}))
     _save(d)
     return dict(top, pool=rec["pool"])
 
 
-POOL_SPREAD_SD = 2.0        # pooled when the centres differ by no more than this x the repeats' SD
+POOL_SE = 2.0               # two centre means differ when |a1 - a2| > this x sqrt(SE1^2 + SE2^2)
 POOL_PX_DEFAULT = 2.0       # without repeat data: pooled at this many cm-1 per pixel or coarser ...
 POOL_NO_REPEAT_SPREAD = 1.0  # ... unless the centres already differ by more than this (cm-1)
+POOL_WINDOW_H = 1.0         # entries compared and pooled: the same request, or within this many hours
 
 
-def pool_decision(by: dict, pool: str, cm1_per_px: float | None) -> tuple[bool, str]:
+def _t(rec) -> float:
+    try:
+        return time.mktime(time.strptime(str(rec.get("time")), "%Y-%m-%dT%H:%M:%S"))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _se(rec) -> float | None:
+    r = rec.get("repeats") or {}
+    if r.get("sem_cm1") is not None:
+        return float(r["sem_cm1"])
+    if r.get("sd_cm1") is not None and r.get("n"):
+        return float(r["sd_cm1"]) / max(int(r["n"]), 1) ** 0.5
+    return None
+
+
+def fresh_entries(by: dict, newest: dict, window_h: float = POOL_WINDOW_H) -> tuple[list, list]:
+    """The per-centre entries comparable with the newest one: the same request, or measured within window_h of it
+    (2026-11-24: 637.75 @ 600 at 659.66 nm read -12.11 in the morning and -9.2 ... -9.9 in the evening: a drift
+    larger than the window effect). Returns (fresh, older) as (centre, entry) pairs; LabSpec-placed ranges left out."""
+    t0, req = _t(newest), newest.get("request")
+    fresh, older = [], []
+    for c, v in by.items():
+        if v.get("placement") == "labspec":
+            continue
+        same = req is not None and v.get("request") == req
+        (fresh if same or abs(t0 - _t(v)) <= window_h * 3600 else older).append((c, v))
+    return fresh, older
+
+
+def pool_decision(by: dict, pool: str, cm1_per_px: float | None, newest: dict | None = None) -> tuple[bool, str, list]:
     """One correction for every window, or one per window centre? 'pooled' / 'per_centre' as asked. 'auto' (Nicola,
-    2026-11-24): pooled only when the centres differ by less than the repeat scatter (calibration.repeats gives it):
-    at 600 gr/mm the same window scattered by ~0.5 cm-1, as much as between windows; at 532 @ 1200 the centres
-    differ by a real 2.25 cm-1 (+4.05 / +2.18 / +1.80) and stay per centre. Without repeat data: pooled at a coarse
-    grating (cm-1 per pixel), unless the centres already differ by more than POOL_NO_REPEAT_SPREAD."""
+    2026-11-24): only entries from the same request or within POOL_WINDOW_H are compared (older ones would bring the
+    drift in); with repeat data, pooled when every two centre means agree within POOL_SE x sqrt(SE1^2 + SE2^2)
+    (repeats 5, SD 0.5: ~0.63 cm-1, so a real 0.8 cm-1 window difference stays per centre; 532 @ 1200's +4.05 / +2.18
+    / +1.80 too); without repeat data, pooled only at >= POOL_PX_DEFAULT cm-1 per pixel with the centres within
+    POOL_NO_REPEAT_SPREAD. Returns (pooled, why, the centres pooled)."""
     if pool == "pooled":
-        return True, "calibration.store 'pooled'"
+        return True, "calibration.store 'pooled'", [c for c, v in by.items() if v.get("placement") != "labspec"]
     if pool != "auto":
-        return False, "per window centre"
-    ents = [v for v in by.values() if v.get("placement") != "labspec"]
-    if len(ents) < 2:
-        return False, "one window measured so far: per window centre"
-    a_s = [float(e["a"]) for e in ents]
+        return False, "per window centre", []
+    fresh, older = fresh_entries(by, newest or {})
+    note = (f"; {len(older)} older centre(s) not compared (measured more than {POOL_WINDOW_H:g} h apart: "
+            "recalibrate them in the same request)") if older else ""
+    if len(fresh) < 2:
+        return False, "one window measured in this session: per window centre" + note, []
+    ses = [_se(v) for _, v in fresh]
+    if all(se is not None for se in ses):
+        worst = None
+        for i in range(len(fresh)):
+            for j in range(i + 1, len(fresh)):
+                d = abs(float(fresh[i][1]["a"]) - float(fresh[j][1]["a"]))
+                lim = POOL_SE * (ses[i] ** 2 + ses[j] ** 2) ** 0.5
+                if worst is None or d / max(lim, 1e-9) > worst[0]:
+                    worst = (d / max(lim, 1e-9), d, lim, fresh[i][0], fresh[j][0])
+        if worst[0] <= 1.0:
+            return True, (f"the {len(fresh)} centres agree within {POOL_SE:g} x their standard errors (largest "
+                          f"difference {worst[1]:.2f} cm-1, allowed {worst[2]:.2f}): one correction (their mean)"
+                          + note), [c for c, _ in fresh]
+        return False, (f"centres {worst[3]} and {worst[4]} nm differ by {worst[1]:.2f} cm-1, more than {POOL_SE:g} x "
+                       f"their standard errors ({worst[2]:.2f}): a real window dependence, kept per centre" + note), []
+    a_s = [float(v["a"]) for _, v in fresh]
     spread = max(a_s) - min(a_s)
-    sds = [float(e["repeats"]["sd_cm1"]) for e in ents if (e.get("repeats") or {}).get("sd_cm1") is not None]
-    if sds:
-        sd = (sum(s * s for s in sds) / len(sds)) ** 0.5
-        if spread <= POOL_SPREAD_SD * sd:
-            return True, (f"the {len(ents)} window centres differ by {spread:.2f} cm-1, within {POOL_SPREAD_SD:g} x the "
-                          f"repeats' SD ({sd:.2f}): one correction (their mean)")
-        return False, (f"the window centres differ by {spread:.2f} cm-1, more than {POOL_SPREAD_SD:g} x the repeats' "
-                       f"SD ({sd:.2f}): a real window dependence, kept per centre")
     if cm1_per_px is not None and cm1_per_px >= POOL_PX_DEFAULT and spread <= POOL_NO_REPEAT_SPREAD:
-        return True, (f"no repeat data; {cm1_per_px:.1f} cm-1 per pixel and the centres within "
-                      f"{POOL_NO_REPEAT_SPREAD:g} cm-1 ({spread:.2f}): one correction (their mean); calibration.repeats "
-                      "would tell")
-    return False, (f"no repeat data; the centres differ by {spread:.2f} cm-1: per window centre "
-                   "(calibration.repeats would tell whether that is noise)")
+        return True, (f"no repeat data for every centre; {cm1_per_px:.1f} cm-1 per pixel and the centres within "
+                      f"{POOL_NO_REPEAT_SPREAD:g} cm-1 ({spread:.2f}): one correction (their mean); "
+                      "calibration.repeats would tell" + note), [c for c, _ in fresh]
+    return False, (f"no repeat data for every centre; the centres differ by {spread:.2f} cm-1: per window centre "
+                   "(calibration.repeats would tell whether that is noise)" + note), []
 
 
 def clear_centre(laser_nm, grating, centre_nm) -> int:
