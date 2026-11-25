@@ -50,6 +50,8 @@ def positions(study: dict) -> list[dict]:
         dz = float(study.get("focus", {}).get("dz_um", 0) or 0)
         return [{"i": i, "ix": i, "iy": 0, "iz": 0, "x_um": 0.0, "y_um": 0.0, "dz_um": dz} for i in range(n)]
     pts = study.get("points") or [{}]
+    if kind == "calibration" and int((study.get("calibration") or {}).get("repeats", 1) or 1) > 1:
+        pts = [{}] * int(study["calibration"]["repeats"])        # the same spot, the spectrometer re-placed each time
     dz0 = float(study.get("focus", {}).get("dz_um", 0) or 0)
     out = []
     for i, p in enumerate(pts):
@@ -404,6 +406,23 @@ def acquire_seconds(study: dict, prof: dict, rng: dict) -> float:
     w = rng.get("windows") or 1
     return w * n * (float(exp) + t["readout_s"]) + (w if not rng.get("single") else 1) * t["window_move_s"] \
         + t["command_s"]
+
+
+def acq_next_s(study: dict, prof: dict, rng: dict, held: bool) -> float:
+    """A spectrum after the first in a study: the spectrometer is already in place (one window: no move), and with
+    the shutter held LabSpec's Acq adds about timing.held_overhead_s to the exposures (2026-11-24, a 5 x 5 map, 2 x
+    1 s: 2.5 s per Acq, the estimate said 5.3 s per point)."""
+    if not rng.get("single", True) and (rng.get("windows") or 1) > 1:
+        return acquire_seconds(study, prof, rng)
+    acq = study.get("acquire", {})
+    t = prof["timing"]
+    exp = acq.get("exposure_s", 1.0)
+    if exp == "auto":
+        return acquire_seconds(study, prof, rng)
+    n = int(acq.get("accumulations", 1)) + (1 if acq.get("spike") == "double_auto" else 0)
+    if held:
+        return n * float(exp) + float(t.get("held_overhead_s", 1.0)) * 0.5 + t["command_s"]
+    return n * (float(exp) + t["readout_s"]) + t["command_s"]
 
 
 SCAN_DEFAULTS = {"range_um": 10.0, "step_um": 1.0, "window_cm1": 30.0, "exposure_s": 0.5}
@@ -1027,8 +1046,10 @@ def estimate(study: dict, prof: dict, current: dict | None = None) -> dict:
         if af and (k == 0 or (every and k % every == 0)):
             total += scan_seconds(study, prof) if af == "scan" else camera_seconds(study, prof) if af == "camera" \
                 else t["autofocus_s"]
-        total += acq_s
         held_ = hold_shutter(study, prof, laser)
+        total += acq_s if k == 0 else acq_next_s(study, prof, rng, held_)
+        if k > 0 and study.get("kind") in ("map", "series") and (prof.get("display") or {}).get("live_view"):
+            total += float(t.get("view_s", 0.2))     # the live view's update per point
         if k > 0 and not held_:
             total += settle_s(prof, laser)          # the pause between spectra (a laser that needs it)
         if k == 0 and held_:

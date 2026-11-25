@@ -122,6 +122,24 @@ def noise_sigma(y) -> float:
     return float(1.4826 * mad / math.sqrt(6.0))
 
 
+def noise_smooth(y) -> tuple[float, float | None]:
+    """The noise as the scatter around a smooth line (a 31-point median; robust: median absolute deviation), and
+    the residual's lag-1 correlation. LabSpec's DeNoise (Lite on the XploRA, 2026-11-24) makes neighbouring points
+    correlated (lag-1 r 0.85-0.88), and the point-to-point estimate (noise_sigma) then read 0.16 counts for a real
+    scatter of 1.3-1.4: every SNR was ~8 x too high."""
+    from scipy.signal import medfilt
+    y = np.asarray(y, float)
+    if y.size < 63:
+        return float("nan"), None
+    r = y - medfilt(y, 31)               # 31 points: a 15-point median followed the correlated noise (~30 % low)
+    r = r[15:-15]
+    s = 1.4826 * float(np.median(np.abs(r - np.median(r))))
+    rc = r - r.mean()
+    den = float(np.sum(rc * rc))
+    rho = float(np.sum(rc[1:] * rc[:-1]) / den) if den > 0 else None
+    return s, (round(rho, 3) if rho is not None else None)
+
+
 def spikes(y, sigma: float | None = None, k: float = 12.0, e_per_count: float = 1.0) -> list[int]:
     """Indices of single- or two-pixel spikes (cosmic rays) standing k sigma above a 5-point median."""
     y = np.asarray(y, float)
@@ -334,7 +352,11 @@ def analyze(shift, y, process: dict, min_snr: float = 10.0, detect_snr: float = 
     """Baseline, noise, spikes, peaks and bands of one spectrum (x in cm-1, ascending)."""
     process = process or {}
     x, y = sort_xy(shift, y)
-    sigma = noise_sigma(y)
+    sigma_px = noise_sigma(y)            # point to point: for spikes (one or two pixels)
+    s_sm, rho = noise_smooth(y)
+    # for peaks and SNRs: the scatter around a smooth line when it is larger (correlated noise: LabSpec's DeNoise)
+    sigma = max(v for v in (sigma_px, s_sm, 0.0) if math.isfinite(v)) if (math.isfinite(sigma_px) or
+                                                                          math.isfinite(s_sm)) else float("nan")
     bl_spec = process.get("baseline", {"degree": 3})
     if bl_spec in (False, None):
         base = np.zeros_like(y)
@@ -346,7 +368,9 @@ def analyze(shift, y, process: dict, min_snr: float = 10.0, detect_snr: float = 
     out: dict = {"points": int(x.size), "from_cm1": round(float(x.min()), 3) if x.size else None,
                  "to_cm1": round(float(x.max()), 3) if x.size else None,
                  "noise_sigma": round(sigma, 4) if math.isfinite(sigma) else None,
-                 "baseline_degree": deg, "spikes": spikes(y, sigma, e_per_count=e_per_count)}
+                 "noise_sigma_pixel": round(sigma_px, 4) if math.isfinite(sigma_px) else None,
+                 "noise_correlation": rho,
+                 "baseline_degree": deg, "spikes": spikes(y, sigma_px, e_per_count=e_per_count)}
     specs = process.get("peaks")
     auto = False
     if not specs:
@@ -356,6 +380,15 @@ def analyze(shift, y, process: dict, min_snr: float = 10.0, detect_snr: float = 
     for i, ps in enumerate(specs):
         r = fit_peak(x, yc, float(ps["near_cm1"]), float(ps.get("window_cm1", 40.0)),
                      ps.get("shape", "pseudo_voigt"), sigma, ps.get("name") or f"peak{i}", detect_snr)
+        if auto and r.get("ok"):
+            # an auto-found 'peak' narrower than the sampling allows, or that the line shape hardly fits, is noise
+            # (2026-11-24: 'peak1' 1.88 cm-1 wide, one point, r2 0.62; 'peak2' r2 0.64 in the noise ripple)
+            dx = float(np.median(np.diff(x))) if x.size > 1 else 0.0
+            if dx and float(r.get("fwhm_cm1") or 0) < 2.5 * dx:
+                r.update(ok=False, why=f"narrower ({r['fwhm_cm1']:g} cm-1) than 2.5 points ({2.5 * dx:.2g} cm-1): "
+                                       "noise or a spike, not a Raman line")
+            elif r.get("r2") is not None and float(r["r2"]) < 0.8:
+                r.update(ok=False, why=f"the line shape fits poorly (r2 {r['r2']:g} < 0.8): noise, not a line")
         if r.get("ok") and r.get("snr") is not None and r["snr"] < min_snr:
             r["warning"] = (r.get("warning", "") + "; " if r.get("warning") else "") + \
                 f"weak: SNR {r['snr']:g} < {min_snr:g} (longer exposure or more accumulations)"

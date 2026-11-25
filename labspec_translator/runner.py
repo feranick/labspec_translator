@@ -81,6 +81,26 @@ def motor_args(prof: dict) -> dict:
     return {**{f"m_{k}": v for k, v in prof["motors"].items()}, **shutter_args(prof)}
 
 
+def header_ics_denoise(path) -> tuple:
+    """ICS and DeNoise as LabSpec's spectrum header gives them ('ICS correction=Off', 'DeNoise=Lite'), or None."""
+    try:
+        meta = spectra.header(path)
+    except OSError:
+        return None, None
+    ics = dn = None
+    for k, v in meta.items():
+        kl = k.lower()
+        if "ics" in kl.replace("physics", "") and "correction" in kl and ics is None:
+            ics = (("on" if str(v).strip().lower().startswith("on") else "off" if str(v).strip().lower().startswith(
+                "off") else str(v).strip()) + f" (LabSpec's header: {k.split('.')[-1]}={v})")
+        if "denoise" in kl and dn is None:
+            dn = str(v).strip()
+    return ics, dn
+
+
+SPECTRO_NM_PLAUSIBLE = (100.0, 2000.0)     # a spectrometer reading outside this is a bogus read-back
+
+
 def optics_record(r: dict) -> dict | None:
     """What the bridge read around one Acq: the time since the previous spectrum (and any pause), the spectrometer
     and grating before Acq, right after it returned and after the data, and whether a motor was busy then
@@ -90,7 +110,13 @@ def optics_record(r: dict) -> dict | None:
     out = {k: _f(r.get(k)) for k in keys if r.get(k) not in (None, "")}
     if not out:
         return None
-    sp = [out[k] for k in ("spectro_before_acq", "spectro_after_acq_call", "spectro_after_data") if out.get(k) is not None]
+    # a read-back right after a grating change can be nonsense (2026-11-24: -2027.24 nm, 'moved' 2787.9 nm)
+    bogus = [k for k in ("spectro_before_acq", "spectro_after_acq_call", "spectro_after_data")
+             if out.get(k) is not None and not SPECTRO_NM_PLAUSIBLE[0] <= out[k] <= SPECTRO_NM_PLAUSIBLE[1]]
+    if bogus:
+        out["spectro_reading_invalid"] = bogus
+    sp = [out[k] for k in ("spectro_before_acq", "spectro_after_acq_call", "spectro_after_data")
+          if out.get(k) is not None and k not in bogus]
     if len(sp) >= 2:
         out["spectro_moved_nm"] = round(max(sp) - min(sp), 4)
     # a motor busy just before Acq, right after the bridge's own spectrometer move to the study's window, is that
@@ -1306,6 +1332,8 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
                           site=str(study.get("sample", {}).get("site", ""))[:100])
             if study.get("sample", {}).get("notes"):
                 params["remark"] = str(study["sample"]["notes"])[:200]     # LabSpec's Remark, after "ls6t <seq>"
+            if kind == "calibration" and k > 0:
+                params["spectro_jog_nm"] = 3.0           # re-placed: each repeat lands on the pixels afresh
             if native and kind != "map":             # series too (2026-11-23: no .l6s for series spectra)
                 params["native"] = str(sd / "spectra" / f"p{k:05d}.l6s")
             if ctx.hold_wanted and not ctx.holding and str(params.get("laser_off", "0")) != "1":
@@ -1315,8 +1343,11 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
             t_a = time.time()
             t_last_start = t_a
             r = ctx.call("acquire", timeout_s=_acq_timeout(study, prof, rng), **params)
-            # when this spectrum's acquisition was sent (series: start to start), and when LabSpec began it
-            t_sent = round(t_a - t_start, 3)
+            # when LabSpec's Acq began: the command's time plus the bridge's time before Acq (the spectrometer move
+            # after a grating change, the flush, the settle); series spacing counts from there
+            pre = _f(r.get("t_to_acq_s")) or 0.0
+            t_last_start = t_a + pre
+            t_sent = round(t_a + pre - t_start, 3)
             t_acq += time.time() - t_a
             if not r["ok"]:
                 raise Stop(f"point {k}: acquisition failed: {r.get('error')}", "study")
@@ -1335,6 +1366,13 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
                                                  if r.get("hold_after_acq_last_release") else {})}}
                       if r.get("hold_after_acq_held") not in (None, "") else {}),
                    **({"settled_s": _f(r.get("settled_s"))} if r.get("settled_s") not in (None, "") else {})}
+            hdr_ics, hdr_dn = header_ics_denoise(out)
+            if hdr_ics:
+                # LabSpec's own record of this spectrum (2026-11-24: 'ICS correction=Off' while ls6t said "LabSpec's
+                # setting (a correction file exists)")
+                rec["ics"] = hdr_ics
+            if hdr_dn:
+                rec["denoise"] = hdr_dn
             per_point.append(rec)
             if r.get("hold_after_acq_held") == "no" and not any("shutter hold was lost" in w for w in warnings):
                 warnings.append(f"the shutter hold was lost at point {k}: LabSpec read ShutterMode "
@@ -3289,6 +3327,25 @@ def _stats(vals) -> dict:
             "max": float(a.max())}
 
 
+def stitch_seams(x) -> list:
+    """Where a LabSpec-stitched spectrum changes window: the point spacing jumps there (2026-11-24: 1.56 -> 1.12 ->
+    1.60 cm-1 at ~1945 cm-1)."""
+    x = np.sort(np.asarray(x, float))
+    if x.size < 60:
+        return []
+    dx = np.diff(x)
+    out = []
+    i = 20
+    while i < dx.size - 20:
+        a, b = float(np.median(dx[i - 20:i])), float(np.median(dx[i:i + 20]))
+        if a > 0 and abs(b / a - 1) > 0.1 and abs(dx[i] - a) > 0.15 * a:
+            out.append(round(float(x[i]), 1))
+            i += 30
+        else:
+            i += 1
+    return out
+
+
 def window_centre_used(rng: dict, per_point: list) -> tuple:
     """The spectrometer's real centre (nm) for a study's spectra, and where it comes from. One window centred by ls6t:
     the centre asked. A range: LabSpec's Acq places the window itself (2026-11-24: -100..700 cm-1 at 637.75 nm, ls6t
@@ -3298,7 +3355,8 @@ def window_centre_used(rng: dict, per_point: list) -> tuple:
     if rng.get("single", True):
         return plan.window_centre(rng), "the centre asked (ls6t placed the spectrometer)"
     reads = [(r.get("optics_check") or {}).get("spectro_after_data") for r in per_point]
-    reads = [float(v) for v in reads if v not in (None, "")]
+    reads = [float(v) for v in reads if v not in (None, "")
+             and SPECTRO_NM_PLAUSIBLE[0] <= float(v) <= SPECTRO_NM_PLAUSIBLE[1]]
     if reads and rng.get("windows") == 1:
         return (round(float(np.median(reads)), 4),
                 "the spectrometer's reading after the data (LabSpec placed the window for the range itself)")
@@ -3324,7 +3382,9 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
         checks["window_centre"] = {"nm": wc, "from": wc_from,
                                    "range_centre_nm": plan.window_centre(rng)}
     placement = "labspec" if (not rng.get("single", True)) else "centred"
-    corr = xcal.get(laser, grating, wc, placement) if kind != "calibration" else None
+    ext_range = [rng["from_cm1"], rng["to_cm1"]] if (not rng.get("single", True) and (rng.get("windows") or 1) > 1
+                                                      and rng.get("from_cm1") is not None) else None
+    corr = xcal.get(laser, grating, wc, placement, range_cm1=ext_range) if kind != "calibration" else None
     if kind != "calibration" and laser:
         zs = zero_state(laser, grating, prof)
         checks["zero"] = zs
@@ -3363,9 +3423,14 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
                             "zero differs between windows by a cm-1 or more; calibrate with this study's window "
                             "(center_cm1 or range_cm1), or keep the laser line in the window with "
                             "acquire.laser_reference 'correct'")
+        elif ext_range and not corr.get("range_match"):
+            warnings.append(f"this range is stitched by LabSpec from {rng.get('windows')} windows, each with its own "
+                            "zero; the correction applied was measured in one window (2026-11-24, 637.75 @ 1200, "
+                            "100-3200 cm-1: Si read 1.5 cm-1 low with it): calibrate with this same range_cm1 and ls6t "
+                            "keeps that correction for this range")
         elif corr.get("centre_unknown"):
-            warnings.append("the correction's window centre is not known (an extended range here, or a calibration "
-                            "stored before 2026.11.24.8): the zero differs between windows")
+            warnings.append("the correction's window centre is not known (a calibration stored before "
+                            "2026.11.24.8): the zero differs between windows")
         lkc = P.laser_key(prof, laser) if laser else None
         max_h = float((prof["lasers"][lkc].get("calibration_max_age_h") if lkc else None)
                       or prof.get("calibration", {}).get("max_age_h", 24))
@@ -3607,6 +3672,13 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
         a = spectra.analyze(shift, y, process, min_snr, prof["checks"].get("detect_snr", 5.0),
                             float(prof["detector"].get("e_per_count") or 1.0))
         _spikes_where_meaningful(a, laser, grating, ll)
+        if ext_range and rec["point"] == per_point[0]["point"]:
+            checks["stitch"] = {"windows": rng.get("windows"), "seams_cm1": stitch_seams(a["_x"])}
+        if a.get("noise_correlation") is not None and a["noise_correlation"] > 0.5 and "noise" not in checks:
+            checks["noise"] = {"correlation": a["noise_correlation"], "sigma": a.get("noise_sigma"),
+                               "sigma_pixel": a.get("noise_sigma_pixel"), "denoise": rec.get("denoise"),
+                               "note": "neighbouring points are correlated (LabSpec's DeNoise smooths them): the noise "
+                                       "is the scatter around a smooth line, not point to point"}
         if ll and ll.get("ok"):
             # each peak also from this spectrum's own laser line (the Raman shift by definition; LabSpec's scale may
             # carry its own offset between 0 and the band: on the XploRA Si was 524.8 from the line, 520.2 on the scale)
@@ -3617,7 +3689,8 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
                 if pk.get("ok") and pk.get("position_cm1") is not None:
                     pk["from_laser_line_cm1"] = round(float(pk["position_cm1"]) - base, 3)
         rec.update(max_counts=sat["max_counts"], saturated=sat["saturated"], saturated_pixels=sat["pixels"],
-                   noise_sigma=a["noise_sigma"], spikes=len(a["spikes"]), spike_cm1=a.get("spike_cm1", [])[:20],
+                   noise_sigma=a["noise_sigma"], noise_sigma_pixel=a.get("noise_sigma_pixel"),
+                   noise_correlation=a.get("noise_correlation"), spikes=len(a["spikes"]), spike_cm1=a.get("spike_cm1", [])[:20],
                    spike_info=a.get("spike_info", [])[:20],
                    from_cm1=a["from_cm1"],
                    to_cm1=a["to_cm1"], peaks=a["peaks"], bands=a["bands"], auto_peaks=a["auto_peaks"])
@@ -3819,7 +3892,10 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
             if abs(dr) > LASER_JUMP_CM1:
                 warnings.append(f"the laser line sits {dr:+.1f} cm-1 from where it was at the calibration (drift "
                                 "since then, or a calibration made with another spectrometer window), not a hop"
-                                + ("; followed (laser_reference)" if ll_mode == "correct" else ""))
+                                + ("; followed (laser_reference)" if ll_mode == "correct" and (
+                                    follow_each or any(p_.get("applied") for p_ in plateau_report)) else
+                                    "; not followed: under the laser_reference step threshold "
+                                    "(checks.zero_correction.plateaus)" if ll_mode == "correct" else ""))
         if jumps:
             after_ = checks["laser_line"]["points_after_a_jump"]
             msg = (f"the laser line moved by {', '.join(f'{d:+.1f}' for _, d in jumps[:6])} cm-1 at point(s) "
@@ -3890,7 +3966,7 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
         out["bands"] = first.get("bands", {})
     if kind == "calibration" and per_point:
         out["calibration"] = _calibration_result(study, prof, per_point[0], ref_lines, laser, grating, rng, request,
-                                                 checks, unreliable, warnings)
+                                                 checks, unreliable, warnings, repeats=per_point)
     return out
 
 
@@ -3921,8 +3997,34 @@ def zero_state(laser, grating, prof: dict) -> dict:
     return out
 
 
+COARSE_CM1_PER_PX = 2.0    # a grating this coarse at the reference line: per-centre corrections are pooled (auto)
+
+
+def _cm1_per_px(rec: dict, laser, near_cm1: float) -> float | None:
+    """The spectrum's sampling (cm-1 per pixel) near a line, from its own axis (600 gr/mm at 660 nm: ~4.5)."""
+    try:
+        sp = spectra.read(rec["file"])
+        sh, _ = spectra.to_shift(sp["x"], sp["meta"].get("x_unit", "nm"), laser)
+        sh = np.sort(np.asarray(sh, float))
+        sel = np.abs(sh - near_cm1) < 50
+        d = np.diff(sh[sel]) if sel.sum() > 3 else np.diff(sh)
+        return round(float(np.median(np.abs(d))), 3) if d.size else None
+    except Exception:  # noqa: BLE001 - only a hint for how to store
+        return None
+
+
+def _repeat_offsets(per_point, ref_lines) -> list:
+    """Each repeat's offset (mean of its lines' measured - reference); None where no line was fitted."""
+    out = []
+    for r_ in per_point:
+        e = [pk["position_cm1"] - ref for ref, pk in zip(ref_lines, r_.get("peaks") or [])
+             if pk.get("ok") and pk.get("position_cm1") is not None]
+        out.append(float(np.mean(e)) if e else None)
+    return out
+
+
 def _calibration_result(study, prof, rec, ref_lines, laser, grating, rng, request, checks, unreliable,
-                        warnings) -> dict:
+                        warnings, repeats: list | None = None) -> dict:
     """The reference lines measured against their true positions: the offset (the zero) and, with lines far enough
     apart, the scale (the dispersion coefficient): true = a + b x measured. adjust 'ls6t' remembers it and applies
     it to later spectra (same laser and grating)."""
@@ -3959,11 +4061,38 @@ def _calibration_result(study, prof, rec, ref_lines, laser, grating, rng, reques
     worst = float(np.max(np.abs(meas - refs)))
     resid = refs - (a + b * meas)
     first = ok[0]
+    rep_info = None
+    if repeats and len(repeats) > 1:
+        # several spectra, the spectrometer re-placed before each (2026-11-24, 600 gr/mm: the same window gave
+        # +9.22 / +9.47 / +9.86 cm-1, a scatter larger than the fit's own error): the correction is their mean
+        offs = _repeat_offsets(repeats, ref_lines)
+        good = [o for o in offs if o is not None]
+        if len(good) >= 2:
+            mean_o = float(np.mean(good))
+            sd = float(np.std(good, ddof=1))
+            a = a + (float(np.mean(meas - refs)) - mean_o) * b       # the zero moved to the mean of the repeats
+            worst = abs(mean_o)
+            rep_info = {"n": len(good), "offsets_cm1": [None if o is None else round(o, 3) for o in offs],
+                        "mean_cm1": round(mean_o, 3), "sd_cm1": round(sd, 3),
+                        "sem_cm1": round(sd / math.sqrt(len(good)), 3)}
     res.update(reference_cm1=first["reference_cm1"], measured_cm1=first["measured_cm1"],
                offset_cm1=round(float(np.mean(meas - refs)), 4), fwhm_cm1=first["fwhm_cm1"], snr=first["snr"],
                worst_error_cm1=round(worst, 4), correction={"a": round(float(a), 5), "b": round(float(b), 7)},
                residual_cm1=round(float(np.max(np.abs(resid))), 4), lines_used=len(ok), **{"pass": worst <= tol})
     res["zero_shift_cm1"] = round(float(a + (b - 1.0) * float(np.mean(refs))), 4)   # the shift at the lines' centre
+    px = _cm1_per_px(rec, laser, float(first["reference_cm1"]))
+    if px:
+        res["cm1_per_pixel"] = px
+    if rep_info:
+        res["repeats"] = rep_info
+        res["offset_cm1"] = rep_info["mean_cm1"]
+        if rep_info["sd_cm1"] > tol / 2:
+            warnings.append(f"the repeats scatter by {rep_info['sd_cm1']:.2f} cm-1 (SD of {rep_info['n']}): more than "
+                            f"half the tolerance; the mean ({rep_info['mean_cm1']:+.2f} ± {rep_info['sem_cm1']:.2f}) is "
+                            "stored")
+    elif px and px >= COARSE_CM1_PER_PX:
+        warnings.append(f"{px:.1f} cm-1 per pixel: the line spans a couple of pixels and one fit repeats to about "
+                        "±0.5 cm-1 (more than its own error says): calibration.repeats 5 gives the mean and its scatter")
     # good enough to correct the zero by? 2026-11-23: at 1 %, 1 s the Si line was weak and its fit sat at the edge of
     # the window (525.12 cm-1); ls6t still asked for a -4.42 cm-1 correction; AutoCalibration then found 520.64
     min_snr = float(prof["checks"].get("min_snr", 10.0))
@@ -4011,10 +4140,19 @@ def _calibration_result(study, prof, rec, ref_lines, laser, grating, rng, reques
             res["laser_line_rejected"] = broad
             warnings.append(f"the calibration's laser line is not kept as a reference: {broad}")
             llc = {}
-        st = xcal.store(laser, grating, a, b, refname, lines, request, centre_nm=wc,
+        mode_ = cal.get("store", "auto")
+        pooled = mode_ == "pooled" or (mode_ == "auto" and px is not None and px >= COARSE_CM1_PER_PX)
+        if pooled:
+            res["stored_as"] = (f"one correction for {combo(laser, grating)} (pooled: at {px or 0:.1f} cm-1 per pixel "
+                                "the repeat scatter exceeds the difference between windows)" if mode_ == "auto"
+                                else f"one correction for {combo(laser, grating)} (calibration.store 'pooled')")
+        st = xcal.store(laser, grating, a, b, refname, lines, request, centre_nm=None if pooled else wc,
+                        pooled=pooled, repeats=rep_info,
                         laser_line_cm1=llc.get("position_cm1") if llc.get("ok") else None,
                         laser_line_fwhm_cm1=llc.get("fwhm_cm1") if llc.get("ok") else None,
-                        placement="labspec" if not rng.get("single", True) else "centred")
+                        placement="labspec" if not rng.get("single", True) else "centred",
+                        range_cm1=[rng["from_cm1"], rng["to_cm1"]] if (wc is None and not rng.get("single", True)
+                                                                         and rng.get("from_cm1") is not None) else None)
         res["stored_correction"] = st
         warnings.append(f"ls6t now corrects later spectra ({xcal.key(laser, grating)}): true = {a:+.3f} + "
                         f"{b:.6f} x measured")
@@ -4157,13 +4295,15 @@ def parse_native_map(path, study: dict, prof: dict, x0, y0, zref) -> list:
 
 def _point_summary(r: dict) -> dict:
     keys = ("point", "offset", "stage", "file", "native", "t", "exposure_s", "accumulations", "max_counts",
-            "saturated", "noise_sigma", "spikes", "spike_cm1", "spike_info", "from_cm1", "to_cm1", "peaks", "bands",
+            "saturated", "noise_sigma", "noise_sigma_pixel", "noise_correlation", "denoise", "spikes", "spike_cm1",
+            "spike_info", "from_cm1", "to_cm1", "peaks", "bands",
             "x_correction", "laser_line_correction_cm1", "zero_uncertain", "excluded",
             "background",
             "ics", "auto_exposure", "optics_check", "t_start", "shutter_hold_after")
     return {k: r.get(k) for k in keys if k not in ("auto_exposure", "optics_check", "t_start",
                                                     "laser_line_correction_cm1", "zero_uncertain", "excluded",
-                                                    "shutter_hold_after")
+                                                    "shutter_hold_after", "noise_sigma_pixel", "noise_correlation",
+                                                    "denoise")
             or r.get(k) is not None}
 
 

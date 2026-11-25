@@ -1014,6 +1014,25 @@ same 600 held series (`shutter_hold_after` on every point); the hop series with 
 excluded, "not single-mode"); 785 at 300 cm⁻¹ right after a laser change (`checks.grating_window.spectro_nm.retried`);
 637.75@2400 after 785 (`checks.setup.pass` true after the retry, `shutter_hold.log` shows the release before the
 reselect).
+**On .15:** the read-back, `correction_used`, bad fits, the 2400 retry and the multimode exclusion pass. **From .16**
+`t_start` is LabSpec's Acq (after the bridge's spectrometer move: the first gap of a series after a grating change is
+the interval again); the drift warning no longer says "followed" for a step that was not applied; validation warns
+when a mode-hopping laser's first exposure is unprotected (shutter auto, settle_s 0, no warm-up). **Tests:** a series
+right after a grating change: `spacing` first gap ≈ the interval, `acquire_phases_s` shows the move; still to
+exercise: the release before a reselect (a held study whose grating needs the retry) and the spectrometer retry.
+**600 gr/mm repeatability (.15):** seven Si calibrations at 300 / 520.7 / 1000 cm⁻¹ in 3 min: +9.22 … +10.34, the same
+window scattering as much as different windows (Si spans ~2 pixels at ~4.5 cm⁻¹ per pixel). **From .16**
+`calibration.repeats: 5` re-places the spectrometer before each spectrum and stores the mean (SD and SEM reported); at
+600 the correction is pooled (one for all windows). **Test:** 637.75 @ 600, `repeats: 5`, at 300 and at 1000 cm⁻¹:
+the two means within about 2 × SEM of each other; `stored_as` pooled; a spectrum afterwards uses it at any centre.
+**Extended range and maps (.15):** the stitched 100–3200 cm⁻¹ range (2 windows, seam ~1945 cm⁻¹) read Si 1.5 low with
+a one-window correction; `noise_sigma` ~0.16 against a real 1.3–1.4 (DeNoise Lite: lag-1 r 0.85–0.88), so SNRs were
+~8 × high; auto 'peaks' one point wide were accepted. 5 × 5 maps: native 92 s, points 87 s (estimate 3.0 min).
+**From .16:** noise from the scatter around a smooth line (`noise_sigma`; `noise_sigma_pixel`, `noise_correlation`,
+`denoise` and `ics` from the header), auto peaks need 2.5 points and r² 0.8, `checks.stitch` gives the seams, a
+calibration over the same range_cm1 is kept for that range. **Tests:** the same extended range: calibrate it with
+`range_cm1: [100, 3200]`, then a spectrum: `zero_correction.stored.range_match` and Si within 0.3; the 5 × 5 map:
+`noise_sigma` near the height scatter, SNR about 10 × lower than before, estimate within 20 %.
 **Native map on .24.9, safety (3 × 3, 2 µm, 637.75 / 1200 / 1 %, 1 s × 2):** the map held the bridge about a minute
 (LabSpec's own map acquisition); ls6t called the bridge gone after 20 s ("busy in map_native"), and the shutter release
 it then sent was withdrawn from the bridge's queue, so the shutter stayed held open (laser_shutter On, ShutterMode 1,

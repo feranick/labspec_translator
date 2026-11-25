@@ -952,7 +952,7 @@ def test_laser_line_and_stored_correction_do_not_count_the_zero_twice():
     setup = dict(SETUP, grating=600)
     acq = {"center_cm1": 250, "exposure_s": 1}
     st = run_inline({"c": {"kind": "calibration", "sample": {"name": "Si"}, "setup": setup, "acquire": acq,
-                           "calibration": {"adjust": "ls6t"}}})
+                           "calibration": {"adjust": "ls6t", "store": "per_centre"}}})
     stored = st["studies"]["c"]["calibration"]["stored_correction"]
     assert stored["laser_line_cm1"] == pytest.approx(1.5, abs=0.3) and stored["centre_nm"]
     # then the laser moves by 8.7 cm-1 (sim_shift_after_first replaces the scale's error for later spectra)
@@ -1424,3 +1424,94 @@ def test_spectra_after_a_hop_that_are_not_single_mode_are_kept_out():
     assert set(s["checks"]["excluded_points"]) == {"1", "2"}
     for f in ("sim_shift_after_first", "sim_multimode_after_hop"):
         (bdir / f).unlink()
+
+
+def test_first_exposure_unprotected_warned_and_spectrum_clock_from_acq():
+    """2026-11-24 (.15): with the shutter cycled by LabSpec and settle_s 0, point 0 of the 637.75 nm laser was broad
+    (Si 8.2 against 6.1 cm-1): warned at validation. Each spectrum's t_start is LabSpec's Acq, after the bridge's
+    spectrometer move (a 26 s move counted as point 0's in the first gap)."""
+    prof = P.load()
+    lk = next(k for k, v in prof["lasers"].items() if abs(v["nm"] - 532) < 1)
+    prof["lasers"][lk].update(mode_hops=True)
+    P.save(prof)
+    st = {"kind": "series", "sample": {"name": "Si"}, "setup": SETUP,
+          "acquire": {"center_cm1": 520, "exposure_s": 1}, "series": {"count": 2, "interval_s": 0}}
+    v = F.validate({"s": st})["s"]
+    assert any("settles after its shutter opens" in w for w in v["warnings"]), v["warnings"]
+    assert not any("settles after its shutter opens" in w for w in
+                   F.validate({"s": dict(st, acquire=dict(st["acquire"], warmup_s=2))})["s"]["warnings"])
+    prof["lasers"][lk].update(mode_hops=False)
+    P.save(prof)
+    text = api.compose_vbs(config.active_bridge_dir(), config.home())["ls6t_bridge.vbs"]
+    acq = text.split('res("t_to_acq_s") = Secs(Elapsed(tAll))')
+    assert len(acq) == 2 and acq[1].lstrip().startswith("LabSpec.Acq mode")
+
+
+def test_calibration_repeats_pooled_at_coarse_gratings_and_run_order():
+    """2026-11-24, 637.75 @ 600 gr/mm: seven calibrations in three windows within 3 min scattered as much within a
+    window (+9.22 / +9.47 / +9.86) as between windows, Si spanning ~2 pixels at ~4.5 cm-1 per pixel. calibration.repeats
+    N re-places the spectrometer before each spectrum and reports mean, SD and SEM; at a coarse grating (>= 2 cm-1 per
+    pixel) one pooled correction is stored for every window. Studies run in the order given (order, when an app sorts
+    the keys)."""
+    from labspec_translator import xcal
+    xcal.clear()
+    xcal.store(532, 600, 1.0, 1.0, "si", [], centre_nm=547.16, placement="centred")
+    st = {"kind": "calibration", "sample": {"name": "Si"}, "setup": dict(SETUP, grating=600),
+          "acquire": {"center_cm1": 520.7, "exposure_s": 1}, "calibration": {"adjust": "ls6t", "repeats": 3}}
+    assert F.validate({"c": st})["c"]["ok"]
+    c = run_inline({"c": st})["studies"]["c"]["calibration"]
+    assert c["repeats"]["n"] == 3 and c["repeats"]["sd_cm1"] >= 0 and c["cm1_per_pixel"] >= 2.0, c.get("repeats")
+    assert c["stored_correction"]["pooled"] and "pooled" in c["stored_as"]
+    g = xcal.get(532, 600, 560.0, "centred")
+    assert g["pooled"] and not g.get("centre_unknown") and not g.get("centre_far")
+    assert "by_centre" not in xcal.load()["532@600"]
+    xcal.clear()
+    assert not F.validate({"c": dict(st, calibration={"repeats": 0})})["c"]["ok"]
+    # run order
+    one = {"kind": "spectrum", "sample": {"name": "Si"}, "setup": SETUP, "acquire": {"center_cm1": 520, "exposure_s": 0.2}}
+    s = api.start({"a": one, "b": one}, inline=True, order=["b", "a"])
+    assert s["ok"] and s["studies"] == ["b", "a"]
+    api.status(s["request"], 30)
+    assert not api.start({"a": one, "b": one}, order=["b"])["ok"]
+
+
+def test_correlated_noise_auto_peaks_stitch_seams_range_corrections_and_headers(tmp_path):
+    """2026-11-24 evening: LabSpec's DeNoise (Lite) correlates neighbouring points (lag-1 r ~0.87), and the
+    point-to-point noise read ~8 x low, inflating every SNR; auto 'peaks' one point wide or poorly fitted were
+    accepted; an extended range got one window's correction; the header's ICS and DeNoise were not reported; a
+    bogus spectrometer read-back (-2027 nm) after a grating change; the points engine's estimate was ~2 x high."""
+    from scipy.ndimage import gaussian_filter1d
+    from labspec_translator import xcal
+    rng_ = np.random.default_rng(3)
+    n = gaussian_filter1d(rng_.normal(0, 4, 3000), 1.2)
+    sm, rho = spectra.noise_smooth(300 + n)
+    assert spectra.noise_sigma(300 + n) < 0.5 * np.std(n) and sm > 0.75 * np.std(n) and rho > 0.5
+    x = np.linspace(100, 3200, 2000)
+    y = 300 + gaussian_filter1d(rng_.normal(0, 4, x.size), 1.2)
+    y[800] += 60                                                   # one point: not a Raman line
+    a = spectra.analyze(x, y, {}, 10.0, 5.0)
+    assert not any(pk.get("ok") and pk["fwhm_cm1"] < 2.5 * (x[1] - x[0]) for pk in a["peaks"]), a["peaks"]
+    assert a["noise_sigma"] > 2 * a["noise_sigma_pixel"]
+    # seams where the point spacing jumps
+    xs = np.concatenate([np.arange(100, 1945, 1.56), np.arange(1945, 3200, 1.12)])
+    assert runner.stitch_seams(xs) and abs(runner.stitch_seams(xs)[0] - 1945) < 5
+    # an extended range keeps its own correction
+    xcal.clear()
+    xcal.store(637.75, 1200, 0.02, 1.0, "si", [], centre_nm=659.66, placement="centred")
+    xcal.store(637.75, 1200, 1.5, 1.0, "si", [], placement="labspec", range_cm1=[100, 3200])
+    assert xcal.get(637.75, 1200, None, "labspec", range_cm1=[100, 3200])["range_match"]
+    assert xcal.get(637.75, 1200, 659.66, "centred")["a"] == 0.02
+    xcal.clear()
+    # LabSpec's header
+    f = tmp_path / "s.txt"
+    f.write_text("# acq.ICS correction=Off\n# acq.DeNoise=Lite\n500\t1\n")
+    ics, dn = runner.header_ics_denoise(f)
+    assert ics.startswith("off") and dn == "Lite"
+    oc = runner.optics_record({"spectro_before_acq": "-2027.24", "spectro_after_data": "659.66"})
+    assert oc["spectro_reading_invalid"] == ["spectro_before_acq"] and "spectro_moved_nm" not in oc
+    # the estimate: one spectrometer move, not one per point
+    st = {"kind": "map", "sample": {"name": "Si"}, "setup": dict(SETUP, grating=1200),
+          "acquire": {"center_cm1": 520, "exposure_s": 1, "accumulations": 2, "shutter": "hold"},
+          "map": {"x_um": [-4, 4, 2], "y_um": [-4, 4, 2]}}
+    e = plan.estimate(st, P.load())["seconds"]
+    assert e["total"] - e["setup"] < 25 * 4.5, e

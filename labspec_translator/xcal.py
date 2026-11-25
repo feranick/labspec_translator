@@ -55,13 +55,21 @@ def _usable(rec: dict, placement: str | None) -> bool:
     return rec.get("placement") != "labspec" or placement == "labspec"
 
 
-def get(laser_nm, grating, centre_nm=None, placement: str | None = None) -> dict | None:
+def range_key(range_cm1) -> str:
+    lo, hi = sorted(float(v) for v in range_cm1)
+    return f"{lo:g}-{hi:g}"
+
+
+def get(laser_nm, grating, centre_nm=None, placement: str | None = None, range_cm1=None) -> dict | None:
     """The correction for this laser and grating, for a window centred at centre_nm: the one measured there, or
     interpolated between the two around it, or the nearest (then 'centre_far': the zero differs between windows:
     1.7 cm-1 between two windows a minute apart, 2026-11-24). Without a centre, the last one measured."""
     rec = load().get(key(laser_nm, grating))
     if not rec:
         return None
+    if range_cm1 is not None and (rec.get("by_range") or {}).get(range_key(range_cm1)):
+        # an extended range calibrated with the same range: LabSpec stitches its windows the same way
+        return dict(rec["by_range"][range_key(range_cm1)], range_match=True)
     by = {k: v for k, v in (rec.get("by_centre") or {}).items() if _usable(v, placement)}
     if rec.get("by_centre") and not by:
         return None
@@ -70,7 +78,7 @@ def get(laser_nm, grating, centre_nm=None, placement: str | None = None) -> dict
         if not by and not _usable(rec, placement):
             return None
         out = {k: v for k, v in top.items() if k != "by_centre"}
-        if by or centre_nm is not None:
+        if (by or centre_nm is not None) and not top.get("pooled"):
             out["centre_unknown"] = True
         return out
     c = float(centre_nm)
@@ -95,7 +103,8 @@ def get(laser_nm, grating, centre_nm=None, placement: str | None = None) -> dict
 
 
 def store(laser_nm, grating, a: float, b: float, reference: str, lines: list, request: str | None = None,
-          centre_nm=None, laser_line_cm1=None, laser_line_fwhm_cm1=None, placement: str | None = None) -> dict:
+          centre_nm=None, laser_line_cm1=None, laser_line_fwhm_cm1=None, placement: str | None = None,
+          pooled: bool = False, repeats: dict | None = None, range_cm1=None) -> dict:
     """Keeps the correction per window centre (2026-11-24: two Si calibrations a minute apart, in two windows, gave
     -0.72 and -2.40 cm-1: each had overwritten the other)."""
     d = load()
@@ -106,16 +115,32 @@ def store(laser_nm, grating, a: float, b: float, reference: str, lines: list, re
         rec["centre_nm"] = round(float(centre_nm), 2)
     if placement:
         rec["placement"] = placement          # centred (ls6t placed the window) or labspec (LabSpec placed a range)
+    if repeats:
+        rec["repeats"] = repeats              # n, mean, sd of the repeats
     if laser_line_cm1 is not None:
         # where the laser line sat when this was measured: a later spectrum is brought back to it before the
         # correction applies (laser_reference 'correct'), so the laser's move is not counted twice
         rec["laser_line_cm1"] = round(float(laser_line_cm1), 3)
         if laser_line_fwhm_cm1:
             rec["laser_line_fwhm_cm1"] = round(float(laser_line_fwhm_cm1), 3)
+    if pooled:
+        # one correction for every window (a coarse grating: the repeat scatter exceeds the between-window
+        # difference, 2026-11-24): the per-centre entries go
+        rec["pooled"] = True
+        dropped = len((d.get(k) or {}).get("by_centre") or {})
+        if dropped:
+            rec["replaced_per_centre"] = dropped
+        d[k] = rec
+        _save(d)
+        return rec
+    br = dict((d.get(k) or {}).get("by_range") or {})
+    if centre_nm is None and range_cm1 is not None:
+        rec["range_cm1"] = sorted(float(v) for v in range_cm1)
+        br[range_key(range_cm1)] = rec
     by = dict((d.get(k) or {}).get("by_centre") or {})
     if centre_nm is not None:
         by[f"{float(centre_nm):.2f}"] = rec
-    d[k] = dict(rec, **({"by_centre": by} if by else {}))
+    d[k] = dict(rec, **({"by_centre": by} if by else {}), **({"by_range": br} if br else {}))
     _save(d)
     return rec
 

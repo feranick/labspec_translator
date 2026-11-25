@@ -141,9 +141,14 @@ def _spawn(folder: Path):
     log.close()
 
 
-def start(studies: dict, inline: bool = False) -> dict:
+def start(studies: dict, inline: bool = False, order: list | None = None) -> dict:
     """Validates, writes the request folder and starts its runner (a detached process, or a thread with
-    inline=True). Returns {request, studies, estimate_min} or {ok: false, errors} when a study is invalid."""
+    inline=True). Studies run in the order given (the keys' order, or `order`: every name once; 2026-11-24: an app
+    passed them sorted by name). Returns {request, studies, estimate_min} or {ok: false, errors}."""
+    if order:
+        if sorted(map(str, order)) != sorted(studies) or len(set(order)) != len(order):
+            return {"ok": False, "errors": {"order": [f"order must name every study once: {', '.join(studies)}"]}}
+        studies = {n: studies[n] for n in order}
     v = F.validate(studies)
     bad = {n: r["errors"] for n, r in v.items() if not r["ok"]}
     if bad:
@@ -242,8 +247,8 @@ def status(request: str, wait_s: float = 0) -> dict:
     return out
 
 
-def run(studies: dict, wait_s: float = 45, inline: bool = False) -> dict:
-    s = start(studies, inline=inline)
+def run(studies: dict, wait_s: float = 45, inline: bool = False, order: list | None = None) -> dict:
+    s = start(studies, inline=inline, order=order)
     if not s.get("ok"):
         return s
     return status(s["request"], wait_s)

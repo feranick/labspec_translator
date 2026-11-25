@@ -150,10 +150,12 @@ def validate_studies(studies: dict) -> dict:
 
 
 @server.tool()
-def run_studies(studies: dict, wait_s: float = 45) -> dict:
+def run_studies(studies: dict, wait_s: float = 45, order: list[str] | None = None) -> dict:
     """Starts a request (validated first) and returns after at most wait_s (<= 50) s: {request, state, done,
-    studies: {name: result}, pending, progress: {name: {stage, point, points, eta_min}}, next}."""
-    return api.run(studies, _wait(wait_s))
+    studies: {name: result}, pending, progress: {name: {stage, point, points, eta_min}}, next}. Studies run in the
+    order of the keys; give `order` (every name once) when the order matters, since some apps sort an object's
+    keys; the answer's 'studies' lists the order used."""
+    return api.run(studies, _wait(wait_s), order=order)
 
 
 @server.tool()

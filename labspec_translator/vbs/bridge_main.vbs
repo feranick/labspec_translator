@@ -1476,6 +1476,14 @@ Sub VAcquireInner(cmd, res)
     If f > 0 And f = t And GetP(cmd, "center_move", "1") = "1" Then
         spm = GetP(cmd, "m_spectro", "Spectro")
         waitedS = WaitMotor("", 0, 120, res)
+        If ParseNum(GetP(cmd, "spectro_jog_nm", "0")) <> 0 Then
+            ' a calibration repeat: the spectrometer sent away and back, so each repeat lands on the pixels afresh
+            ' (2026-11-24, 600 gr/mm: Si spans ~2 pixels and the same window gave +9.2 ... +9.9 cm-1)
+            LabSpec.MoveMotor spm, f + ParseNum(GetP(cmd, "spectro_jog_nm", "0")), "", LS_MOTOR_VALUE
+            waitedS = WaitMotor(spm, gNoId, 120, res)
+            res("spectro_jogged") = 1
+            Err.Clear
+        End If
         res("t_motors_before_s") = Secs(Elapsed(tp))       ' e.g. a grating turret still turning
         tp = Timer
         cur = MotorValue(spm)
@@ -1587,6 +1595,9 @@ Sub VAcquireInner(cmd, res)
     gBlockingS = tmo
     Beat "busy", True
     gShutterT0 = Timer
+    ' from the command's start to LabSpec's Acq (the spectrometer move, the flush, the settle): the spectrum's own
+    ' clock starts here (2026-11-24: a 26 s spectrometer move counted as point 0's in a series' first gap)
+    res("t_to_acq_s") = Secs(Elapsed(tAll))
     LabSpec.Acq mode, ex, acc, f, t
     res("t_acq_call_s") = Secs(Elapsed(tp))              ' Acq itself (it can hold the script)
     res("spectro_after_acq_call") = MotorValue(mspec)

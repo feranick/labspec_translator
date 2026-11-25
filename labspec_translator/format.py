@@ -16,7 +16,7 @@ TOP_KEYS = {"kind", "sample", "setup", "acquire", "focus", "points", "map", "ser
             "calibration", "background", "filters", "cutoff"}
 FILTERS_KEYS = {"line_cm1", "window_cm1", "labels", "exposure_s", "max_exposure_s"}
 CUTOFF_KEYS = {"from_cm1", "to_cm1", "light", "laser_off", "plateau_cm1"}
-CAL_KEYS = {"reference", "lines_cm1", "tol_cm1", "adjust", "window_cm1"}
+CAL_KEYS = {"reference", "lines_cm1", "tol_cm1", "adjust", "window_cm1", "repeats", "store"}
 BG_KEYS = {"name", "laser_off"}
 DEPTH_KEYS = {"from_um", "to_um", "step_um", "refractive_index", "engine", "swift"}
 MOVE_KEYS = {"x_um", "y_um", "to_um", "dz_um", "stay", "snapshot", "travel", "focus"}
@@ -330,6 +330,11 @@ def validate_study(name: str, study: dict, prof: dict) -> dict:
             errors.append("calibration.lines_cm1: a list of Raman shifts (cm-1)")
         if cal.get("adjust", "none") not in ("none", "labspec", "ls6t", "auto"):
             errors.append("calibration.adjust: none, labspec, ls6t or auto")
+        if cal.get("repeats") is not None and (not isinstance(cal["repeats"], int) or not 1 <= cal["repeats"] <= 20):
+            errors.append("calibration.repeats: 1 to 20 spectra, the spectrometer re-placed before each (mean and SD)")
+        if cal.get("store", "auto") not in ("auto", "per_centre", "pooled"):
+            errors.append("calibration.store: auto (pooled at coarse gratings, per window centre otherwise), "
+                          "per_centre or pooled")
         if cal.get("tol_cm1") is not None and (not _num(cal["tol_cm1"]) or cal["tol_cm1"] <= 0):
             errors.append("calibration.tol_cm1: > 0")
         if cal.get("window_cm1") is not None and (not _num(cal["window_cm1"]) or not 5 <= cal["window_cm1"] <= 200):
@@ -511,6 +516,18 @@ def validate_study(name: str, study: dict, prof: dict) -> dict:
                + ("; LabSpec's own map engine cannot pause between points: hold the shutter, or use map.engine "
                   "'points'" if native else ""))
         (warnings if unstable == "warn" else errors).append(why)
+    # the first exposure after LabSpec opens the shutter (2026-11-24, 637.75 nm, shutter auto, settle_s 0: point 0's Si
+    # 8.2 cm-1 wide against 6.1): nothing protects it unless the shutter is held (the open wait) or a warm-up runs
+    Lk = prof["lasers"][lk] if lk else {}
+    if (Lk.get("mode_hops") or Lk.get("unstable_multi")) and \
+            kind in ("spectrum", "map", "series", "depth", "calibration", "filters", "focus") and \
+            not plan.hold_shutter(study, prof, s.get("laser_nm")) and plan.settle_s(prof, s.get("laser_nm")) <= 0 and \
+            not ((study.get("acquire") or {}).get("warmup_s") or Lk.get("warmup_s")):
+        warnings.append(f"the {Lk.get('nm', 0):g} nm laser settles after its shutter opens (lasers.{lk}.mode_hops / "
+                        "unstable_multi), and here LabSpec opens it for each spectrum with no pause (settle_s 0): even "
+                        "the first spectrum may be broadened (Si 8.2 against 6.1 cm-1 on 2026-11-24). Hold the shutter "
+                        "(acquire.shutter 'hold': ls6t waits hold_open_s after opening it), give the laser its "
+                        "settle_s, or a discarded warm-up (acquire.warmup_s)")
     if s.get("grating") is not None:
         if not _num(s["grating"]) or f"{float(s['grating']):g}" not in prof["gratings"]:
             errors.append(f"setup.grating {s['grating']}: use one of {', '.join(prof['gratings'])} gr/mm")
