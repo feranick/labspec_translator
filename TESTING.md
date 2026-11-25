@@ -1039,7 +1039,11 @@ a held series without moves: 0.12); at a coarse grating calibrate and measure at
 **From 2026.11.25.1 — tests:** (1) 637.75 @ 600, Si, `repeats: 8, repeats_move: false` then `repeats: 8` (moved): the two SDs
 in `repeatability` (`still_sd_cm1`, `moved_sd_cm1`); (2) the same with `ls6t profile set spectrometer.approach_nm -2`:
 does `moved_sd_cm1` drop (backlash) or not (step resolution)? (3) a calibration after 1200 → 600: `warmup.why` says
-the first spectrum was discarded; no outlier left. **Test:** 637.75 @ 600, `repeats: 5`, at 300 and at 1000 cm⁻¹:
+the first spectrum was discarded; no outlier left.
+**Result (2026-11-25): backlash.** 637.75 @ 600, Si: still 0.26, moved 0.40 / 0.59, moved with `approach_nm -2` 0.30 cm⁻¹
+(no time cost; no ±2.4 jumps in 25 moved repeats). **From 2026.11.25.3** −2 is the default; put the measured spreads in
+the profile when settled: `ls6t profile set spectrometer.repeatability '{"637.75@600": {"still_sd_cm1": 0.26,
+"moved_sd_cm1": 0.30}}'`. Repeat the test at 1200 and 1800 to fill the others. **Test:** 637.75 @ 600, `repeats: 5`, at 300 and at 1000 cm⁻¹:
 the two means within about 2 × SEM of each other; `stored_as` pooled; a spectrum afterwards uses it at any centre.
 **Extended range and maps (.15):** the stitched 100–3200 cm⁻¹ range (2 windows, seam ~1945 cm⁻¹) read Si 1.5 low with
 a one-window correction; `noise_sigma` ~0.16 against a real 1.3–1.4 (DeNoise Lite: lag-1 r 0.85–0.88), so SNRs were

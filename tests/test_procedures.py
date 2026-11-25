@@ -1468,7 +1468,7 @@ def test_calibration_repeats_pooled_at_coarse_gratings_and_run_order():
     assert "one window measured in this session" in c["stored_as"]
     xcal.clear()
     # pooled only when the centres differ by less than the repeats' scatter (Nicola, 2026-11-24)
-    rep = lambda sd: {"n": 5, "sd_cm1": sd}
+    rep = lambda sd: {"n": 5, "sd_cm1": sd, "median_cm1": 0.0, "settled": True}
     for cen, a_ in ((659.66, -9.52), (650.19, -9.88), (681.0, -9.64)):          # 637.75 @ 600: noise
         r = xcal.store(637.75, 600, a_, 1.0, "si", [], centre_nm=cen, placement="centred", pool="auto",
                        repeats=rep(0.5), cm1_per_px=4.5)
@@ -1482,33 +1482,39 @@ def test_calibration_repeats_pooled_at_coarse_gratings_and_run_order():
     assert xcal.get(532, 1200, 540.63, "centred")["a"] == -4.05
     xcal.clear()
     # the means' standard errors, not the SD: a real 0.8 cm-1 difference (repeats 5, SD 0.5) is not pooled
-    xcal.store(637.75, 1200, -0.4, 1.0, "si", [], centre_nm=650.19, pool="auto", repeats={"n": 5, "sd_cm1": 0.5})
-    r = xcal.store(637.75, 1200, 0.4, 1.0, "si", [], centre_nm=659.66, pool="auto", repeats={"n": 5, "sd_cm1": 0.5})
+    nr = {"n": 5, "sd_cm1": 0.5, "median_cm1": 0.0, "settled": True}
+    xcal.store(637.75, 1200, -0.4, 1.0, "si", [], centre_nm=650.19, pool="auto", repeats=nr)
+    r = xcal.store(637.75, 1200, 0.4, 1.0, "si", [], centre_nm=659.66, pool="auto", repeats=nr)
     assert not r.get("pooled") and "standard errors (0.63)" in r["pool"]["why"], r["pool"]
     xcal.clear()
     # only some centres with repeats: the SE test is not defined for the others, so the no-repeat default decides
     # (Nicola, .18): a single-shot centre 0.6 cm-1 away is not pooled on the repeated centre's SE alone at 1200
-    xcal.store(637.75, 1200, -0.3, 1.0, "si", [], centre_nm=650.19, pool="auto", repeats={"n": 5, "sd_cm1": 0.1},
-               cm1_per_px=2.01)
+    xcal.store(637.75, 1200, -0.3, 1.0, "si", [], centre_nm=650.19, pool="auto",
+               repeats={"n": 5, "sd_cm1": 0.1, "median_cm1": 0.3, "settled": True}, cm1_per_px=2.01)
     r = xcal.store(637.75, 1200, 0.3, 1.0, "si", [], centre_nm=659.66, pool="auto", cm1_per_px=2.01)
     assert r["pooled"] and "no repeat data for every centre" in r["pool"]["why"]     # the default: <= 1 cm-1, 2 px
     xcal.clear()
-    xcal.store(637.75, 1800, -0.3, 1.0, "si", [], centre_nm=650.19, pool="auto", repeats={"n": 5, "sd_cm1": 0.1},
-               cm1_per_px=1.4)
+    xcal.store(637.75, 1800, -0.3, 1.0, "si", [], centre_nm=650.19, pool="auto",
+               repeats={"n": 5, "sd_cm1": 0.1, "median_cm1": 0.3, "settled": True}, cm1_per_px=1.4)
     r = xcal.store(637.75, 1800, 0.3, 1.0, "si", [], centre_nm=659.66, pool="auto", cm1_per_px=1.4)
     assert not r.get("pooled") and "no repeat data for every centre" in r["pool"]["why"]
     xcal.clear()
+    # repeats judged before 2026.11.25.1 (no median) or not settled are never compared (2026-11-25: every 600
+    # calibration found a 'real window dependence' against such an entry)
+    xcal.store(637.75, 600, -11.35, 1.0, "si", [], centre_nm=681.19, pool="auto", repeats={"n": 5, "sd_cm1": 0.2,
+                                                                                            "settled": True})
+    r = xcal.store(637.75, 600, -9.48, 1.0, "si", [], centre_nm=659.66, pool="auto",
+                   repeats={"n": 10, "sd_cm1": 0.3, "median_cm1": 9.48, "settled": True})
+    assert "real window dependence" not in r["pool"]["why"] and "before 2026.11.25.1" in r["pool"]["why"], r["pool"]
+    xcal.clear()
     # entries hours apart are not compared; the drift at a window measured again is reported
-    xcal.store(637.75, 600, -12.11, 1.0, "si", [], centre_nm=659.66, request="morning", pool="auto",
-               repeats={"n": 5, "sd_cm1": 0.5})
-    xcal.store(637.75, 600, -12.0, 1.0, "si", [], centre_nm=650.19, request="morning", pool="auto",
-               repeats={"n": 5, "sd_cm1": 0.5})
+    xcal.store(637.75, 600, -12.11, 1.0, "si", [], centre_nm=659.66, request="morning", pool="auto", repeats=nr)
+    xcal.store(637.75, 600, -12.0, 1.0, "si", [], centre_nm=650.19, request="morning", pool="auto", repeats=nr)
     d = xcal.load()
     for v in list(d["637.75@600"]["by_centre"].values()) + [d["637.75@600"]]:
         v["time"] = "2026-11-24T09:12:00"
     xcal._save(d)
-    r = xcal.store(637.75, 600, -9.6, 1.0, "si", [], centre_nm=659.66, request="evening", pool="auto",
-                   repeats={"n": 5, "sd_cm1": 0.5})
+    r = xcal.store(637.75, 600, -9.6, 1.0, "si", [], centre_nm=659.66, request="evening", pool="auto", repeats=nr)
     assert not r.get("pooled") and "older centre" in r["pool"]["why"]
     assert r["drift_at_centre"]["cm1"] == pytest.approx(2.51, abs=0.01) and r["older_centres"][0]["centre_nm"] == 650.19
     xcal.clear()
@@ -1612,10 +1618,17 @@ def test_expected_uncertainty_warned_above_the_tolerance():
     from labspec_translator import xcal, store
     xcal.clear()
     xcal.store(532, 1800, 0.1, 1.0, "si", [], centre_nm=547.16, placement="centred")
-    store.write("spectro_repeatability.json", {"532@1800": {"moved_sd_cm1": 1.1}})
+    store.write("spectro_repeatability.json", {"532@1800": {"moved_sd_cm1": 1.1, "approach_nm": -2.0}})
     sp = {"kind": "spectrum", "sample": {"name": "Si"}, "setup": SETUP, "acquire": {"center_cm1": 520.7, "exposure_s": 1}}
     s = run_inline({"s": sp})["studies"]["s"]
     assert s["checks"]["zero"]["correction_used"]["expected_uncertainty_cm1"] == 1.1
     assert any("repositions that much" in w for w in s["warnings"])
+    # measured with another approach than the profile's now: not used; the profile's own value wins
+    store.write("spectro_repeatability.json", {"532@1800": {"moved_sd_cm1": 1.1, "approach_nm": 0.0}})
+    assert "moved_sd_cm1" not in runner.spectro_repeatability(P.load(), 532, 1800)
+    prof = P.load()
+    P.save(dict(prof, spectrometer=dict(prof.get("spectrometer") or {}, repeatability={"532@1800": {"moved_sd_cm1": 0.3}})))
+    assert runner.spectro_repeatability(P.load(), 532, 1800) == {"moved_sd_cm1": 0.3, "source": "profile"}
+    P.save(prof)
     store.write("spectro_repeatability.json", {})
     xcal.clear()

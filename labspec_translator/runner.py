@@ -585,6 +585,8 @@ class Ctx:
 
 
 PHASES = (("t_motors_before_s", "waiting for motors before the spectrometer move (a grating turret still turning?)"),
+          ("t_spectro_jog_s", "the spectrometer sent away (a calibration repeat)"),
+          ("t_spectro_approach_s", "the spectrometer to its approach point (spectrometer.approach_nm)"),
           ("t_spectro_call_s", "MoveMotor Spectro (to the window's centre)"),
           ("t_spectro_wait_s", "until the spectrometer reported idle"),
           ("t_motors_after_s", "until every motor reported idle"),
@@ -3420,7 +3422,7 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
         if corr:
             # (2026-11-24: checks.zero showed the last calibration stored, -2.09 @ 676.75 nm, while the correction
             # used was -0.01 @ 650.19): the one applied here, and what the rest is
-            rep_ = (store.read("spectro_repeatability.json") or {}).get(f"{float(laser):g}@{_f(grating) or 0:g}") or {}
+            rep_ = spectro_repeatability(prof, laser, grating)
             if rep_.get("moved_sd_cm1"):
                 # the zero across spectrometer moves is no better than the spectrometer repeats (2026-11-24, 600:
                 # SD 0.9-1.2 cm-1 moved, 0.12 without moves); the calibration's own pass tolerance stays as it is
@@ -4059,6 +4061,22 @@ def zero_state(laser, grating, prof: dict) -> dict:
     return out
 
 
+def spectro_repeatability(prof: dict, laser, grating) -> dict:
+    """How well the spectrometer repeats at laser@grating: the profile's spectrometer.repeatability["<laser>@<grating>"]
+    (set by a person), else the last measured (LS6T_HOME/spectro_repeatability.json); a moved SD measured with another
+    approach_nm than the profile's now does not count."""
+    kk = f"{float(laser):g}@{_f(grating) or 0:g}"
+    sp_ = prof.get("spectrometer") or {}
+    own = (sp_.get("repeatability") or {}).get(kk)
+    if own:
+        return dict(own, source="profile")
+    rec = dict((store.read("spectro_repeatability.json") or {}).get(kk) or {})
+    if rec.get("moved_sd_cm1") is not None and float(rec.get("approach_nm", 0) or 0) != \
+            float(sp_.get("approach_nm", 0) or 0):
+        rec.pop("moved_sd_cm1")
+    return dict(rec, source="measured") if rec else {}
+
+
 COARSE_CM1_PER_PX = 2.0    # a grating this coarse at the reference line: per-centre corrections are pooled (auto)
 
 
@@ -4192,6 +4210,8 @@ def _calibration_result(study, prof, rec, ref_lines, laser, grating, rng, reques
                 rec_r = store.read("spectro_repeatability.json") or {}
                 kk = f"{float(laser):g}@{_f(grating) or 0:g}"
                 rec_r.setdefault(kk, {})["moved_sd_cm1" if moved else "still_sd_cm1"] = round(sd, 3)
+                if moved:
+                    rec_r[kk]["approach_nm"] = float((prof.get("spectrometer") or {}).get("approach_nm", 0) or 0)
                 rec_r[kk]["time"] = time.strftime("%Y-%m-%dT%H:%M:%S")
                 store.write("spectro_repeatability.json", rec_r)
                 res["repeatability"] = rec_r[kk]
@@ -4224,7 +4244,7 @@ def _calibration_result(study, prof, rec, ref_lines, laser, grating, rng, reques
         res["offset_cm1"] = rep_info["mean_cm1"]
         if rep_info["sd_cm1"] > tol / 2:
             warnings.append(f"the repeats scatter by {rep_info['sd_cm1']:.2f} cm-1 (SD of {rep_info['n']}): more than "
-                            f"half the tolerance; the mean ({rep_info['mean_cm1']:+.2f} ± {rep_info['sem_cm1']:.2f}) is "
+                            f"half the tolerance; the median ({rep_info['median_cm1']:+.2f}, SEM {rep_info['sem_cm1']:.2f}) is "
                             "stored")
     elif px and px >= COARSE_CM1_PER_PX:
         warnings.append(f"{px:.1f} cm-1 per pixel: the line spans a couple of pixels and one fit repeats to about "

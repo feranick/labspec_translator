@@ -155,7 +155,8 @@ def store(laser_nm, grating, a: float, b: float, reference: str, lines: list, re
     if drift:
         top["drift_at_centre"] = drift
     if older:
-        top["older_centres"] = [{"centre_nm": float(c), "time": v.get("time")} for c, v in older]
+        top["older_centres"] = [{"centre_nm": float(c), "time": v.get("time"),
+                                 **({"why": v["not_compared"]} if v.get("not_compared") else {})} for c, v in older]
     if pooled:
         # one correction for every window: the mean of the compared centres (all entries kept, so later evidence
         # can undo it)
@@ -202,6 +203,12 @@ def fresh_entries(by: dict, newest: dict, window_h: float = POOL_WINDOW_H) -> tu
     for c, v in by.items():
         if v.get("placement") == "labspec":
             continue
+        rp = v.get("repeats") or {}
+        if v is not newest and rp and ("median_cm1" not in rp or rp.get("settled") is False):
+            # repeats judged before 2026.11.25.1 (a step read as a settled drift), or not settled: never compared
+            # (2026-11-25: every 600 calibration found a 'real window dependence' against such an entry)
+            older.append((c, dict(v, not_compared="repeats from before 2026.11.25.1 or not settled")))
+            continue
         same = req is not None and v.get("request") == req
         (fresh if same or abs(t0 - _t(v)) <= window_h * 3600 else older).append((c, v))
     return fresh, older
@@ -220,8 +227,11 @@ def pool_decision(by: dict, pool: str, cm1_per_px: float | None, newest: dict | 
     if pool != "auto":
         return False, "per window centre", []
     fresh, older = fresh_entries(by, newest or {})
-    note = (f"; {len(older)} older centre(s) not compared (measured more than {POOL_WINDOW_H:g} h apart: "
-            "recalibrate them in the same request)") if older else ""
+    n_old = sum(1 for _, v in older if not v.get("not_compared"))
+    n_bad = len(older) - n_old
+    note = ((f"; {n_old} older centre(s) not compared (measured more than {POOL_WINDOW_H:g} h apart: recalibrate "
+             "them in the same request)" if n_old else "")
+            + (f"; {n_bad} centre(s) not compared (repeats from before 2026.11.25.1 or not settled)" if n_bad else ""))
     if len(fresh) < 2:
         return False, "one window measured in this session: per window centre" + note, []
     ses = [_se(v) for _, v in fresh]

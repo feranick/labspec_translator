@@ -1438,7 +1438,7 @@ End Sub
 
 Sub VAcquireInner(cmd, res)
     Dim mode, ex, acc, f, t, outPath, native, sample, id, t0, started, who, tmo, r, spm, waitedS, tp, tAll, cur
-    Dim prevId, same, staleId, gap, settle, mspec, mgr
+    Dim prevId, same, staleId, gap, settle, mspec, mgr, apJog
     mode = CLng(ParseNum(GetP(cmd, "mode", "10")))
     ex = ParseNum(GetP(cmd, "exposure_s", "1"))
     acc = CLng(ParseNum(GetP(cmd, "accumulations", "1")))
@@ -1476,16 +1476,18 @@ Sub VAcquireInner(cmd, res)
     If f > 0 And f = t And GetP(cmd, "center_move", "1") = "1" Then
         spm = GetP(cmd, "m_spectro", "Spectro")
         waitedS = WaitMotor("", 0, 120, res)
+        res("t_motors_before_s") = Secs(Elapsed(tp))       ' e.g. a grating turret still turning
+        tp = Timer
         If ParseNum(GetP(cmd, "spectro_jog_nm", "0")) <> 0 Then
             ' a calibration repeat: the spectrometer sent away and back, so each repeat lands on the pixels afresh
             ' (2026-11-24, 600 gr/mm: Si spans ~2 pixels and the same window gave +9.2 ... +9.9 cm-1)
             LabSpec.MoveMotor spm, f + ParseNum(GetP(cmd, "spectro_jog_nm", "0")), "", LS_MOTOR_VALUE
             waitedS = WaitMotor(spm, gNoId, 120, res)
             res("spectro_jogged") = 1
+            res("t_spectro_jog_s") = Secs(Elapsed(tp))     ' its own line: not 'waiting for motors' (2026-11-25)
+            tp = Timer
             Err.Clear
         End If
-        res("t_motors_before_s") = Secs(Elapsed(tp))       ' e.g. a grating turret still turning
-        tp = Timer
         cur = MotorValue(spm)
         Err.Clear
     End If
@@ -1499,10 +1501,16 @@ Sub VAcquireInner(cmd, res)
     End If
     If f > 0 And f = t And GetP(cmd, "center_move", "1") = "1" Then
         If ParseNum(GetP(cmd, "spectro_approach_nm", "0")) <> 0 Then
-            ' always from the same side (profile spectrometer.approach_nm): backlash against step resolution
-            LabSpec.MoveMotor spm, f + ParseNum(GetP(cmd, "spectro_approach_nm", "0")), "", LS_MOTOR_VALUE
-            waitedS = WaitMotor(spm, gNoId, 120, res)
+            ' always from the same side (profile spectrometer.approach_nm): it takes the backlash out (2026-11-25,
+            ' 600 gr/mm: the repositioning spread 0.15 cm-1 with -2 nm against ~0.5 without)
+            apJog = ParseNum(GetP(cmd, "spectro_jog_nm", "0"))
+            If Not res.Exists("spectro_jogged") Or apJog <> ParseNum(GetP(cmd, "spectro_approach_nm", "0")) Then
+                LabSpec.MoveMotor spm, f + ParseNum(GetP(cmd, "spectro_approach_nm", "0")), "", LS_MOTOR_VALUE
+                waitedS = WaitMotor(spm, gNoId, 120, res)
+            End If
             res("spectro_approached_from") = f + ParseNum(GetP(cmd, "spectro_approach_nm", "0"))
+            res("t_spectro_approach_s") = Secs(Elapsed(tp))
+            tp = Timer
             Err.Clear
         End If
         gBlocking = spm
