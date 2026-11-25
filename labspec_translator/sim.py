@@ -796,12 +796,22 @@ class SimLabSpec:
             res.update(max_value=maxv, t_max_s=tmax, period_s=round(t_sim / n, 3))
         return res
 
+    def _band(self, p, data_id) -> dict:
+        """map.live_band: the red cursors (PointerLimits) in the display unit (1/cm in the simulator)."""
+        if p.get("band_from_cm1") in (None, ""):
+            return {}
+        f, t = float(p["band_from_cm1"]), float(p["band_to_cm1"])
+        self.band = (f, t, str(p.get("band_baseline", "0")) == "1")
+        return {"band_set": 1, "band_unit_before": "1/cm", "band_sent": f"{f:g};{t:g}",
+                "band_readback": f"{f:g};{t:g}", "band_on": data_id}
+
     def v_map_native(self, p):
         """LabSpec's mapping engine: the grid of the axes given (absolute stage positions), X fastest; one window at
         center_nm; written like the bridge's dump (spectra contiguous), each spectrum measured at its position."""
         out = p.get("out")
         if not out:
             return {"ok": 0, "error": "map_native needs 'out'"}
+        band_ = self._band(p, 0)
         ex = float(p.get("exposure_s", 1.0))
         acc = max(1, int(float(p.get("accumulations", 1))))
         axes = []
@@ -871,7 +881,7 @@ class SimLabSpec:
                         spectro_map_started=c_nm + (2.0 if (self.dir / "sim_native_moves_spectro").exists() else 0.0))
         return {"id": 950, "out": str(path), "native_ok": 0, "text_ok": 0, "pixels": int(data.size), "data_via": via,
                 "axes": " ".join(m for m, _ in axes), "seconds_map": round(npts * (ex * acc + speed), 2),
-                "detector_temp_c": self.temp_c, **hold, "acq_mode": 10 + 2,
+                "detector_temp_c": self.temp_c, **hold, **band_, "acq_mode": 10 + 2,
                 **{f"{ax}_readback": f"{p.get(ax + '_from')} / {p.get(ax + '_to')} / {p.get(ax + '_step')} / mode 0 / "
                                      "use 1" for ax in ("x", "y", "z") if p.get(f"{ax}_from") is not None}}
 
@@ -920,7 +930,7 @@ class SimLabSpec:
                 return {"ok": 0, "error": "LabSpec could not create the map (Map returned -2147467259)"}
             self.views[name] = {"kind": p.get("kind"), "n": 1, "index": [p.get("index")],
                                 "axis_x": p.get("axis_x"), "axis_y": p.get("axis_y")}
-            return {"view": name}
+            return {"view": name, **self._band(p, 7)}
         if name not in self.views:
             return {"ok": 0, "error": f"no view {name!r}"}
         if action == "add":

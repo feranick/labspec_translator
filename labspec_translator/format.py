@@ -37,7 +37,7 @@ ACQ_KEYS = {"range_cm1", "center_cm1", "exposure_s", "accumulations", "auto_expo
 AE_KEYS = {"target_counts", "min_s", "max_s", "test_s"}
 FOCUS_KEYS = {"autofocus", "every", "dz_um", "scan", "camera"}
 CAMERA_KEYS = {"range_um", "step_um", "settle_s"}
-MAP_KEYS = {"x_um", "y_um", "z_um", "snake", "engine", "swift"}
+MAP_KEYS = {"x_um", "y_um", "z_um", "snake", "engine", "swift", "live_band"}
 SERIES_KEYS = {"count", "interval_s"}
 PROCESS_KEYS = {"baseline", "peaks", "auto_peaks", "bands"}
 PEAK_KEYS = {"near_cm1", "window_cm1", "shape", "name"}
@@ -153,7 +153,10 @@ def study_format(status: dict | None = None) -> dict:
             "points": "[{x_um, y_um, dz_um}] (spectrum kind): offsets from where the operator left the stage",
             "map": "{x_um, y_um, z_um: [from, to, step] offsets; snake: true (default) for boustrophedon rows; "
                    "engine: auto | points (ls6t moves and acquires: checks and autofocus between points) | native "
-                   "(LabSpec's mapping engine: faster for large maps; one detector window; swift: true for SWIFT)}",
+                   "(LabSpec's mapping engine: faster for large maps; one detector window; swift: true for SWIFT); "
+                   "live_band: what LabSpec's map shows while it is measured (its red cursors): a peak's name from "
+                   "process.peaks (e.g. \"Si\"), a wavenumber (a 30 cm-1 band around it), or {near_cm1, window_cm1} "
+                   "| {from_cm1, to_cm1}, with baseline: true for LabSpec's baseline under the band}",
             "series": "{count, interval_s: seconds from one start to the next}",
             "process": "{baseline: {degree: 3} | false (polynomial, iterative; default degree 3), peaks: "
                        "[{name, near_cm1, window_cm1 (default 40), shape: pseudo_voigt | lorentz | gauss}], "
@@ -680,6 +683,11 @@ def validate_study(name: str, study: dict, prof: dict) -> dict:
             errors.append("map: give at least one of x_um, y_um, z_um as [from, to, step] (µm)")
         else:
             _unknown(m, MAP_KEYS, "map", errors)
+            if m.get("live_band") is not None:
+                try:
+                    plan.live_band(study)
+                except ValueError as exc:
+                    errors.append(f"map.live_band: {exc}")
             for ax in ("x_um", "y_um", "z_um"):
                 if m.get(ax) is not None and _axis(m[ax], f"map.{ax}", errors):
                     vals = plan.axis_values(m[ax])

@@ -1183,3 +1183,52 @@ def inputs(study: dict, prof: dict, max_steps: int = 40, current: dict | None = 
         steps.append(dict(acq, point=p["i"]))
     return {"laser_nm": laser, "range": rng, "points": len(pts), "steps": steps[:max_steps],
             "steps_shown": min(len(steps), max_steps), "estimate": estimate(study, prof, current)}
+
+
+def live_band(study: dict) -> dict | None:
+    """The spectral band LabSpec's live map shows (its red cursors) while a map is measured (Nicola, 2026-11-25:
+    "show me the map with the silicon peak"): {from_cm1, to_cm1, baseline, name} or None. map.live_band: a peak's
+    name from process.peaks, a wavenumber (30 cm-1 around it), {near_cm1, window_cm1} or {from_cm1, to_cm1}."""
+    b = (study.get("map") or {}).get("live_band")
+    if b is None:
+        return None
+    base = False
+    name = None
+    if isinstance(b, str):
+        pk = next((p for p in ((study.get("process") or {}).get("peaks") or [])
+                   if isinstance(p, dict) and str(p.get("name", "")).lower() == b.lower()), None)
+        if pk is None:
+            known = {"si": 520.7, "silicon": 520.7}
+            if b.lower() not in known:
+                raise ValueError(f"no peak named {b!r} in process.peaks (give its near_cm1 there, or a wavenumber)")
+            near, win, name = known[b.lower()], 30.0, b
+        else:
+            near, win, name = float(pk["near_cm1"]), float(pk.get("window_cm1", 30.0)), pk.get("name")
+        lo, hi = near - win / 2, near + win / 2
+    elif isinstance(b, (int, float)) and not isinstance(b, bool):
+        lo, hi = float(b) - 15.0, float(b) + 15.0
+    elif isinstance(b, dict):
+        base = bool(b.get("baseline", False))
+        name = b.get("name")
+        if b.get("from_cm1") is not None and b.get("to_cm1") is not None:
+            lo, hi = sorted((float(b["from_cm1"]), float(b["to_cm1"])))
+        elif b.get("near_cm1") is not None:
+            w = float(b.get("window_cm1", 30.0))
+            lo, hi = float(b["near_cm1"]) - w / 2, float(b["near_cm1"]) + w / 2
+        else:
+            raise ValueError("give from_cm1 and to_cm1, or near_cm1 (and window_cm1)")
+    else:
+        raise ValueError("a peak's name, a wavenumber, {near_cm1, window_cm1} or {from_cm1, to_cm1}")
+    if hi - lo <= 0:
+        raise ValueError("the band is empty")
+    return {"from_cm1": round(lo, 3), "to_cm1": round(hi, 3), "baseline": base, "name": name}
+
+
+def band_params(study: dict, laser) -> dict:
+    """The bridge parameters for live_band (band_from_cm1, band_to_cm1, band_laser_nm, band_baseline), or {}."""
+    b = live_band(study)
+    if not b or not laser:
+        return {}
+    return {"band_from_cm1": b["from_cm1"], "band_to_cm1": b["to_cm1"], "band_laser_nm": float(laser),
+            "band_baseline": int(bool(b["baseline"]))}
+

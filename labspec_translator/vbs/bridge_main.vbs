@@ -1750,6 +1750,64 @@ Function NumList(s)
     NumList = a
 End Function
 
+' The spectral band a map shows (Nicola, 2026-11-25: "during mapping show me the map with the silicon peak"):
+' LabSpec's red cursors, PutValue id, "PointerLimits" (index 0: red 1 X, index 2: red 2 X; GetValue first for the
+' rest), switched on with "ActiveCursors" (index 0: ACTIVATE_CURSOR 1, + ACTIVATE_BASELINE 2). HORIBA's
+' "Axial Resolution.vbs" sets DisplayUnit 1/cm, then the limits in cm-1 (280 / 320 around a 300 cm-1 window):
+' the values are in the display unit; with nm displayed they are given in nm, other units are set to 1/cm first.
+Sub SetBand(id, cmd, res)
+    Dim u, arr, ac, f, t, las, a, b, rb
+    f = ParseNum(GetP(cmd, "band_from_cm1", "0"))
+    t = ParseNum(GetP(cmd, "band_to_cm1", "0"))
+    las = ParseNum(GetP(cmd, "band_laser_nm", "0"))
+    On Error Resume Next
+    u = ""
+    LabSpec.GetValue 0, "DisplayUnit", u
+    Err.Clear
+    res("band_unit_before") = u
+    If InStr(LCase(u), "cm") > 0 Then
+        a = f
+        b = t
+    ElseIf LCase(Trim(u)) = "nm" And las > 0 Then
+        a = 1E7 / (1E7 / las - f)
+        b = 1E7 / (1E7 / las - t)
+    Else
+        LabSpec.PutValue 0, "DisplayUnit", "1/cm"
+        res("band_unit_set") = "1/cm"
+        a = f
+        b = t
+    End If
+    LabSpec.GetValue id, "PointerLimits", arr
+    If Err.Number <> 0 Or Not IsArray(arr) Then
+        res("band_set") = 0
+        res("band_error") = "GetValue PointerLimits: " & ErrText("PointerLimits")
+        Err.Clear
+        Exit Sub
+    End If
+    arr(0) = a
+    arr(2) = b
+    LabSpec.PutValue id, "PointerLimits", arr
+    If Err.Number <> 0 Then
+        res("band_set") = 0
+        res("band_error") = "PutValue PointerLimits: " & ErrText("PointerLimits")
+        Err.Clear
+        Exit Sub
+    End If
+    LabSpec.GetValue id, "ActiveCursors", ac
+    If Err.Number = 0 And IsArray(ac) Then
+        ac(0) = 1
+        If GetP(cmd, "band_baseline", "0") = "1" Then ac(0) = 3
+        LabSpec.PutValue id, "ActiveCursors", ac
+    End If
+    Err.Clear
+    LabSpec.GetValue id, "PointerLimits", rb
+    If Err.Number = 0 And IsArray(rb) Then res("band_readback") = rb(0) & ";" & rb(2)
+    Err.Clear
+    res("band_set") = 1
+    res("band_sent") = a & ";" & b
+    res("band_on") = id
+End Sub
+
 Sub VView(cmd, res)
     Dim name, action, kind, id, arr, dataId, mapId, pid, r, p, fv, tv, ax, ay, axA(), ayA(), k
     Dim vals(1), labels(1), units(1), disp(1)
@@ -1791,6 +1849,7 @@ Sub VView(cmd, res)
             If Err.Number = 0 And mapId > 0 Then
                 LabSpec.Exec mapId, LS_SHOW_DATA, p
                 gViews(name) = Array("mapex", 0, mapId, ax, ay)
+                If GetP(cmd, "band_from_cm1", "") <> "" Then SetBand mapId, cmd, res
             ElseIf Err.Number = 0 Then
                 Fail res, "LabSpec could not create the map (MapEx returned " & mapId & "; LabSpec's last error: " & _
                           LabSpecError() & ")"
@@ -2684,6 +2743,9 @@ Sub VMapNative(cmd, res)
     ' ACQ_SPECTRAL_IMAGE, -1, 0, 0, 0): time, accumulations and range from LabSpec's interface (set above), the
     ' spectrometer already at the centre. Until 2026.11.24.10 the bridge added its own flags, accumulations and
     ' From = To, and LabSpec made an empty "Pixel" map without measuring
+    ' the band the live map shows (map.live_band): set on the default data (0) before the map, as HORIBA's
+    ' "Axial Resolution.vbs" does: LabSpec's Acq holds the script for the whole map
+    If GetP(cmd, "band_from_cm1", "") <> "" Then SetBand 0, cmd, res
     mode = LS_ACQ_SPECTRAL_IMAGE + LS_ACQ_AUTO_SHOW
     If GetP(cmd, "horiba_start", "1") <> "1" Then mode = LS_ACQ_SPECTRAL_IMAGE + CLng(ParseNum(GetP(cmd, "mode_flags", "0")))
     res("acq_mode") = mode

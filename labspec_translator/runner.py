@@ -1198,6 +1198,7 @@ def run_any(name: str, study: dict, ctx: Ctx) -> dict:
     held and read its second filter 0.54 x low); Ctx.call holds it before an acquisition and notes when the bridge
     lets it go; released here at the end."""
     kind = study.get("kind", "spectrum")
+    ctx.live_band = None                     # map.live_band: what LabSpec took, this study's own
     laser = (study.get("setup") or {}).get("laser_nm")
     if laser is None:
         laser = (ctx.start or {}).get("laser_nm")
@@ -1335,13 +1336,15 @@ def _live_view(ctx: Ctx, view, name: str, kind: str, study: dict, rng: dict, dat
         if kind == "map" and not grid and not zonly:
             return False         # LabSpec's Map() returned E_FAIL whatever its range (2026-11-24)
         if view is None:
+            bp = plan.band_params(study, ctx.optics[0] if ctx.optics else None) if grid else {}
             vr = ctx.call("view", timeout_s=30, action="create", name=name, vfrom=vfrom, vto=vto,
                           kind="mapex" if grid else "profile", id=data_id, x=p["x_um"], y=p["y_um"], value=vval,
                           label="time" if kind == "series" else ("Z" if zonly else "XY"),
-                          unit="s" if kind == "series" else "um", **gx)
+                          unit="s" if kind == "series" else "um", **gx, **bp)
             if not vr["ok"]:
                 warnings.append(f"live view in LabSpec not available: {vr.get('error')}")
                 return False
+            _band_said(ctx, vr, "band", warnings)
             return vr.get("view")
         if view:
             vr = ctx.call("view", timeout_s=30, action="add", name=name, id=data_id, x=p["x_um"], y=p["y_um"],
@@ -1352,6 +1355,19 @@ def _live_view(ctx: Ctx, view, name: str, kind: str, study: dict, rng: dict, dat
         return view
     except Stop:
         raise
+
+
+def _band_said(ctx: Ctx, r: dict, tag: str, warnings: list) -> None:
+    """What LabSpec took for the live map's band (map.live_band): kept for the result; a warning if it did not."""
+    if r.get(f"{tag}_set") in (None, ""):
+        return
+    info = {k[len(tag) + 1:]: r[k] for k in r if str(k).startswith(tag + "_")}
+    for k_ in ("set", "on"):
+        if info.get(k_) not in (None, ""):
+            info[k_] = int(float(info[k_]))
+    ctx.live_band = info
+    if info.get("set") != 1:
+        warnings.append(f"the live map's band (map.live_band) was not set in LabSpec: {r.get(f'{tag}_error') or '?'}")
 
 
 def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
@@ -1663,6 +1679,8 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
         timing=tm,
         **({"warmup": warmup_info} if warmup_info else {}),
         **({"native_map": ctx.native_info} if native_map and getattr(ctx, "native_info", None) else {}),
+        **({"live_band": dict(ctx.live_band, asked=plan.live_band(study))}
+           if getattr(ctx, "live_band", None) else {}),
         execution={"mode": config.mode(), "bridge": ctx.bridge_version, "translator": __version__,
                    "protocol": BRIDGE_PROTOCOL})
     if not per_point:
@@ -4968,7 +4986,8 @@ def _native_map(ctx: Ctx, name: str, study: dict, sd: Path, rng: dict, laser: fl
                  from_nm=rng.get("from_nm"), to_nm=rng.get("to_nm"), exposure_s=acq.get("exposure_s"),
                  accumulations=acq.get("accumulations", 1), mode_flags=flags, swift=bool(m.get("swift")),
                  acq_time=mp.get("acq_time", "interface"), chunk=int(mp.get("export_chunk", 65536) or 0),
-                 **params, **motor_args(prof))
+                 **params, **plan.band_params(study, laser), **motor_args(prof))
+    _band_said(ctx, r, "band", warnings)
     # what LabSpec took for each axis (GetMappingParams after setting them), how it was started, how long it took
     ctx.native_info = {k: r[k] for k in r if str(k).endswith("_readback")}
     ctx.native_info.update({k: _f(r.get(k)) if k != "axes" else r.get(k)

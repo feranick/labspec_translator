@@ -2166,3 +2166,25 @@ def test_series_zero_creep_reported_learned_and_widens_the_expected_uncertainty(
     assert cu["age_min"] == pytest.approx(30, abs=2) and cu["expected_uncertainty_cm1"] >= 1.99, cu
     assert "creep" in cu["expected_uncertainty_from"]
     store.write("spectro_repeatability.json", {})
+
+
+def test_map_live_band_sets_labspecs_cursors_on_the_live_and_native_maps():
+    """Nicola, 2026-11-25: "during mapping show me the map with the silicon peak": LabSpec's live map shows the
+    band between its red cursors (PutValue PointerLimits / ActiveCursors, as HORIBA's Axial Resolution.vbs does)."""
+    st = {"kind": "map", "sample": {"name": "Si"}, "setup": dict(SETUP),
+          "acquire": {"center_cm1": 520.7, "exposure_s": 0.2},
+          "map": {"x_um": [0, 2, 1], "y_um": [0, 1, 1], "live_band": "Si"},
+          "process": {"peaks": [{"name": "Si", "near_cm1": 520.7, "window_cm1": 20}]}}
+    assert F.validate({"m": st})["m"]["ok"]
+    assert plan.live_band(st) == {"from_cm1": 510.7, "to_cm1": 530.7, "baseline": False, "name": "Si"}
+    assert plan.live_band(dict(st, map=dict(st["map"], live_band=1332)))["from_cm1"] == 1317.0
+    assert plan.live_band(dict(st, map=dict(st["map"], live_band={"from_cm1": 900, "to_cm1": 1000,
+                                                                  "baseline": True})))["baseline"] is True
+    bad = F.validate({"m": dict(st, map=dict(st["map"], live_band="D band"))})["m"]
+    assert not bad["ok"] and any("live_band" in e for e in bad["errors"])
+    S.ensure(config.active_bridge_dir())
+    m = run_inline({"m": st})["studies"]["m"]
+    assert m["live_band"]["set"] == 1 and m["live_band"]["sent"] == "510.7;530.7", m.get("live_band")
+    nat = dict(st, map=dict(st["map"], engine="native"))
+    m = run_inline({"m": nat})["studies"]["m"]
+    assert m["live_band"]["set"] == 1 and m["live_band"]["on"] == 0, m.get("live_band")

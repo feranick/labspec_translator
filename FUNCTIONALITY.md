@@ -24,7 +24,7 @@ A request is `{name: study}`; each study has a `kind`.
 | Kind | What it does | Main keys | Laser |
 |---|---|---|---|
 | `spectrum` | One spectrum at the current spot, or one per entry of `points` (offsets in µm) | `setup`, `acquire`, `points`, `focus`, `process` | yes |
-| `map` | A grid of spectra: XY maps, line scans, Z stacks, XYZ; on ls6t's point-by-point engine (snake order, checks and autofocus between points, a live map in LabSpec) or LabSpec's own engine (faster for large maps; SWIFT) | `map.x_um / y_um / z_um = [from, to, step]`, `engine`, `swift` | yes |
+| `map` | A grid of spectra: XY maps, line scans, Z stacks, XYZ; on ls6t's point-by-point engine (snake order, checks and autofocus between points, a live map in LabSpec) or LabSpec's own engine (faster for large maps; SWIFT) | `map.x_um / y_um / z_um = [from, to, step]`, `engine`, `swift`, `live_band` (the band LabSpec's live map shows: a peak's name, a wavenumber or a range) | yes |
 | `depth` | A depth profile at the current spot: Z steps into the sample; each peak and band against depth; interfaces; depth corrected for the refractive index; a live profile in LabSpec | `depth.from_um, to_um, step_um, refractive_index` | yes |
 | `series` | Repeated spectra at one spot (time series); a live profile in LabSpec | `series.count, interval_s` | yes |
 | `calibration` | The spectral zero: reference lines (Si, polystyrene, cyclohexane, naphthalene, diamond, or your own) against their true positions; offset, and scale with several lines; `adjust`: `labspec` (the operator corrects LabSpec's zero, ls6t checks again) or `ls6t` (a remembered correction applied to later spectra) | `calibration.reference, lines_cm1, tol_cm1, adjust` | yes |
