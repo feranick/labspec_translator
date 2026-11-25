@@ -109,6 +109,8 @@ DEFAULT_PROFILE: dict = {
     # (2026-11-24: the MapEx view froze, then crashed, LabSpec)
     # (on from 2026.11.24.8: the MapEx view passed on the instrument, held and not)
     "display": {"live_view": True, "live_view_while_held": True},
+    # approach_nm: every spectrometer move ends from this side (e.g. -2: from 2 nm below), to test backlash
+    "spectrometer": {"approach_nm": 0.0},
     "calibration": {"max_age_h": 24.0, "max_retries": 2,
                     # a video frame before each calibration (false: none, for batches; a study's video.before wins)
                     "video_before": True,

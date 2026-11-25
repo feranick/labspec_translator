@@ -1319,8 +1319,15 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
                 # diagnostic (TESTING T3.21, 2026-11-23): the bridge's status read before every spectrum, as at the
                 # start of a request; the 637.75 nm laser's mode was right for the first spectrum of each request only
                 ctx.call("status", timeout_s=15, **motor_args(prof))
+            cal_reps = kind == "calibration" and int((study.get("calibration") or {}).get("repeats", 1) or 1) > 1
+            grating_changed = str(before.get("grating")) != str(after.get("grating"))
             if k == 0 and warmup_s(study, prof, laser) > 0:
                 warmup_info = _warmup(ctx, acq, sd, warmup_s(study, prof, laser))
+            elif k == 0 and cal_reps and grating_changed:
+                # the first spectrum after a grating change was the outlier twice (2026-11-24: 11.31, 11.09 against
+                # ~9.5): one discarded first
+                warmup_info = _warmup(ctx, acq, sd, float(acq.get("exposure_s") or 1.0))
+                warmup_info["why"] = "the first spectrum after a grating change (calibration repeats)"
             out = sd / "spectra" / f"p{k:05d}.txt"
             params = dict(acq)
             params.pop("verb", None)
@@ -1334,8 +1341,11 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
                           site=str(study.get("sample", {}).get("site", ""))[:100])
             if study.get("sample", {}).get("notes"):
                 params["remark"] = str(study["sample"]["notes"])[:200]     # LabSpec's Remark, after "ls6t <seq>"
-            if kind == "calibration" and k > 0:
-                params["spectro_jog_nm"] = 3.0           # re-placed: each repeat lands on the pixels afresh
+            appr = float((prof.get("spectrometer") or {}).get("approach_nm", 0) or 0)
+            if appr:
+                params["spectro_approach_nm"] = appr     # every move from the same side (backlash test)
+            if kind == "calibration" and k > 0 and (study.get("calibration") or {}).get("repeats_move", True):
+                params["spectro_jog_nm"] = appr or 3.0   # re-placed: each repeat lands on the pixels afresh
             if native and kind != "map":             # series too (2026-11-23: no .l6s for series spectra)
                 params["native"] = str(sd / "spectra" / f"p{k:05d}.l6s")
             if ctx.hold_wanted and not ctx.holding and str(params.get("laser_off", "0")) != "1":
@@ -3410,9 +3420,14 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
         if corr:
             # (2026-11-24: checks.zero showed the last calibration stored, -2.09 @ 676.75 nm, while the correction
             # used was -0.01 @ 650.19): the one applied here, and what the rest is
+            rep_ = (store.read("spectro_repeatability.json") or {}).get(f"{float(laser):g}@{_f(grating) or 0:g}") or {}
+            if rep_.get("moved_sd_cm1"):
+                # the zero across spectrometer moves is no better than the spectrometer repeats (2026-11-24, 600:
+                # SD 0.9-1.2 cm-1 moved, 0.12 without moves)
+                corr = dict(corr, expected_uncertainty_cm1=rep_["moved_sd_cm1"])
             zs = checks["zero"] = dict(zs, correction_used={**{k: corr.get(k) for k in (
                 "a", "b", "time", "centre_nm", "interpolated_between_nm", "centre_far", "laser_line_cm1", "placement",
-                "range_match", "range_cm1", "pooled", "pooled_from", "repeats")
+                "range_match", "range_cm1", "pooled", "pooled_from", "repeats", "expected_uncertainty_cm1")
                 if corr.get(k) is not None}, **({"age_h": round(xcal.age_h(corr), 2)} if xcal.age_h(corr) is not None
                                                  else {})},
                 note="offset_cm1 is this laser and grating's last calibration check (any window); "
@@ -3459,7 +3474,9 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
         if age is not None and age <= max_h and age > xcal.POOL_WINDOW_H and (Lc.get("mode_hops") or
                                                                            Lc.get("unstable_multi")):
             warnings.append(f"the spectral correction is {age:.1f} h old and this laser's zero drifts (2026-11-24: "
-                            "2-3 cm-1 within a day at 637.75 nm): calibrate in the same request for the best zero")
+                            "2-3 cm-1 within a day at 637.75 nm): calibrate in the same request for the best zero, "
+                            "and at a coarse grating at the same centre, without moving the spectrometer in between "
+                            "(it repositions to about +-1 cm-1 at 600 gr/mm)")
         if age is not None and age > max_h:
             warnings.append(f"the spectral correction is {age:.1f} h old (more than {max_h:g} h for this laser): run "
                             "a calibration" + (", or keep the laser line in the window with "
@@ -3572,8 +3589,15 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
                                   "filter), not a hop; not used")
                     plateau_of[pt] = m_
                     continue
+                # everything moving together is a laser hop only when the spectrometer stayed put (2026-11-24: at
+                # 600 gr/mm a spectrometer landing ~0.5 px elsewhere after its move looked the same, +-2.4 cm-1)
+                smove = bool(((next((r_ for r_ in per_point if r_["point"] == pt), {}) or {}).get("optics_check")
+                              or {}).get("spectro_moved_by_ls6t"))
                 hop_info.append({"point": pt, "moved_cm1": round(d_, 2),
-                                 "confirmed_by_peaks": (round(float(np.median(moved)), 2) if moved else None)})
+                                 "confirmed_by_peaks": (round(float(np.median(moved)), 2) if moved else None),
+                                 "after_spectrometer_move": smove,
+                                 "what": "a laser hop or the spectrometer repositioning (it was moved just before)"
+                                 if smove else "a laser mode hop (the spectrometer did not move)"})
                 plateaus.append(cur)
                 cur = []
         cur.append((pt, pos_, pks_))
@@ -3926,9 +3950,13 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
                                     "(checks.zero_correction.plateaus)" if ll_mode == "correct" else ""))
         if jumps:
             after_ = checks["laser_line"]["points_after_a_jump"]
+            smv = any(h.get("after_spectrometer_move") for h in hop_info)
             msg = (f"the laser line moved by {', '.join(f'{d:+.1f}' for _, d in jumps[:6])} cm-1 at point(s) "
-                   f"{', '.join(str(p) for p, _ in jumps[:6])} (a laser mode hop: the Raman peaks moved with it), "
-                   f"{len(after_)} spectra on from there: every Raman shift there moves with it")
+                   f"{', '.join(str(p) for p, _ in jumps[:6])} ("
+                   + ("a laser hop or the spectrometer repositioning: it was moved just before; " if smv else
+                      "a laser mode hop: the spectrometer did not move; ")
+                   + f"the Raman peaks moved with it), {len(after_)} spectra on from there: every Raman shift there "
+                   "moves with it")
             if ll_mode == "correct":
                 warnings.append(msg + "; corrected (acquire.laser_reference 'correct')")
             else:
@@ -4041,29 +4069,52 @@ def _cm1_per_px(rec: dict, laser, near_cm1: float) -> float | None:
         return None
 
 
-def repeat_drift(offs: list) -> dict | None:
-    """A trend over the repeats in run order (2026-11-24, 637.75 @ 600: 11.31, 10.00, 9.99, 9.58, 9.60 with the laser
-    line moving in step, the laser settling after its shutter opened): a least-squares slope over 2 x its standard
-    error. Then the leading spectra are dropped one by one (at least 3 kept) until the rest is flat. None: no trend."""
-    def slope(v):
-        n = len(v)
-        if n < 3:
-            return 0.0, float("inf")
-        t = np.arange(n, dtype=float)
-        k, c = np.polyfit(t, v, 1)
-        res = np.asarray(v) - (k * t + c)
-        se = math.sqrt(float(np.sum(res ** 2)) / (n - 2) / float(np.sum((t - t.mean()) ** 2))) if n > 2 else float("inf")
-        return float(k), se
-    k, se = slope(offs)
-    if len(offs) < 3 or not (abs(k) > 2 * max(se, 1e-9)):
-        return None
-    # at least 3, and at least half of them, are kept: noise must not be read as drift (Nicola, .19)
-    keep_min = max(3, -(-len(offs) // 2))
-    for drop in range(1, len(offs) - keep_min + 1):
-        k2, se2 = slope(offs[drop:])
-        if not abs(k2) > 2 * max(se2, 1e-9):
-            return {"slope": round(k, 3), "dropped_leading": drop, "settled": True}
-    return {"slope": round(k, 3), "dropped_leading": 0, "settled": False}
+STEP_T = 5.0      # a step between two runs of repeats: their means over 5 x the pooled standard error
+TREND_T = 5.0     # a creep: a slope over 5 x its standard error (few repeats: a 1 % false alarm, not 5 %)
+
+
+def repeat_stats(offs: list) -> dict:
+    """Robust statistics of calibration repeats (Nicola, 2026-11-24 .20: with the spectrometer moved away and back
+    before each, 637.75 @ 600 gave 11.09, 8.96, 9.17, 8.94, 9.51 and 8.93, 9.32, 10.01, 12.33, 11.71: a first spectrum
+    off after a grating change, and a step, the spectrometer landing ~0.5 px elsewhere; a slope test read the step as
+    a drift and kept it). An outlier: more than 3 robust SDs (and 0.3 cm-1) from the median. A step: two runs whose
+    means differ by over 4 x their pooled standard error (each run >= 2 spectra). The centre is the median of the kept
+    values; with a step the scatter is not noise (settled false: not used to compare windows)."""
+    v = np.asarray([o for o in offs if o is not None], float)
+    out: dict = {"n_all": int(v.size)}
+    if v.size < 2:
+        return dict(out, centre=float(v[0]) if v.size else None, kept=v.tolist(), outliers=[], step=None,
+                    settled=True)
+    med = float(np.median(v))
+    mad = 1.4826 * float(np.median(np.abs(v - med)))
+    sdiff = 1.4826 * float(np.median(np.abs(np.diff(v)))) / math.sqrt(2) if v.size > 2 else 0.0
+    lim = max(3 * max(mad, sdiff), 0.3)
+    idx = [i for i in range(v.size) if abs(v[i] - med) > lim] if v.size >= 4 else []
+    keep = np.asarray([v[i] for i in range(v.size) if i not in idx])
+    step = None
+    if keep.size >= 4:
+        best = None
+        for k in range(2, keep.size - 1):
+            g1, g2 = keep[:k], keep[k:]
+            sw2 = ((g1.size - 1) * np.var(g1, ddof=1) + (g2.size - 1) * np.var(g2, ddof=1)) / (keep.size - 2)
+            se = math.sqrt(max(sw2, 1e-6) * (1 / g1.size + 1 / g2.size))
+            d = float(np.mean(g2) - np.mean(g1))
+            t = abs(d) / se
+            if best is None or t > best[0]:
+                best = (t, k, d)
+        if best and best[0] > STEP_T and abs(best[2]) > 0.3:
+            step = {"after_repeat": int(best[1]), "size_cm1": round(best[2], 3), "t": round(best[0], 1)}
+    trend = None
+    if step is None and keep.size >= 5:
+        # a steady creep (the laser settling after its shutter opened): a slope over 3 x its standard error
+        t_ = np.arange(keep.size, dtype=float)
+        k_, c_ = np.polyfit(t_, keep, 1)
+        res_ = keep - (k_ * t_ + c_)
+        se_ = math.sqrt(float(np.sum(res_ ** 2)) / (keep.size - 2) / float(np.sum((t_ - t_.mean()) ** 2)))
+        if abs(k_) > TREND_T * max(se_, 1e-6) and abs(k_) * (keep.size - 1) > 0.3:
+            trend = {"slope_cm1_per_repeat": round(float(k_), 3)}
+    return dict(out, centre=float(np.median(keep)), kept=keep.tolist(), outliers=idx, step=step, trend=trend,
+                settled=step is None and trend is None)
 
 
 def _repeat_offsets(per_point, ref_lines) -> list:
@@ -4119,26 +4170,41 @@ def _calibration_result(study, prof, rec, ref_lines, laser, grating, rng, reques
         # several spectra, the spectrometer re-placed before each (2026-11-24, 600 gr/mm: the same window gave
         # +9.22 / +9.47 / +9.86 cm-1, a scatter larger than the fit's own error): the correction is their mean
         offs = _repeat_offsets(repeats, ref_lines)
-        good = [o for o in offs if o is not None]
-        drift = repeat_drift(good)
-        use = good[drift["dropped_leading"]:] if drift else good
+        stt = repeat_stats(offs)
+        use = stt["kept"]
         if len(use) >= 2:
-            mean_o = float(np.mean(use))
+            centre_o = float(stt["centre"])
             sd = float(np.std(use, ddof=1))
-            a = a + (float(np.mean(meas - refs)) - mean_o) * b       # the zero moved to the mean of the repeats
-            worst = abs(mean_o)
+            a = a + (float(np.mean(meas - refs)) - centre_o) * b      # the zero moved to the repeats' median
+            worst = abs(centre_o)
+            moved = bool((study.get("calibration") or {}).get("repeats_move", True))
             rep_info = {"n": len(use), "offsets_cm1": [None if o is None else round(o, 3) for o in offs],
-                        "mean_cm1": round(mean_o, 3), "sd_cm1": round(sd, 3),
-                        "sem_cm1": round(sd / math.sqrt(len(use)), 3)}
-            if drift:
-                rep_info.update(drifting=True, slope_cm1_per_repeat=drift["slope"],
-                                dropped_leading=drift["dropped_leading"], settled=drift["settled"])
+                        "median_cm1": round(centre_o, 3), "mean_cm1": round(float(np.mean(use)), 3),
+                        "sd_cm1": round(sd, 3), "sem_cm1": round(sd / math.sqrt(len(use)), 3),
+                        "spectrometer_moved": moved, "outliers": stt["outliers"], "settled": stt["settled"]}
+            if stt["settled"] and len(use) >= 3:
+                rec_r = store.read("spectro_repeatability.json") or {}
+                kk = f"{float(laser):g}@{_f(grating) or 0:g}"
+                rec_r.setdefault(kk, {})["moved_sd_cm1" if moved else "still_sd_cm1"] = round(sd, 3)
+                rec_r[kk]["time"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+                store.write("spectro_repeatability.json", rec_r)
+                res["repeatability"] = rec_r[kk]
+            if stt["outliers"]:
+                warnings.append(f"repeat(s) {', '.join(str(i + 1) for i in stt['outliers'])} left out as outliers "
+                                "(more than 3 robust SDs from the median; the first after a grating change was one "
+                                "twice on 2026-11-24)")
+            if stt["trend"] and not stt["step"]:
+                rep_info.update(drifting=True, trend=stt["trend"])
+                warnings.append(f"the repeats creep by {stt['trend']['slope_cm1_per_repeat']:+.2f} cm-1 per spectrum "
+                                "(the laser still settling?): their scatter is not noise and is not used to compare "
+                                "windows; the median is stored")
+            if stt["step"]:
+                rep_info.update(drifting=True, step=stt["step"])
                 warnings.append(
-                    f"the zero drifted during the repeats ({drift['slope']:+.2f} cm-1 per spectrum: the laser still "
-                    "settling after its shutter opened?)" + (
-                        f"; the first {drift['dropped_leading']} dropped, the rest is flat" if drift["settled"] else
-                        "; it never settled: the scatter is not noise and is not used to compare windows (a longer "
-                        "lasers.<k>.calibration_open_s, or keep the shutter held from an earlier study)"))
+                    f"the repeats jump by {stt['step']['size_cm1']:+.2f} cm-1 after repeat {stt['step']['after_repeat']}"
+                    + (" (the spectrometer landing elsewhere after its move, or a laser hop)" if moved else
+                       " (a laser hop: the spectrometer did not move)")
+                    + ": their scatter is not noise and is not used to compare windows; the median is stored")
     res.update(reference_cm1=first["reference_cm1"], measured_cm1=first["measured_cm1"],
                offset_cm1=round(float(np.mean(meas - refs)), 4), fwhm_cm1=first["fwhm_cm1"], snr=first["snr"],
                worst_error_cm1=round(worst, 4), correction={"a": round(float(a), 5), "b": round(float(b), 7)},

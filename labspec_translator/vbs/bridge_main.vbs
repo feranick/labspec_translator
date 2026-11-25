@@ -1498,6 +1498,13 @@ Sub VAcquireInner(cmd, res)
         End If
     End If
     If f > 0 And f = t And GetP(cmd, "center_move", "1") = "1" Then
+        If ParseNum(GetP(cmd, "spectro_approach_nm", "0")) <> 0 Then
+            ' always from the same side (profile spectrometer.approach_nm): backlash against step resolution
+            LabSpec.MoveMotor spm, f + ParseNum(GetP(cmd, "spectro_approach_nm", "0")), "", LS_MOTOR_VALUE
+            waitedS = WaitMotor(spm, gNoId, 120, res)
+            res("spectro_approached_from") = f + ParseNum(GetP(cmd, "spectro_approach_nm", "0"))
+            Err.Clear
+        End If
         gBlocking = spm
         Beat "busy", True
         r = LabSpec.MoveMotor(spm, f, "", LS_MOTOR_VALUE)

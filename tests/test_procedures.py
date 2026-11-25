@@ -614,6 +614,7 @@ def test_laser_mode_hop_is_seen_and_corrected_with_the_laser_line():
     s = st["studies"]["s"]
     ll = s["checks"]["laser_line"]
     assert [j["point"] for j in ll["jumps"]] == [1] and ll["jumps"][0]["moved_cm1"] == pytest.approx(-8.7, abs=0.6)
+    assert not ll["jumps"][0]["after_spectrometer_move"] and "did not move" in ll["jumps"][0]["what"]
     assert ll["points_after_a_jump"] == [1, 2] and ll["jumps"][0]["confirmed_by_peaks"] == pytest.approx(-8.7, abs=0.6)
     assert not s["reliable"] and any("laser line moved" in u for u in s["unreliable_because"])
     sim = S.ensure(bdir)
@@ -1577,9 +1578,13 @@ def test_seam_dip_repeat_drift_calibration_open_wait_and_estimate_breakdown():
     from labspec_translator import xcal
     x = np.concatenate([np.arange(100, 1945, 1.56), [1945 + 1.12], 1945 + 1.12 + np.arange(1, 800) * 1.60])
     assert runner.stitch_seams(x) and abs(runner.stitch_seams(x)[0] - 1945) < 5
-    d = runner.repeat_drift([11.31, 10.00, 9.99, 9.58, 9.60])
-    assert d and d["slope"] < 0 and d["settled"] and d["dropped_leading"] >= 1
-    assert runner.repeat_drift([9.5, 9.7, 9.4, 9.6, 9.55]) is None
+    # .20: robust repeats: an outlier first spectrum after a grating change, and a step (the spectrometer landing
+    # elsewhere), not a slope
+    r1 = runner.repeat_stats([11.09, 8.96, 9.17, 8.94, 9.51])
+    assert r1["outliers"] == [0] and r1["settled"] and abs(r1["centre"] - 9.07) < 0.1
+    r2 = runner.repeat_stats([8.93, 9.32, 10.01, 12.33, 11.71])
+    assert r2["step"] and not r2["settled"] and r2["step"]["after_repeat"] == 3
+    assert runner.repeat_stats([9.5, 9.7, 9.4, 9.6, 9.55])["settled"]
     # a drifting, never-settled set of repeats is no standard error for the window comparison
     assert xcal._se({"repeats": {"n": 5, "sd_cm1": 0.6, "drifting": True, "settled": False}}) is None
     prof = P.load()
@@ -1587,10 +1592,7 @@ def test_seam_dip_repeat_drift_calibration_open_wait_and_estimate_breakdown():
     prof["lasers"][lk].update(mode_hops=True)
     assert plan.hold_open_s(prof, 532, "calibration") == plan.CAL_OPEN_DEFAULT_S
     assert plan.hold_open_s(prof, 532, "spectrum") == plan.OPEN_SETTLE_DEFAULT_S
-    # the drop-leading floor: at least 3 and half the repeats kept; a trend that needs more is "never settled"
-    d8 = runner.repeat_drift([12.0, 11.5, 11.0, 10.5, 10.0, 9.9, 9.95, 9.9])
-    assert d8 is None or d8["dropped_leading"] <= 4
-    assert not runner.repeat_drift([12.0, 11.6, 11.2, 10.8, 10.4, 10.0])["settled"]
+    assert not runner.repeat_stats([12.0, 11.6, 11.2, 10.8, 10.4, 10.0])["settled"]
     st = {"kind": "map", "sample": {"name": "Si"}, "setup": dict(SETUP, grating=1200),
           "acquire": {"center_cm1": 520, "exposure_s": 1, "accumulations": 2, "shutter": "hold"},
           "map": {"x_um": [-4, 4, 2], "y_um": [-4, 4, 2]}}

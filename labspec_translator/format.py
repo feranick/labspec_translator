@@ -16,7 +16,7 @@ TOP_KEYS = {"kind", "sample", "setup", "acquire", "focus", "points", "map", "ser
             "calibration", "background", "filters", "cutoff"}
 FILTERS_KEYS = {"line_cm1", "window_cm1", "labels", "exposure_s", "max_exposure_s"}
 CUTOFF_KEYS = {"from_cm1", "to_cm1", "light", "laser_off", "plateau_cm1"}
-CAL_KEYS = {"reference", "lines_cm1", "tol_cm1", "adjust", "window_cm1", "repeats", "store"}
+CAL_KEYS = {"reference", "lines_cm1", "tol_cm1", "adjust", "window_cm1", "repeats", "store", "repeats_move"}
 BG_KEYS = {"name", "laser_off"}
 DEPTH_KEYS = {"from_um", "to_um", "step_um", "refractive_index", "engine", "swift"}
 MOVE_KEYS = {"x_um", "y_um", "to_um", "dz_um", "stay", "snapshot", "travel", "focus"}
@@ -332,6 +332,9 @@ def validate_study(name: str, study: dict, prof: dict) -> dict:
             errors.append("calibration.adjust: none, labspec, ls6t or auto")
         if cal.get("repeats") is not None and (not isinstance(cal["repeats"], int) or not 1 <= cal["repeats"] <= 20):
             errors.append("calibration.repeats: 1 to 20 spectra, the spectrometer re-placed before each (mean and SD)")
+        if cal.get("repeats_move") is not None and not isinstance(cal["repeats_move"], bool):
+            errors.append("calibration.repeats_move: true (the spectrometer sent away and back before each repeat: "
+                          "noise plus repositioning) or false (it stays: noise alone)")
         if cal.get("store", "auto") not in ("auto", "per_centre", "pooled"):
             errors.append("calibration.store: auto (pooled at coarse gratings, per window centre otherwise), "
                           "per_centre or pooled")
