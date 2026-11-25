@@ -265,6 +265,9 @@ every laser's `nm`, `max_filter_pct` and `power_mw` filled in. `ls6t status` sho
 4. Import it, which checks it and marks the profile reviewed: `ls6t profile import
    "$HOME\ls6t\profile.proposed.json"`. A laser with `nm`, `max_filter_pct` or `power_mw` blank is refused. Later
    changes: `ls6t profile set KEY VALUE`, or the same propose / edit / import.
+   In Windows PowerShell a JSON value loses its inner double quotes (`'{"a": 1}'` arrives as `{a: 1}`):
+   ls6t puts them back and says so (`repaired`), or write `\"` for each `"`, or save the value in a file and
+   give `@file.json`.
 
    Without any profile (no inventory, no import), ls6t refuses studies on the instrument: its built-in defaults are
    a generic XploRA for the simulator (other laser lines, an x50, no caps), not this instrument.

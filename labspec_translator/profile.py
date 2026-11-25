@@ -148,11 +148,29 @@ HOW = ("confirm it on the spectrum, in two steps (TESTING T1.2): 1. LabSpec's re
        "set the motor back to null: ls6t cannot block the laser on that instrument")
 
 
-def _merge(base: dict, over: dict) -> dict:
+def _merge(base: dict, over: dict, problems: list | None = None, path: str = "") -> dict:
+    """The profile file over the defaults. A value whose default is a group of keys must be one in the file too: a
+    group stored as text (2026-11-25, `profile set` from PowerShell) is read as JSON if it is JSON, else the default
+    is kept and the problem is listed (problems), so a bad value cannot fail every request."""
     out = copy.deepcopy(base)
     for k, v in (over or {}).items():
+        where = f"{path}.{k}" if path else str(k)
+        if isinstance(out.get(k), dict) and not isinstance(v, dict) and v is not None:
+            try:
+                fixed = json.loads(v) if isinstance(v, str) else None
+            except ValueError:
+                fixed = None
+            if isinstance(fixed, dict):
+                v = fixed
+                if problems is not None:
+                    problems.append(f"{where} was stored as text; read as JSON (set it again to store it properly)")
+            else:
+                if problems is not None:
+                    problems.append(f"{where} should be a group of keys, the profile has {v!r:.80}: ignored, the "
+                                    f"default is used. Fix it: ls6t profile set {where} @file.json")
+                continue
         if isinstance(v, dict) and isinstance(out.get(k), dict) and k not in ("lasers", "gratings", "filters"):
-            out[k] = _merge(out[k], v)
+            out[k] = _merge(out[k], v, problems, where)
         else:
             out[k] = copy.deepcopy(v)
     return out
@@ -314,7 +332,15 @@ def load(path: Path | None = None) -> dict:
                 pass
     if p.is_file():
         data = json.loads(p.read_text(encoding="utf-8"))
-        prof = _merge(DEFAULT_PROFILE, data)
+        problems: list = []
+        prof = _merge(DEFAULT_PROFILE, data, problems)
+        rp = (prof.get("spectrometer") or {}).get("repeatability") or {}
+        for kk in [kk for kk, vv in rp.items() if not isinstance(vv, dict)]:
+            problems.append(f"spectrometer.repeatability.{kk} should be {{moved_sd_cm1, still_sd_cm1}}, the profile "
+                            f"has {rp[kk]!r:.60}: ignored")
+            rp.pop(kk)
+        if problems:
+            prof["problems"] = problems
         prof["measured"] = True
         prof["path"] = str(p)
         if path is None:

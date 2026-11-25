@@ -213,6 +213,9 @@ def snap_objective(prof: dict, objective: str) -> str:
     return same[0] if same else str(objective)
 
 
+LASER_MAY_BE_ON_TAG = "THE LASER MAY STILL REACH THE SAMPLE"
+
+
 def _summary(st: dict) -> dict:
     """A finished request in a few numbers, for small models: per study reliable (or why not), peaks, calibration."""
     out = {"request": st.get("request"), "done": st.get("done"), "state": st.get("state"),
@@ -240,7 +243,13 @@ def _summary(st: dict) -> dict:
             s["images"] = {k: (v.get("path") if isinstance(v, dict) else v) for k, v in imgs.items()}
         res[n] = s
     out["studies"] = res
-    if not st.get("done"):
+    rel = st.get("shutter_hold_released")
+    if rel is not None:
+        out["shutter_hold_released"] = rel
+    if rel is not True and (rel is not None or LASER_MAY_BE_ON_TAG in str(st.get("why", ""))):
+        out["next"] = ("the laser shutter may still be held open: call instrument(action=\"laser_off\") now (it only "
+                       "closes the shutter) and tell the user")
+    elif not st.get("done"):
         out["next"] = f"still running: call study_status(request=\"{st.get('request')}\") until done"
     return out
 
@@ -339,8 +348,15 @@ def start(studies: dict, inline: bool = False, order: list | None = None) -> dic
         th.start()
     else:
         _spawn(folder)
-    return {"ok": True, "request": str(folder), "studies": list(studies),
-            "estimate_min": round(sum(req["estimate_min"].values()), 2)}
+    out = {"ok": True, "request": str(folder), "studies": list(studies),
+           "estimate_min": round(sum(req["estimate_min"].values()), 2)}
+    try:
+        probs = P.load().get("problems")
+    except Exception:  # noqa: BLE001 - only a hint here
+        probs = None
+    if probs:
+        out["profile_problems"] = probs
+    return out
 
 
 def _resolve(request: str) -> Path:
@@ -402,7 +418,8 @@ def status(request: str, wait_s: float = 0) -> dict:
             prog[n] = runner.read_json(folder / n / "progress.json", {})
     out = {"request": str(folder), "translator": __version__, "state": st.get("state"),
            "done": st.get("state") in runner.FINAL, "pending": pending, "studies": res, "progress": prog}
-    for k in ("why", "stopped_by", "reason", "config_restored", "config_restore_error", "returned", "stage_at_end"):
+    for k in ("why", "stopped_by", "reason", "config_restored", "config_restore_error", "returned", "stage_at_end",
+              "shutter_hold_released", "trace", "profile_problems"):
         if st.get(k) is not None:
             out[k] = st[k]
     if pending:
@@ -2025,19 +2042,53 @@ def alignment_record(request: str, study: str | None = None, attempt: int | None
     return {"ok": True, "laser": lk, "settings": settings, "baseline": base, "profile": str(path)}
 
 
+def _unquoted_json(text: str):
+    """JSON whose double quotes the shell took away (Windows PowerShell 5.1 strips them from arguments to programs:
+    '{"637.75@600": {"moved_sd_cm1": 0.3}}' arrives as {637.75@600: {moved_sd_cm1: 0.3}}): every bare word that is
+    not a number, true, false or null is quoted again. None when even that is not JSON."""
+    import re
+    def q(m):
+        w = m.group(2).strip()
+        if re.fullmatch(r"-?\d+(\.\d+)?([eE][-+]?\d+)?|true|false|null", w):
+            return m.group(1) + w
+        return m.group(1) + json.dumps(w)
+    try:
+        return json.loads(re.sub(r"([{\[,:]\s*)([^\s\"{}\[\],:][^{}\[\],:]*?)(?=\s*[,:}\]])", q, text))
+    except ValueError:
+        return None
+
+
 def profile_set(key: str, value_json: str) -> dict:
-    """A person's edit of one profile value: `ls6t profile set video.laser_offset_um "[1.4, -0.6]"`."""
+    """A person's edit of one profile value: `ls6t profile set video.laser_offset_um "[1.4, -0.6]"`; @file.json reads
+    the value from a file. A value that should be JSON (it starts with { or [, or the key holds a group or a list
+    now) is never stored as text (2026-11-25: spectrometer.repeatability set from PowerShell arrived without its
+    quotes, was stored as a string, and every request then failed with "'str' object has no attribute 'get'")."""
+    note = None
+    if str(value_json).startswith("@") and Path(str(value_json)[1:]).is_file():
+        value_json = Path(str(value_json)[1:]).read_text(encoding="utf-8-sig")
+    prof = P.load()
+    old = runner.lookup(prof, key)
     try:
         value = json.loads(value_json)
     except ValueError:
         value = value_json
-    prof = P.load()
-    old = runner.lookup(prof, key)
+        if str(value_json).strip()[:1] in ("{", "[") or isinstance(old, (dict, list)):
+            value = _unquoted_json(str(value_json))
+            if value is None:
+                return {"ok": False, "key": key, "error": f"{key} takes JSON ({type(old).__name__ if old is not None else 'an object or a list'}), and this is not JSON: {value_json!r}. "
+                        "Windows PowerShell removes the double quotes inside '...': write them as \\\" "
+                        "('{\\\"a\\\": 1}'), or put the value in a file and give @file.json"}
+            note = ("the value had lost its double quotes (Windows PowerShell does that): they were put back; "
+                    "check 'new'")
+    if isinstance(old, dict) and not isinstance(value, dict) or isinstance(old, list) and not isinstance(value, list):
+        return {"ok": False, "key": key, "error": f"{key} is a {type(old).__name__}; {value!r} is not"}
     P.set_key(prof, key, value)
     was_auto = bool(prof.pop("auto", None))
     if was_auto:
         prof["source"] = str(prof.get("source", "")).replace("automatic", "changed by a person; first automatic", 1)
     out = {"ok": True, "key": key, "old": old, "new": value, "profile": str(P.save(prof))}
+    if note:
+        out["repaired"] = note
     if was_auto:
         out["note"] = "the profile is now a person's: newer inventories from the bridge no longer replace it"
     return out

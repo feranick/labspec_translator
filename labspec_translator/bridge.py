@@ -327,6 +327,25 @@ class Bridge:
             pass
 
     # ------------------------------------------------------------------ calls
+    def queue(self, verb: str, **params) -> str:
+        """Leaves a command in the inbox without waiting for it (the bridge runs it when it is free): for a safety
+        command when the bridge does not answer right now (2026-11-25: a runner that gave up left the shutter held)."""
+        seq = f"{time.time_ns():020d}"
+        _write_atomic(self.inbox / f"{seq}.cmd", encode({"verb": verb, "seq": seq, "timeout_s": 30, **params}))
+        return seq
+
+    def wait_alive(self, max_s: float, on_wait=None, poll_s: float = 1.0) -> bool:
+        """True as soon as the bridge answers again (a fresh heartbeat), within max_s."""
+        end = time.monotonic() + max_s
+        while True:
+            if self.alive():
+                return True
+            if time.monotonic() >= end:
+                return False
+            if on_wait:
+                on_wait()
+            time.sleep(poll_s)
+
     def call(self, verb: str, timeout_s: float = 30.0, should_stop=None, on_wait=None, poll_s: float = 0.1,
              keep_queued: bool | None = None, **params) -> dict:
         """Sends one command and waits for its result (a dict with 'ok' as bool). Raises BridgeGone when the

@@ -113,7 +113,7 @@ class SimLabSpec:
     def _write_hb(self):
         state = "halted" if self.halted and self.state != "stopped" else self.state
         txt = encode({"state": state, "verb": self.verb, "seq": self.seq, "protocol": BRIDGE_PROTOCOL,
-                      "pid": os.getpid(),
+                      "pid": os.getpid(), "shutter_held": int(bool(getattr(self, "held", False))),
                       "version": f"sim {__version__}", "system": "XploRA (simulated)"})
         tmp = self.dir / "heartbeat.tmp"
         try:
@@ -124,6 +124,8 @@ class SimLabSpec:
 
     def _hb_loop(self):
         while not self._stop.wait(0.2):
+            if time.monotonic() < getattr(self, "hb_paused_until", 0.0):
+                continue                        # a blocking LabSpec call: the real bridge writes no heartbeat
             self._write_hb()
 
     def _scale(self) -> float:
@@ -1047,6 +1049,16 @@ class SimLabSpec:
             return 1.0
 
     def v_acquire(self, p):
+        # sim_hb_pause: this acquisition blocks the bridge (a long blocking MoveMotor) for N real seconds without a
+        # heartbeat, once (2026-11-25: turret + approach + centre move inside the first acquire after a grating change)
+        fp = self.dir / "sim_hb_pause"
+        if fp.exists():
+            secs = float(fp.read_text().strip() or 3)
+            fp.unlink()
+            self.state, self.verb = "busy", "acquire"
+            self._write_hb()
+            self.hb_paused_until = time.monotonic() + secs
+            time.sleep(secs)
         laser_off = str(p.get("laser_off", "0")) == "1"
         if laser_off and p.get("m_laser_shutter", "") not in self.m:
             return {"ok": 0, "error": "laser_off needs the laser shutter's motor name"}

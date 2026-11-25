@@ -1729,3 +1729,93 @@ def test_flat_tools_for_small_models_string_studies_rejected_log_and_measure_onl
     assert "snapshot" not in hs["tools"] and "run_benchmarks" not in hs["tools"]
     full = C.handshake(_s.executable, ["-m", "labspec_translator.mcp_server"], dict(env, LS6T_TOOLS="full"), timeout_s=90)
     assert "snapshot" in full["tools"] and "measure_spectrum" in full["tools"]
+
+
+def test_held_up_bridge_releases_the_hold_and_says_closed_or_leaves_safe_queued(tmp_path, monkeypatch):
+    """2026-11-25: the first acquisition after a grating change held the bridge (an unannounced spectrometer move);
+    ls6t said 'bridge stuck', the runner stopped and the shutter stayed held. Now: wait for the bridge, release the
+    hold and say the shutter is closed; only when it never answers, keep the laser warning and queue 'safe'."""
+    import json as _j
+    import labspec_translator.runner as R
+    monkeypatch.setenv("LS6T_HEARTBEAT_S", "2")
+    _profile_with_shutter(tmp_path)
+    bdir = config.active_bridge_dir()
+    sim = S.ensure(bdir)
+    st = {"kind": "spectrum", "sample": {"name": "Si"}, "setup": dict(SETUP, grating=1800),
+          "acquire": {"center_cm1": 520.7, "exposure_s": 0.2, "shutter": "hold"}}
+    # held up for 6 s: recovered, released, no laser warning
+    (bdir / "sim_hb_pause").write_text("6")
+    r = run_inline({"s": st})
+    s = _j.load(open(r["request"] + "/state.json"))
+    assert s["state"] in ("failed", "cancelled") and s["stopped_by"] == "bridge", s
+    assert "released the shutter hold: the laser shutter is closed" in s["why"], s["why"]
+    assert R.LASER_MAY_BE_ON not in s["why"] and s.get("shutter_hold_released") is True
+    assert sim.held is False
+    summ = api._summary(api.status(r["request"], 0))
+    assert summ.get("shutter_hold_released") is True and "laser_off" not in str(summ.get("next"))
+    # never answers within the wait: the warning stays, 'safe' is left queued for the bridge
+    monkeypatch.setattr(R, "RELEASE_WAIT_S", 1.0)
+    sim = S.ensure(bdir)
+    (bdir / "sim_hb_pause").write_text("12")
+    r = run_inline({"s": st})
+    s = _j.load(open(r["request"] + "/state.json"))
+    assert R.LASER_MAY_BE_ON in s["why"] and "left a 'safe' command" in s["why"], s["why"]
+    assert str(s.get("shutter_hold_released", "")).startswith("queued"), s
+    summ = api._summary(api.status(r["request"], 0))
+    assert "laser_off" in summ["next"]
+
+
+def test_measure_only_instrument_keeps_laser_off():
+    src = (Path(api.__file__).parent / "mcp_server.py").read_text(encoding="utf-8")
+    assert '("status", "last_error", "resume", "laser_off")' in src
+
+
+def test_profile_set_never_stores_json_as_text_and_load_survives_a_bad_group(tmp_path, monkeypatch):
+    """2026-11-25: spectrometer.repeatability set from PowerShell lost its quotes, was stored as a string, and every
+    request failed on its first acquisition ('str' object has no attribute 'get')."""
+    import json as _j
+    _profile_with_shutter(tmp_path)
+    good = _j.dumps({"637.75@600": {"moved_sd_cm1": 1.0, "still_sd_cm1": 0.12}})
+    r = api.profile_set("spectrometer.repeatability", good)
+    assert r["ok"] and r["new"]["637.75@600"]["moved_sd_cm1"] == 1.0
+    # what PowerShell 5.1 passes: the quotes gone -> put back, stored as an object
+    r = api.profile_set("spectrometer.repeatability", "{637.75@600: {moved_sd_cm1: 0.9, still_sd_cm1: 0.1}}")
+    assert r["ok"] and r.get("repaired") and r["new"] == {"637.75@600": {"moved_sd_cm1": 0.9, "still_sd_cm1": 0.1}}
+    # not JSON even so: refused, nothing stored
+    r = api.profile_set("spectrometer.repeatability", "{637.75@600: {...}")
+    assert not r["ok"] and "PowerShell" in r["error"]
+    r = api.profile_set("spectrometer.repeatability", "0.5")
+    assert not r["ok"]
+    assert P.load()["spectrometer"]["repeatability"]["637.75@600"]["moved_sd_cm1"] == 0.9
+    # a profile file already holding the text: load keeps the default and lists the problem; requests run
+    pf = config.profile_path()
+    d = _j.loads(pf.read_text(encoding="utf-8"))
+    d["spectrometer"]["repeatability"] = "{637.75@600: {...}}"
+    pf.write_text(_j.dumps(d), encoding="utf-8")
+    prof = P.load()
+    assert prof["spectrometer"]["repeatability"] == {} and "spectrometer.repeatability" in prof["problems"][0]
+    st = {"kind": "spectrum", "sample": {"name": "Si"}, "setup": dict(SETUP),
+          "acquire": {"center_cm1": 520.7, "exposure_s": 0.2}}
+    s = api.start({"s": st}, inline=True)
+    assert s["ok"] and s.get("profile_problems")
+    res = api.status(s["request"], 60)
+    assert res["state"] == "done", res.get("why")
+
+
+def test_runner_fault_releases_the_hold_and_does_not_blame_the_bridge(tmp_path, monkeypatch):
+    import json as _j
+    import labspec_translator.runner as R
+    _profile_with_shutter(tmp_path)
+    bdir = config.active_bridge_dir()
+    sim = S.ensure(bdir)
+
+    def boom(*a, **k):
+        raise AttributeError("'str' object has no attribute 'get'")
+    monkeypatch.setattr(R, "screen_points", boom)
+    st = {"kind": "spectrum", "sample": {"name": "Si"}, "setup": dict(SETUP),
+          "acquire": {"center_cm1": 520.7, "exposure_s": 0.2, "shutter": "hold"}}
+    r = run_inline({"s": st})
+    s = _j.load(open(r["request"] + "/state.json"))
+    assert s["state"] == "failed" and s["stopped_by"] == "ls6t" and s.get("trace"), s
+    assert "not the bridge" in s["why"] and R.LASER_MAY_BE_ON not in s["why"] and "stuck" not in s["why"]
+    assert sim.held is False

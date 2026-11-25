@@ -1481,7 +1481,11 @@ Sub VAcquireInner(cmd, res)
         If ParseNum(GetP(cmd, "spectro_jog_nm", "0")) <> 0 Then
             ' a calibration repeat: the spectrometer sent away and back, so each repeat lands on the pixels afresh
             ' (2026-11-24, 600 gr/mm: Si spans ~2 pixels and the same window gave +9.2 ... +9.9 cm-1)
+            gBlocking = spm                 ' a blocking move: announced, so ls6t does not call the bridge stuck
+            Beat "busy", True
             LabSpec.MoveMotor spm, f + ParseNum(GetP(cmd, "spectro_jog_nm", "0")), "", LS_MOTOR_VALUE
+            gBlocking = ""
+            Beat "busy", True
             waitedS = WaitMotor(spm, gNoId, 120, res)
             res("spectro_jogged") = 1
             res("t_spectro_jog_s") = Secs(Elapsed(tp))     ' its own line: not 'waiting for motors' (2026-11-25)
@@ -1505,7 +1509,13 @@ Sub VAcquireInner(cmd, res)
             ' 600 gr/mm: the repositioning spread 0.15 cm-1 with -2 nm against ~0.5 without)
             apJog = ParseNum(GetP(cmd, "spectro_jog_nm", "0"))
             If Not res.Exists("spectro_jogged") Or apJog <> ParseNum(GetP(cmd, "spectro_approach_nm", "0")) Then
+                ' announced: after a grating change this move took ~25 s with no heartbeat, and ls6t called the
+                ' bridge stuck (2026-11-25)
+                gBlocking = spm
+                Beat "busy", True
                 LabSpec.MoveMotor spm, f + ParseNum(GetP(cmd, "spectro_approach_nm", "0")), "", LS_MOTOR_VALUE
+                gBlocking = ""
+                Beat "busy", True
                 waitedS = WaitMotor(spm, gNoId, 120, res)
             End If
             res("spectro_approached_from") = f + ParseNum(GetP(cmd, "spectro_approach_nm", "0"))
@@ -2605,7 +2615,11 @@ Sub VMapNative(cmd, res)
     If GetP(cmd, "center_nm", "") <> "" Then
         If ParseNum(GetP(cmd, "spectro_approach_nm", "0")) <> 0 Then
             ' from the same side as ls6t's other moves (spectrometer.approach_nm: the backlash out)
+            gBlocking = "Spectro"
+            Beat "busy", True
             LabSpec.MoveMotor "Spectro", ParseNum(GetP(cmd, "center_nm", "0")) + ParseNum(GetP(cmd, "spectro_approach_nm", "0")), "", LS_MOTOR_VALUE
+            gBlocking = ""
+            Beat "busy", True
             WaitMotor "Spectro", gNoId, 120, res
             res("spectro_approached_from") = ParseNum(GetP(cmd, "center_nm", "0")) + ParseNum(GetP(cmd, "spectro_approach_nm", "0"))
             Err.Clear

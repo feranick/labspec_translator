@@ -261,9 +261,10 @@ async def instrument(ctx: Context, action: str = "status", camera: str | int | N
 if MEASURE_ONLY:
     @server.tool(name="instrument")
     async def instrument_status(ctx: Context, action: str = "status") -> dict:
-        """The instrument now (status), LabSpec's last error (last_error), or ask the operator to lift a halt
-        (resume). Nothing else here: spectra and calibrations are measure_spectrum and calibrate_si."""
-        if action not in ("status", "last_error", "resume"):
+        """The instrument now (status), LabSpec's last error (last_error), ask the operator to lift a halt (resume),
+        or close the laser shutter and release ls6t's hold (laser_off: it only closes, never fires). Nothing else
+        here: spectra and calibrations are measure_spectrum and calibrate_si."""
+        if action not in ("status", "last_error", "resume", "laser_off"):
             api.log_rejected("instrument", {"action": action}, "not in the measure-only tool set")
             return {"ok": False, "error": f"instrument {action!r} is not available here (measure-only tools): use "
                                           "measure_spectrum or calibrate_si to measure"}

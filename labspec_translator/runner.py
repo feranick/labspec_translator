@@ -21,7 +21,7 @@ from . import spot as SP
 from . import store
 from . import shutter as SH
 from . import profile as P
-from .bridge import replace_retry, Bridge, BridgeError, BridgeGone, BridgeTimeout
+from .bridge import replace_retry, Bridge, BridgeError, BridgeGone, BridgeTimeout  # noqa: F401
 
 FINAL = ("done", "cancelled", "failed", "interrupted")
 
@@ -503,9 +503,9 @@ class Ctx:
                 rec["spectro_skipped"] = True
             self.calls.append(rec)
         except BridgeGone as exc:
-            raise Stop(self._held_warning(str(exc)), "bridge") from exc
+            raise Stop(self._release_after_silence(str(exc)), "bridge") from exc
         except BridgeTimeout as exc:
-            raise Stop(self._held_warning(str(exc)), "timeout") from exc
+            raise Stop(self._release_after_silence(str(exc)), "timeout") from exc
         self.beat()
         self._log(f"<- {verb} ok={int(bool(r.get('ok')))} {r.get('seconds', '')} s"
                   + "".join(f" {k}={r[k]}" for k in ("id", "mapex_return", "map_create_return", "view",
@@ -534,6 +534,32 @@ class Ctx:
                 fh.flush()
         except OSError:
             pass
+
+    def _release_after_silence(self, msg: str) -> str:
+        """The bridge did not answer while ls6t held the shutter: before saying the laser may still reach the sample,
+        wait for the bridge to answer again (a long blocking move may have held it: 2026-11-25, the first acquisition
+        after a grating change) and release the hold then; the message says which happened."""
+        hb = self.bridge.heartbeat() or {}
+        if not (self.holding or str(hb.get("shutter_held", "0")) == "1"):
+            return msg
+        if self.bridge.wait_alive(RELEASE_WAIT_S, on_wait=self.beat):
+            try:
+                r = self.bridge.call("shutter_hold", timeout_s=30, state="off")
+                if r.get("ok"):
+                    self.holding = False
+                    self.hold_log.append({"released": True, "by": "after the bridge answered again"})
+                    first = " ".join(msg.replace(LASER_MAY_BE_ON, "").split()).split(". ")[0].rstrip(".")
+                    return (f"{first}; it answered again afterwards, so LabSpec was only held up (no restart "
+                            "needed). ls6t stopped the request and released the shutter hold: the laser shutter is "
+                            "closed. Run the request again; tell the ls6t maintainer which command was held up.")
+            except BridgeError:
+                pass
+        try:
+            self.bridge.queue("safe")       # carried out as soon as the bridge is free
+        except OSError:
+            pass
+        return self._held_warning(msg) + (" ls6t left a 'safe' command (shutter closed, hold released) for the "
+                                          "bridge: it runs as soon as the bridge is free.")
 
     def _held_warning(self, msg: str) -> str:
         """The bridge stopped answering while ls6t held the laser shutter open: say so first."""
@@ -800,19 +826,23 @@ def run_request(folder: Path | str) -> dict:
         state.update(state="cancelled" if exc.by in ("cancel", "operator") else "failed", why=exc.why,
                      stopped_by=exc.by, finished=time.time())
         try:
-            state["stage_at_end"] = _stage_now(ctx)
-        except Exception:  # noqa: BLE001 - the bridge may be gone
-            state["stage_at_end"] = {}
-        state["returned"] = _not_returned(exc.by, state["stage_at_end"])
-        for name in studies:
-            res = folder / name / f"{name}.json"
-            if not res.exists():
-                (folder / name).mkdir(exist_ok=True)
-                write_json(res, {"ok": False, "why": f"not run: {exc.why}", "reliable": False,
-                                 "unreliable_because": [exc.why], "warnings": []})
+            try:
+                state["stage_at_end"] = _stage_now(ctx) if ctx is not None else {}
+            except Exception:  # noqa: BLE001 - the bridge may be gone
+                state["stage_at_end"] = {}
+            state["returned"] = _not_returned(exc.by, state["stage_at_end"])
+            for name in studies:
+                res = folder / name / f"{name}.json"
+                if not res.exists():
+                    (folder / name).mkdir(exist_ok=True)
+                    write_json(res, {"ok": False, "why": f"not run: {exc.why}", "reliable": False,
+                                     "unreliable_because": [exc.why], "warnings": []})
+        except Exception:  # noqa: BLE001 - a fault while stopping must not hide the stop or skip the release below
+            state["trace"] = traceback.format_exc()[-3000:]
     except Exception as exc:  # noqa: BLE001
-        state.update(state="failed", why=f"{type(exc).__name__}: {exc}", trace=traceback.format_exc()[-3000:],
-                     finished=time.time())
+        state.update(state="failed", why=f"ls6t failed (its own fault, not the bridge's or LabSpec's): "
+                                         f"{type(exc).__name__}: {exc}", trace=traceback.format_exc()[-3000:],
+                     stopped_by="ls6t", finished=time.time())
         for name in studies:
             res = folder / name / f"{name}.json"
             if not res.exists():
@@ -821,13 +851,35 @@ def run_request(folder: Path | str) -> dict:
                                  "reliable": False, "unreliable_because": ["runner failed"], "warnings": []})
     finally:
         if ctx is not None:
+            # on ANY end (a runner failure too) the shutter hold is released: wait for a silent bridge, else leave
+            # 'safe' queued for it (2026-11-25: the runner died with the hold on; laser_off by hand closed it)
+            hb = ctx.bridge.heartbeat() or {}
+            held = bool(getattr(ctx, "holding", False) or str(hb.get("shutter_held", "0")) == "1")
             try:
-                if ctx.bridge.alive():
-                    ctx.bridge.call("safe", timeout_s=15, **motor_args(prof))
+                if ctx.bridge.alive() or (held and ctx.bridge.wait_alive(RELEASE_WAIT_S, on_wait=ctx.beat)):
+                    # a long blocking call (the hold's opening wait, an acquisition) may still be on: wait it out
+                    r = ctx.bridge.call("safe", timeout_s=120 if held else 30, **motor_args(prof))
+                    if held:
+                        state["shutter_hold_released"] = bool(r.get("ok"))
                     ctx.bridge.call("message", timeout_s=10,
                                     text=f"ls6t: request {folder.name} {state.get('state')}")
-            except (BridgeError, OSError):
-                pass
+                elif held:
+                    ctx.bridge.queue("safe", **motor_args(prof))
+                    state["shutter_hold_released"] = "queued: 'safe' runs as soon as the bridge is free"
+            except (BridgeError, OSError) as exc:
+                if held:
+                    try:
+                        ctx.bridge.queue("safe", **motor_args(prof))
+                        state["shutter_hold_released"] = f"queued after {type(exc).__name__}"
+                    except OSError:
+                        state["shutter_hold_released"] = False
+        if state.get("stopped_by") == "ls6t" and state.get("shutter_hold_released") is True:
+            state["why"] += "; the bridge answered and ls6t released the shutter hold: the laser shutter is closed"
+        if profile_problems := (prof.get("problems") if isinstance(prof, dict) else None):
+            state["profile_problems"] = profile_problems
+        if ctx is not None and "shutter_hold_released" not in state and any(
+                h.get("by") == "after the bridge answered again" for h in ctx.hold_log):
+            state["shutter_hold_released"] = True
         _release_lock(folder)
         state["seconds"] = round(time.time() - started, 1)
         write_json(folder / "state.json", state)
@@ -984,6 +1036,7 @@ def _setup(name: str, study: dict, ctx: Ctx, warnings: list, unreliable: list, c
     return {"before": before, "after": after, "laser": laser, "temp": temp, "readback": readback, "rng": rng}
 
 
+RELEASE_WAIT_S = 90.0     # how long ls6t waits for a silent bridge to answer again before giving up on the release
 LASER_MAY_BE_ON = ("THE LASER MAY STILL REACH THE SAMPLE: ls6t held the laser shutter open (LabSpec's ShutterMode "
                    "manual) when the bridge stopped answering. Close it now: switch the laser off in LabSpec's status "
                    "bar if LabSpec responds, otherwise switch the laser off at its power supply or key; after "
@@ -4085,8 +4138,9 @@ def spectro_repeatability(prof: dict, laser, grating, placement: str = "centred"
     get no approach: their entry is "<laser>@<grating>@labspec", never the approach-based one (Nicola, 2026-11-25)."""
     kk = f"{float(laser):g}@{_f(grating) or 0:g}" + ("@labspec" if placement == "labspec" else "")
     sp_ = prof.get("spectrometer") or {}
-    own = (sp_.get("repeatability") or {}).get(kk)
-    if own:
+    rp_ = sp_.get("repeatability") if isinstance(sp_.get("repeatability"), dict) else {}
+    own = rp_.get(kk)
+    if isinstance(own, dict) and own:
         return dict(own, source="profile")
     rec = dict((store.read("spectro_repeatability.json") or {}).get(kk) or {})
     if placement != "labspec" and rec.get("moved_sd_cm1") is not None and \
