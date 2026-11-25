@@ -329,6 +329,11 @@ ls6t tools appear in a new chat or session (Claude: the tools / connectors menu)
   use and a long context (ls6t's instructions and study format are long): small models refuse or confuse requests
   more often. ls6t's limits and confirmations hold whatever the model. Not yet tried on the instrument PC (none
   of the four above has been).
+- **Small local models** (LM Studio, Bionic; a few billion parameters): they often cannot build the nested
+  `studies` object. ls6t gives them flat tools, `measure_spectrum` and `calibrate_si` (scalar arguments with
+  defaults; they wait for the result), and a smaller tool set without `instrument set`, `laser_on` or `snapshot`:
+  `ls6t connect bionic --tools measure` (or `lmstudio`; `--tools full` puts everything back). Calls ls6t refused
+  (invalid studies, wrong arguments) are listed by `ls6t jobs` (`rejected_calls`).
 - **LM Studio Bionic**: a separate app that keeps its own MCP list (Settings > MCP), so the LM Studio entry does not
   reach it (2026-11-24). Start Bionic once (it makes its folder), quit it, then connect (`ls6t connect bionic`, or
   the installer's *LM Studio Bionic* box); start it again and check that `ls6t` is switched on under Settings > MCP.

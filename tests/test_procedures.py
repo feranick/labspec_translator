@@ -1687,3 +1687,45 @@ def test_outlier_after_a_jump_forced_first_move_and_no_drift_against_old_entries
     assert 'GetP(cmd, "spectro_force", "0") <> "1"' in text
     nm = text.split("Sub VMapNative")[1].split("End Sub")[0]
     assert nm.index('WaitMotor "Spectro", gNoId, 120, res') < nm.index('res("spectro_before_map")')
+
+
+def test_flat_tools_for_small_models_string_studies_rejected_log_and_measure_only_set(tmp_path):
+    """2026-11-25: a 4B local model never got a run_studies call through (it cannot build the nested object), and
+    nothing showed the attempts. Flat measure_spectrum / calibrate_si (scalar arguments, laser snapped to the
+    profile's), studies accepted as JSON text, refused calls in jobs, and a measure-only tool set."""
+    import json as _j
+    import sys as _s
+    from labspec_translator import clients as C
+    S.ensure(config.active_bridge_dir())
+    prof = P.load()
+    assert api.snap_laser(prof, 533) == 532.0
+    with pytest.raises(ValueError):
+        api.snap_laser(prof, 600)
+    assert api.snap_objective(prof, "x100_VIS") in [str(o) for o in prof["objectives"]]
+    r = api.measure_spectrum(laser_nm=533, center_cm1=520.7, exposure_s=0.2, accumulations=1, grating=1800,
+                             filter="10%", objective="x100", inline=True, wait_total_s=60)
+    assert r["done"] and r["study"]["setup"]["laser_nm"] == 532.0 and r["study"]["acquire"]["spike"] == "none"
+    pk = r["studies"]["spectrum"]["peaks"]["peak"]
+    assert abs(pk["position_cm1"] - 520.7) < 1.0 and r["studies"]["spectrum"]["reliable"] is not None
+    c = api.calibrate_si(laser_nm=532, grating=1800, repeats=3, filter="10%", objective="x100", inline=True,
+                         wait_total_s=60)
+    assert c["done"] and "offset_cm1" in c["studies"]["calibration"]["calibration"]
+    # studies as JSON text; a single unnamed study; garbage refused clearly and logged
+    one = {"kind": "spectrum", "sample": {"name": "Si"}, "setup": SETUP, "acquire": {"center_cm1": 520, "exposure_s": 1}}
+    assert list(api.coerce_studies(_j.dumps({"a": one}))) == ["a"]
+    assert list(api.coerce_studies(one)) == ["study"]
+    with pytest.raises(ValueError):
+        api.coerce_studies("run a spectrum please")
+    bad = api.start({"x": dict(one, setup=dict(SETUP, laser_nm=999))})
+    assert not bad["ok"]
+    j = api.jobs(5)
+    assert any(x["tool"] == "run_studies" for x in j["rejected_calls"]) and \
+        any("not JSON" in str(x["errors"]) for x in j["rejected_calls"])
+    # the measure-only set: no laser_on / set / snapshot; instrument status only
+    env = {"LS6T_TOOLS": "measure", "LS6T_MODE": "sim", "LS6T_HOME": str(config.home()), "PYTHONPATH": os.pathsep.join(_s.path)}
+    hs = C.handshake(_s.executable, ["-m", "labspec_translator.mcp_server"], env, timeout_s=90)
+    assert hs.get("ok"), hs
+    assert {"measure_spectrum", "calibrate_si", "study_status", "instrument"} <= set(hs["tools"])
+    assert "snapshot" not in hs["tools"] and "run_benchmarks" not in hs["tools"]
+    full = C.handshake(_s.executable, ["-m", "labspec_translator.mcp_server"], dict(env, LS6T_TOOLS="full"), timeout_s=90)
+    assert "snapshot" in full["tools"] and "measure_spectrum" in full["tools"]

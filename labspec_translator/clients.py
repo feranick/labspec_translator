@@ -669,7 +669,8 @@ def existing_env() -> dict:
     return {}
 
 
-def connect(clients: list, python: str, sim: bool = False, main: bool = True, test: bool | None = None) -> list[dict]:
+def connect(clients: list, python: str, sim: bool = False, main: bool = True, test: bool | None = None,
+            tools: str | None = None) -> list[dict]:
     """Adds "ls6t" (main) and "ls6t-sim" (sim) to each client's file. test True / False turns test mode (the
     hardware_test tool) on / off in those entries; None leaves it as it is. Returns one report per file:
     {client, file, ok, notes | error, backup}."""
@@ -677,6 +678,10 @@ def connect(clients: list, python: str, sim: bool = False, main: bool = True, te
     shared = existing_env()
     shared.pop("LS6T_TEST_MODE", None)
     tm = {} if test is None else {"LS6T_TEST_MODE": "1" if test else "0"}
+    if tools:
+        # 'measure': the small tool set for small local models (flat measure_spectrum / calibrate_si, no laser_on or
+        # set); 'full': everything (mcp_server, LS6T_TOOLS)
+        tm["LS6T_TOOLS"] = tools
     for client in clients:
         if client == "bionic" and not files(client, create=True):
             reports.append({"client": client, "app": LABELS[client], "file": str(bionic_file()), "ok": False,

@@ -4,6 +4,9 @@ Tools (all JSON):
   study_format      the study format, the profile's choices and limits, the bridge's state. Read it first.
   validate_studies  static checks of {name: study} with time estimates (fix every error before running)
   run_studies       starts a request (one runner process; the instrument does one request at a time)
+  measure_spectrum  one spectrum from flat arguments, waiting for it (small local models)
+  calibrate_si      a Si calibration from flat arguments, waiting for it
+LS6T_TOOLS=measure (ls6t connect APP --tools measure): only the measurement and read-only tools; instrument status.
   study_status      a request's results, or its progress while it runs
   cancel            stops a request (the current acquisition or move stops)
   jobs              recent requests and which one holds the instrument
@@ -28,6 +31,7 @@ import argparse
 import asyncio
 import functools
 import inspect
+import os
 
 from . import api, testmode
 
@@ -70,6 +74,18 @@ Polling costs tokens: past about 5 minutes, tell the user when a run should fini
 Direct requests: laser, grating, filter, objective, hole, slit: instrument set; camera view: instrument camera_on
 /off; the beam on for viewing: instrument laser_on/off; a picture: snapshot; the state: instrument status; a
 spectrum, a stage move, focus: a study. PNGs: "images": true, get_image. Units: cm-1, µm, s, counts."""
+
+# LS6T_TOOLS=measure (`ls6t connect APP --tools measure`): a smaller tool set for small local models: the flat
+# measure_spectrum / calibrate_si, the study tools and read-only ones; instrument answers status only; no laser_on,
+# set or snapshot (2026-11-25: a 4B model could not build the nested studies object, and reached for instrument set)
+MEASURE_ONLY = os.environ.get("LS6T_TOOLS", "full").strip().lower() == "measure"
+if MEASURE_ONLY:
+    INSTRUCTIONS = """labspec-translator runs Raman measurements on a HORIBA XploRA through LabSpec 6.
+To measure a spectrum call measure_spectrum (flat arguments, all with defaults: laser_nm 637.75, center_cm1 520.7 or
+from_cm1 + to_cm1, exposure_s, accumulations, grating, filter, objective, peak_cm1). To calibrate on silicon call
+calibrate_si. Both wait for the result. If the answer says it is still running, call study_status with its request.
+Report the numbers in the answer only: peak position, FWHM, SNR, 'reliable' (if false, why), warnings.
+If the LabSpec bridge is not running, ask the user to start ls6t_bridge.vbs in LabSpec (Processing > Scripts)."""
 
 if testmode.enabled():
     INSTRUCTIONS += """
@@ -131,6 +147,13 @@ def _tool_said(*a, **k):
 server.tool = _tool_said
 
 
+def _full_tool(*a, **k):
+    """A tool of the full set only (hidden with LS6T_TOOLS=measure)."""
+    if MEASURE_ONLY:
+        return lambda fn: fn
+    return server.tool(*a, **k)
+
+
 def _wait(w) -> float:
     return min(max(float(w), 0.0), 50.0)
 
@@ -143,19 +166,43 @@ def study_format() -> dict:
 
 
 @server.tool()
-def validate_studies(studies: dict) -> dict:
+def validate_studies(studies: dict | str) -> dict:
     """Static checks of {name: study}: per study ok, errors (each says the fix), warnings, the time estimate
-    (minutes, points, detector windows) and the acquisition range in nm."""
-    return api.validate(studies)
+    (minutes, points, detector windows) and the acquisition range in nm. studies may also be its JSON text."""
+    return api.validate(api.coerce_studies(studies, "validate_studies"))
 
 
 @server.tool()
-def run_studies(studies: dict, wait_s: float = 45, order: list[str] | None = None) -> dict:
+def run_studies(studies: dict | str, wait_s: float = 45, order: list[str] | None = None) -> dict:
     """Starts a request (validated first) and returns after at most wait_s (<= 50) s: {request, state, done,
-    studies: {name: result}, pending, progress: {name: {stage, point, points, eta_min}}, next}. Studies run in the
-    order of the keys; give `order` (every name once) when the order matters, since some apps sort an object's
-    keys; the answer's 'studies' lists the order used."""
-    return api.run(studies, _wait(wait_s), order=order)
+    studies: {name: result}, pending, progress: {name: {stage, point, points, eta_min}}, next}. studies is an object
+    {name: study} (its JSON text is accepted too). Studies run in the order of the keys; give `order` (every name
+    once) when the order matters, since some apps sort an object's keys; the answer's 'studies' lists the order
+    used."""
+    return api.run(api.coerce_studies(studies, "run_studies"), _wait(wait_s), order=order)
+
+
+@server.tool()
+async def measure_spectrum(ctx: Context, laser_nm: float = 637.75, center_cm1: float | None = None,
+                           from_cm1: float | None = None, to_cm1: float | None = None, exposure_s: float = 1.0,
+                           accumulations: int = 2, grating: float = 1200, filter: str = "1%",
+                           objective: str = "x100_VIS", peak_cm1: float | None = 520.7,
+                           sample: str = "sample") -> dict:
+    """Measures one Raman spectrum and waits for it (up to about 5 minutes), returning the result in a few numbers.
+    All arguments are optional: laser_nm (638 is taken as 637.75, 785 as 785.04), center_cm1 (one detector window
+    centred there) or from_cm1 + to_cm1 (a range), exposure_s, accumulations, grating, filter (never above 10%),
+    objective, peak_cm1 (the peak to fit; null: the strongest are found), sample (its name). If the answer says it
+    is still running, call study_status with its request."""
+    return await _keepalive(ctx, functools.partial(api.measure_spectrum, laser_nm, center_cm1, from_cm1, to_cm1,
+                                                   exposure_s, accumulations, grating, filter, objective, peak_cm1,
+                                                   sample))
+
+
+@server.tool()
+async def calibrate_si(ctx: Context, laser_nm: float = 637.75, grating: float = 1200, repeats: int = 5) -> dict:
+    """Calibrates the spectral zero on silicon (520.7 cm-1) for this laser and grating and waits for it (up to about
+    5 minutes): ls6t then corrects later spectra. All arguments optional (laser_nm 638 is taken as 637.75)."""
+    return await _keepalive(ctx, functools.partial(api.calibrate_si, laser_nm, grating, repeats))
 
 
 @server.tool()
@@ -178,7 +225,7 @@ def jobs(limit: int = 20, active: bool = False) -> dict:
     return api.jobs(limit, active)
 
 
-@server.tool()
+@_full_tool()
 async def instrument(ctx: Context, action: str = "status", camera: str | int | None = None,
                      setup: dict | None = None, seconds: float | None = None, um: float | None = None) -> dict:
     """status: the bridge's version and the instrument's state now (laser, grating, filter, objective, stage,
@@ -211,7 +258,19 @@ async def instrument(ctx: Context, action: str = "status", camera: str | int | N
     return await _keepalive(ctx, api.instrument, action, camera, setup, seconds, um)
 
 
-@server.tool()
+if MEASURE_ONLY:
+    @server.tool(name="instrument")
+    async def instrument_status(ctx: Context, action: str = "status") -> dict:
+        """The instrument now (status), LabSpec's last error (last_error), or ask the operator to lift a halt
+        (resume). Nothing else here: spectra and calibrations are measure_spectrum and calibrate_si."""
+        if action not in ("status", "last_error", "resume"):
+            api.log_rejected("instrument", {"action": action}, "not in the measure-only tool set")
+            return {"ok": False, "error": f"instrument {action!r} is not available here (measure-only tools): use "
+                                          "measure_spectrum or calibrate_si to measure"}
+        return await _keepalive(ctx, api.instrument, action, None, None, None, None)
+
+
+@_full_tool()
 def snapshot(with_laser: bool = False, extended: bool = False):
     """A video frame of the sample now, with the laser position marked (red cross), returned as an image plus its
     details (stage position, field of view, files). with_laser: true opens the laser shutter for about a second so
@@ -234,14 +293,14 @@ def references() -> dict:
     return api.references()
 
 
-@server.tool()
+@_full_tool()
 def spot_status() -> dict:
     """Where the beam is relative to LabSpec's laser marker, remembered per objective and laser: the offset (µm),
     how it was measured, its age and the drift since the first record. Read-only; a 'spot' study measures it."""
     return api.spot_status()
 
 
-@server.tool()
+@_full_tool()
 def alignment_status() -> dict:
     """Per laser: the fixed alignment settings and the baseline recorded after the last AutoAlignment, the last
     alignment check (time, passed, ratio to baseline) and its age. Read-only: baselines are recorded by the
@@ -249,7 +308,7 @@ def alignment_status() -> dict:
     return api.alignment_status()
 
 
-@server.tool()
+@_full_tool()
 def get_inputs(study: dict, name: str = "study") -> dict:
     """The bridge commands one study would send (setup moves, the first points), its range in nm and its time
     estimate, without running anything."""
@@ -285,7 +344,7 @@ if testmode.enabled():
         return testmode.hardware_test(action, step, verb, params, result, notes, values, answers, who, timeout_s)
 
 
-@server.tool()
+@_full_tool()
 def run_benchmarks(names: list | None = None, wait_s: float = 45) -> dict:
     """The benchmarks on the simulator (never the instrument): per case the checks with expected and measured
     values. Takes about a minute for all of them."""

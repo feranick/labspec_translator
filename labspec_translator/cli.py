@@ -150,6 +150,9 @@ def main(argv=None) -> int:
     s.add_argument("--remove", action="store_true", help="remove this install's entries instead")
     s.add_argument("--test", dest="test", action="store_true", default=None, help="test mode on (hardware_test)")
     s.add_argument("--no-test", dest="test", action="store_false", help="test mode off")
+    s.add_argument("--tools", choices=["full", "measure"], help="the tool set those apps see: full, or measure (small "
+                                                               "local models: measure_spectrum, calibrate_si, study "
+                                                               "tools; no laser_on, set or snapshot)")
     s = sub.add_parser("test")
     s.add_argument("action", choices=["plan", "step", "record", "report"])
     s.add_argument("id", nargs="?", help="step / record: the test's ID, e.g. T3.4")
@@ -337,7 +340,7 @@ def main(argv=None) -> int:
         if bad:
             ap.error(f"connect: unknown app {', '.join(bad)} ({', '.join(C.CLIENTS)}, auto)")
         reps = (C.disconnect(apps, sys.executable) if a.remove
-                else C.connect(apps, sys.executable, sim=a.sim, test=a.test))
+                else C.connect(apps, sys.executable, sim=a.sim, test=a.test, tools=a.tools))
         ok = all(r.get("ok") for r in reps)
         _print({"ok": ok, "python": sys.executable, "files": reps,
                 "next": "quit and restart each app changed: the ls6t tools appear in a new chat or session"})

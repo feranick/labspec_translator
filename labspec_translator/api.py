@@ -141,6 +141,174 @@ def _spawn(folder: Path):
     log.close()
 
 
+def log_rejected(tool: str, args, errors) -> None:
+    """A call refused before anything ran (invalid studies, wrong arguments): LS6T_HOME/rejected_log.jsonl, shown by
+    jobs (2026-11-25: a small local model's run_studies calls never reached ls6t, and nothing showed it)."""
+    try:
+        p = config.home() / "rejected_log.jsonl"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with open(p, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"time": time.strftime("%Y-%m-%d %H:%M:%S"), "tool": tool,
+                                 "args": json.loads(json.dumps(args, default=str))
+                                 if len(json.dumps(args, default=str)) < 4000 else str(args)[:4000],
+                                 "errors": errors}, default=str) + "\n")
+    except (OSError, TypeError, ValueError):
+        pass
+
+
+def rejected_log(n: int = 10) -> list:
+    try:
+        rows = (config.home() / "rejected_log.jsonl").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    out = []
+    for line in rows[-n:]:
+        try:
+            out.append(json.loads(line))
+        except ValueError:
+            pass
+    return out
+
+
+def coerce_studies(studies, tool: str = "run_studies") -> dict:
+    """{name: study} from what a client sent: a JSON object, or a JSON string of one (small models send strings);
+    a single study without its name is wrapped as {"study": ...}. Anything else is a clear error (and logged)."""
+    raw = studies
+    if isinstance(studies, str):
+        try:
+            studies = json.loads(studies)
+        except ValueError as exc:
+            log_rejected(tool, {"studies": raw}, f"not JSON: {exc}")
+            raise ValueError(f"studies: a JSON object {{name: study}} is needed; the text sent is not JSON ({exc})")
+    if isinstance(studies, dict) and "kind" in studies and not any(isinstance(v, dict) and "kind" in v
+                                                                  for v in studies.values()):
+        studies = {"study": studies}
+    if not isinstance(studies, dict) or not studies or not all(isinstance(v, dict) for v in studies.values()):
+        log_rejected(tool, {"studies": raw}, "not an object of studies")
+        raise ValueError('studies: an object {"name": {"kind": "spectrum", ...}} is needed (one entry per study); '
+                         f"got {type(studies).__name__}")
+    return studies
+
+
+def snap_laser(prof: dict, laser_nm) -> float:
+    """The profile's laser nearest to what was said (638 -> 637.75; 785 -> 785.04), within 5 nm."""
+    want = float(laser_nm)
+    have = [float(v["nm"]) for v in (prof.get("lasers") or {}).values() if v.get("nm") is not None]
+    if not have:
+        return want
+    best = min(have, key=lambda x: abs(x - want))
+    if abs(best - want) > 5:
+        raise ValueError(f"laser_nm {want:g}: this instrument has {', '.join(f'{h:g}' for h in sorted(have))} nm")
+    return best
+
+
+def snap_objective(prof: dict, objective: str) -> str:
+    """The profile's objective with the same magnification when the name differs (x100 -> x100_VIS)."""
+    objs = [str(o) for o in (prof.get("objectives") or [])]
+    if not objs or str(objective) in objs:
+        return str(objective)
+    import re as _re
+    m = _re.search(r"(\d+)", str(objective))
+    same = [o for o in objs if m and _re.search(r"(\d+)", o) and _re.search(r"(\d+)", o).group(1) == m.group(1)]
+    return same[0] if same else str(objective)
+
+
+def _summary(st: dict) -> dict:
+    """A finished request in a few numbers, for small models: per study reliable (or why not), peaks, calibration."""
+    out = {"request": st.get("request"), "done": st.get("done"), "state": st.get("state"),
+           **({"why": st["why"]} if st.get("why") else {})}
+    res = {}
+    for n, r in (st.get("studies") or {}).items():
+        if not isinstance(r, dict):
+            continue
+        s = {"reliable": r.get("reliable"), "warnings": (r.get("warnings") or [])[:5]}
+        if r.get("unreliable_because"):
+            s["unreliable_because"] = r["unreliable_because"][:5]
+        if r.get("why"):
+            s["why"] = r["why"]
+        pk = r.get("peaks_by_name") or {}
+        if not pk and (r.get("spectra") or []):
+            pk = {p.get("name"): p for p in (r["spectra"][0].get("peaks") or []) if p.get("name")}
+        s["peaks"] = {k: {f: v.get(f) for f in ("position_cm1", "fwhm_cm1", "height", "snr", "ok", "why")
+                          if v.get(f) is not None} for k, v in pk.items()}
+        cal = r.get("calibration") or {}
+        if cal:
+            s["calibration"] = {k: cal.get(k) for k in ("offset_cm1", "pass", "trusted", "outcome", "stored_as",
+                                                        "repeats") if cal.get(k) is not None}
+        imgs = r.get("images") or {}
+        if imgs:
+            s["images"] = {k: (v.get("path") if isinstance(v, dict) else v) for k, v in imgs.items()}
+        res[n] = s
+    out["studies"] = res
+    if not st.get("done"):
+        out["next"] = f"still running: call study_status(request=\"{st.get('request')}\") until done"
+    return out
+
+
+def run_and_wait(studies: dict, wait_total_s: float = 280.0, inline: bool = False) -> dict:
+    """Starts studies and waits for them (up to wait_total_s), then returns the short summary."""
+    s = start(studies, inline=inline)
+    if not s.get("ok"):
+        return s
+    end = time.monotonic() + max(0.0, float(wait_total_s))
+    st = status(s["request"], 0)
+    while not st.get("done") and time.monotonic() < end:
+        st = status(s["request"], min(30.0, max(0.5, end - time.monotonic())))
+    st.setdefault("request", s["request"])
+    return _summary(st)
+
+
+def measure_spectrum(laser_nm=637.75, center_cm1=None, from_cm1=None, to_cm1=None, exposure_s=1.0,
+                     accumulations=2, grating=1200, filter="1%", objective="x100_VIS", peak_cm1=520.7,
+                     sample="sample", wait_total_s: float = 280.0, inline: bool = False) -> dict:
+    """One spectrum from flat arguments (for small models): a centre, or from/to for a range; a peak fitted near
+    peak_cm1 (None: the strongest peaks are found)."""
+    prof = P.load()
+    try:
+        las = snap_laser(prof, laser_nm)
+        acq = {"exposure_s": float(exposure_s), "accumulations": int(accumulations),
+               "spike": "double" if int(accumulations) >= 2 else "none"}
+        if from_cm1 is not None and to_cm1 is not None:
+            acq["range_cm1"] = [float(from_cm1), float(to_cm1)]
+        else:
+            acq["center_cm1"] = float(center_cm1 if center_cm1 is not None else (peak_cm1 or 520.7))
+        study = {"kind": "spectrum", "sample": {"name": str(sample)},
+                 "setup": {"laser_nm": las, "grating": float(grating), "filter": str(filter),
+                           "objective": snap_objective(prof, objective)},
+                 "acquire": acq}
+        if peak_cm1 is not None:
+            study["process"] = {"peaks": [{"name": "peak", "near_cm1": float(peak_cm1), "window_cm1": 30}]}
+    except (TypeError, ValueError) as exc:
+        log_rejected("measure_spectrum", {"laser_nm": laser_nm, "center_cm1": center_cm1, "from_cm1": from_cm1,
+                                          "to_cm1": to_cm1}, str(exc))
+        return {"ok": False, "error": str(exc)}
+    out = run_and_wait({"spectrum": study}, wait_total_s, inline)
+    out["study"] = study
+    return out
+
+
+def calibrate_si(laser_nm=637.75, grating=1200, repeats=5, filter="1%", objective="x100_VIS",
+                 wait_total_s: float = 280.0, inline: bool = False) -> dict:
+    """A silicon calibration (520.7 cm-1) from flat arguments: the correction ls6t applies to later spectra."""
+    prof = P.load()
+    try:
+        las = snap_laser(prof, laser_nm)
+        cal = {"reference": "si", "adjust": "ls6t", "repeats": int(repeats)}
+        if float(grating) <= 600:
+            cal["window_cm1"] = 60
+        study = {"kind": "calibration", "sample": {"name": "Si wafer"},
+                 "setup": {"laser_nm": las, "grating": float(grating), "filter": str(filter),
+                           "objective": snap_objective(prof, objective)},
+                 "acquire": {"center_cm1": 520.7, "exposure_s": 1, "accumulations": 2, "spike": "double"},
+                 "calibration": cal, "video": {"before": False}}
+    except (TypeError, ValueError) as exc:
+        log_rejected("calibrate_si", {"laser_nm": laser_nm, "grating": grating}, str(exc))
+        return {"ok": False, "error": str(exc)}
+    out = run_and_wait({"calibration": study}, wait_total_s, inline)
+    out["study"] = study
+    return out
+
+
 def start(studies: dict, inline: bool = False, order: list | None = None) -> dict:
     """Validates, writes the request folder and starts its runner (a detached process, or a thread with
     inline=True). Studies run in the order given (the keys' order, or `order`: every name once; 2026-11-24: an app
@@ -152,6 +320,7 @@ def start(studies: dict, inline: bool = False, order: list | None = None) -> dic
     v = F.validate(studies)
     bad = {n: r["errors"] for n, r in v.items() if not r["ok"]}
     if bad:
+        log_rejected("run_studies", {"studies": list(studies)}, bad)
         return {"ok": False, "errors": bad, "next": "fix every error (validate_studies), then run again"}
     folder = _new_folder()
     req = {"translator": __version__, "mode": config.mode(), "bridge_dir": str(config.active_bridge_dir()),
@@ -280,7 +449,7 @@ def jobs(limit: int = 20, active: bool = False) -> dict:
             if len(rows) >= limit:
                 break
     lock = runner.read_json(runner.lock_path(), None)
-    return {"requests": rows, "instrument_actions": action_log(10),
+    return {"requests": rows, "instrument_actions": action_log(10), "rejected_calls": rejected_log(10),
             "instrument_busy": lock.get("request") if lock else None}
 
 
