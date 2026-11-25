@@ -3423,8 +3423,14 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
             rep_ = (store.read("spectro_repeatability.json") or {}).get(f"{float(laser):g}@{_f(grating) or 0:g}") or {}
             if rep_.get("moved_sd_cm1"):
                 # the zero across spectrometer moves is no better than the spectrometer repeats (2026-11-24, 600:
-                # SD 0.9-1.2 cm-1 moved, 0.12 without moves)
+                # SD 0.9-1.2 cm-1 moved, 0.12 without moves); the calibration's own pass tolerance stays as it is
                 corr = dict(corr, expected_uncertainty_cm1=rep_["moved_sd_cm1"])
+                tol_u = float(prof["checks"]["si_tol_cm1"])
+                if float(rep_["moved_sd_cm1"]) > tol_u:
+                    warnings.append(f"the zero here is good to about +-{float(rep_['moved_sd_cm1']):.1f} cm-1 (the "
+                                    f"spectrometer repositions that much on {combo(laser, grating)}), more than the "
+                                    f"tolerance ({tol_u:g}): calibrate and measure at the same centre without moving "
+                                    "the spectrometer in between")
             zs = checks["zero"] = dict(zs, correction_used={**{k: corr.get(k) for k in (
                 "a", "b", "time", "centre_nm", "interpolated_between_nm", "centre_far", "laser_line_cm1", "placement",
                 "range_match", "range_cm1", "pooled", "pooled_from", "repeats", "expected_uncertainty_cm1")

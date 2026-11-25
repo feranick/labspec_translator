@@ -1603,3 +1603,19 @@ def test_seam_dip_repeat_drift_calibration_open_wait_and_estimate_breakdown():
     r = xcal.store(637.75, 1200, 1.5, 1.0, "si", [], placement="labspec", range_cm1=[100, 3200])
     assert "kept for the range 100-3200" in r["pool"]["why"]
     xcal.clear()
+
+
+
+def test_expected_uncertainty_warned_above_the_tolerance():
+    """2026-11-25 (Nicola): the spectrometer's repositioning spread is reported on corrected spectra and warned when
+    it exceeds the Si tolerance; the calibration's own pass tolerance is not widened."""
+    from labspec_translator import xcal, store
+    xcal.clear()
+    xcal.store(532, 1800, 0.1, 1.0, "si", [], centre_nm=547.16, placement="centred")
+    store.write("spectro_repeatability.json", {"532@1800": {"moved_sd_cm1": 1.1}})
+    sp = {"kind": "spectrum", "sample": {"name": "Si"}, "setup": SETUP, "acquire": {"center_cm1": 520.7, "exposure_s": 1}}
+    s = run_inline({"s": sp})["studies"]["s"]
+    assert s["checks"]["zero"]["correction_used"]["expected_uncertainty_cm1"] == 1.1
+    assert any("repositions that much" in w for w in s["warnings"])
+    store.write("spectro_repeatability.json", {})
+    xcal.clear()
