@@ -3423,8 +3423,10 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
             # (2026-11-24: checks.zero showed the last calibration stored, -2.09 @ 676.75 nm, while the correction
             # used was -0.01 @ 650.19): the one applied here, and what the rest is
             # LabSpec places extended ranges and its own maps' windows itself: no approach there, their own entry
-            rep_place = "labspec" if (placement == "labspec" or (kind == "map" and
-                                                                 plan.map_engine(study, prof) == "native")) else "centred"
+            native_ = kind == "map" and plan.map_engine(study, prof) == "native"
+            # a native map counts as ls6t-placed only when the spectrometer was read unmoved through LabSpec's map
+            rep_place = "labspec" if (placement == "labspec" or (native_ and per_point and per_point[0].get(
+                "native_spectro_moved_by_labspec", True))) else "centred"
             rep_ = spectro_repeatability(prof, laser, grating, rep_place)
             if rep_.get("moved_sd_cm1"):
                 # the zero across spectrometer moves is no better than the spectrometer repeats (2026-11-24, 600:
@@ -4356,6 +4358,9 @@ def _native_map(ctx: Ctx, name: str, study: dict, sd: Path, rng: dict, laser: fl
     per_s = float(acq.get("exposure_s") or 1.0) * int(acq.get("accumulations", 1)) + \
         float(mp.get("native_point_s", 0.05))
     _progress(sd, stage="LabSpec is mapping", point=0, points=n, eta_min=round(n * per_s / 60.0, 2))
+    appr = float((prof.get("spectrometer") or {}).get("approach_nm", 0) or 0)
+    if appr:
+        params["spectro_approach_nm"] = appr
     r = ctx.call("map_native", timeout_s=600 + 3 * n * per_s, out=str(sd / name), center_nm=rng.get("from_nm"),
                  from_nm=rng.get("from_nm"), to_nm=rng.get("to_nm"), exposure_s=acq.get("exposure_s"),
                  accumulations=acq.get("accumulations", 1), mode_flags=flags, swift=bool(m.get("swift")),
@@ -4365,6 +4370,16 @@ def _native_map(ctx: Ctx, name: str, study: dict, sd: Path, rng: dict, laser: fl
     ctx.native_info = {k: r[k] for k in r if str(k).endswith("_readback")}
     ctx.native_info.update({k: _f(r.get(k)) if k != "axes" else r.get(k)
                             for k in ("acq_mode", "seconds_map", "axes") if r.get(k) not in (None, "")})
+    # did LabSpec's map move the spectrometer from where ls6t put it (with its approach)? Then its windows are
+    # LabSpec-placed for the zero's repeatability; otherwise ls6t's approach-based entry applies (Nicola, 2026-11-25)
+    sp0 = _f(r.get("spectro_before_map"))
+    later = [_f(r.get(k)) for k in ("spectro_map_started", "spectro_after_map")]
+    later = [v for v in later if v is not None and SPECTRO_NM_PLAUSIBLE[0] <= v <= SPECTRO_NM_PLAUSIBLE[1]]
+    if sp0 is not None and later:
+        moved_ls = any(abs(v - sp0) > 0.01 for v in later)
+        ctx.native_info["spectrometer"] = {"before_map_nm": sp0, "read_during_after_nm": later,
+                                           "moved_by_labspec": moved_ls,
+                                           "approached_from_nm": _f(r.get("spectro_approached_from"))}
     # the hold as LabSpec read it at the end of the map: HORIBA's mapping engine may set the shutter mode itself
     ha = r.get("hold_after_map_held")
     if ha not in (None, "") and ctx.holding:
@@ -4387,7 +4402,10 @@ def _native_map(ctx: Ctx, name: str, study: dict, sd: Path, rng: dict, laser: fl
     recs = parse_native_map(r["out"], study, prof, x0, y0, zref)
     if len(recs) != n:
         warnings.append(f"LabSpec's map has {len(recs)} points, the study {n}: check the axes (TESTING Q29)")
+    nsp = (ctx.native_info or {}).get("spectrometer") or {}
     for rec in recs:
+        if nsp:
+            rec["native_spectro_moved_by_labspec"] = nsp["moved_by_labspec"]
         rec.update(file=r["out"], exposure_s=float(acq.get("exposure_s") or 1.0),
                    accumulations=float(acq.get("accumulations", 1)), id=r.get("id"), data_via=r.get("data_via"))
     return recs

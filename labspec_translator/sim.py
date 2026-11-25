@@ -863,6 +863,10 @@ class SimLabSpec:
             hold = {"hold_after_map_held": "no", "hold_after_map_shutter_mode": 0, "hold_after_map_shutter_label": "Off"}
         else:
             hold = {"hold_after_map_held": "yes", "hold_after_map_shutter_mode": 1, "hold_after_map_shutter_label": "On"}
+        c_nm = float(p.get("center_nm") or 0) or None
+        if c_nm:
+            hold = dict(hold, spectro_before_map=c_nm, spectro_after_map=c_nm,
+                        spectro_map_started=c_nm + (2.0 if (self.dir / "sim_native_moves_spectro").exists() else 0.0))
         return {"id": 950, "out": str(path), "native_ok": 0, "text_ok": 0, "pixels": int(data.size), "data_via": via,
                 "axes": " ".join(m for m, _ in axes), "seconds_map": round(npts * (ex * acc + speed), 2),
                 "detector_temp_c": self.temp_c, **hold, "acq_mode": 10 + 2,

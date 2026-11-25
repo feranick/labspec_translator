@@ -1044,7 +1044,9 @@ the first spectrum was discarded; no outlier left.
 (no time cost; no ±2.4 jumps in 25 moved repeats). **From 2026.11.25.3** −2 is the default; put the measured spreads in
 the profile when settled: `ls6t profile set spectrometer.repeatability '{"637.75@600": {"still_sd_cm1": 0.26,
 "moved_sd_cm1": 0.30}}'`. Repeat the test at 1200 and 1800 to fill the others. **.25.4:** extended ranges and native maps are placed by LabSpec (no approach): measure
-their spread with calibration repeats over the range (stored as `"637.75@600@labspec"`). **Test:** 637.75 @ 600, `repeats: 5`, at 300 and at 1000 cm⁻¹:
+their spread with calibration repeats over the range (stored as `"637.75@600@labspec"`). **.25.5:** a native map now reads the
+spectrometer when LabSpec's map has started and after it: `native_map.spectrometer.moved_by_labspec` says whether
+LabSpec re-placed it (send it with the next native map test). **Test:** 637.75 @ 600, `repeats: 5`, at 300 and at 1000 cm⁻¹:
 the two means within about 2 × SEM of each other; `stored_as` pooled; a spectrum afterwards uses it at any centre.
 **Extended range and maps (.15):** the stitched 100–3200 cm⁻¹ range (2 windows, seam ~1945 cm⁻¹) read Si 1.5 low with
 a one-window correction; `noise_sigma` ~0.16 against a real 1.3–1.4 (DeNoise Lite: lag-1 r 0.85–0.88), so SNRs were

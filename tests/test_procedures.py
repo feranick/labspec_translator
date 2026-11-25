@@ -1637,3 +1637,28 @@ def test_expected_uncertainty_warned_above_the_tolerance():
     P.save(prof)
     store.write("spectro_repeatability.json", {})
     xcal.clear()
+
+
+def test_native_map_spectrometer_read_back_picks_the_repeatability_entry():
+    """2026-11-25 (Nicola): ls6t pre-positions the spectrometer for LabSpec's map with its approach, then reads it
+    when the map has started and after it: unmoved, the approach-based repeatability applies; moved by LabSpec,
+    the '@labspec' entry does."""
+    from labspec_translator import xcal, store
+    xcal.clear()
+    xcal.store(532, 1800, 0.1, 1.0, "si", [], centre_nm=547.16, placement="centred")
+    store.write("spectro_repeatability.json", {"532@1800": {"moved_sd_cm1": 0.3, "approach_nm": -2.0},
+                                               "532@1800@labspec": {"moved_sd_cm1": 0.6}})
+    nat = {"kind": "map", "sample": {"name": "Si"}, "setup": SETUP, "acquire": {"center_cm1": 520.7, "exposure_s": 0.2},
+           "map": {"x_um": [0, 2, 1], "y_um": [0, 0, 1], "engine": "native"}}
+    m = run_inline({"m": nat})["studies"]["m"]
+    assert m["native_map"]["spectrometer"]["moved_by_labspec"] is False
+    cu = m["checks"]["zero"]["correction_used"]
+    assert cu["expected_uncertainty_cm1"] == 0.3 and "centred" in cu["expected_uncertainty_from"], cu
+    bdir = config.active_bridge_dir()
+    (bdir / "sim_native_moves_spectro").write_text("1")
+    m = run_inline({"m": nat})["studies"]["m"]
+    (bdir / "sim_native_moves_spectro").unlink()
+    cu = m["checks"]["zero"]["correction_used"]
+    assert m["native_map"]["spectrometer"]["moved_by_labspec"] and cu["expected_uncertainty_cm1"] == 0.6
+    store.write("spectro_repeatability.json", {})
+    xcal.clear()

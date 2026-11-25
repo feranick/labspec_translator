@@ -2603,6 +2603,13 @@ Sub VMapNative(cmd, res)
     On Error Resume Next
     ' the spectrometer centre (one window)
     If GetP(cmd, "center_nm", "") <> "" Then
+        If ParseNum(GetP(cmd, "spectro_approach_nm", "0")) <> 0 Then
+            ' from the same side as ls6t's other moves (spectrometer.approach_nm: the backlash out)
+            LabSpec.MoveMotor "Spectro", ParseNum(GetP(cmd, "center_nm", "0")) + ParseNum(GetP(cmd, "spectro_approach_nm", "0")), "", LS_MOTOR_VALUE
+            WaitMotor "Spectro", gNoId, 120, res
+            res("spectro_approached_from") = ParseNum(GetP(cmd, "center_nm", "0")) + ParseNum(GetP(cmd, "spectro_approach_nm", "0"))
+            Err.Clear
+        End If
         r = LabSpec.MoveMotor("Spectro", ParseNum(GetP(cmd, "center_nm", "0")), "", LS_MOTOR_VALUE + LS_MOTOR_NO_WAIT)
         If Err.Number <> 0 Then
             Fail res, ErrText("Spectro")
@@ -2610,6 +2617,7 @@ Sub VMapNative(cmd, res)
             Exit Sub
         End If
         If r > 0 Then WaitMotor "Spectro", r, 120, res
+        res("spectro_before_map") = MotorValue("Spectro")
     End If
     ' the axes: all off, then the ones asked for
     LabSpec.SetMappingParams "", 0, 0, 0, LS_DISABLE_ALL_MOTORS, 0
@@ -2703,6 +2711,7 @@ Sub VMapNative(cmd, res)
             ClosePopup
             Exit Sub
         End If
+        If id = 0 And Not started Then res("spectro_map_started") = MotorValue("Spectro")    ' did LabSpec re-place it?
         If id = 0 Then started = True
         If id = -1 And Not started And Elapsed(t0) > 30 Then
             Fail res, "the map did not start (LabSpec reports no acquisition in progress)"
@@ -2728,6 +2737,7 @@ Sub VMapNative(cmd, res)
     Err.Clear
     On Error GoTo 0
     HoldCheck res, "hold_after_map"
+    res("spectro_after_map") = MotorValue("Spectro")
     res("id") = id
     res("seconds_map") = Elapsed(tMap)
     If WriteData(id, outBase & ".map.txt", res, "map") Then res("out") = outBase & ".map.txt"
