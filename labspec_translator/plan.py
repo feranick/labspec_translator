@@ -914,34 +914,36 @@ def settle_s(prof: dict, laser) -> float:
     return s
 
 
-HOLD_OPEN_DEFAULT_S = 5.0   # a laser marked mode_hops / unstable_multi without its own settle_s
 
 
-CAL_OPEN_DEFAULT_S = 40.0   # before a calibration, a laser marked mode_hops / unstable_multi without its own value
+OPEN_SETTLE_DEFAULT_S = 40.0   # after a fresh shutter opening, a laser marked mode_hops / unstable_multi (any study)
+CAL_OPEN_DEFAULT_S = OPEN_SETTLE_DEFAULT_S
 
 
 def hold_open_s(prof: dict, laser, kind: str | None = None) -> float:
-    """The wait after the shutter hold opens the shutter, before the first spectrum (the laser settling in its mode:
-    2026-11-24, the 637.75 nm laser's first held spectrum had its laser line 9.9 cm-1 wide, then about 6):
-    lasers.<k>.hold_open_s; by default the laser's settle_s (the time it needs after a shutter cycle), or 5 s for a
-    laser marked mode_hops or unstable_multi, else none."""
+    """The wait after the shutter hold opens the shutter afresh, before the study's first spectrum (a hold continued
+    from the previous study waits nothing: the laser has settled). A laser marked mode_hops or unstable_multi drifts
+    for a while after its shutter opens (2026-11-24, 637.75 nm: the zero moved 1.7 cm-1 over ~40 s before a
+    calibration; a 5 x 5 map's laser line went -3.55 -> -2.95 cm-1 over its first ~30 s, then flat): it waits
+    OPEN_SETTLE_DEFAULT_S (40 s) for any study, unless lasers.<k>.hold_open_s says otherwise (a calibration:
+    lasers.<k>.calibration_open_s, never less than the 40 s default without it). Other lasers: hold_open_s, else
+    settle_s, else none."""
     lk = laser_key(prof, laser) if laser is not None else None
     if not lk:
         return 0.0
     L = prof["lasers"][lk]
+    drifting = bool(L.get("mode_hops") or L.get("unstable_multi"))
+    own = float(L["hold_open_s"]) if L.get("hold_open_s") is not None else None
     if kind == "calibration":
-        # a calibration needs the laser settled, not just in its mode (2026-11-24, 637.75 nm: the zero still moved by
-        # 1.7 cm-1 over the first ~40 s after the shutter opened, with 4.5 s of open wait)
         if L.get("calibration_open_s") is not None:
             return max(0.0, float(L["calibration_open_s"]))
-        if L.get("mode_hops") or L.get("unstable_multi"):
-            return CAL_OPEN_DEFAULT_S
-    if L.get("hold_open_s") is not None:
-        return max(0.0, float(L["hold_open_s"]))
-    st = float(L.get("settle_s") or 0.0)
-    if st > 0:
-        return st
-    return HOLD_OPEN_DEFAULT_S if (L.get("mode_hops") or L.get("unstable_multi")) else 0.0
+        if drifting:
+            return max(OPEN_SETTLE_DEFAULT_S, own or 0.0)
+    if own is not None:
+        return max(0.0, own)
+    if drifting:
+        return OPEN_SETTLE_DEFAULT_S
+    return float(L.get("settle_s") or 0.0)
 
 
 def hold_shutter(study: dict, prof: dict, laser) -> bool:

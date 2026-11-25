@@ -1032,7 +1032,8 @@ range corrections, the DeNoise-aware noise pass. **From .19:** the seam of the 1
 during repeats is detected (leading spectra dropped, or the scatter not used); calibrations with the 637.75 wait
 `calibration_open_s` (40 s) after the shutter opens; a stale correction (laser line > 0.5 cm⁻¹ away, or > 1 h for a
 drifting laser) is warned. **Tests:** r600_c520 with `repeats: 5`: no trend now, or `dropped_leading`; the extended
-range: `seams_cm1` ≈ [1945]. **Test:** 637.75 @ 600, `repeats: 5`, at 300 and at 1000 cm⁻¹:
+range: `seams_cm1` ≈ [1945]. **.20:** any study with the 637.75 waits 40 s after a fresh shutter opening (not after a continued hold):
+the 5 × 5 map's laser line should be flat from point 0; set `lasers.637.75.hold_open_s` to shorten it if not needed. **Test:** 637.75 @ 600, `repeats: 5`, at 300 and at 1000 cm⁻¹:
 the two means within about 2 × SEM of each other; `stored_as` pooled; a spectrum afterwards uses it at any centre.
 **Extended range and maps (.15):** the stitched 100–3200 cm⁻¹ range (2 windows, seam ~1945 cm⁻¹) read Si 1.5 low with
 a one-window correction; `noise_sigma` ~0.16 against a real 1.3–1.4 (DeNoise Lite: lag-1 r 0.85–0.88), so SNRs were

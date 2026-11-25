@@ -1084,10 +1084,14 @@ def test_hold_open_wait_native_map_hold_read_back_and_reopened_hold(tmp_path):
     assert plan.hold_open_s(prof, 532) == 0.0
     prof["lasers"][lk].update(mode_hops=True)
     P.save(prof)
-    assert plan.hold_open_s(P.load(), 532) == plan.HOLD_OPEN_DEFAULT_S
+    assert plan.hold_open_s(P.load(), 532) == plan.OPEN_SETTLE_DEFAULT_S           # any study, a fresh opening
     prof["lasers"][lk].update(settle_s=3.5)
     P.save(prof)
+    assert plan.hold_open_s(P.load(), 532) == plan.OPEN_SETTLE_DEFAULT_S           # settle_s does not shorten it
+    prof["lasers"][lk].update(hold_open_s=3.5)
+    P.save(prof)
     assert plan.hold_open_s(P.load(), 532) == 3.5
+    assert plan.hold_open_s(P.load(), 532, "calibration") == plan.OPEN_SETTLE_DEFAULT_S   # never less before one
     sim = S.ensure(config.active_bridge_dir())
     sim.hold_open_waits = 0
     one = {"kind": "spectrum", "sample": {"name": "Si"}, "setup": SETUP,
@@ -1582,7 +1586,11 @@ def test_seam_dip_repeat_drift_calibration_open_wait_and_estimate_breakdown():
     lk = next(k for k, v in prof["lasers"].items() if abs(v["nm"] - 532) < 1)
     prof["lasers"][lk].update(mode_hops=True)
     assert plan.hold_open_s(prof, 532, "calibration") == plan.CAL_OPEN_DEFAULT_S
-    assert plan.hold_open_s(prof, 532, "spectrum") == plan.HOLD_OPEN_DEFAULT_S
+    assert plan.hold_open_s(prof, 532, "spectrum") == plan.OPEN_SETTLE_DEFAULT_S
+    # the drop-leading floor: at least 3 and half the repeats kept; a trend that needs more is "never settled"
+    d8 = runner.repeat_drift([12.0, 11.5, 11.0, 10.5, 10.0, 9.9, 9.95, 9.9])
+    assert d8 is None or d8["dropped_leading"] <= 4
+    assert not runner.repeat_drift([12.0, 11.6, 11.2, 10.8, 10.4, 10.0])["settled"]
     st = {"kind": "map", "sample": {"name": "Si"}, "setup": dict(SETUP, grating=1200),
           "acquire": {"center_cm1": 520, "exposure_s": 1, "accumulations": 2, "shutter": "hold"},
           "map": {"x_um": [-4, 4, 2], "y_um": [-4, 4, 2]}}

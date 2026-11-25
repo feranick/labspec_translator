@@ -4057,7 +4057,9 @@ def repeat_drift(offs: list) -> dict | None:
     k, se = slope(offs)
     if len(offs) < 3 or not (abs(k) > 2 * max(se, 1e-9)):
         return None
-    for drop in range(1, len(offs) - 2):
+    # at least 3, and at least half of them, are kept: noise must not be read as drift (Nicola, .19)
+    keep_min = max(3, -(-len(offs) // 2))
+    for drop in range(1, len(offs) - keep_min + 1):
         k2, se2 = slope(offs[drop:])
         if not abs(k2) > 2 * max(se2, 1e-9):
             return {"slope": round(k, 3), "dropped_leading": drop, "settled": True}
