@@ -1481,6 +1481,18 @@ def test_calibration_repeats_pooled_at_coarse_gratings_and_run_order():
     r = xcal.store(637.75, 1200, 0.4, 1.0, "si", [], centre_nm=659.66, pool="auto", repeats={"n": 5, "sd_cm1": 0.5})
     assert not r.get("pooled") and "standard errors (0.63)" in r["pool"]["why"], r["pool"]
     xcal.clear()
+    # only some centres with repeats: the SE test is not defined for the others, so the no-repeat default decides
+    # (Nicola, .18): a single-shot centre 0.6 cm-1 away is not pooled on the repeated centre's SE alone at 1200
+    xcal.store(637.75, 1200, -0.3, 1.0, "si", [], centre_nm=650.19, pool="auto", repeats={"n": 5, "sd_cm1": 0.1},
+               cm1_per_px=2.01)
+    r = xcal.store(637.75, 1200, 0.3, 1.0, "si", [], centre_nm=659.66, pool="auto", cm1_per_px=2.01)
+    assert r["pooled"] and "no repeat data for every centre" in r["pool"]["why"]     # the default: <= 1 cm-1, 2 px
+    xcal.clear()
+    xcal.store(637.75, 1800, -0.3, 1.0, "si", [], centre_nm=650.19, pool="auto", repeats={"n": 5, "sd_cm1": 0.1},
+               cm1_per_px=1.4)
+    r = xcal.store(637.75, 1800, 0.3, 1.0, "si", [], centre_nm=659.66, pool="auto", cm1_per_px=1.4)
+    assert not r.get("pooled") and "no repeat data for every centre" in r["pool"]["why"]
+    xcal.clear()
     # entries hours apart are not compared; the drift at a window measured again is reported
     xcal.store(637.75, 600, -12.11, 1.0, "si", [], centre_nm=659.66, request="morning", pool="auto",
                repeats={"n": 5, "sd_cm1": 0.5})

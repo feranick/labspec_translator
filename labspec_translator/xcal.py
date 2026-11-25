@@ -202,8 +202,9 @@ def pool_decision(by: dict, pool: str, cm1_per_px: float | None, newest: dict | 
     2026-11-24): only entries from the same request or within POOL_WINDOW_H are compared (older ones would bring the
     drift in); with repeat data, pooled when every two centre means agree within POOL_SE x sqrt(SE1^2 + SE2^2)
     (repeats 5, SD 0.5: ~0.63 cm-1, so a real 0.8 cm-1 window difference stays per centre; 532 @ 1200's +4.05 / +2.18
-    / +1.80 too); without repeat data, pooled only at >= POOL_PX_DEFAULT cm-1 per pixel with the centres within
-    POOL_NO_REPEAT_SPREAD. Returns (pooled, why, the centres pooled)."""
+    / +1.80 too); the SE test needs repeat data at EVERY compared centre (never on one repeated centre's SE alone);
+    otherwise pooled only at >= POOL_PX_DEFAULT cm-1 per pixel with the centres within POOL_NO_REPEAT_SPREAD.
+    Returns (pooled, why, the centres pooled)."""
     if pool == "pooled":
         return True, "calibration.store 'pooled'", [c for c, v in by.items() if v.get("placement") != "labspec"]
     if pool != "auto":
