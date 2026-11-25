@@ -1986,7 +1986,7 @@ def test_calibration_anchored_to_the_laser_line_removes_landing_scatter():
     bdir = config.active_bridge_dir()
     sim = S.ensure(bdir)
     (bdir / "sim_laser_line").write_text("1")
-    (bdir / "sim_landing").write_text("1.6,-0.3,0.2,-0.5,0.1,0.4,-0.2")
+    (bdir / "sim_landing").write_text("1.6,0.05,-0.05,0.1,0.0,0.05,-0.05")
     sim._landing_n = 0
     cal = {"kind": "calibration", "sample": {"name": "Si"}, "setup": dict(SETUP),
            "acquire": {"center_cm1": 250, "exposure_s": 1},
@@ -1996,7 +1996,7 @@ def test_calibration_anchored_to_the_laser_line_removes_landing_scatter():
     rp = c["calibration"]["repeats"]
     ls = rp["landing_steps"]
     assert [s_["repeat"] for s_ in ls["steps"] if s_["followed"]] == [1], ls
-    assert rp["median_cm1"] == pytest.approx(0.0, abs=0.35) and not rp.get("anchored_to_laser_line")
+    assert rp["median_cm1"] == pytest.approx(0.0, abs=0.2) and not rp.get("anchored_to_laser_line")
     st = c["calibration"]["stored_correction"]
     assert st.get("laser_line_cm1") is not None and st["zero_mode"] == "absolute"
     learned = R.spectro_repeatability(P.load(), 532, 1800).get("laser_line_sd_cm1")
@@ -2188,3 +2188,29 @@ def test_map_live_band_sets_labspecs_cursors_on_the_live_and_native_maps():
     nat = dict(st, map=dict(st["map"], engine="native"))
     m = run_inline({"m": nat})["studies"]["m"]
     assert m["live_band"]["set"] == 1 and m["live_band"]["on"] == 0, m.get("live_band")
+
+
+def test_landing_threshold_reads_the_profile_and_one_step_cannot_hide_itself():
+    """Nicola, 2026-11-25 (.25.15 at 1200): the threshold came from "this calibration's repeats" though the profile
+    held still/moved values; and the laser line's SD (0.35) from 5 repeats with the step in them hid the step
+    (repeat 2: laser line -0.59, Si -0.80, not followed). Now: laser_line_sd_cm1 (profile or learned), else the
+    profile's still_sd_cm1 standing in, else the repeats' MAD."""
+    import labspec_translator.runner as R
+    from labspec_translator import store
+    store.write("spectro_repeatability.json", {})
+    prof = P.load()
+    prof["spectrometer"]["repeatability"] = {"637.75@1200": {"still_sd_cm1": 0.15, "moved_sd_cm1": 0.25}}
+    th = R.landing_threshold(prof, 637.75, 1200)
+    assert "still_sd_cm1" in th["from"] and th["threshold_cm1"] == 0.5
+    prof["spectrometer"]["repeatability"]["637.75@1200"]["laser_line_sd_cm1"] = 0.3
+    th = R.landing_threshold(prof, 637.75, 1200)
+    assert "laser_line_sd_cm1" in th["from"] and th["threshold_cm1"] == pytest.approx(0.9)
+    # Nicola's repeats: the first moved the laser line alone (+0.74), the second both (-0.59 / -0.80)
+    prof["spectrometer"]["repeatability"] = {}
+    reps = [{"laser_line": {"ok": True, "position_cm1": -4.0 + d}} for d in (0.74, -0.59, 0.0, 0.05, -0.05)]
+    offs = [0.0, -0.80, 0.0, 0.05, -0.02]
+    ls = R._landing_steps(reps, offs, prof, 637.75, 1200, "centred")
+    assert "MAD" in ls["threshold"]["from"] and ls["threshold"]["threshold_cm1"] == 0.5
+    fol = {s_["repeat"]: s_["followed"] for s_ in ls["steps"]}
+    assert fol == {1: False, 2: True}, ls["steps"]
+    assert ls["offs_eff"][1] == pytest.approx(-0.21, abs=0.01)

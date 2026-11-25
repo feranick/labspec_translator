@@ -4412,9 +4412,15 @@ def landing_threshold(prof: dict, laser, grating, placement: str = "centred", fa
     at least LANDING_MIN_CM1."""
     rep = spectro_repeatability(prof, laser, grating, placement) if laser else {}
     sd = rep.get("laser_line_sd_cm1")
-    src = rep.get("source") if sd is not None else None
+    src = (f"{rep.get('source')}: laser_line_sd_cm1") if sd is not None else None
+    if sd is None and rep.get("still_sd_cm1"):
+        # no laser-line scatter known yet: the Si line's scatter without moves stands in (Nicola, 2026-11-25: the
+        # profile's still/moved values were ignored and 5 repeats with a step in them set the threshold)
+        sd = rep["still_sd_cm1"]
+        src = f"{rep.get('source')}: still_sd_cm1 (Si without moves, standing in for the laser line's own scatter)"
     if sd is None:
-        sd, src = (fallback_sd, "this calibration's repeats") if fallback_sd else (LL_SD_DEFAULT_CM1, "default")
+        sd, src = ((fallback_sd, "this calibration's repeats (robust: MAD)") if fallback_sd else
+                   (LL_SD_DEFAULT_CM1, "default"))
     return {"threshold_cm1": round(max(LANDING_MIN_CM1, LANDING_K * float(sd)), 3),
             "laser_line_sd_cm1": round(float(sd), 3), "from": src}
 
@@ -4620,7 +4626,9 @@ def _landing_steps(repeats: list, offs: list, prof: dict, laser, grating, placem
         return {"offs_eff": None, "why_not": "the laser line was not fitted in enough repeats (it must be in the "
                                              "window: about -15 to +15 cm-1)"}
     med = float(np.median(have))
-    sd_own = _robust_sd(have)
+    # the spread from the median absolute deviation: one step in five repeats must not raise the threshold enough
+    # to hide itself (Nicola, 2026-11-25, 1200: SD 0.35 with the step in it; the step -0.59 not followed)
+    sd_own = _mad_sd(have)
     thr = landing_threshold(prof, laser, grating, placement, fallback_sd=max(sd_own, 0.05))
     t_ = float(thr["threshold_cm1"])
     ov = [o for o in offs if o is not None]
@@ -4643,7 +4651,15 @@ def _landing_steps(repeats: list, offs: list, prof: dict, laser, grating, placem
             steps.append({"repeat": i + 1, "laser_line_step_cm1": round(d, 3), "raman_moved_cm1": round(dpk, 3),
                           "followed": False, "why": "the Raman lines did not move with it"})
     return {"offs_eff": eff, "steps": steps, "laser_line_median_cm1": round(med, 3), "threshold": thr,
-            "ll_sd": round(_robust_sd(quiet), 4) if len(quiet) >= 3 else None, "n_quiet": len(quiet)}
+            "ll_sd": round(_mad_sd(quiet), 4) if len(quiet) >= 3 else None, "n_quiet": len(quiet)}
+
+
+def _mad_sd(v: list) -> float:
+    """A robust SD: 1.4826 x the median absolute deviation from the median."""
+    a = np.asarray(v, float)
+    if a.size < 2:
+        return 0.0
+    return float(1.4826 * np.median(np.abs(a - np.median(a))))
 
 
 def _robust_sd(v: list) -> float:
