@@ -299,6 +299,14 @@ def clear(laser_nm=None, grating=None) -> int:
     return n
 
 
+def age_min(rec: dict) -> float | None:
+    """The correction's age in minutes (unrounded: the zero creeps by the minute, 2026-11-25)."""
+    try:
+        return (time.time() - time.mktime(time.strptime(rec["time"], "%Y-%m-%dT%H:%M:%S"))) / 60.0
+    except (KeyError, ValueError):
+        return None
+
+
 def age_h(rec: dict) -> float | None:
     try:
         return round((time.time() - time.mktime(time.strptime(rec["time"], "%Y-%m-%dT%H:%M:%S"))) / 3600, 1)

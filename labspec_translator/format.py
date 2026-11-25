@@ -338,9 +338,10 @@ def validate_study(name: str, study: dict, prof: dict) -> dict:
         if cal.get("repeats_move") is not None and not isinstance(cal["repeats_move"], bool):
             errors.append("calibration.repeats_move: true (the spectrometer sent away and back before each repeat: "
                           "noise plus repositioning) or false (it stays: noise alone)")
-        if cal.get("anchor", "auto") not in ("auto", "off"):
-            errors.append("calibration.anchor: auto (with a narrow laser line in the window, the zero is judged and "
-                          "stored relative to it, which removes the spectrometer's landing scatter) or off")
+        if cal.get("anchor", "auto") not in ("auto", "always", "off"):
+            errors.append("calibration.anchor: auto (a repeat whose laser line steps beyond its own scatter, with "
+                          "the Raman lines moving alike, is brought back by the step: a spectrometer landing), always "
+                          "(every repeat judged relative to the laser line) or off")
         if cal.get("store", "auto") not in ("auto", "per_centre", "pooled"):
             errors.append("calibration.store: auto (pooled at coarse gratings, per window centre otherwise), "
                           "per_centre or pooled")

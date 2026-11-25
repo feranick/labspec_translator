@@ -1629,7 +1629,8 @@ def test_expected_uncertainty_warned_above_the_tolerance():
     assert "moved_sd_cm1" not in runner.spectro_repeatability(P.load(), 532, 1800)
     prof = P.load()
     P.save(dict(prof, spectrometer=dict(prof.get("spectrometer") or {}, repeatability={"532@1800": {"moved_sd_cm1": 0.3}})))
-    assert runner.spectro_repeatability(P.load(), 532, 1800) == {"moved_sd_cm1": 0.3, "source": "profile"}
+    sr_ = runner.spectro_repeatability(P.load(), 532, 1800)       # a person's values over the measured (.25.15)
+    assert sr_["moved_sd_cm1"] == 0.3 and sr_["source"] == "profile"
     # windows LabSpec places itself have their own entry, never the approach-based one
     store.write("spectro_repeatability.json", {"532@1800": {"moved_sd_cm1": 0.3, "approach_nm": -2.0}})
     assert runner.spectro_repeatability(P.load(), 532, 1800, "labspec") == {}
@@ -1976,9 +1977,11 @@ def test_unreliable_calibration_stores_nothing_and_fixed_profile_problems_clear(
 
 def test_calibration_anchored_to_the_laser_line_removes_landing_scatter():
     """Nicola, 2026-11-25 (637.75 @ 1200): Si 521.41, 520.10, 519.62, 519.82, 519.58 (SD 0.76), Si - laser line
-    524.43, 524.44, 524.36, 524.51, 524.42 (SD 0.06): the spectrometer's landing moves both lines. The zero is judged
-    relative to a narrow laser line, and later spectra are brought to it (laser_reference 'anchor' by default)."""
+    524.43 ... 524.42 (SD 0.06): the spectrometer's landing moves both lines. .25.14 anchored every repeat, which
+    added the laser line's ~0.2 fit noise when nothing jumped; now only landing STEPS are followed: the laser line
+    beyond LANDING_K x its own scatter (learned per laser@grating) with the Raman lines moving alike."""
     from labspec_translator import xcal
+    import labspec_translator.runner as R
     xcal.clear()
     bdir = config.active_bridge_dir()
     sim = S.ensure(bdir)
@@ -1989,32 +1992,43 @@ def test_calibration_anchored_to_the_laser_line_removes_landing_scatter():
            "acquire": {"center_cm1": 250, "exposure_s": 1},
            "calibration": {"adjust": "ls6t", "repeats": 5}, "video": {"before": False}}
     c = run_inline({"c": cal})["studies"]["c"]
-    rp = c["calibration"]["repeats"]
-    an = rp.get("anchored_to_laser_line")
-    assert an and rp["settled"] and rp["sd_cm1"] < 0.25, rp
-    assert an["landing_sd_cm1"] > 0.5 and not rp["outliers"], rp
     assert c["reliable"], c["unreliable_because"]
+    rp = c["calibration"]["repeats"]
+    ls = rp["landing_steps"]
+    assert [s_["repeat"] for s_ in ls["steps"] if s_["followed"]] == [1], ls
+    assert rp["median_cm1"] == pytest.approx(0.0, abs=0.35) and not rp.get("anchored_to_laser_line")
     st = c["calibration"]["stored_correction"]
-    assert st.get("laser_line_cm1") is not None and not st.get("pooled")
-    # a later spectrum landing 1.2 cm-1 elsewhere: brought back to the calibration's laser line
-    (bdir / "sim_landing").write_text("1.2")
-    sim._landing_n = 0
+    assert st.get("laser_line_cm1") is not None and st["zero_mode"] == "absolute"
+    learned = R.spectro_repeatability(P.load(), 532, 1800).get("laser_line_sd_cm1")
+    assert learned is not None and learned < 0.5
+    thr = R.landing_threshold(P.load(), 532, 1800)["threshold_cm1"]
     sp = {"kind": "spectrum", "sample": {"name": "Si"}, "setup": dict(SETUP),
           "acquire": {"center_cm1": 250, "exposure_s": 1},
           "process": {"peaks": [{"name": "Si", "near_cm1": 520.7, "window_cm1": 30}]}}
+    # a later spectrum landing beyond the threshold: brought back to the calibration's laser line
+    (bdir / "sim_landing").write_text(str(thr + 0.6))
+    sim._landing_n = 0
     s = run_inline({"s": sp})["studies"]["s"]
     zc = s["checks"]["zero_correction"]
     assert zc["laser_reference"] == "anchor" and any(p.get("landing") for p in zc.get("plateaus") or []), zc
     assert abs(s["peaks_by_name"]["Si"]["position_cm1"] - 520.7) < 0.3, s["peaks_by_name"]["Si"]
-    # without the anchor (report): the landing stays in the result
+    # within the laser line's own scatter: not followed (no fit noise added)
+    (bdir / "sim_landing").write_text(str(thr / 2))
+    sim._landing_n = 0
+    s = run_inline({"s": sp})["studies"]["s"]
+    pl = s["checks"]["zero_correction"]["plateaus"]
+    assert pl and not pl[0]["applied"] and "own scatter" in pl[0]["not_applied_because"], pl
+    # report: the landing stays in the result
+    (bdir / "sim_landing").write_text(str(thr + 0.6))
+    sim._landing_n = 0
     s = run_inline({"s": dict(sp, acquire=dict(sp["acquire"], laser_reference="report"))})["studies"]["s"]
     assert abs(s["peaks_by_name"]["Si"]["position_cm1"] - 520.7) > 0.8
     (bdir / "sim_landing").unlink()
     (bdir / "sim_laser_line").unlink()
-    # calibration.anchor 'off' and the validation
-    assert F.validate({"c": dict(cal, calibration=dict(cal["calibration"], anchor="off"))})["c"]["ok"]
+    # calibration.anchor: auto | always | off
+    for v in ("off", "always"):
+        assert F.validate({"c": dict(cal, calibration=dict(cal["calibration"], anchor=v))})["c"]["ok"]
     assert not F.validate({"c": dict(cal, calibration=dict(cal["calibration"], anchor="x"))})["c"]["ok"]
-
 
 def test_calibration_in_correct_mode_stores_the_zero_as_measured_and_creep_is_not_scatter(monkeypatch):
     """Nicola, 2026-11-25: a correction stored from a calibration run with laser_reference correct/correct_each was
@@ -2108,9 +2122,47 @@ def test_anchored_calibration_still_unreliable_after_a_multimode_hop_and_says_wh
     assert c["calibration"]["repeats"]["not_anchored_because"] == "calibration.anchor is off"
     (bdir / "sim_laser_line").unlink()
     c = run_inline({"c": cal})["studies"]["c"]
-    assert "no laser line" in c["calibration"]["repeats"]["not_anchored_because"]
+    assert "laser line was not fitted" in c["calibration"]["repeats"]["landing_steps"]["why_not"]
     # a laser line that adds its own scatter is not used
     r = R._anchor_repeats([{"laser_line": {"ok": True, "position_cm1": v, "fwhm_cm1": 5.0}} for v in
                            (0.0, 0.6, -0.5, 0.4, -0.3)], [0.10, 0.12, 0.08, 0.11, 0.09],
                           [{"fwhm_cm1": 5.0, "measured_cm1": 520.7}], {}, 1.0)
     assert "not less than on their own" in r["why_not"]
+
+
+def test_series_zero_creep_reported_learned_and_widens_the_expected_uncertainty(monkeypatch):
+    """Nicola, 2026-11-25 (637.75 @ 1200): after a calibration Si 520.91, then a series 521.07 ... 521.48 with the
+    laser line steady (-4.06 ... -3.92): a slow zero creep (~0.1 cm-1/min), not a landing."""
+    import labspec_translator.runner as R
+    from labspec_translator import store, xcal
+    store.write("spectro_repeatability.json", {})
+    pts = [{"point": i, "t": 60.0 * i, "peaks": [{"name": "Si", "ok": True, "position_cm1": 521.0 + 0.1 * i}],
+            "laser_line": {"ok": True, "position_cm1": -4.0 + 0.005 * (i % 2)}} for i in range(6)]
+    z = R.zero_creep(pts, {}, 637.75, 1200, "centred")
+    assert z["significant"] and z["laser_line_steady"] and z["cm1_per_min"] == pytest.approx(0.1, abs=0.01)
+    assert R.spectro_repeatability(P.load(), 637.75, 1200)["zero_creep_cm1_per_min"] == pytest.approx(0.1, abs=0.01)
+    flat = [dict(p, peaks=[{"name": "Si", "ok": True, "position_cm1": 521.0 + (0.02 if p["point"] % 2 else 0)}])
+            for p in pts]
+    assert not R.zero_creep(flat, {}, 637.75, 1200, "centred")["significant"]
+    # the expected uncertainty grows with the correction's age in minutes (532 @ 1800 in the simulator)
+    xcal.clear()
+    store.write("spectro_repeatability.json", {"532@1800": {"moved_sd_cm1": 0.2, "zero_creep_cm1_per_min": 0.1}})
+    S.ensure(config.active_bridge_dir())
+    cal = {"kind": "calibration", "sample": {"name": "Si"}, "setup": dict(SETUP),
+           "acquire": {"center_cm1": 520.7, "exposure_s": 1}, "calibration": {"adjust": "ls6t"},
+           "video": {"before": False}}
+    run_inline({"c": cal})
+    d = xcal.load()
+    for k_, v_ in d.items():                      # the correction 30 min old
+        for e_ in (v_.get("by_centre") or {}).values():
+            e_["time"] = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(time.time() - 1800))
+        if v_.get("time"):
+            v_["time"] = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(time.time() - 1800))
+    xcal._save(d)
+    sp = {"kind": "spectrum", "sample": {"name": "Si"}, "setup": dict(SETUP),
+          "acquire": {"center_cm1": 520.7, "exposure_s": 1}}
+    s = run_inline({"s": sp})["studies"]["s"]
+    cu = s["checks"]["zero"]["correction_used"]
+    assert cu["age_min"] == pytest.approx(30, abs=2) and cu["expected_uncertainty_cm1"] >= 1.99, cu
+    assert "creep" in cu["expected_uncertainty_from"]
+    store.write("spectro_repeatability.json", {})
