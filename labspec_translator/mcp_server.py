@@ -191,12 +191,13 @@ def run_studies(studies: dict | str, wait_s: float = 45, order: list[str] | None
 @server.tool()
 async def measure_spectrum(ctx: Context, laser_nm: float = 637.75, center_cm1: float | None = None,
                            from_cm1: float | None = None, to_cm1: float | None = None, exposure_s: float = 1.0,
-                           accumulations: int = 2, grating: float = 1200, filter: str = "1%",
+                           accumulations: int = 2, grating: float = 1200, filter: str | None = None,
                            objective: str = "x100_VIS", peak_cm1: float | None = 520.7,
                            sample: str = "sample") -> dict:
     """Measures one Raman spectrum and waits for it (up to about 90 s), returning the result in a few numbers.
     All arguments are optional: laser_nm (638 is taken as 637.75, 785 as 785.04), center_cm1 (one detector window
-    centred there) or from_cm1 + to_cm1 (a range), exposure_s, accumulations, grating, filter (never above 10%),
+    centred there) or from_cm1 + to_cm1 (a range), exposure_s, accumulations, grating, filter (never above 10%;
+    default the laser's own, else 1%),
     objective, peak_cm1 (the peak to fit; null: the strongest are found), sample (its name). If the answer says it
     is still running, call study_status with its request."""
     return await _keepalive(ctx, functools.partial(api.measure_spectrum, laser_nm, center_cm1, from_cm1, to_cm1,

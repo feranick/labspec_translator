@@ -2053,3 +2053,64 @@ def test_calibration_in_correct_mode_stores_the_zero_as_measured_and_creep_is_no
     assert rp["sd_successive_cm1"] < rp["sd_cm1"]
     if rp["settled"]:
         assert c["repeatability"]["moved_sd_cm1"] == pytest.approx(rp["sd_successive_cm1"], abs=0.002)
+
+
+def test_laser_default_filter_for_flat_tools_and_settle_after_a_laser_change():
+    """Nicola, 2026-11-25: at 1 % the 785 nm Si line was not detected (the flat tools' default); 532 @ 1200 crept
+    +0.17 cm-1 per repeat right after 637.75 -> 532 (no wait after a laser change)."""
+    prof = P.load()
+    lk = P.laser_key(prof, 638)
+    assert api.laser_filter(prof, 638) == "1%" and api.laser_filter(prof, 638, "5%") == "5%"
+    prof["lasers"][lk]["default_filter"] = "10%"
+    prof["lasers"][lk]["change_settle_s"] = 1.5
+    P.save(prof)
+    prof = P.load()
+    assert api.laser_filter(prof, 638) == "10%"
+    assert plan.change_settle_s(prof, 638, "calibration") == 1.5
+    assert plan.change_settle_s(P.load(), 532, "calibration") == plan.CHANGE_SETTLE_DEFAULT_S
+    assert plan.change_settle_s(P.load(), 532, "spectrum") == 0.0
+    S.ensure(config.active_bridge_dir())
+    run_inline({"s": {"kind": "spectrum", "sample": {"name": "Si"}, "setup": dict(SETUP),
+                      "acquire": {"center_cm1": 520.7, "exposure_s": 0.2}}})          # on 532 first
+    out = api.calibrate_si(laser_nm=638, grating=1800, repeats=2, objective="x100", inline=True, wait_total_s=90)
+    assert out["study"]["setup"]["filter"] == "10%"
+    st = api.status(out["request"], 0)["studies"]["calibration"]
+    assert "change of laser" in (st.get("warmup") or {}).get("why", ""), st.get("warmup")
+    assert st["warmup"]["seconds"] == 1.5
+
+
+def test_anchored_calibration_still_unreliable_after_a_multimode_hop_and_says_why_not_anchored(monkeypatch):
+    """Nicola, 2026-11-25 (.25.13 checks): a hop moves Si and the laser line together, so the anchored difference
+    hides it: the multimode checks (broadened lines after a hop) must still make the calibration unreliable. And the
+    result says whether the repeats were anchored, or why not."""
+    from labspec_translator import xcal
+    import labspec_translator.runner as R
+    xcal.clear()
+    bdir = config.active_bridge_dir()
+    sim = S.ensure(bdir)
+    (bdir / "sim_laser_line").write_text("1")
+    (bdir / "sim_shift_after_first").write_text("1")
+    (bdir / "sim_multimode_after_hop").write_text("1")
+    sim._shift_armed = False
+    cal = {"kind": "calibration", "sample": {"name": "Si"}, "setup": dict(SETUP),
+           "acquire": {"center_cm1": 250, "exposure_s": 1},
+           "calibration": {"adjust": "ls6t", "repeats": 4}, "video": {"before": False}}
+    c = run_inline({"c": cal})["studies"]["c"]
+    for f in ("sim_shift_after_first", "sim_multimode_after_hop"):
+        (bdir / f).unlink()
+    assert not c["reliable"], c["calibration"].get("repeats")
+    assert any("zero uncertain" in u or "kept out" in u for u in c["unreliable_because"]), c["unreliable_because"]
+    assert c["calibration"]["stored_as"].startswith("nothing stored")
+    # not anchored: why, in the result
+    monkeypatch.setattr(R, "_repeat_offsets", lambda reps, lines: [0.1, 0.5, -0.3, 0.2][:len(reps)])
+    sim._landing_n = 0
+    c = run_inline({"c": dict(cal, calibration=dict(cal["calibration"], anchor="off"))})["studies"]["c"]
+    assert c["calibration"]["repeats"]["not_anchored_because"] == "calibration.anchor is off"
+    (bdir / "sim_laser_line").unlink()
+    c = run_inline({"c": cal})["studies"]["c"]
+    assert "no laser line" in c["calibration"]["repeats"]["not_anchored_because"]
+    # a laser line that adds its own scatter is not used
+    r = R._anchor_repeats([{"laser_line": {"ok": True, "position_cm1": v, "fwhm_cm1": 5.0}} for v in
+                           (0.0, 0.6, -0.5, 0.4, -0.3)], [0.10, 0.12, 0.08, 0.11, 0.09],
+                          [{"fwhm_cm1": 5.0, "measured_cm1": 520.7}], {}, 1.0)
+    assert "not less than on their own" in r["why_not"]

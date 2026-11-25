@@ -614,6 +614,10 @@ class Ctx:
         """The laser shutter held open (ShutterMode manual) before this study's next acquisition, as HORIBA's
         mapping scripts do for a map; the bridge keeps it only through HOLD_VERBS."""
         w = plan.hold_open_s(self.prof, self.optics[0] if self.optics else None, getattr(self, "study_kind", None))
+        if getattr(self, "laser_changed_now", False):
+            # just changed to this laser: its settling counts too (2026-11-25, 532 after 637.75)
+            w = max(w, plan.change_settle_s(self.prof, self.optics[0] if self.optics else None,
+                                            getattr(self, "study_kind", None)))
         r = self.call("shutter_hold", timeout_s=30 + w, state="on", max_s=getattr(self, "hold_max_s", 3600),
                       idle_s=getattr(self, "hold_idle_s", 60), open_wait_s=w, **motor_args(self.prof))
         if not r.get("ok"):
@@ -1378,6 +1382,9 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
         # spectrum after a grating change made the move without the approach, and the repeats then skipped it)
         acq = dict(acq, spectro_approach_nm=appr_)
     grating_changed = str(before.get("grating")) != str(after.get("grating"))
+    lb_, la_ = _f(before.get("laser_nm")), _f(after.get("laser_nm"))
+    laser_changed = lb_ is not None and la_ is not None and abs(lb_ - la_) > 0.5
+    ctx.laser_changed_now = laser_changed
     focus = study.get("focus", {})
     af = focus.get("autofocus")
     every = int(focus.get("every", 0) or 0)
@@ -1510,7 +1517,14 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
             # study is always made (with its approach), even when the spectrometer already reads the centre
             first_acq = dict(acq, spectro_force=1) if grating_changed else acq
             warmed = False
-            if k == 0 and warmup_s(study, prof, laser) > 0:
+            chg_s = plan.change_settle_s(prof, laser, kind) if (k == 0 and laser_changed) else 0.0
+            if chg_s > 0 and not ctx.hold_wanted:
+                # the laser on the sample for a while after a change to it, discarded (2026-11-25: 532 @ 1200 crept
+                # +0.17 cm-1 per repeat right after 637.75 -> 532); with the hold, its open wait does it
+                warmup_info = _warmup(ctx, first_acq, sd, max(chg_s, warmup_s(study, prof, laser)))
+                warmed = True
+                warmup_info["why"] = f"after the change of laser ({lb_:g} -> {la_:g} nm): the laser settling"
+            elif k == 0 and warmup_s(study, prof, laser) > 0:
                 warmup_info = _warmup(ctx, first_acq, sd, warmup_s(study, prof, laser))
                 warmed = True
             elif k == 0 and cal_reps and grating_changed:
@@ -3729,7 +3743,8 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
     # 0.76 cm-1 with the spectrometer's landing, Si - laser line 0.06). Asked for explicitly, the study's own choice
     if (not ll_asked and kind != "calibration" and ll_mode in ("report", "correct") and corr
             and corr.get("laser_line_cm1") is not None
-            and not laser_line_too_broad(corr.get("laser_line_fwhm_cm1"), corr.get("lines"))):
+            and (corr.get("zero_mode") == "anchored" if corr.get("zero_mode") else
+                 not laser_line_too_broad(corr.get("laser_line_fwhm_cm1"), corr.get("lines")))):
         ll_mode = ll_mode_asked = "anchor"
     anchor = ll_mode == "anchor"
     if anchor:
@@ -4426,8 +4441,10 @@ def _anchor_repeats(repeats: list, offs: list, lines: list, cal: dict, b: float)
     narrow enough to be a reference (not at 600 gr/mm: ~21 cm-1 wide on the edge filter) and the fit is an offset
     only. Returns the stats of (line - laser line), the laser line's median, or None. calibration.anchor 'off'
     keeps the absolute repeats."""
-    if str(cal.get("anchor", "auto")) == "off" or float(b) != 1.0:
-        return None
+    if str(cal.get("anchor", "auto")) == "off":
+        return {"why_not": "calibration.anchor is off"}
+    if float(b) != 1.0:
+        return {"why_not": "the fit has a scale (two reference lines): offset-only fits are anchored"}
     lls, ws = [], []
     for r_ in repeats:
         l_ = r_.get("laser_line") or {}
@@ -4435,15 +4452,35 @@ def _anchor_repeats(repeats: list, offs: list, lines: list, cal: dict, b: float)
         lls.append(float(l_["position_cm1"]) if ok_ else None)
         if ok_ and l_.get("fwhm_cm1"):
             ws.append(float(l_["fwhm_cm1"]))
-    if not ws or laser_line_too_broad(float(np.median(ws)), lines):
-        return None
+    if not ws:
+        return {"why_not": "no laser line in the window (it must include about -15 to +15 cm-1)"}
+    broad = laser_line_too_broad(float(np.median(ws)), lines)
+    if broad:
+        return {"why_not": broad}
     # offs are as measured (_repeat_offsets undoes this study's laser-line shifts)
     rel = [None if (o is None or l_ is None) else o - l_ for o, l_ in zip(offs, lls)]
     n_off = sum(o is not None for o in offs)
     if sum(v is not None for v in rel) < max(2, n_off - 1):
-        return None
+        return {"why_not": "the laser line was not fitted in enough repeats"}
+    # only when it helps: the scatter relative to the laser line below the scatter on its own (2026-11-25, 532 @
+    # 1200: a 15 cm-1 wide line on the edge filter, Si - laser line scattering 0.30-0.36)
+    rv = [v for v in rel if v is not None]
+    av = [o for o in offs if o is not None]
+    if len(rv) >= 3 and len(av) >= 3:
+        sr, sa = _robust_sd(rv), _robust_sd(av)
+        if sr >= sa:
+            return {"why_not": f"relative to the laser line the repeats scatter {sr:.2f} cm-1, not less than on their "
+                               f"own ({sa:.2f}): the laser line adds its own scatter (a broad line on the edge filter)"}
     return {"stats": repeat_stats(rel), "relative": rel, "laser_lines": lls,
             "laser_line_cm1": float(np.median([v for v in lls if v is not None]))}
+
+
+def _robust_sd(v: list) -> float:
+    """The spread of repeats with one outlier allowed for: the SD of all but the value farthest from the median."""
+    a = np.asarray(v, float)
+    if a.size >= 4:
+        a = np.delete(a, int(np.argmax(np.abs(a - np.median(a)))))
+    return float(np.std(a, ddof=1)) if a.size >= 2 else 0.0
 
 
 def _calibration_result(study, prof, rec, ref_lines, laser, grating, rng, request, checks, unreliable,
@@ -4496,6 +4533,9 @@ def _calibration_result(study, prof, rec, ref_lines, laser, grating, rng, reques
         stt_abs = repeat_stats(offs)
         stt = stt_abs
         anc = _anchor_repeats(repeats, offs, lines, cal, b)
+        anc_why_not = anc.get("why_not") if anc else None
+        if anc_why_not:
+            anc = None
         if anc:
             # 2026-11-25, 637.75 @ 1200: Si 521.41, 520.10, 519.62, 519.82, 519.58 (SD 0.76) but Si - laser line
             # 524.43, 524.44, 524.36, 524.51, 524.42 (SD 0.06): the scatter is the spectrometer's landing, common to
@@ -4529,6 +4569,8 @@ def _calibration_result(study, prof, rec, ref_lines, laser, grating, rng, reques
                            "removes the spectrometer's landing scatter (later spectra with the laser line in the "
                            "window are brought to its position: acquire.laser_reference 'anchor')"}
                 rep_info["absolute_outliers"] = stt_abs["outliers"]
+            else:
+                rep_info["not_anchored_because"] = anc_why_not or "no laser line"
                 res["anchored"] = True
             # spread from successive differences (sqrt(mean d^2 / 2)): a slow creep does not count as scatter
             # (2026-11-25, ext600: 9.26, 8.75, 7.85, 7.51, 8.17 passed the creep test; SD 0.70 overstated the
@@ -4667,7 +4709,10 @@ def _calibration_result(study, prof, rec, ref_lines, laser, grating, rng, reques
                        placement="labspec" if not rng.get("single", True) else "centred",
                        range_cm1=[rng["from_cm1"], rng["to_cm1"]] if (wc is None and not rng.get("single", True)
                                                                         and rng.get("from_cm1") is not None)
-                       else None, zero_mode="anchored" if anc_ll is not None else "absolute")}
+                       else None,
+                       zero_mode="anchored" if (anc_ll is not None or (
+                           not rep_info and llc.get("ok") and float(b) == 1.0
+                           and str(cal.get("anchor", "auto")) != "off")) else "absolute")}
     elif not res["pass"]:
         unreliable.append(f"the {'Si' if refname == 'si' else refname} line is at {first['measured_cm1']:.2f} cm-1, "
                           f"{first['measured_cm1'] - first['reference_cm1']:+.2f} from {first['reference_cm1']}: "

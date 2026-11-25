@@ -368,6 +368,9 @@ def load(path: Path | None = None) -> dict:
             v.setdefault("laser_reference", "report")  # 'correct': follow the laser line's steps (hops) when it is in
             # the window; 'correct_each': every spectrum's laser line (its slow drift too)
             v.setdefault("calibration_max_age_h", None)  # a shorter life for this laser's calibrations
+            v.setdefault("default_filter", None)       # the flat tools' filter with this laser (None: 1%)
+            v.setdefault("change_settle_s", None)      # after a change to this laser, before a calibration
+            # (None: CHANGE_SETTLE_DEFAULT_S for calibrations, none otherwise)
     return prof
 
 

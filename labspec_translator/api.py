@@ -195,6 +195,16 @@ def coerce_studies(studies, tool: str = "run_studies") -> dict:
     return studies
 
 
+def laser_filter(prof: dict, laser_nm, asked=None) -> str:
+    """The filter for the flat tools: what was asked, else the laser's lasers.<k>.default_filter (set by a person),
+    else 1% (2026-11-25: at 1 % the 785 nm Si line was not detected in 13 spectra, SNR 1-3; 10 % gave 10-15)."""
+    if asked not in (None, ""):
+        return str(asked)
+    lk = P.laser_key(prof, laser_nm)
+    f = (prof["lasers"][lk].get("default_filter") if lk else None)
+    return str(f) if f else "1%"
+
+
 def snap_laser(prof: dict, laser_nm) -> float:
     """The profile's laser nearest to what was said (638 -> 637.75; 785 -> 785.04), within 5 nm."""
     want = float(laser_nm)
@@ -301,7 +311,7 @@ def run_and_wait(studies: dict, wait_total_s: float | None = None, inline: bool 
 
 
 def measure_spectrum(laser_nm=637.75, center_cm1=None, from_cm1=None, to_cm1=None, exposure_s=1.0,
-                     accumulations=2, grating=1200, filter="1%", objective="x100_VIS", peak_cm1=520.7,
+                     accumulations=2, grating=1200, filter=None, objective="x100_VIS", peak_cm1=520.7,
                      sample="sample", wait_total_s: float | None = None, inline: bool = False) -> dict:
     """One spectrum from flat arguments (for small models): a centre, or from/to for a range; a peak fitted near
     peak_cm1 (None: the strongest peaks are found)."""
@@ -315,7 +325,7 @@ def measure_spectrum(laser_nm=637.75, center_cm1=None, from_cm1=None, to_cm1=Non
         else:
             acq["center_cm1"] = float(center_cm1 if center_cm1 is not None else (peak_cm1 or 520.7))
         study = {"kind": "spectrum", "sample": {"name": str(sample)},
-                 "setup": {"laser_nm": las, "grating": float(grating), "filter": str(filter),
+                 "setup": {"laser_nm": las, "grating": float(grating), "filter": laser_filter(prof, las, filter),
                            "objective": snap_objective(prof, objective)},
                  "acquire": acq}
         if peak_cm1 is not None:
@@ -329,7 +339,7 @@ def measure_spectrum(laser_nm=637.75, center_cm1=None, from_cm1=None, to_cm1=Non
     return out
 
 
-def calibrate_si(laser_nm=637.75, grating=1200, repeats=5, filter="1%", objective="x100_VIS",
+def calibrate_si(laser_nm=637.75, grating=1200, repeats=5, filter=None, objective="x100_VIS",
                  wait_total_s: float | None = None, inline: bool = False) -> dict:
     """A silicon calibration (520.7 cm-1) from flat arguments: the correction ls6t applies to later spectra."""
     prof = P.load()
@@ -339,7 +349,7 @@ def calibrate_si(laser_nm=637.75, grating=1200, repeats=5, filter="1%", objectiv
         if float(grating) <= 600:
             cal["window_cm1"] = 60
         study = {"kind": "calibration", "sample": {"name": "Si wafer"},
-                 "setup": {"laser_nm": las, "grating": float(grating), "filter": str(filter),
+                 "setup": {"laser_nm": las, "grating": float(grating), "filter": laser_filter(prof, las, filter),
                            "objective": snap_objective(prof, objective)},
                  "acquire": {"center_cm1": 520.7, "exposure_s": 1, "accumulations": 2, "spike": "double"},
                  "calibration": cal, "video": {"before": False}}

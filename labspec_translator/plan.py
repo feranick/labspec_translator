@@ -920,6 +920,20 @@ OPEN_SETTLE_DEFAULT_S = 40.0   # after a fresh shutter opening, a laser marked m
 CAL_OPEN_DEFAULT_S = OPEN_SETTLE_DEFAULT_S
 
 
+CHANGE_SETTLE_DEFAULT_S = 40.0   # after a change of laser, before a calibration (2026-11-25, 532 @ 1200: a creep of
+#                                 +0.17 cm-1 per repeat right after 637.75 -> 532)
+
+
+def change_settle_s(prof: dict, laser, kind: str | None = None) -> float:
+    """The laser on the sample (a discarded acquisition) after a change to this laser, before the study's spectra:
+    lasers.<k>.change_settle_s, else CHANGE_SETTLE_DEFAULT_S for a calibration, else none."""
+    lk = laser_key(prof, laser) if laser is not None else None
+    L = prof["lasers"][lk] if lk else {}
+    if L.get("change_settle_s") is not None:
+        return max(0.0, float(L["change_settle_s"]))
+    return CHANGE_SETTLE_DEFAULT_S if kind == "calibration" else 0.0
+
+
 def hold_open_s(prof: dict, laser, kind: str | None = None) -> float:
     """The wait after the shutter hold opens the shutter afresh, before the study's first spectrum (a hold continued
     from the previous study waits nothing: the laser has settled). A laser marked mode_hops or unstable_multi drifts
