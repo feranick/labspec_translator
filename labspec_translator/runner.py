@@ -4140,19 +4140,15 @@ def _calibration_result(study, prof, rec, ref_lines, laser, grating, rng, reques
             res["laser_line_rejected"] = broad
             warnings.append(f"the calibration's laser line is not kept as a reference: {broad}")
             llc = {}
-        mode_ = cal.get("store", "auto")
-        pooled = mode_ == "pooled" or (mode_ == "auto" and px is not None and px >= COARSE_CM1_PER_PX)
-        if pooled:
-            res["stored_as"] = (f"one correction for {combo(laser, grating)} (pooled: at {px or 0:.1f} cm-1 per pixel "
-                                "the repeat scatter exceeds the difference between windows)" if mode_ == "auto"
-                                else f"one correction for {combo(laser, grating)} (calibration.store 'pooled')")
-        st = xcal.store(laser, grating, a, b, refname, lines, request, centre_nm=None if pooled else wc,
-                        pooled=pooled, repeats=rep_info,
+        st = xcal.store(laser, grating, a, b, refname, lines, request, centre_nm=wc,
+                        pool=cal.get("store", "auto"), cm1_per_px=px, repeats=rep_info,
                         laser_line_cm1=llc.get("position_cm1") if llc.get("ok") else None,
                         laser_line_fwhm_cm1=llc.get("fwhm_cm1") if llc.get("ok") else None,
                         placement="labspec" if not rng.get("single", True) else "centred",
                         range_cm1=[rng["from_cm1"], rng["to_cm1"]] if (wc is None and not rng.get("single", True)
                                                                          and rng.get("from_cm1") is not None) else None)
+        res["stored_as"] = (("one correction for every window of " if st.get("pooled") else "per window centre: ")
+                            + combo(laser, grating) + " (" + st["pool"]["why"] + ")")
         res["stored_correction"] = st
         warnings.append(f"ls6t now corrects later spectra ({xcal.key(laser, grating)}): true = {a:+.3f} + "
                         f"{b:.6f} x measured")

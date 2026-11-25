@@ -1455,16 +1455,34 @@ def test_calibration_repeats_pooled_at_coarse_gratings_and_run_order():
     the keys)."""
     from labspec_translator import xcal
     xcal.clear()
-    xcal.store(532, 600, 1.0, 1.0, "si", [], centre_nm=547.16, placement="centred")
     st = {"kind": "calibration", "sample": {"name": "Si"}, "setup": dict(SETUP, grating=600),
           "acquire": {"center_cm1": 520.7, "exposure_s": 1}, "calibration": {"adjust": "ls6t", "repeats": 3}}
     assert F.validate({"c": st})["c"]["ok"]
     c = run_inline({"c": st})["studies"]["c"]["calibration"]
     assert c["repeats"]["n"] == 3 and c["repeats"]["sd_cm1"] >= 0 and c["cm1_per_pixel"] >= 2.0, c.get("repeats")
-    assert c["stored_correction"]["pooled"] and "pooled" in c["stored_as"]
-    g = xcal.get(532, 600, 560.0, "centred")
-    assert g["pooled"] and not g.get("centre_unknown") and not g.get("centre_far")
-    assert "by_centre" not in xcal.load()["532@600"]
+    assert "one window measured so far" in c["stored_as"]
+    xcal.clear()
+    # pooled only when the centres differ by less than the repeats' scatter (Nicola, 2026-11-24)
+    rep = lambda sd: {"n": 5, "sd_cm1": sd}
+    for cen, a_ in ((659.66, -9.52), (650.19, -9.88), (681.0, -9.64)):          # 637.75 @ 600: noise
+        r = xcal.store(637.75, 600, a_, 1.0, "si", [], centre_nm=cen, placement="centred", pool="auto",
+                       repeats=rep(0.5), cm1_per_px=4.5)
+    assert r["pooled"] and r["a"] == pytest.approx(-9.68, abs=0.01) and "within" in r["pool"]["why"]
+    g = xcal.get(637.75, 600, 700.0, "centred")
+    assert g["pooled"] and not g.get("centre_far") and "by_centre" in xcal.load()["637.75@600"]
+    for cen, a_ in ((540.63, -4.05), (547.16, -2.18), (555.65, -1.80)):           # 532 @ 1200: real
+        r = xcal.store(532, 1200, a_, 1.0, "si", [], centre_nm=cen, placement="centred", pool="auto",
+                       repeats=rep(0.3), cm1_per_px=2.6)
+    assert not r.get("pooled") and "real window dependence" in r["pool"]["why"]
+    assert xcal.get(532, 1200, 540.63, "centred")["a"] == -4.05
+    xcal.clear()
+    for cen, a_ in ((540.63, -4.05), (547.16, -2.18)):                            # no repeats, coarse, real
+        r = xcal.store(532, 1200, a_, 1.0, "si", [], centre_nm=cen, pool="auto", cm1_per_px=2.6)
+    assert not r.get("pooled")
+    xcal.clear()
+    for cen, a_ in ((659.66, -9.5), (650.19, -9.8)):                              # no repeats, coarse, close
+        r = xcal.store(637.75, 600, a_, 1.0, "si", [], centre_nm=cen, pool="auto", cm1_per_px=4.5)
+    assert r["pooled"] and "no repeat data" in r["pool"]["why"]
     xcal.clear()
     assert not F.validate({"c": dict(st, calibration={"repeats": 0})})["c"]["ok"]
     # run order
