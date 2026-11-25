@@ -119,7 +119,7 @@ def _errors_said(fn):
     return wrapper
 
 
-async def _keepalive(ctx, fn, *a, every_s: float = 5.0):
+async def _keepalive(ctx, fn, *a, every_s: float = 5.0, msg=None):
     """Runs a blocking call in a thread and reports progress every few seconds meanwhile, so the app does not give
     up on a call that waits for LabSpec (2026-11-20: a 30.9 s set completed on the instrument, but the app had
     dropped it: 'No client-side handler found')."""
@@ -131,7 +131,13 @@ async def _keepalive(ctx, fn, *a, every_s: float = 5.0):
             return task.result()
         waited += every_s
         try:
-            await ctx.report_progress(waited, None, f"waiting for LabSpec ({waited:.0f} s)")
+            m = None
+            if msg is not None:
+                try:
+                    m = msg()
+                except Exception:  # noqa: BLE001 - only the progress text
+                    m = None
+            await ctx.report_progress(waited, None, m or f"waiting for LabSpec ({waited:.0f} s)")
         except Exception:  # noqa: BLE001 - no progress token, an older client: the wait goes on
             pass
 
@@ -188,21 +194,23 @@ async def measure_spectrum(ctx: Context, laser_nm: float = 637.75, center_cm1: f
                            accumulations: int = 2, grating: float = 1200, filter: str = "1%",
                            objective: str = "x100_VIS", peak_cm1: float | None = 520.7,
                            sample: str = "sample") -> dict:
-    """Measures one Raman spectrum and waits for it (up to about 5 minutes), returning the result in a few numbers.
+    """Measures one Raman spectrum and waits for it (up to about 90 s), returning the result in a few numbers.
     All arguments are optional: laser_nm (638 is taken as 637.75, 785 as 785.04), center_cm1 (one detector window
     centred there) or from_cm1 + to_cm1 (a range), exposure_s, accumulations, grating, filter (never above 10%),
     objective, peak_cm1 (the peak to fit; null: the strongest are found), sample (its name). If the answer says it
     is still running, call study_status with its request."""
     return await _keepalive(ctx, functools.partial(api.measure_spectrum, laser_nm, center_cm1, from_cm1, to_cm1,
                                                    exposure_s, accumulations, grating, filter, objective, peak_cm1,
-                                                   sample))
+                                                   sample), msg=api.flat_progress)
 
 
 @server.tool()
 async def calibrate_si(ctx: Context, laser_nm: float = 637.75, grating: float = 1200, repeats: int = 5) -> dict:
     """Calibrates the spectral zero on silicon (520.7 cm-1) for this laser and grating and waits for it (up to about
-    5 minutes): ls6t then corrects later spectra. All arguments optional (laser_nm 638 is taken as 637.75)."""
-    return await _keepalive(ctx, functools.partial(api.calibrate_si, laser_nm, grating, repeats))
+    90 s; then call study_status with its request): ls6t then corrects later spectra. All arguments optional
+    (laser_nm 638 is taken as 637.75)."""
+    return await _keepalive(ctx, functools.partial(api.calibrate_si, laser_nm, grating, repeats),
+                            msg=api.flat_progress)
 
 
 @server.tool()

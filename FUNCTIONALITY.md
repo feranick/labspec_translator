@@ -60,7 +60,7 @@ A request is `{name: study}`; each study has a `kind`.
 | `study_format` | The study format, this instrument's lasers, gratings, filters, objectives and limits, and the bridge's state. Read first |
 | `validate_studies` | Static checks of a request with time estimates; every error says the fix |
 | `run_studies` | Starts a request; returns results, or progress with an ETA, within 50 s (`studies` may also be its JSON text; a single unnamed study is accepted) |
-| `measure_spectrum` | One spectrum from flat arguments (laser_nm snapped to the instrument's: 638 → 637.75; a centre or from/to; exposure, accumulations, grating, filter, objective, the peak to fit), waiting up to ~5 min; a short answer (for small local models) |
+| `measure_spectrum` | One spectrum from flat arguments (laser_nm snapped to the instrument's: 638 → 637.75; a centre or from/to; exposure, accumulations, grating, filter, objective, the peak to fit), waiting up to ~90 s (`LS6T_FLAT_WAIT_S`), then its request to poll with `study_status`; a short answer (for small local models) |
 | `calibrate_si` | A Si calibration from flat arguments (laser, grating, repeats), waiting up to ~5 min |
 | `study_status` | A request's results, or its progress |
 | `cancel` | Stops a request: the acquisition or move in progress stops |

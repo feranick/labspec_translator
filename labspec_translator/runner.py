@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import threading
 import time
 import traceback
 from pathlib import Path
@@ -447,6 +448,7 @@ class Ctx:
         self.z_purpose = None               # 'depth' while a depth profile runs (its own Z limit, confirmed)
         self.focus_stale = False            # after a retract for an objective change: a fresh focus is needed
         self.last_beat = 0.0
+        self._beat_lock = threading.Lock()
         self.bridge_version = None
         self.optics = (None, None)          # (laser nm, grating) after the last setup: for ics.off_for
         self.last_ics = None                # the ICS state of the last acquisition sent
@@ -454,15 +456,41 @@ class Ctx:
     def cancelled(self) -> bool:
         return (self.folder / "cancel").exists()
 
+    def start_heartbeat(self, every_s: float = 10.0) -> None:
+        """A heartbeat of its own (runner.json, and the lock while held), whatever the runner is doing: 2026-11-25,
+        study_status called a live runner 'interrupted' (no beat for 120 s during its analysis), and the operator
+        switched the laser off on that false report."""
+        def loop():
+            while not getattr(self, "finished", False):
+                time.sleep(every_s)
+                try:
+                    self.beat(force=True)
+                except Exception:  # noqa: BLE001 - the next one tries again
+                    pass
+        threading.Thread(target=loop, name="ls6t-runner-beat", daemon=True).start()
+
     def beat(self, force: bool = False):
         now = time.time()
-        if force or now - self.last_beat > 3:
+        if not (force or now - self.last_beat > 3):
+            return
+        if not self._beat_lock.acquire(blocking=False):
+            return                                       # the other thread is writing it now
+        try:
+            self._beat(now)
+        finally:
+            self._beat_lock.release()
+
+    def _beat(self, now: float):
+        if True:
             self.last_beat = now
             write_json(self.folder / "runner.json", {"pid": os.getpid(), "time": now, "version": __version__})
-            try:
-                os.utime(lock_path(), None)
-            except OSError:
-                pass
+            if getattr(self, "owns_lock", False):
+                # only the holder keeps the lock fresh (2026-11-25: a queued request's beat kept a dead runner's
+                # lock fresh, and every request after it queued forever)
+                try:
+                    os.utime(lock_path(), None)
+                except OSError:
+                    pass
 
     def call(self, verb: str, timeout_s: float = 60.0, **params) -> dict:
         if verb == "acquire" and "mode" in params:
@@ -493,6 +521,15 @@ class Ctx:
             # shifted and broadened)
             params.setdefault("settle_s", plan.settle_s(self.prof, self.optics[0]))
         t0 = time.monotonic()
+        wf = self.folder / "waiting.json"
+        if verb in OPERATOR_VERBS:
+            # the request waits for a person at LabSpec: study_status and the flat tools say so (2026-11-25: an
+            # unattended small-model client saw a silent 'setup' while the go-ahead dialog waited)
+            try:
+                write_json(wf, {"for": "operator", "verb": verb, "text": str(params.get("text", ""))[:400],
+                                "since": time.time()})
+            except OSError:
+                pass
         try:
             r = self.bridge.call(verb, timeout_s=timeout_s, should_stop=self.cancelled, on_wait=self.beat, **params)
             rec = {"verb": verb, "s": round(time.monotonic() - t0, 3)}
@@ -506,6 +543,12 @@ class Ctx:
             raise Stop(self._release_after_silence(str(exc)), "bridge") from exc
         except BridgeTimeout as exc:
             raise Stop(self._release_after_silence(str(exc)), "timeout") from exc
+        finally:
+            if verb in OPERATOR_VERBS:
+                try:
+                    wf.unlink()
+                except OSError:
+                    pass
         self.beat()
         self._log(f"<- {verb} ok={int(bool(r.get('ok')))} {r.get('seconds', '')} s"
                   + "".join(f" {k}={r[k]}" for k in ("id", "mapex_return", "map_create_return", "view",
@@ -705,6 +748,84 @@ def shutter_report(r: dict, warnings: list, verified: bool = False) -> dict:
     return out
 
 
+LOCK_STALE_S = 90.0     # a lock nobody refreshed for this long is free
+
+
+def pid_alive(pid) -> bool | None:
+    """Whether a process with this id runs (None: cannot tell). Windows: OpenProcess + GetExitCodeProcess (never
+    os.kill, which ends the process there)."""
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return None
+    if pid <= 0:
+        return None
+    if os.name == "nt":
+        try:
+            import ctypes
+            k32 = ctypes.windll.kernel32
+            h = k32.OpenProcess(0x1000, False, pid)          # PROCESS_QUERY_LIMITED_INFORMATION
+            if not h:
+                return False
+            code = ctypes.c_ulong()
+            ok = k32.GetExitCodeProcess(h, ctypes.byref(code))
+            k32.CloseHandle(h)
+            return bool(ok) and code.value == 259            # STILL_ACTIVE
+        except Exception:  # noqa: BLE001
+            return None
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True             # exists, another user's
+    return None
+
+
+def runner_alive(folder) -> bool:
+    """A request's runner still runs: a heartbeat (runner.json) or runner.log written within LOCK_STALE_S, or (when
+    both are older) its process still there."""
+    f = Path(folder)
+    rj = read_json(f / "runner.json", {}) or {}
+    beat = rj.get("time")
+    if beat is None:
+        beat = (read_json(f / "request.json", {}) or {}).get("created", 0)
+    newest = float(beat or 0)
+    try:
+        newest = max(newest, (f / "runner.log").stat().st_mtime)
+    except OSError:
+        pass
+    if time.time() - newest <= LOCK_STALE_S:
+        return True
+    pa = pid_alive(rj.get("pid") or (read_json(f / "state.json", {}) or {}).get("pid"))
+    return bool(pa) and time.time() - newest <= 1800      # a live pid, but silent for 30 min: not a runner any more
+
+
+def holder_alive(holder) -> bool:
+    """Whether the request holding the instrument lock still has a runner: its state is not final and its runner
+    wrote its heartbeat (runner.json) within LOCK_STALE_S."""
+    if not holder:
+        return False
+    hf = Path(holder)
+    st = read_json(hf / "state.json", {}) or {}
+    if st.get("state") in FINAL:
+        return False
+    return runner_alive(hf)
+
+
+def free_lock_of(folder: Path) -> bool:
+    """Removes the instrument lock if this request holds it (a request that ended without its runner)."""
+    lp = lock_path()
+    if read_json(lp, {}).get("request") == str(folder):
+        try:
+            lp.unlink()
+            return True
+        except OSError:
+            return False
+    return False
+
+
 def _acquire_lock(folder: Path, ctx_beat) -> None:
     lp = lock_path()
     lp.parent.mkdir(parents=True, exist_ok=True)
@@ -720,7 +841,7 @@ def _acquire_lock(folder: Path, ctx_beat) -> None:
                 holder = read_json(lp, {}).get("request")
             except OSError:
                 continue
-            if age > 90 or holder == str(folder):
+            if age > LOCK_STALE_S or holder == str(folder) or not holder_alive(holder):
                 try:
                     lp.unlink()
                 except OSError:
@@ -757,7 +878,9 @@ def run_request(folder: Path | str) -> dict:
     try:
         ctx = Ctx(folder, Bridge(bridge_dir), prof)
         ctx.beat(force=True)
+        ctx.start_heartbeat()
         _acquire_lock(folder, ctx.beat)
+        ctx.owns_lock = True
         write_json(folder / "state.json", state)
         if req.get("mode", config.mode()) == "sim":
             from . import sim as S
@@ -880,6 +1003,8 @@ def run_request(folder: Path | str) -> dict:
         if ctx is not None and "shutter_hold_released" not in state and any(
                 h.get("by") == "after the bridge answered again" for h in ctx.hold_log):
             state["shutter_hold_released"] = True
+        if ctx is not None:
+            ctx.finished = True
         _release_lock(folder)
         state["seconds"] = round(time.time() - started, 1)
         write_json(folder / "state.json", state)
@@ -3551,10 +3676,14 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
         Lc = prof["lasers"][lkc] if lkc else {}
         if age is not None and age <= max_h and age > xcal.POOL_WINDOW_H and (Lc.get("mode_hops") or
                                                                            Lc.get("unstable_multi")):
+            # how well it repositions: the profile's / measured repeatability for this grating (2026-11-25: the
+            # fixed "+-1 cm-1 at 600" predated approach_nm, with which the moved SD is ~0.3)
+            rp_w = spectro_repeatability(prof, laser, grating, placement)
+            rp_txt = (f" (it repositions to about +-{float(rp_w['moved_sd_cm1']):.2g} cm-1 at {_f(grating) or 0:g} "
+                      f"gr/mm, {rp_w.get('source')})" if rp_w.get("moved_sd_cm1") else "")
             warnings.append(f"the spectral correction is {age:.1f} h old and this laser's zero drifts (2026-11-24: "
                             "2-3 cm-1 within a day at 637.75 nm): calibrate in the same request for the best zero, "
-                            "and at a coarse grating at the same centre, without moving the spectrometer in between "
-                            "(it repositions to about +-1 cm-1 at 600 gr/mm)")
+                            "at the same centre, without moving the spectrometer in between" + rp_txt)
         if age is not None and age > max_h:
             warnings.append(f"the spectral correction is {age:.1f} h old (more than {max_h:g} h for this laser): run "
                             "a calibration" + (", or keep the laser line in the window with "
@@ -3995,6 +4124,9 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
         warnings.append(f"zero uncertain at {len(uncertain)} spectra (points {', '.join(map(str, uncertain[:10]))}): "
                         "the laser line jumped or broadened; positions there may be off by about a cm-1 even after "
                         "following it")
+        if len(uncertain) > max(1, len(per_point) // 10):
+            unreliable.append(f"zero uncertain at {len(uncertain)} of {len(per_point)} spectra (the laser line jumped "
+                              "or broadened: checks.zero_correction.uncertain_points)")
     miss = [r["point"] for r in per_point if not (r.get("laser_line") or {}).get("ok") and r["point"] not in excluded]
     if ll_mode == "correct" and miss:
         # (2026-11-24: 'no laser line was found in spectra :' with an empty list, when every spectrum after the
@@ -4017,7 +4149,16 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
         if cal_ref is not None:
             dr = round(float(np.median([v for _, v in lls])) - cal_ref, 2)
             checks["laser_line"]["drift_since_calibration_cm1"] = dr
-            if abs(dr) > STALE_DRIFT_CM1:
+            if abs(dr) > ZERO_JUMP_CM1:
+                # 2026-11-25: a native map ran with the 637.75 laser hopped (line -8.5 cm-1 from the calibration's,
+                # Si mean 512.69, 'zero uncertain' at 13 of 25) and said reliable: a different mode is not drift
+                unreliable.append(f"the laser line sits {dr:+.1f} cm-1 from where it was at the calibration: the laser "
+                                  "is in another mode (a hop or multimode), so the stored zero does not hold here and "
+                                  "every Raman shift may be off by about that"
+                                  + (" (followed by laser_reference, about 1 cm-1 may remain)" if ll_mode == "correct"
+                                     else "") + "; let the laser settle (or switch it off and on) and calibrate "
+                                  "again in the mode it measures in")
+            elif abs(dr) > STALE_DRIFT_CM1:
                 # (2026-11-24: a map used a 5.5 h old correction with the line +0.78 away, no warning; Si 521.30)
                 warnings.append(f"the laser line sits {dr:+.1f} cm-1 from where it was at the calibration (drift "
                                 "since then, or a calibration made with another spectrometer window), not a hop: "
@@ -4309,15 +4450,14 @@ def _calibration_result(study, prof, rec, ref_lines, laser, grating, rng, reques
             if stt["trend"] and not stt["step"]:
                 rep_info.update(drifting=True, trend=stt["trend"])
                 warnings.append(f"the repeats creep by {stt['trend']['slope_cm1_per_repeat']:+.2f} cm-1 per spectrum "
-                                "(the laser still settling?): their scatter is not noise and is not used to compare "
-                                "windows; the median is stored")
+                                "(the laser still settling?): their scatter is not noise")
             if stt["step"]:
                 rep_info.update(drifting=True, step=stt["step"])
                 warnings.append(
                     f"the repeats jump by {stt['step']['size_cm1']:+.2f} cm-1 after repeat {stt['step']['after_repeat']}"
                     + (" (the spectrometer landing elsewhere after its move, or a laser hop)" if moved else
                        " (a laser hop: the spectrometer did not move)")
-                    + ": their scatter is not noise and is not used to compare windows; the median is stored")
+                    + ": their scatter is not noise")
     res.update(reference_cm1=first["reference_cm1"], measured_cm1=first["measured_cm1"],
                offset_cm1=round(float(np.mean(meas - refs)), 4), fwhm_cm1=first["fwhm_cm1"], snr=first["snr"],
                worst_error_cm1=round(worst, 4), correction={"a": round(float(a), 5), "b": round(float(b), 7)},
@@ -4376,7 +4516,24 @@ def _calibration_result(study, prof, rec, ref_lines, laser, grating, rng, reques
         res["outcome"] = (f"out of tolerance ({res['offset_cm1']:+.2f} cm-1, tolerance {tol:g}): correct LabSpec's "
                           f"zero for {combo(laser, grating)}")
     checks["calibration"]["outcome"] = res["outcome"]
-    if res["adjust"] == "ls6t" and res["trusted"]:
+    unsettled = bool(rep_info and not rep_info.get("settled", True))
+    if unsettled and res["adjust"] == "ls6t" and res["trusted"]:
+        # 2026-11-25, 637.75 @ 600: repeats 7.78, 7.13, -0.95, -0.51, -0.00 (a hop of -7.9 cm-1 after the hold was
+        # lost); their median (-0.004) stored as the correction was wrong by ~8.6 cm-1. A step or a creep: nothing is
+        # stored, the correction in use stays, and the calibration is not to be trusted
+        what = (f"jump by {rep_info['step']['size_cm1']:+.2f} cm-1 after repeat {rep_info['step']['after_repeat']}"
+                if rep_info.get("step") else
+                f"creep by {rep_info['trend']['slope_cm1_per_repeat']:+.2f} cm-1 per repeat" if rep_info.get("trend")
+                else "do not agree")
+        res["stored_as"] = "nothing stored: the repeats did not settle; the correction in use stays"
+        res["outcome"] = (f"not stored: the repeats did not settle (median {rep_info['median_cm1']:+.2f} cm-1, "
+                          f"{rep_info['offsets_cm1']}); the correction in use stays")
+        checks["calibration"]["outcome"] = res["outcome"]
+        res.pop("corrected", None)
+        unreliable.append(f"the repeats {what} (a laser hop or the spectrometer landing elsewhere): no correction "
+                          f"is stored for {combo(laser, grating)}, the previous one stays; calibrate again (with the "
+                          "laser settled: the shutter held, no laser_off in between)")
+    elif res["adjust"] == "ls6t" and res["trusted"]:
         llc = dict(rec.get("laser_line") or {})
         broad = laser_line_too_broad(llc.get("fwhm_cm1"), lines) if llc.get("ok") else None
         if broad:

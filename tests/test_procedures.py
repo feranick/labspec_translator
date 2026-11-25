@@ -1819,3 +1819,119 @@ def test_runner_fault_releases_the_hold_and_does_not_blame_the_bridge(tmp_path, 
     assert s["state"] == "failed" and s["stopped_by"] == "ls6t" and s.get("trace"), s
     assert "not the bridge" in s["why"] and R.LASER_MAY_BE_ON not in s["why"] and "stuck" not in s["why"]
     assert sim.held is False
+
+
+def _fake_request(name, state, beat_age_s, created_age_s=600):
+    f = config.out_dir() / name
+    (f / "s").mkdir(parents=True, exist_ok=True)
+    now = time.time()
+    runner.write_json(f / "request.json", {"created": now - created_age_s, "studies": ["s"]})
+    runner.write_json(f / "studies.json", {"s": {}})
+    runner.write_json(f / "state.json", {"state": state, "time": now})
+    runner.write_json(f / "runner.json", {"pid": 999999, "time": now - beat_age_s})
+    return f
+
+
+def test_dead_runner_lock_is_freed_and_cancel_clears_it(tmp_path):
+    """2026-11-25: a flat-tool request was ended with its client (interrupted at '-> confirm'); every request after
+    it queued forever 'busy with' it: the queued request's own beat kept the dead runner's lock fresh."""
+    _profile_with_shutter(tmp_path)
+    S.ensure(config.active_bridge_dir())
+    dead = _fake_request("run_20261125_150356_dead01", "running", beat_age_s=400)
+    lp = runner.lock_path()
+    lp.parent.mkdir(parents=True, exist_ok=True)
+    lp.write_text(json.dumps({"request": str(dead), "pid": 1, "time": time.time()}))
+    st = {"kind": "spectrum", "sample": {"name": "Si"}, "setup": dict(SETUP),
+          "acquire": {"center_cm1": 520.7, "exposure_s": 0.2}}
+    s = api.start({"s": st}, inline=True)
+    r = api.status(s["request"], 90)
+    assert r["state"] == "done", r.get("why") or r.get("state")
+    # an interrupted request still named in the lock: status / cancel free it
+    gone = _fake_request("run_20261125_150356_dead02", "running", beat_age_s=400)
+    lp.write_text(json.dumps({"request": str(gone), "pid": 1, "time": time.time()}))
+    c = api.cancel(str(gone))
+    assert c["state"] == "interrupted" and not lp.exists()
+    assert "instrument is free again" in api.status(str(gone))["why"]
+    # a live holder keeps it
+    live = _fake_request("run_20261125_150356_live01", "running", beat_age_s=1)
+    assert runner.holder_alive(str(live)) and not runner.holder_alive(str(gone))
+
+
+def test_waiting_for_the_operator_is_said_and_flat_tools_answer_within_90_s(monkeypatch, tmp_path):
+    _profile_with_shutter(tmp_path)
+    f = _fake_request("run_20261125_151000_wait01", "running", beat_age_s=1)
+    runner.write_json(f / "waiting.json", {"for": "operator", "verb": "confirm", "text": "ls6t: go ahead?",
+                                           "since": time.time() - 12})
+    r = api.status(str(f))
+    assert "go-ahead in LabSpec" in r["waiting_for"] and "operator" in r["next"]
+    s = api._summary(r)
+    assert s["waiting_for"] and "operator" in s["next"]
+    api.CURRENT_FLAT["request"] = str(f)
+    assert "go-ahead" in api.flat_progress()
+    monkeypatch.delenv("LS6T_FLAT_WAIT_S", raising=False)
+    assert api.flat_wait_s() == 90.0
+    monkeypatch.setenv("LS6T_FLAT_WAIT_S", "30")
+    assert api.flat_wait_s() == 30.0
+
+
+def test_unsettled_repeats_store_nothing_and_laser_off_cancels_the_running_request(monkeypatch, tmp_path):
+    """2026-11-25, 637.75 @ 600: repeats 7.78, 7.13, -0.95, -0.51, -0.00 (a hop after a laser_off); the median
+    (-0.004) was stored as the correction. Now nothing is stored and the calibration is unreliable."""
+    from labspec_translator import xcal
+    import labspec_translator.runner as R
+    xcal.clear()
+    seq = [7.78, 7.13, -0.95, -0.51, -0.00]
+    monkeypatch.setattr(R, "_repeat_offsets", lambda reps, lines: list(seq[:len(reps)]))
+    st = {"kind": "calibration", "sample": {"name": "Si"}, "setup": dict(SETUP, grating=600),
+          "acquire": {"center_cm1": 520.7, "exposure_s": 0.2}, "calibration": {"adjust": "ls6t", "repeats": 5}}
+    r = run_inline({"c": st})["studies"]["c"]
+    c = r["calibration"]
+    assert c["repeats"]["settled"] is False and "nothing stored" in c["stored_as"], c
+    assert not r["reliable"] and any("no correction is stored" in u for u in r["unreliable_because"])
+    assert xcal.get(637.75, 600, 660.0, "centred") is None
+    monkeypatch.undo()
+    # laser_off while a request holds the instrument: it is cancelled so it does not re-hold
+    live = _fake_request("run_20261125_152000_live02", "running", beat_age_s=1)
+    lp = runner.lock_path()
+    lp.parent.mkdir(parents=True, exist_ok=True)
+    lp.write_text(json.dumps({"request": str(live), "pid": os.getpid(), "time": time.time()}))
+    S.ensure(config.active_bridge_dir())
+    o = api.instrument("laser_off")
+    assert o.get("cancelled_request") == str(live) and (live / "cancel").exists()
+    lp.unlink()
+
+
+def test_live_runner_is_not_called_interrupted():
+    f = _fake_request("run_20261125_151800_busy01", "running", beat_age_s=400)
+    (f / "runner.log").write_text("still measuring\n")            # its log is fresh
+    assert api.status(str(f))["state"] == "running"
+    runner.write_json(f / "runner.json", {"pid": os.getpid(), "time": time.time() - 400})
+    old = time.time() - 400
+    os.utime(f / "runner.log", (old, old))
+    assert runner.pid_alive(os.getpid()) is True and api.status(str(f))["state"] == "running"   # its process runs
+    runner.write_json(f / "runner.json", {"pid": 999999, "time": time.time() - 400})
+    assert api.status(str(f))["state"] == "interrupted"
+
+
+def test_laser_line_far_from_the_calibrations_makes_the_result_unreliable():
+    """2026-11-25: a native map in the hopped state (line -8.5 cm-1 from the calibration, Si 512.69) said
+    reliable: true."""
+    from labspec_translator import xcal
+    xcal.clear()
+    bdir = config.active_bridge_dir()
+    S.ensure(bdir)
+    (bdir / "sim_laser_line").write_text("1")
+    cal = {"kind": "calibration", "sample": {"name": "Si"}, "setup": dict(SETUP, grating=600),
+           "acquire": {"center_cm1": 250, "exposure_s": 1}, "calibration": {"adjust": "ls6t"}}
+    c = run_inline({"c": cal})["studies"]["c"]
+    assert c["calibration"].get("stored_correction", {}).get("laser_line_cm1") is not None, c["calibration"]
+    sp = {"kind": "spectrum", "sample": {"name": "Si"}, "setup": dict(SETUP, grating=600),
+          "acquire": {"center_cm1": 250, "exposure_s": 1},
+          "process": {"peaks": [{"name": "Si", "near_cm1": 520.7, "window_cm1": 30}]}}
+    s = run_inline({"s": sp})["studies"]["s"]
+    assert s["reliable"], s.get("unreliable_because")
+    (bdir / "sim_xshift").write_text("-8.5,1.0")          # the laser hopped: line and Raman lines 8.5 cm-1 lower
+    s = run_inline({"s": sp})["studies"]["s"]
+    (bdir / "sim_xshift").unlink()
+    (bdir / "sim_laser_line").unlink()
+    assert not s["reliable"] and any("another mode" in u for u in s["unreliable_because"]), s["unreliable_because"]

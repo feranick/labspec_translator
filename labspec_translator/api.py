@@ -134,11 +134,16 @@ def _spawn(folder: Path):
         detached, group, breakaway, nowin = 0x00000008, 0x00000200, 0x01000000, 0x08000000
         try:   # outlive the MCP server's job object when Windows allows it
             subprocess.Popen(cmd, creationflags=detached | group | breakaway, **kw)
+            how = "detached (outside the app's job)"
         except OSError:
             subprocess.Popen(cmd, creationflags=detached | group | nowin, **kw)
+            how = ("detached, but inside the app's job: Windows ends it with the MCP server if the app ends that "
+                   "process")
     else:
         subprocess.Popen(cmd, start_new_session=True, **kw)
+        how = "detached (own session)"
     log.close()
+    return how
 
 
 def log_rejected(tool: str, args, errors) -> None:
@@ -243,22 +248,50 @@ def _summary(st: dict) -> dict:
             s["images"] = {k: (v.get("path") if isinstance(v, dict) else v) for k, v in imgs.items()}
         res[n] = s
     out["studies"] = res
+    if st.get("waiting_for"):
+        out["waiting_for"] = st["waiting_for"]
     rel = st.get("shutter_hold_released")
     if rel is not None:
         out["shutter_hold_released"] = rel
     if rel is not True and (rel is not None or LASER_MAY_BE_ON_TAG in str(st.get("why", ""))):
         out["next"] = ("the laser shutter may still be held open: call instrument(action=\"laser_off\") now (it only "
                        "closes the shutter) and tell the user")
+    elif not st.get("done") and st.get("waiting_for"):
+        out["next"] = (f"waiting for the operator's go-ahead in LabSpec: tell the user someone at the instrument "
+                       f"must answer it; then call study_status(request=\"{st.get('request')}\") until done")
     elif not st.get("done"):
         out["next"] = f"still running: call study_status(request=\"{st.get('request')}\") until done"
     return out
 
 
-def run_and_wait(studies: dict, wait_total_s: float = 280.0, inline: bool = False) -> dict:
-    """Starts studies and waits for them (up to wait_total_s), then returns the short summary."""
+FLAT_WAIT_S = 90.0      # the flat tools answer within this (2026-11-25: a client link gave up at 140 s)
+CURRENT_FLAT: dict = {}  # the request a flat tool is waiting for (its progress messages)
+
+
+def flat_wait_s() -> float:
+    try:
+        return max(0.0, float(os.environ.get("LS6T_FLAT_WAIT_S", FLAT_WAIT_S)))
+    except ValueError:
+        return FLAT_WAIT_S
+
+
+def flat_progress() -> str | None:
+    """The progress line for a flat tool's wait: the operator dialog it waits on, else None."""
+    f = CURRENT_FLAT.get("request")
+    w = waiting_for(f) if f else None
+    return f"waiting for {w}" if w else None
+
+
+def run_and_wait(studies: dict, wait_total_s: float | None = None, inline: bool = False) -> dict:
+    """Starts studies (a detached runner, as run_studies) and waits for them up to wait_total_s (LS6T_FLAT_WAIT_S,
+    90 s), then returns the short summary: done, or the request to poll with study_status. The request goes on
+    whether or not the caller is still there."""
+    if wait_total_s is None:
+        wait_total_s = flat_wait_s()
     s = start(studies, inline=inline)
     if not s.get("ok"):
         return s
+    CURRENT_FLAT["request"] = s["request"]
     end = time.monotonic() + max(0.0, float(wait_total_s))
     st = status(s["request"], 0)
     while not st.get("done") and time.monotonic() < end:
@@ -269,7 +302,7 @@ def run_and_wait(studies: dict, wait_total_s: float = 280.0, inline: bool = Fals
 
 def measure_spectrum(laser_nm=637.75, center_cm1=None, from_cm1=None, to_cm1=None, exposure_s=1.0,
                      accumulations=2, grating=1200, filter="1%", objective="x100_VIS", peak_cm1=520.7,
-                     sample="sample", wait_total_s: float = 280.0, inline: bool = False) -> dict:
+                     sample="sample", wait_total_s: float | None = None, inline: bool = False) -> dict:
     """One spectrum from flat arguments (for small models): a centre, or from/to for a range; a peak fitted near
     peak_cm1 (None: the strongest peaks are found)."""
     prof = P.load()
@@ -297,7 +330,7 @@ def measure_spectrum(laser_nm=637.75, center_cm1=None, from_cm1=None, to_cm1=Non
 
 
 def calibrate_si(laser_nm=637.75, grating=1200, repeats=5, filter="1%", objective="x100_VIS",
-                 wait_total_s: float = 280.0, inline: bool = False) -> dict:
+                 wait_total_s: float | None = None, inline: bool = False) -> dict:
     """A silicon calibration (520.7 cm-1) from flat arguments: the correction ls6t applies to later spectra."""
     prof = P.load()
     try:
@@ -347,7 +380,8 @@ def start(studies: dict, inline: bool = False, order: list | None = None) -> dic
         th = threading.Thread(target=runner.run_request, args=(folder,), name="ls6t-runner", daemon=True)
         th.start()
     else:
-        _spawn(folder)
+        how = _spawn(folder)
+        runner.write_json(folder / "request.json", dict(req, runner_started=how))
     out = {"ok": True, "request": str(folder), "studies": list(studies),
            "estimate_min": round(sum(req["estimate_min"].values()), 2)}
     try:
@@ -375,26 +409,39 @@ def _resolve(request: str) -> Path:
 def _state(folder: Path) -> dict:
     st = runner.read_json(folder / "state.json", {"state": "unknown"})
     if st.get("state") in ("queued", "running"):
-        beat = runner.read_json(folder / "runner.json", {})
-        created = runner.read_json(folder / "request.json", {}).get("created", 0)
-        last = beat.get("time") or created
-        if time.time() - last > 120:
+        # dead only when its heartbeat and its log are both old and its process is gone (2026-11-25: a live runner
+        # was called 'interrupted' from its heartbeat alone)
+        if not runner.runner_alive(folder):
             tail = ""
             try:
                 tail = (folder / "runner.log").read_text(encoding="utf-8", errors="replace").strip()[-400:]
             except OSError:
                 pass
+            how = runner.read_json(folder / "request.json", {}).get("runner_started", "")
             st = dict(st, state="interrupted",
-                      why="the runner stopped without finishing (the computer slept, or its process was ended); "
-                          "the studies without a result were not measured: run them again"
+                      why="the runner stopped without finishing (the computer slept, or its process was ended"
+                          + ("; it ran inside the app's job, so it ended when the app ended the MCP server: e.g. a "
+                             "client that gave up on a long tool call" if "inside the app's job" in how else "")
+                          + "); the instrument is free again; the studies without a result were not measured: run "
+                            "them again"
                           + (f". runner.log: {tail}" if tail else ""))
             runner.write_json(folder / "state.json", st)
+            runner.free_lock_of(folder)         # its runner is gone: the instrument is free (2026-11-25)
             for n in runner.read_json(folder / "studies.json", {}):
                 res = folder / n / f"{n}.json"
                 if not res.exists():
                     runner.write_json(res, {"ok": False, "why": st["why"], "reliable": False,
                                             "unreliable_because": ["interrupted"], "warnings": []})
     return st
+
+
+def waiting_for(folder) -> str | None:
+    """What a running request waits for from a person (an operator dialog in LabSpec), or None."""
+    w = runner.read_json(Path(folder) / "waiting.json", None)
+    if not w:
+        return None
+    return (f"the operator's go-ahead in LabSpec ({time.time() - float(w.get('since', time.time())):.0f} s so far)"
+            + (f": {w['text']}" if w.get("text") else ""))
 
 
 def status(request: str, wait_s: float = 0) -> dict:
@@ -418,11 +465,18 @@ def status(request: str, wait_s: float = 0) -> dict:
             prog[n] = runner.read_json(folder / n / "progress.json", {})
     out = {"request": str(folder), "translator": __version__, "state": st.get("state"),
            "done": st.get("state") in runner.FINAL, "pending": pending, "studies": res, "progress": prog}
+    wt = waiting_for(folder) if not out["done"] else None
+    if wt:
+        out["waiting_for"] = wt
     for k in ("why", "stopped_by", "reason", "config_restored", "config_restore_error", "returned", "stage_at_end",
               "shutter_hold_released", "trace", "profile_problems"):
         if st.get(k) is not None:
             out[k] = st[k]
-    if pending:
+    if wt:
+        out["next"] = ("waiting for the operator's go-ahead in LabSpec (a person at the instrument answers the "
+                       "question there; LS6T_CONFIRM sets when ls6t asks): tell the user, then call study_status "
+                       "again")
+    elif pending:
         eta = [p.get("eta_min") or p.get("estimate_min") for p in prog.values()]
         eta = [e for e in eta if e is not None]
         out["next"] = ("call study_status again" + (f"; about {max(eta):.0f} min left for the slowest study"
@@ -444,7 +498,10 @@ def cancel(request: str) -> dict:
     folder = _resolve(request)
     (folder / "cancel").write_text(str(time.time()), encoding="utf-8")
     st = _state(folder)
+    freed = runner.free_lock_of(folder) if (st.get("state") in runner.FINAL
+                                             or not runner.holder_alive(str(folder))) else False
     return {"request": str(folder), "state": st.get("state"),
+            **({"lock_released": True} if freed else {}),
             "note": "the runner stops the current command (acquisition or move) and ends the request; "
                     "study_status shows the partial results"}
 
@@ -467,7 +524,10 @@ def jobs(limit: int = 20, active: bool = False) -> dict:
                 break
     lock = runner.read_json(runner.lock_path(), None)
     return {"requests": rows, "instrument_actions": action_log(10), "rejected_calls": rejected_log(10),
-            "instrument_busy": lock.get("request") if lock else None}
+            "instrument_busy": lock.get("request") if lock else None,
+            **({"instrument_lock_stale": "its runner is gone: the next request takes the instrument (cancel it to "
+                                         "free it now)"}
+               if lock and not runner.holder_alive(lock.get("request")) else {})}
 
 
 # --------------------------------------------------------------------------------------------- the instrument
@@ -1225,7 +1285,23 @@ def laser(on: bool, seconds: float | None = None) -> dict:
         S.ensure(b.dir)
     try:
         if not on:
-            return b.call("laser", timeout_s=30, state="off")
+            # a request measuring now would hold the shutter open again for its next spectrum: it is cancelled
+            # first (2026-11-25: a laser_off during a calibration made the 637.75 nm laser hop, then the request
+            # re-held and went on measuring in the hopped state)
+            holder = (lock or {}).get("request")
+            cancelled = None
+            if holder and runner.holder_alive(holder):
+                try:
+                    (Path(holder) / "cancel").write_text(str(time.time()), encoding="utf-8")
+                    cancelled = holder
+                except OSError:
+                    pass
+            r = b.call("laser", timeout_s=30, state="off")
+            if cancelled:
+                r["cancelled_request"] = cancelled
+                r["note"] = ("the request measuring now was cancelled so it does not open the shutter again; "
+                             "study_status shows what it measured")
+            return r
         gate = P.review_gate(prof) if config.mode() == "labspec" else None
         if gate:
             return {"ok": False, "error": gate}
