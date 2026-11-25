@@ -754,6 +754,7 @@ def test_grating_move_must_arrive():
     s = st["studies"]["s"]
     moves = [m for m in s["setup"]["moves"] if m["motor"] == "Grating"]
     assert s["reliable"] and moves[-1].get("retry") and moves[-1]["ok"] and s["instrument"]["grating"] == 2400
+    assert s["checks"]["setup"]["pass"]           # the retry arrived (2026-11-24: pass false although it did)
     (bdir / "sim_grating_stuck").write_text("2400:1800")
     api.instrument("set", setup={"grating": 1200})
     st = run_inline({"s": sp})
@@ -1222,6 +1223,8 @@ def test_weak_points_kept_out_bad_laser_line_fits_and_native_readbacks():
         s["checks"]["laser_line"]
     pos = [p["peaks"][0]["position_cm1"] for p in s["spectra"]]
     assert max(pos) - min(pos) < 0.5 and not any("mode hop" in u for u in s["unreliable_because"])
+    # (2026-11-24: "no laser line was found in spectra :" with an empty list when the later fits were bad)
+    assert not any("no laser line was found" in u for u in s["unreliable_because"])
     (bdir / "sim_laser_line_drift").unlink()
     # a native map gives LabSpec's axis readbacks
     nat = {"kind": "map", "sample": {"name": "x"}, "setup": SETUP, "acquire": {"center_cm1": 520, "exposure_s": 0.2},
@@ -1332,3 +1335,92 @@ def test_camera_autofocus_on_features_and_refused_on_a_featureless_view():
         list(m)
     (bdir / "sim_defocus").unlink()
     assert not F.validate({"f": dict(st, focus={"autofocus": "camera", "camera": {"step_um": 0}})})["f"]["ok"]
+
+
+
+def test_hold_opens_before_point_zero_reads_back_and_beam_went_off_wording(tmp_path):
+    """2026-11-24 evening (.13): a held 30-point series had its first gap 8.3 s: the 5 s open wait ran inside point
+    0's call, before LabSpec's Acq but after point 0's clock started. The hold (and its wait) now opens first. After
+    every held spectrum the bridge reads ShutterMode and the shutter back (spectra[].shutter_hold_after); spectra that
+    lose the light after earlier ones had it are kept out with "the beam went off"."""
+    _profile_with_shutter(tmp_path)
+    prof = P.load()
+    lk = next(k for k, v in prof["lasers"].items() if abs(v["nm"] - 532) < 1)
+    prof["lasers"][lk].update(hold_open_s=5)
+    P.save(prof)
+    bdir = config.active_bridge_dir()
+    S.ensure(bdir)
+    (bdir / "sim_time_scale").write_text("0.2")              # the open wait: 1 s real
+    try:
+        ser = {"kind": "series", "sample": {"name": "Si"}, "setup": SETUP,
+               "acquire": {"center_cm1": 520, "exposure_s": 0.2, "shutter": "hold"},
+               "series": {"count": 3, "interval_s": 0.6}}
+        s = run_inline({"s": ser})["studies"]["s"]
+    finally:
+        (bdir / "sim_time_scale").unlink()
+    ts = [p["t_start"] for p in s["spectra"]]
+    assert ts[1] - ts[0] < 0.85, ts                          # not the open wait + the first spectrum
+    assert s["spectra"][0]["shutter_hold_after"]["held"] == "yes" and s["shutter_hold"]["open_wait_s"] == 5
+    prof["lasers"][lk].update(hold_open_s=None)
+    P.save(prof)
+    # the beam lost after earlier spectra had it
+    x = np.linspace(-200, 800, 800)
+    nm = 1e7 / (1e7 / 532.0 - x)
+
+    def rec(k, scale):
+        y = 300 + scale * (100 * np.exp(-0.5 * (x / 3) ** 2) + 50 * np.exp(-0.5 * ((x - 520.7) / 3) ** 2))
+        return {"point": k, "_sp": {"x": nm, "y": y, "meta": {"x_unit": "nm"}}}
+    ex = runner.screen_points([rec(0, 1.0), rec(1, 1.0), rec(2, 0.03), rec(3, 0.03), rec(4, 0.03)], 532.0, "series")
+    assert sorted(ex) == [2, 3, 4] and all("went off" in w for w in ex.values()), ex
+    ex = runner.screen_points([rec(0, 0.03), rec(1, 1.0), rec(2, 1.0)], 532.0, "series")
+    assert list(ex) == [0] and "not on yet" in ex[0]
+
+
+def test_corrections_by_placement_one_centre_cleared_and_unconfirmed_hops():
+    """2026-11-24: +2.09 stored for 676.75 nm was measured with LabSpec placing a range's window (data on the CCD
+    edge): such a correction now serves only studies acquired the same way (range_placement 'labspec'), and one
+    window's correction can be cleared (references clear correction 637.75@1200@676.75). A laser-line step with no
+    Raman peak to confirm it is applied only over 5 cm-1, flagged unconfirmed."""
+    from labspec_translator import xcal
+    xcal.clear()
+    xcal.store(637.75, 1200, -0.01, 1.0, "si", [], centre_nm=650.19, placement="centred")
+    xcal.store(637.75, 1200, 2.09, 1.0, "si", [], centre_nm=676.75, placement="labspec")
+    assert xcal.get(637.75, 1200, 676.0, "centred")["a"] == -0.01           # the centred one, far
+    assert xcal.get(637.75, 1200, 676.0, "labspec")["a"] == 2.09
+    assert xcal.get(637.75, 1200, None, "centred")["a"] == -0.01
+    assert api.references_clear("correction", "637.75@1200@676.75")["cleared"] == 1
+    assert list(xcal.load()["637.75@1200"]["by_centre"]) == ["650.19"]
+    xcal.clear()
+    # a hop without Raman peaks to confirm it: applied, flagged
+    bdir = config.active_bridge_dir()
+    sim = S.ensure(bdir)
+    (bdir / "sim_laser_line").write_text("1")
+    (bdir / "sim_shift_after_first").write_text("1")
+    sim._shift_armed = False
+    st = {"kind": "spectrum", "sample": {"name": "Si"}, "setup": dict(SETUP, grating=600), "points": [{}] * 3,
+          "acquire": {"center_cm1": 250, "exposure_s": 1, "laser_reference": "correct"}}
+    s = run_inline({"s": st})["studies"]["s"]
+    pl = s["checks"]["zero_correction"]["plateaus"]
+    assert pl[1]["applied"] and pl[1].get("unconfirmed") and any("unconfirmed" in w for w in s["warnings"]), pl
+    (bdir / "sim_shift_after_first").unlink()
+
+
+
+def test_spectra_after_a_hop_that_are_not_single_mode_are_kept_out():
+    """2026-11-24: after real hops (-7.8, -9.4 cm-1, confirmed by Si) the 637.75 nm laser was multimode: Si 6.1 ->
+    13-26 cm-1 wide, counts 171 -> 51-63, corrected Si 521.4-525.0. Such spectra are kept out of the summaries and
+    the study is unreliable, rather than 'corrected'."""
+    bdir = config.active_bridge_dir()
+    sim = S.ensure(bdir)
+    (bdir / "sim_laser_line").write_text("1")
+    (bdir / "sim_shift_after_first").write_text("1")
+    (bdir / "sim_multimode_after_hop").write_text("1")
+    sim._shift_armed = False
+    st = {"kind": "series", "sample": {"name": "Si"}, "setup": dict(SETUP, grating=600),
+          "acquire": {"center_cm1": 250, "exposure_s": 1, "laser_reference": "correct"},
+          "series": {"count": 3, "interval_s": 0}, "process": {"peaks": [{"name": "Si", "near_cm1": 520.7, "window_cm1": 40}]}}
+    s = run_inline({"s": st})["studies"]["s"]
+    assert not s["reliable"] and any("not single-mode" in u for u in s["unreliable_because"]), s["unreliable_because"]
+    assert set(s["checks"]["excluded_points"]) == {"1", "2"}
+    for f in ("sim_shift_after_first", "sim_multimode_after_hop"):
+        (bdir / f).unlink()

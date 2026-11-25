@@ -32,7 +32,7 @@
   ls6t profile ini [OLConfig.ini]    what LabSpec's own configuration says (cameras, objectives, motors)
   ls6t alignment status              per laser: baseline, last check, age
   ls6t spot status | forget [--objective O --laser NM]   the beam's remembered offsets
-  ls6t references show | clear correction [LASER@GRATING] | clear background NAME
+  ls6t references show | clear correction [LASER@GRATING[@CENTRE_NM]] | clear background NAME
                                      spectral corrections, white-light backgrounds, beam offsets, alignment
   ls6t alignment record REQUEST [--study NAME] [--attempt N]
                                      after a successful AutoAlignment: the check becomes the laser's baseline
@@ -303,7 +303,7 @@ def main(argv=None) -> int:
             _print(api.references())
         else:
             if not a.what:
-                ap.error("references clear needs: correction [LASER@GRATING] | background NAME | spot")
+                ap.error("references clear needs: correction [LASER@GRATING[@CENTRE_NM]] | background NAME | spot")
             _print(api.references_clear(a.what, a.name))
     elif a.cmd == "spot":
         _print(api.spot_status() if a.action == "status" else api.spot_forget(a.objective, a.laser))

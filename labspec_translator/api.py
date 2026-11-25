@@ -407,7 +407,17 @@ def bridge_mismatch(ping: dict) -> str | None:
     return None
 
 
+BUSY_OK = ("status", "last_error", "laser_off", "resume", "end_bridge", "autocal_info")
+
+
 def _instrument(action, camera, setup, seconds, um=None) -> dict:
+    # While a request runs, only reads and safety commands: any other bridge command (camera, calibration read,
+    # snapshot...) makes the bridge let a held laser shutter go in the middle of the request's spectra (2026-11-24:
+    # the light went off 53 s into a held series; the shutter's read-back after every spectrum now says why)
+    lock = runner.read_json(runner.lock_path(), None)
+    if lock and action not in BUSY_OK:
+        return {"ok": False, "error": f"the instrument is busy with {lock.get('request')}: only status, last_error, "
+                                      "laser_off and resume while it runs; wait or cancel it"}
     b = Bridge()
     if config.mode() == "sim":
         from . import sim as S
@@ -1886,7 +1896,10 @@ def references_clear(what: str, name: str | None = None) -> dict:
     from . import xcal
     if what == "correction":
         if name:
-            las, gr = name.split("@")
+            parts = name.split("@")
+            if len(parts) == 3:          # laser@grating@centre_nm: that window's correction only
+                return {"cleared": xcal.clear_centre(float(parts[0]), float(parts[1]), float(parts[2]))}
+            las, gr = parts
             return {"cleared": xcal.clear(float(las), float(gr))}
         return {"cleared": xcal.clear()}
     if what == "background":

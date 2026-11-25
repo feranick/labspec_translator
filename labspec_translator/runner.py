@@ -137,6 +137,7 @@ LASER_JUMP_CM1 = 1.5     # the laser line moving more than this between spectra:
 ZERO_JUMP_CM1 = 3.0      # followed, but more than this: the corrected zero is uncertain (about 1 cm-1 left)
 WEAK_POINT_FRAC = 0.2    # a spectrum whose signal is under this fraction of the study's median: kept out
 FOLLOW_MIN_CM1 = 3.0     # 'correct' applies a laser-line step only above this (and with the Raman peaks moving too)
+UNCONFIRMED_MIN_CM1 = 5.0    # with no Raman peak to confirm it, only a step above this (flagged unconfirmed)
 LASER_LINE_MAX_WIDTH = 2.0   # a calibration's laser line wider than this x its reference line: not a reference
 
 
@@ -184,23 +185,35 @@ def screen_points(per_point: list, laser, kind: str = "spectrum", warnings: list
     out: dict = {}
     have = {p_: float(l_.get("height") or 0.0) for p_, l_ in lines.items() if l_ and l_.get("ok")}
     if len(have) >= max(2, (len(per_point) + 1) // 2):
-        hmed = float(np.median(list(have.values())))
+        # the reference: the strong ones (when the beam went off for most of a study, the median of all was weak)
+        hv = list(have.values())
+        hmed = float(np.median([h for h in hv if h >= 0.5 * max(hv)])) if hv else 0.0
+        good_before = False
         for rec in per_point:
             p_ = rec["point"]
             if p_ not in spans:
                 continue
+            # 2026-11-24: points 2-4 of a held series lost the light after 0-1 had it: "went off", not "not on yet"
+            when = ("the beam went off (earlier spectra in this study had it)" if good_before
+                    else "the beam was probably not on yet")
             if p_ not in have:
-                out[p_] = "no laser line where the study's other spectra have one: the beam was probably not on"
+                out[p_] = f"no laser line where the study's other spectra have one: {when}"
             elif hmed > 0 and have[p_] < WEAK_POINT_FRAC * hmed:
-                out[p_] = (f"its laser line ({have[p_]:.1f}) is under {WEAK_POINT_FRAC:.0%} of the study's median "
-                           f"({hmed:.1f}): the beam was probably not on yet")
+                out[p_] = (f"its laser line ({have[p_]:.1f}) is under {WEAK_POINT_FRAC:.0%} of the study's strong spectra (median) "
+                           f"({hmed:.1f}): {when}")
+            else:
+                good_before = True
         return out
-    med = float(np.median(list(spans.values()))) if spans else 0.0
+    sv = list(spans.values())
+    med = float(np.median([v for v in sv if v >= 0.5 * max(sv)])) if sv else 0.0
     weak = {p_: v for p_, v in spans.items() if med > 0 and v < WEAK_POINT_FRAC * med}
     if kind in ("spectrum", "series"):
+        first_good = min((p_ for p_ in spans if p_ not in weak), default=None)
         for p_, v in weak.items():
-            out[p_] = (f"its signal ({v:.1f} above its level) is under {WEAK_POINT_FRAC:.0%} of the study's median "
-                       f"({med:.1f}): the beam was probably not on yet")
+            out[p_] = (f"its signal ({v:.1f} above its level) is under {WEAK_POINT_FRAC:.0%} of the study's strong spectra (median) "
+                       f"({med:.1f}): " + ("the beam went off (earlier spectra in this study had it)"
+                                           if first_good is not None and p_ > first_good
+                                           else "the beam was probably not on yet"))
     elif 0 in weak and warnings is not None:
         warnings.append(f"point 0's signal is under {WEAK_POINT_FRAC:.0%} of the map's median: off the sample, or the "
                         "beam not yet on (put the laser line in the window to tell)")
@@ -448,6 +461,7 @@ class Ctx:
             params.setdefault("ae_off", ae_off(self.prof))
             if self.holding:
                 params.setdefault("settle_s", 0.0)       # the shutter is held open: no pause needed
+                params["held_expected"] = 1              # the bridge reads the hold back after it, or says it is gone
             # a pause after the previous spectrum (TESTING T3.21: the spectra after the first in a request were
             # shifted and broadened)
             params.setdefault("settle_s", plan.settle_s(self.prof, self.optics[0]))
@@ -467,7 +481,9 @@ class Ctx:
             raise Stop(self._held_warning(str(exc)), "timeout") from exc
         self.beat()
         self._log(f"<- {verb} ok={int(bool(r.get('ok')))} {r.get('seconds', '')} s"
-                  + "".join(f" {k}={r[k]}" for k in ("id", "mapex_return", "map_create_return", "view")
+                  + "".join(f" {k}={r[k]}" for k in ("id", "mapex_return", "map_create_return", "view",
+                                                       "hold_after_acq_held", "hold_after_acq_shutter_mode",
+                                                       "hold_after_acq_shutter_label", "max_counts")
                             if r.get(k) not in (None, ""))
                   + (f" error={r.get('error')}" if r.get("error") else ""))
         if self.holding and (verb not in HOLD_VERBS or laser_off or (verb == "shutter_hold" and params.get("state") == "off")):
@@ -861,6 +877,13 @@ def _setup(name: str, study: dict, ctx: Ctx, warnings: list, unreliable: list, c
             # once more, after selecting the laser again, then stop: a study on the wrong grating is wrong
             # (2026-11-23: after a scripted visit to 785 nm LabSpec kept refusing 2400 (its range ends at 690 nm) and
             # took 1800, also once back on 637.75 nm; selecting 2400 by hand cleared it)
+            if ctx.holding:
+                # a laser is selected again (maybe through another one): never with the shutter held open
+                # (2026-11-24: the 2400 retry reselected the laser while the 637.75's hold went on)
+                ctx.holding = False
+                rr = ctx.call("shutter_hold", timeout_s=30, state="off")
+                ctx.hold_log.append({"released": bool(rr.get("ok")), "by": "laser reselect (grating retry)"})
+            readback[-1]["retried"] = True          # superseded by the retry below: checks.setup goes by that one
             r, tried = retry_grating(ctx.call, prof, dict(p, **move_extra(prof, p["motor"], asked_here)), step["value"])
             ok, got = _matches(step, r)
             readback.append({"motor": step["motor"], "asked": step["value"], "got": r.get("label") or r.get("value"),
@@ -901,7 +924,7 @@ def _setup(name: str, study: dict, ctx: Ctx, warnings: list, unreliable: list, c
         warnings.append("the detector temperature could not be read")
     elif temp > prof["detector"]["max_temp_c"]:
         unreliable.append(f"detector at {temp:g} C, warmer than {prof['detector']['max_temp_c']:g} C: let it cool")
-    checks["setup"] = {"pass": all(r["ok"] for r in readback), "moves": readback}
+    checks["setup"] = {"pass": all(r["ok"] or r.get("retried") for r in readback), "moves": readback}
     rng = plan.acq_range(study, prof, laser)
     if rng.get("from_nm") is None:
         raise Stop("the laser line is unknown: give setup.laser_nm", "study")
@@ -1285,6 +1308,10 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
                 params["remark"] = str(study["sample"]["notes"])[:200]     # LabSpec's Remark, after "ls6t <seq>"
             if native and kind != "map":             # series too (2026-11-23: no .l6s for series spectra)
                 params["native"] = str(sd / "spectra" / f"p{k:05d}.l6s")
+            if ctx.hold_wanted and not ctx.holding and str(params.get("laser_off", "0")) != "1":
+                # the hold (and its open wait: the laser settling) before this spectrum's clock starts: on .13 the
+                # 5 s wait sat inside point 0's call, so point 0's t_start came 5 s early and the first gap read 8.3 s
+                ctx._hold_on()
             t_a = time.time()
             t_last_start = t_a
             r = ctx.call("acquire", timeout_s=_acq_timeout(study, prof, rng), **params)
@@ -1301,8 +1328,22 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
                    "exposure_s": _f(r.get("exposure_s")), "accumulations": _f(r.get("accumulations")),
                    "detector_temp_c": _f(r.get("detector_temp_c")), "ics": ctx.last_ics,
                    "auto_exposure": ae_record(r), "optics_check": optics_record(r), "t_start": t_sent,
+                   **({"shutter_hold_after": {"held": r.get("hold_after_acq_held"),
+                                              "shutter_mode": r.get("hold_after_acq_shutter_mode"),
+                                              "shutter_label": r.get("hold_after_acq_shutter_label"),
+                                              **({"last_release": r["hold_after_acq_last_release"]}
+                                                 if r.get("hold_after_acq_last_release") else {})}}
+                      if r.get("hold_after_acq_held") not in (None, "") else {}),
                    **({"settled_s": _f(r.get("settled_s"))} if r.get("settled_s") not in (None, "") else {})}
             per_point.append(rec)
+            if r.get("hold_after_acq_held") == "no" and not any("shutter hold was lost" in w for w in warnings):
+                warnings.append(f"the shutter hold was lost at point {k}: LabSpec read ShutterMode "
+                                f"{r.get('hold_after_acq_shutter_mode')}, the shutter '"
+                                f"{r.get('hold_after_acq_shutter_label')}' after it (spectra[].shutter_hold_after)")
+            elif r.get("hold_after_acq_held") == "not held" and not any("let the hold go" in w for w in warnings):
+                warnings.append(f"at point {k} the bridge had let the hold go ({r.get('hold_after_acq_last_release')}):"
+                                " LabSpec opened and closed the shutter itself from there")
+                ctx.holding = False
             # live view in LabSpec: the map or the series grows as it is measured (off by default: display.live_view).
             # The view keeps the shutter hold (2026-11-24: releasing it at each view made the 637.75 nm laser hop at
             # every point); display.live_view_while_held false makes the views after the last spectrum instead
@@ -3141,7 +3182,8 @@ def grating_guard(prof: dict, study: dict, after: dict, laser, rng: dict, path, 
     res = plan.grating_window_check(sp["x"], sp["meta"].get("x_unit", "nm"), laser, grating, prof, rng)
     if acq_res and acq_res.get("spectro_asked_nm") not in (None, "") and acq_res.get("spectro_nm") not in (None, ""):
         a, g = float(acq_res["spectro_asked_nm"]), float(acq_res["spectro_nm"])
-        res["spectro_nm"] = {"asked": a, "got": g}
+        res["spectro_nm"] = {"asked": a, "got": g, **({"first_got": _f(acq_res.get("spectro_first_nm")), "retried": True}
+                                                      if str(acq_res.get("spectro_retried")) == "1" else {})}
         if abs(a - g) > 1.0:
             res["stop"].append(f"the spectrometer reads {g:.2f} nm after being sent to {a:.2f} nm")
             res["ok"] = False
@@ -3281,10 +3323,19 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
     if not rng.get("single", True):
         checks["window_centre"] = {"nm": wc, "from": wc_from,
                                    "range_centre_nm": plan.window_centre(rng)}
-    corr = xcal.get(laser, grating, wc) if kind != "calibration" else None
+    placement = "labspec" if (not rng.get("single", True)) else "centred"
+    corr = xcal.get(laser, grating, wc, placement) if kind != "calibration" else None
     if kind != "calibration" and laser:
         zs = zero_state(laser, grating, prof)
         checks["zero"] = zs
+        if corr:
+            # (2026-11-24: checks.zero showed the last calibration stored, -2.09 @ 676.75 nm, while the correction
+            # used was -0.01 @ 650.19): the one applied here, and what the rest is
+            zs = checks["zero"] = dict(zs, correction_used={k: corr.get(k) for k in (
+                "a", "b", "time", "centre_nm", "interpolated_between_nm", "centre_far", "laser_line_cm1", "placement")
+                if corr.get(k) is not None},
+                note="offset_cm1 is this laser and grating's last calibration check (any window); "
+                     "correction_used is the one applied to these spectra")
         tol0 = float(prof["checks"]["si_tol_cm1"])
         if not corr and zs.get("offset_cm1") is not None and abs(float(zs["offset_cm1"])) > tol0:
             warnings.append(f"the last calibration check for {combo(laser, grating)} ({zs['time']}) found the "
@@ -3482,12 +3533,21 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
                        "filter moves more than the Raman lines)")
             elif dpk is not None and abs(dpk - d_) > max(0.5 * abs(d_), 1.0):
                 why = f"the Raman peaks moved {dpk:+.2f} cm-1, not {d_:+.2f}: not a hop"
+            elif dpk is None and abs(d_) <= UNCONFIRMED_MIN_CM1:
+                # a sample without sharp Raman peaks cannot confirm it (Nicola, 2026-11-24): only a large step
+                why = (f"{d_:+.2f} cm-1 and no Raman peak to confirm it (process.peaks): only a step over "
+                       f"{UNCONFIRMED_MIN_CM1:g} cm-1 is applied unconfirmed")
             for pt, _ in pl:
                 plateau_step[pt] = 0.0 if why else d_
             plateau_report.append({"points": [pt for pt, _ in pl], "laser_line_cm1": round(med, 3),
                                    "drift_cm1": round(pl[-1][1] - pl[0][1], 3), "step_cm1": round(d_, 3),
                                    "raman_moved_cm1": None if dpk is None else round(dpk, 3),
-                                   "applied": why is None, **({"not_applied_because": why} if why else {})})
+                                   "applied": why is None, **({"not_applied_because": why} if why else {}),
+                                   **({"unconfirmed": True} if why is None and dpk is None else {})})
+            if why is None and dpk is None:
+                warnings.append(f"zero: a laser-line step of {d_:+.1f} cm-1 (points {pl[0][0]}-{pl[-1][0]}) was applied "
+                                "without Raman peaks to confirm it (unconfirmed: a hop, or a bad fit of the laser "
+                                "line)")
         for pt, idx_ in ll_bad_idx.items():
             if idx_ < len(plateaus) and plateaus[idx_]:
                 plateau_step[pt] = plateau_step.get(plateaus[idx_][0][0], 0.0)
@@ -3580,6 +3640,49 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
                           {"x_unit": "1/cm", "y_unit": sp["meta"].get("y_unit", "cnt"), "laser_nm": laser,
                            "ics": rec.get("ics") or "unknown"})
     n = len(per_point)
+    # After a laser mode hop the 637.75 nm laser was not single-mode (2026-11-24: Si 6.1 -> 13-26 cm-1 wide, counts 171 ->
+    # 51-63, corrected Si 521.4-525.0): following the laser line cannot fix that. A spectrum after a hop whose Raman
+    # line is over 1.5 x as wide as before the hop, or under half as strong, is kept out of the summaries.
+    if len(plateaus) > 1:
+        recs_ = {r_["point"]: r_ for r_ in per_point}
+        first_pts = {pt for pt, _ in plateaus[0]} | {pt for pt, i_ in ll_bad_idx.items() if i_ == 0}
+        after_pts = [pt for pl in plateaus[1:] for pt, _ in pl] + [pt for pt, i_ in ll_bad_idx.items() if i_ >= 1]
+        ref_w: dict = {}
+        ref_h: dict = {}
+        for pt in first_pts:
+            for pk in (recs_.get(pt) or {}).get("peaks") or []:
+                if pk.get("ok") and pk.get("name"):
+                    ref_w.setdefault(pk["name"], []).append(float(pk.get("fwhm_cm1") or 0))
+                    ref_h.setdefault(pk["name"], []).append(float(pk.get("height") or 0))
+        ref_w = {k_: float(np.median(v_)) for k_, v_ in ref_w.items() if v_}
+        ref_h = {k_: float(np.median(v_)) for k_, v_ in ref_h.items() if v_}
+        multimode = []
+        for pt in sorted(after_pts):
+            r_ = recs_.get(pt)
+            if not r_ or r_.get("excluded"):
+                continue
+            why_ = []
+            for pk in r_.get("peaks") or []:
+                nm_ = pk.get("name")
+                if nm_ in ref_w and not pk.get("ok"):
+                    why_.append(f"{nm_} could not be fitted (it was before the hop)")
+                    continue
+                if not (pk.get("ok") and nm_ in ref_w):
+                    continue
+                if ref_w[nm_] and float(pk.get("fwhm_cm1") or 0) > 1.5 * ref_w[nm_]:
+                    why_.append(f"{nm_} {float(pk['fwhm_cm1']):.1f} cm-1 wide ({float(pk['fwhm_cm1']) / ref_w[nm_]:.1f} x "
+                                "before the hop)")
+                if ref_h.get(nm_) and float(pk.get("height") or 0) < 0.5 * ref_h[nm_]:
+                    why_.append(f"{nm_} at {float(pk.get('height') or 0) / ref_h[nm_]:.0%} of its height before the hop")
+            if why_:
+                r_["excluded"] = ("after a laser mode hop the laser is not in a clean single mode: " + "; ".join(why_)
+                                  + " (a pause between spectra, the laser's settle_s, prevents the hop)")
+                excluded[pt] = r_["excluded"]
+                multimode.append(pt)
+        if multimode:
+            unreliable.append(f"{len(multimode)} spectra after a laser mode hop are not single-mode (points "
+                              f"{', '.join(map(str, multimode[:10]))}): kept out of the summaries; settle_s or "
+                              "acquire.shutter 'hold' avoids the hop")
     checks["saturation"] = {"pass": not sat_points, "points": sat_points[:50], "full_scale": fs, "threshold": fs * frac}
     if sat_points:
         unreliable.append(f"saturated in {len(sat_points)} of {n} spectra: choose a stronger filter or a shorter "
@@ -3607,10 +3710,12 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
         got_ = next((r for r in per_point if r["point"] in cover_short), {})
         warnings.append(f"{len(cover_short)} spectra do not cover the whole range asked for (point {got_.get('point')}: "
                         f"{got_.get('from_cm1')} to {got_.get('to_cm1')} cm-1 for {rng.get('from_cm1')} to "
-                        f"{rng.get('to_cm1')})" + (f"; LabSpec placed the window itself (centre {wc:g} nm): ask a "
-                                                    "slightly wider range_cm1, or center_cm1 for one window centred "
-                                                    "where ls6t puts it" if wc is not None and rng.get("windows") == 1
-                                                    else ""))
+                        f"{rng.get('to_cm1')})" + (
+                            "; the zero correction moved the axis (the cut is made before it): ask a slightly wider "
+                            "range_cm1" if rng.get("crop_cm1") else
+                            f"; LabSpec placed the window itself (centre {wc:g} nm): ask a slightly wider range_cm1, "
+                            "or center_cm1 for one window centred where ls6t puts it"
+                            if wc is not None and rng.get("windows") == 1 else ""))
     weak = [r["point"] for r in per_point for pk in r.get("peaks", [])
             if pk.get("ok") and pk.get("snr") is not None and pk["snr"] < min_snr]
     failed = [r["point"] for r in per_point for pk in r.get("peaks", [])
@@ -3635,7 +3740,7 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
                         f"{', '.join(map(str, list(excluded)[:10]))}): "
                         + "; ".join(f"{p_}: {w_}" for p_, w_ in list(excluded.items())[:3]))
         if len(excluded) > max(1, len(per_point) // 10):
-            unreliable.append(f"{len(excluded)} of {len(per_point)} spectra are weak or lack the laser line "
+            unreliable.append(f"{len(excluded)} of {len(per_point)} spectra are kept out of the summaries "
                               "(checks.excluded_points)")
     followed = any(r.get("laser_line_correction_cm1") is not None for r in per_point)
     # after a hop the laser line sits deeper in the edge filter (clipped) and may be multimode: following it left
@@ -3689,8 +3794,10 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
         warnings.append(f"zero uncertain at {len(uncertain)} spectra (points {', '.join(map(str, uncertain[:10]))}): "
                         "the laser line jumped or broadened; positions there may be off by about a cm-1 even after "
                         "following it")
-    if ll_mode == "correct" and len(lls) < len(per_point):
-        miss = [r["point"] for r in per_point if not (r.get("laser_line") or {}).get("ok")]
+    miss = [r["point"] for r in per_point if not (r.get("laser_line") or {}).get("ok") and r["point"] not in excluded]
+    if ll_mode == "correct" and miss:
+        # (2026-11-24: 'no laser line was found in spectra :' with an empty list, when every spectrum after the
+        # first had a bad laser-line fit: those have a line, it is not used)
         unreliable.append(f"acquire.laser_reference 'correct', but no laser line was found in spectra "
                           f"{', '.join(map(str, miss[:10]))}: the window must include about -15 to +15 cm-1 "
                           "(those spectra are not corrected)")
@@ -3906,7 +4013,8 @@ def _calibration_result(study, prof, rec, ref_lines, laser, grating, rng, reques
             llc = {}
         st = xcal.store(laser, grating, a, b, refname, lines, request, centre_nm=wc,
                         laser_line_cm1=llc.get("position_cm1") if llc.get("ok") else None,
-                        laser_line_fwhm_cm1=llc.get("fwhm_cm1") if llc.get("ok") else None)
+                        laser_line_fwhm_cm1=llc.get("fwhm_cm1") if llc.get("ok") else None,
+                        placement="labspec" if not rng.get("single", True) else "centred")
         res["stored_correction"] = st
         warnings.append(f"ls6t now corrects later spectra ({xcal.key(laser, grating)}): true = {a:+.3f} + "
                         f"{b:.6f} x measured")
@@ -4052,9 +4160,10 @@ def _point_summary(r: dict) -> dict:
             "saturated", "noise_sigma", "spikes", "spike_cm1", "spike_info", "from_cm1", "to_cm1", "peaks", "bands",
             "x_correction", "laser_line_correction_cm1", "zero_uncertain", "excluded",
             "background",
-            "ics", "auto_exposure", "optics_check", "t_start")
+            "ics", "auto_exposure", "optics_check", "t_start", "shutter_hold_after")
     return {k: r.get(k) for k in keys if k not in ("auto_exposure", "optics_check", "t_start",
-                                                    "laser_line_correction_cm1", "zero_uncertain", "excluded")
+                                                    "laser_line_correction_cm1", "zero_uncertain", "excluded",
+                                                    "shutter_hold_after")
             or r.get(k) is not None}
 
 

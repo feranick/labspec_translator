@@ -49,16 +49,27 @@ def _save(d: dict):
 CENTRE_TOL_NM = 1.0     # a correction measured within this of a window's centre applies as it is
 
 
-def get(laser_nm, grating, centre_nm=None) -> dict | None:
+def _usable(rec: dict, placement: str | None) -> bool:
+    """A correction measured with LabSpec placing a range's window (its blue edge at From, the data on the CCD's edge:
+    -2.09 cm-1 off at 676.75 nm, 2026-11-24) serves only studies acquired the same way."""
+    return rec.get("placement") != "labspec" or placement == "labspec"
+
+
+def get(laser_nm, grating, centre_nm=None, placement: str | None = None) -> dict | None:
     """The correction for this laser and grating, for a window centred at centre_nm: the one measured there, or
     interpolated between the two around it, or the nearest (then 'centre_far': the zero differs between windows:
     1.7 cm-1 between two windows a minute apart, 2026-11-24). Without a centre, the last one measured."""
     rec = load().get(key(laser_nm, grating))
     if not rec:
         return None
-    by = rec.get("by_centre") or {}
+    by = {k: v for k, v in (rec.get("by_centre") or {}).items() if _usable(v, placement)}
+    if rec.get("by_centre") and not by:
+        return None
     if centre_nm is None or not by:
-        out = {k: v for k, v in rec.items() if k != "by_centre"}
+        top = sorted(by.values(), key=lambda v: v.get("time") or "")[-1] if by else rec   # the last usable one
+        if not by and not _usable(rec, placement):
+            return None
+        out = {k: v for k, v in top.items() if k != "by_centre"}
         if by or centre_nm is not None:
             out["centre_unknown"] = True
         return out
@@ -84,7 +95,7 @@ def get(laser_nm, grating, centre_nm=None) -> dict | None:
 
 
 def store(laser_nm, grating, a: float, b: float, reference: str, lines: list, request: str | None = None,
-          centre_nm=None, laser_line_cm1=None, laser_line_fwhm_cm1=None) -> dict:
+          centre_nm=None, laser_line_cm1=None, laser_line_fwhm_cm1=None, placement: str | None = None) -> dict:
     """Keeps the correction per window centre (2026-11-24: two Si calibrations a minute apart, in two windows, gave
     -0.72 and -2.40 cm-1: each had overwritten the other)."""
     d = load()
@@ -93,6 +104,8 @@ def store(laser_nm, grating, a: float, b: float, reference: str, lines: list, re
            "time": time.strftime("%Y-%m-%dT%H:%M:%S"), "request": request}
     if centre_nm is not None:
         rec["centre_nm"] = round(float(centre_nm), 2)
+    if placement:
+        rec["placement"] = placement          # centred (ls6t placed the window) or labspec (LabSpec placed a range)
     if laser_line_cm1 is not None:
         # where the laser line sat when this was measured: a later spectrum is brought back to it before the
         # correction applies (laser_reference 'correct'), so the laser's move is not counted twice
@@ -105,6 +118,28 @@ def store(laser_nm, grating, a: float, b: float, reference: str, lines: list, re
     d[k] = dict(rec, **({"by_centre": by} if by else {}))
     _save(d)
     return rec
+
+
+def clear_centre(laser_nm, grating, centre_nm) -> int:
+    """One window centre's correction (within CENTRE_TOL_NM) out of laser@grating; the others stay."""
+    d = load()
+    k = key(laser_nm, grating)
+    rec = d.get(k)
+    if not rec:
+        return 0
+    by = dict(rec.get("by_centre") or {})
+    gone = [c for c in by if abs(float(c) - float(centre_nm)) <= CENTRE_TOL_NM]
+    for c in gone:
+        by.pop(c)
+    if not gone:
+        return 0
+    if by:
+        last = max(by.values(), key=lambda v: v.get("time") or "")
+        d[k] = dict(last, by_centre=by)
+    else:
+        d.pop(k)
+    _save(d)
+    return len(gone)
 
 
 def clear(laser_nm=None, grating=None) -> int:

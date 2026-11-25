@@ -1004,6 +1004,16 @@ and `zero_correction.plateaus` shows each step and whether it was applied; a cal
 (600: 19.4 cm⁻¹) is not kept as a reference. **Tests:** −100…700 range: Si within 0.1 of a centred window, no
 correction needed; the 600 series with `correct`: `applied` false, Si ≈ 520.5; `native_map.seconds_map` ≈ the map's
 time.
+**Evening on .13 (2026-11-24):** centred ranges, broad-line rejection, hop-only `correct` and the hold across studies
+passed. A held 600 series lost the light ~53 s after the shutter opened (points 2–4; not reproduced twice). **From
+2026.11.24.15** every held spectrum reads ShutterMode and the shutter back (`spectra[].shutter_hold_after`, runner.log):
+a repeat tells a closed shutter from a laser that dropped; other `instrument` actions are refused while a request runs
+(they made the bridge let the hold go). Real hops (shutter auto, settle_s 0) were detected and confirmed, but the laser
+was multimode afterwards (Si 13–26 cm⁻¹ wide): such spectra are now kept out and the study unreliable. **Tests:** the
+same 600 held series (`shutter_hold_after` on every point); the hop series with settle_s 0 (points after the hop
+excluded, "not single-mode"); 785 at 300 cm⁻¹ right after a laser change (`checks.grating_window.spectro_nm.retried`);
+637.75@2400 after 785 (`checks.setup.pass` true after the retry, `shutter_hold.log` shows the release before the
+reselect).
 **Native map on .24.9, safety (3 × 3, 2 µm, 637.75 / 1200 / 1 %, 1 s × 2):** the map held the bridge about a minute
 (LabSpec's own map acquisition); ls6t called the bridge gone after 20 s ("busy in map_native"), and the shutter release
 it then sent was withdrawn from the bridge's queue, so the shutter stayed held open (laser_shutter On, ShutterMode 1,

@@ -1509,6 +1509,23 @@ Sub VAcquireInner(cmd, res)
         res("t_motors_after_s") = Secs(Elapsed(tp))
         res("spectro_asked_nm") = f
         res("spectro_nm") = MotorValue(spm)
+        ' sent once more when it did not arrive (2026-11-24: 805.59 nm read after 803.97 was sent, right after a
+        ' change to the 785 nm laser), as the grating is
+        If IsNumeric(res("spectro_nm")) And res("spectro_nm") <> "" Then
+            If Abs(CDbl(res("spectro_nm")) - f) > 1 Then
+                res("spectro_first_nm") = res("spectro_nm")
+                gBlocking = spm
+                Beat "busy", True
+                LabSpec.MoveMotor spm, f, "", LS_MOTOR_VALUE
+                gBlocking = ""
+                Beat "busy", True
+                Err.Clear
+                waitedS = WaitMotor(spm, gNoId, 120, res)
+                waitedS = WaitMotor("", 0, 120, res)
+                res("spectro_nm") = MotorValue(spm)
+                res("spectro_retried") = 1
+            End If
+        End If
         Err.Clear
     End If
     If f < 0 Then f = -f
@@ -1649,6 +1666,9 @@ Sub VAcquireInner(cmd, res)
     res("t_until_data_s") = Secs(Elapsed(tp))            ' after Acq returned, until LabSpec had the spectrum
     res("spectro_after_data") = MotorValue(mspec)
     res("grating_after_data") = MotorValue(mgr)
+    ' with the shutter held: ShutterMode and the shutter's label read back after every spectrum (2026-11-24: the
+    ' light went off 53 s into a held series and nothing said whether the shutter closed or the laser dropped)
+    If gHoldOn Or GetP(cmd, "held_expected", "0") = "1" Then HoldCheck res, "hold_after_acq"
     gLastAcqEnd = Timer
     tp = Timer
     res("id") = id
@@ -2819,6 +2839,7 @@ Sub HoldCheck(res, tag)
     Dim md, lab
     If Not gHoldOn Then
         res(tag & "_held") = "not held"
+        res(tag & "_last_release") = gHoldLastWhy       ' why the bridge let it go (asked, operator, idle, time up...)
         Exit Sub
     End If
     md = LSValue(0, "ShutterMode")

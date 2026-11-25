@@ -1089,9 +1089,11 @@ class SimLabSpec:
         xs_ = self._xshift()
         # sim_shift_after_first: every spectrum after the first since the file appeared lands 8.7 cm-1 low (the
         # XploRA, 2026-11-23: points 1-4 of a request at 512 cm-1, point 0 at 520.3)
+        hopped = False
         if (self.dir / "sim_shift_after_first").exists():
             if getattr(self, "_shift_armed", False) and not getattr(self, "held", False):
                 xs_ = (-8.7, 1.0)
+                hopped = True
             self._shift_armed = True
         if xs_:
             a_, b_ = xs_
@@ -1101,6 +1103,10 @@ class SimLabSpec:
         else:
             nm_true = nm
         rate = np.zeros_like(nm) if laser_off or self.laser_blocked else self._signal_per_s(nm_true)
+        if hopped and (self.dir / "sim_multimode_after_hop").exists():
+            # after the hop the laser is not single-mode: every Raman line broader and weaker (2026-11-24)
+            from scipy.ndimage import gaussian_filter1d
+            rate = 0.35 * gaussian_filter1d(rate, 4.0)
         rate = (rate + self._lamp(nm_true)) * self._edge(nm_true)
         if (self.dir / "sim_laser_line").exists() and not laser_off and not self.laser_blocked:
             # the laser line, leaking through the edge filter, where the laser really is; sim_laser_line_drift 'd':
@@ -1168,7 +1174,11 @@ class SimLabSpec:
                     "shutter_first_read_s": round(time.monotonic() - t_w, 3) if holds else 0.01}
                    if laser_off_asked else {}),
                 **({"spectro_asked_nm": f_nm, "spectro_nm": f_nm} if abs(t_nm - f_nm) < 1e-9 else {}),
-                "spectro_after_data": round(self._placed_centre(f_nm, t_nm), 4)}
+                "spectro_after_data": round(self._placed_centre(f_nm, t_nm), 4),
+                **({"hold_after_acq_held": "yes", "hold_after_acq_shutter_mode": 1, "hold_after_acq_shutter_label": "On"}
+                   if getattr(self, "held", False) else
+                   {"hold_after_acq_held": "not held", "hold_after_acq_last_release": getattr(self, "hold_last_why", "")}
+                   if str(p.get("held_expected", "0")) == "1" else {})}
 
     def _placed_centre(self, from_nm: float, to_nm: float) -> float:
         """Where the spectrometer is after an acquisition: From for one window; for a range LabSpec places the window
