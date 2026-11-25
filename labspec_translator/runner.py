@@ -1173,7 +1173,7 @@ LASER_MAY_BE_ON = ("THE LASER MAY STILL REACH THE SAMPLE: ls6t held the laser sh
 NO_HOLD_KINDS = ("move", "background", "cutoff")      # no laser, or the laser off on purpose
 # the bridge commands that keep the shutter held (bridge_main.vbs HOLD_VERBS)
 HOLD_VERBS = ("ping", "status", "acquire", "map_native", "guide", "move_xy", "move", "view", "remove", "save",
-              "labels", "last_error", "message", "shutter_hold")      # video and others release it
+              "labels", "last_error", "message", "shutter_hold", "paint")      # video and others release it
 
 
 def _study_laser(study: dict, ctx: Ctx):
@@ -1365,9 +1365,41 @@ def _band_said(ctx: Ctx, r: dict, tag: str, warnings: list) -> None:
     for k_ in ("set", "on"):
         if info.get(k_) not in (None, ""):
             info[k_] = int(float(info[k_]))
+    did = r.get("mapex_return") if r.get("mapex_return") not in (None, "") else r.get("id")
+    if did not in (None, "") and info.get("set") == 1:
+        info["data_id"] = int(float(did))
     ctx.live_band = info
     if info.get("set") != 1:
         warnings.append(f"the live map's band (map.live_band) was not set in LabSpec: {r.get(f'{tag}_error') or '?'}")
+
+
+def _paint_band(ctx: Ctx, sd: Path, warnings: list) -> None:
+    """The live map's spectrum display exported with its cursors (map.live_band), so where LabSpec put them can be
+    checked without the screen (Nicola, 2026-11-25): live_band.wmf, and a .png next to it where Pillow can draw
+    WMF (Windows)."""
+    lb = getattr(ctx, "live_band", None)
+    if not lb or lb.get("set") != 1 or lb.get("data_id") in (None, ""):
+        return
+    path = sd / "live_band.wmf"
+    try:
+        r = ctx.call("paint", timeout_s=30, id=lb["data_id"], path=str(path), flags=10)
+    except Stop as exc:
+        if exc.by in ("cancel", "operator"):
+            raise
+        warnings.append(f"the live map's display with its cursors was not exported: {exc.why}")
+        return
+    if not r.get("ok"):
+        lb["picture_error"] = r.get("error")
+        return
+    lb["picture"] = str(path)
+    try:
+        from PIL import Image as _Img
+        png = path.with_suffix(".png")
+        with _Img.open(path) as im:
+            im.save(png)
+        lb["picture_png"] = str(png)
+    except Exception as exc:  # noqa: BLE001 - WMF is drawn by Pillow on Windows only
+        lb["picture_png_error"] = f"{type(exc).__name__}: {exc}"
 
 
 def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
@@ -1564,8 +1596,12 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
                 params["remark"] = str(study["sample"]["notes"])[:200]     # LabSpec's Remark, after "ls6t <seq>"
             if k == 0 and grating_changed and not warmed:
                 params["spectro_force"] = 1
-            if kind == "calibration" and k > 0 and (study.get("calibration") or {}).get("repeats_move", True):
-                params["spectro_jog_nm"] = appr_ or 3.0  # re-placed: each repeat lands on the pixels afresh
+            if kind == "calibration" and (k > 0 or cal_reps) and \
+                    (study.get("calibration") or {}).get("repeats_move", True):
+                # re-placed: each repeat lands on the pixels afresh; the first repeat too (2026-11-25, 600: after
+                # the warm-up repeat 1 still kept the first approach's landing, +0.91 laser line / +1.12 Si): every
+                # repeat lands the same way, after a jog
+                params["spectro_jog_nm"] = appr_ or 3.0
             if native and kind != "map":             # series too (2026-11-23: no .l6s for series spectra)
                 params["native"] = str(sd / "spectra" / f"p{k:05d}.l6s")
             if ctx.hold_wanted and not ctx.holding and str(params.get("laser_off", "0")) != "1":
@@ -1653,6 +1689,8 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
         except Stop as exc:
             stop_exc = stop_exc or exc
 
+    if kind == "map" and stop_exc is None and not native_map:
+        _paint_band(ctx, sd, warnings)           # the live map's display with its cursors (map.live_band)
     # ---- analysis and checks
     t_an = time.time()
     _progress(sd, stage="analysing")
@@ -3807,6 +3845,10 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
             if broad:
                 warnings.append(f"the stored correction's laser line is not used as the reference ({broad}): the "
                                 "study's first laser-line plateau is")
+    elif corr and corr.get("laser_line_cm1") is not None:
+        # the correction in use: its laser line is the repeats' median (2026-11-25: reference_cm1 showed the
+        # calibration's first repeat, -3.53, while the drift was measured from the median, -4.27)
+        ll_ref, ll_ref_from = float(corr["laser_line_cm1"]), f"the stored correction's calibration ({corr['time']})"
     else:
         ll_ref = laser_line_reference(laser, grating)
         ll_ref_from = "calibration" if ll_ref is not None else None
@@ -4277,6 +4319,16 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
             else:
                 unreliable.append(msg + "; use acquire.laser_reference 'correct' with the laser line in the window")
     if kind == "series" and laser:
+        # the laser line's jitter with the spectrometer still (a series moves nothing): its own scatter, learned
+        # for the landing threshold (Nicola, 2026-11-25); successive differences, so a creep does not count
+        lls_s = [float(r_["laser_line"]["position_cm1"]) for r_ in per_point
+                 if (r_.get("laser_line") or {}).get("ok") and r_["point"] not in excluded
+                 and r_["point"] not in ll_bad]
+        if len(lls_s) >= 5 and not hop_info:
+            jit = float(np.sqrt(np.mean(np.diff(lls_s) ** 2) / 2.0))
+            checks["laser_line_jitter"] = {"sd_cm1": round(jit, 4), "spectra": len(lls_s),
+                                           "learned_as": learn_laser_line_sd(laser, grating, placement, jit,
+                                                                             "a series (the spectrometer still)")}
         zc_ = zero_creep(per_point, excluded, laser, grating, placement)
         if zc_:
             checks["zero_creep"] = zc_
@@ -4390,6 +4442,11 @@ def spectro_repeatability(prof: dict, laser, grating, placement: str = "centred"
     rp_ = sp_.get("repeatability") if isinstance(sp_.get("repeatability"), dict) else {}
     own = rp_.get(kk)
     rec = dict((store.read("spectro_repeatability.json") or {}).get(kk) or {})
+    if rec.get("zero_creep_cm1_per_min") is not None and rec.get("zero_creep_v") != CREEP_VERSION:
+        rec.pop("zero_creep_cm1_per_min")          # one series' rate from before 2026.11.25.18: not applied
+    if rec.get("laser_line_sd_cm1") is not None and rec.get("laser_line_sd_v") != LL_SD_VERSION:
+        # learned before 2026.11.25.18 from all the repeats, steps included (637.75 @ 1200: 0.353): not used
+        rec.pop("laser_line_sd_cm1")
     if placement != "labspec" and rec.get("moved_sd_cm1") is not None and \
             float(rec.get("approach_nm", 0) or 0) != float(sp_.get("approach_nm", 0) or 0):
         rec.pop("moved_sd_cm1")
@@ -4402,6 +4459,7 @@ def spectro_repeatability(prof: dict, laser, grating, placement: str = "centred"
 LANDING_K = 3.0               # a landing step: the laser line off the calibration's by this x its own scatter
 LANDING_MIN_CM1 = 0.5         # and at least this
 LL_SD_DEFAULT_CM1 = 0.2       # the laser line's own scatter until learned (637.75 @ 1200, 2026-11-25: ~0.2)
+LL_SD_VERSION = 2             # learned laser_line_sd_cm1 values from 2026.11.25.18 on (older ones are ignored)
 CREEP_CAP_CM1 = 2.0           # the zero's creep counted into the expected uncertainty, at most
 
 
@@ -4412,17 +4470,22 @@ def landing_threshold(prof: dict, laser, grating, placement: str = "centred", fa
     at least LANDING_MIN_CM1."""
     rep = spectro_repeatability(prof, laser, grating, placement) if laser else {}
     sd = rep.get("laser_line_sd_cm1")
-    src = (f"{rep.get('source')}: laser_line_sd_cm1") if sd is not None else None
+    kk_ = f"{float(laser):g}@{_f(grating) or 0:g}" + ("@labspec" if placement == "labspec" else "") if laser else ""
+    own_ = (((prof.get("spectrometer") or {}).get("repeatability") or {}).get(kk_) or {}) if laser else {}
+    src = None
+    if sd is not None:
+        src = ("profile: laser_line_sd_cm1" if isinstance(own_, dict) and own_.get("laser_line_sd_cm1") is not None
+               else f"measured: laser_line_sd_cm1 (learned from {rep.get('laser_line_sd_from') or '?'})")
     if sd is None and rep.get("still_sd_cm1"):
         # no laser-line scatter known yet: the Si line's scatter without moves stands in (Nicola, 2026-11-25: the
         # profile's still/moved values were ignored and 5 repeats with a step in them set the threshold)
         sd = rep["still_sd_cm1"]
         src = f"{rep.get('source')}: still_sd_cm1 (Si without moves, standing in for the laser line's own scatter)"
     if sd is None:
-        sd, src = ((fallback_sd, "this calibration's repeats (robust: MAD)") if fallback_sd else
-                   (LL_SD_DEFAULT_CM1, "default"))
+        sd, src = ((fallback_sd, "this calibration's repeats (the tightest 3 of them: a last resort)") if fallback_sd
+                   else (LL_SD_DEFAULT_CM1, "default"))
     return {"threshold_cm1": round(max(LANDING_MIN_CM1, LANDING_K * float(sd)), 3),
-            "laser_line_sd_cm1": round(float(sd), 3), "from": src}
+            "laser_line_sd_used_cm1": round(float(sd), 3), "from": src}
 
 
 def _rep_store_add(laser, grating, placement: str, field: str, value: float, keep: int = 5) -> float:
@@ -4606,9 +4669,36 @@ def zero_creep(per_point: list, excluded: dict, laser, grating, placement: str) 
         out["laser_line_cm1_per_min"] = round(ls_, 4)
         out["laser_line_steady"] = abs(ls_) < 0.3 * abs(slope) if slope else True
     out["significant"] = bool(tval >= 3.0 and abs(slope * span) >= 0.3)
-    if out["significant"] and out.get("laser_line_steady"):
-        out["learned"] = _rep_store_add(laser, grating, placement, "zero_creep_cm1_per_min", abs(slope))
+    # every series of a few minutes counts (Nicola, 2026-11-25: ~0.1 cm-1/min once, -0.002 over 20 min an hour
+    # later): a rate is applied only when it recurs, in 2 of the last 3 series
+    if span >= 3.0:
+        learned = learn_zero_creep(laser, grating, placement, abs(slope),
+                                   bool(out["significant"] and out.get("laser_line_steady")))
+        if learned is not None:
+            out["learned"] = learned
     return out
+
+
+CREEP_VERSION = 2       # zero-creep rates learned from 2026.11.25.18 on (a single series' rate is no longer applied)
+
+
+def learn_zero_creep(laser, grating, placement: str, rate: float, significant: bool) -> float | None:
+    """The zero's creep per laser@grating from the last 3 series: applied (zero_creep_cm1_per_min) only when 2 of
+    them found a significant creep with the laser line steady, as their median; otherwise none."""
+    rec_r = store.read("spectro_repeatability.json") or {}
+    kk = f"{float(laser):g}@{_f(grating) or 0:g}" + ("@labspec" if placement == "labspec" else "")
+    e = rec_r.setdefault(kk, {})
+    hist = list(e.get("zero_creep_history") or []) if e.get("zero_creep_v") == CREEP_VERSION else []
+    hist = (hist + [{"rate": round(float(rate), 4), "significant": bool(significant),
+                     "time": time.strftime("%Y-%m-%dT%H:%M:%S")}])[-3:]
+    sig = [h["rate"] for h in hist if h["significant"]]
+    e.update(zero_creep_history=hist, zero_creep_v=CREEP_VERSION)
+    if len(sig) >= 2:
+        e["zero_creep_cm1_per_min"] = round(float(np.median(sig)), 4)
+    else:
+        e.pop("zero_creep_cm1_per_min", None)
+    store.write("spectro_repeatability.json", rec_r)
+    return e.get("zero_creep_cm1_per_min")
 
 
 def _landing_steps(repeats: list, offs: list, prof: dict, laser, grating, placement: str) -> dict:
@@ -4628,7 +4718,7 @@ def _landing_steps(repeats: list, offs: list, prof: dict, laser, grating, placem
     med = float(np.median(have))
     # the spread from the median absolute deviation: one step in five repeats must not raise the threshold enough
     # to hide itself (Nicola, 2026-11-25, 1200: SD 0.35 with the step in it; the step -0.59 not followed)
-    sd_own = _mad_sd(have)
+    sd_own = _tight_sd(have)
     thr = landing_threshold(prof, laser, grating, placement, fallback_sd=max(sd_own, 0.05))
     t_ = float(thr["threshold_cm1"])
     ov = [o for o in offs if o is not None]
@@ -4650,16 +4740,40 @@ def _landing_steps(repeats: list, offs: list, prof: dict, laser, grating, placem
             quiet.append(l_)
             steps.append({"repeat": i + 1, "laser_line_step_cm1": round(d, 3), "raman_moved_cm1": round(dpk, 3),
                           "followed": False, "why": "the Raman lines did not move with it"})
+    q_sd = float(np.std(quiet, ddof=1)) if len(quiet) >= 3 else None
     return {"offs_eff": eff, "steps": steps, "laser_line_median_cm1": round(med, 3), "threshold": thr,
-            "ll_sd": round(_mad_sd(quiet), 4) if len(quiet) >= 3 else None, "n_quiet": len(quiet)}
+            # the scatter of the repeats without steps (what a later threshold may learn), not the one used above
+            "laser_line_sd_quiet_cm1": round(q_sd, 4) if q_sd is not None else None, "n_quiet": len(quiet),
+            "ll_sd": round(q_sd, 4) if q_sd is not None else None}
 
 
-def _mad_sd(v: list) -> float:
-    """A robust SD: 1.4826 x the median absolute deviation from the median."""
-    a = np.asarray(v, float)
-    if a.size < 2:
-        return 0.0
-    return float(1.4826 * np.median(np.abs(a - np.median(a))))
+def _tight_sd(v: list) -> float:
+    """The scatter of the tightest ~60 % of the values (at least 3): with 5 repeats two may be off (Nicola,
+    2026-11-25: laser lines -3.53, -4.86, -4.27, -4.29, -4.03: SD 0.35, 1.4826 x MAD 0.36, the tightest three
+    0.14). A low estimate, used only when nothing better is known; the 0.5 cm-1 minimum and the Raman lines'
+    confirmation guard the threshold."""
+    a = np.sort(np.asarray(v, float))
+    m = max(3, int(math.ceil(0.6 * a.size)))
+    if a.size < m:
+        return float(np.std(a, ddof=1)) if a.size >= 2 else 0.0
+    best = min(range(a.size - m + 1), key=lambda i: a[i + m - 1] - a[i])
+    return float(np.std(a[best:best + m], ddof=1))
+
+
+def learn_laser_line_sd(laser, grating, placement: str, value: float, source: str, keep: int = 5) -> float:
+    """The laser line's own scatter, learned per laser@grating (LL_SD_VERSION; a history from before is dropped):
+    from series (the spectrometer still: its jitter alone) and from calibrations whose threshold did not come from
+    their own repeats."""
+    rec_r = store.read("spectro_repeatability.json") or {}
+    kk = f"{float(laser):g}@{_f(grating) or 0:g}" + ("@labspec" if placement == "labspec" else "")
+    e = rec_r.setdefault(kk, {})
+    hist = list(e.get("laser_line_sd_cm1_history") or []) if e.get("laser_line_sd_v") == LL_SD_VERSION else []
+    hist = (hist + [round(float(value), 4)])[-keep:]
+    e.update(laser_line_sd_cm1_history=hist, laser_line_sd_cm1=round(float(np.median(hist)), 4),
+             laser_line_sd_v=LL_SD_VERSION, laser_line_sd_from=source,
+             laser_line_sd_time=time.strftime("%Y-%m-%dT%H:%M:%S"))
+    store.write("spectro_repeatability.json", rec_r)
+    return e["laser_line_sd_cm1"]
 
 
 def _robust_sd(v: list) -> float:
@@ -4770,11 +4884,21 @@ def _calibration_result(study, prof, rec, ref_lines, laser, grating, rng, reques
                            "window are brought to its position: acquire.laser_reference 'anchor')"}
                 rep_info["absolute_outliers"] = stt_abs["outliers"]
             elif lst is not None:
-                rep_info["landing_steps"] = {k_: v_ for k_, v_ in lst.items() if k_ not in ("offs_eff",)}
-                if lst.get("ll_sd") is not None and lst.get("n_quiet", 0) >= 3:
-                    # learned per laser@grating: the laser line's own scatter, what a landing step must exceed
-                    _rep_store_add(laser, grating, "labspec" if lab_placed_ else "centred", "laser_line_sd_cm1",
-                                   lst["ll_sd"])
+                rep_info["landing_steps"] = {k_: v_ for k_, v_ in lst.items() if k_ not in ("offs_eff", "ll_sd")}
+                if lst.get("ll_sd") is not None and lst.get("n_quiet", 0) >= 3 and \
+                        "this calibration's repeats" not in str((lst.get("threshold") or {}).get("from")):
+                    # learned per laser@grating, but never from repeats that set their own threshold (a step left
+                    # in would raise it: 2026-11-25, 0.353 at 1200)
+                    learn_laser_line_sd(laser, grating, "labspec" if lab_placed_ else "centred", lst["ll_sd"],
+                                        "calibration repeats without steps")
+                if "this calibration's repeats" in str((lst.get("threshold") or {}).get("from")):
+                    warnings.append("the landing threshold came from this calibration's own repeats (nothing better "
+                                    "known for this laser and grating: set spectrometer.repeatability."
+                                    f"{float(laser):g}@{_f(grating) or 0:g}.laser_line_sd_cm1, or run a held series "
+                                    "with the laser line in the window to learn it)")
+                if any(s_.get("followed") for s_ in lst.get("steps") or []):
+                    rep_info["offsets_corrected_cm1"] = [None if o is None else round(o, 3)
+                                                         for o in lst["offs_eff"]]
                 if lst.get("steps"):
                     warnings.append("landing step(s) at repeat(s) " + ", ".join(
                         f"{s_['repeat']} ({s_['laser_line_step_cm1']:+.2f} cm-1)" for s_ in lst["steps"]
@@ -4854,10 +4978,15 @@ def _calibration_result(study, prof, rec, ref_lines, laser, grating, rng, reques
     if res["trusted"]:
         from . import perf
         llc = (rec.get("laser_line") or {})
+        # with repeats, the laser line's median over them (the first alone may be an outlier: -3.53 vs -4.27)
+        ll_rec = (((rep_info or {}).get("landing_steps") or {}).get("laser_line_median_cm1")
+                  or ((rep_info or {}).get("anchored_to_laser_line") or {}).get("laser_line_cm1"))
+        if ll_rec is None and llc.get("ok"):
+            ll_rec = llc["position_cm1"]
         perf.record("zero", perf.key(laser, grating), {"offset_cm1": res["offset_cm1"], "reference": refname,
                                                         "pass": res["pass"], "tol_cm1": tol,
-                                                        **({"laser_line_cm1": llc["position_cm1"]}
-                                                           if llc.get("ok") and res["pass"] else {})}, request)
+                                                        **({"laser_line_cm1": ll_rec}
+                                                           if ll_rec is not None and res["pass"] else {})}, request)
     lk = P.laser_key(prof, laser)
     if lk and prof["lasers"][lk].get("mode_hops"):
         res["mode_note"] = (f"the {float(laser):g} nm laser has mode hops (profile lasers.{lk}.mode_hops): this "
@@ -5004,6 +5133,7 @@ def _native_map(ctx: Ctx, name: str, study: dict, sd: Path, rng: dict, laser: fl
                  acq_time=mp.get("acq_time", "interface"), chunk=int(mp.get("export_chunk", 65536) or 0),
                  **params, **plan.band_params(study, laser), **motor_args(prof))
     _band_said(ctx, r, "band", warnings)
+    _paint_band(ctx, sd, warnings)
     # what LabSpec took for each axis (GetMappingParams after setting them), how it was started, how long it took
     ctx.native_info = {k: r[k] for k in r if str(k).endswith("_readback")}
     ctx.native_info.update({k: _f(r.get(k)) if k != "axes" else r.get(k)

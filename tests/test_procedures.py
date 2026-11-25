@@ -1996,9 +1996,20 @@ def test_calibration_anchored_to_the_laser_line_removes_landing_scatter():
     rp = c["calibration"]["repeats"]
     ls = rp["landing_steps"]
     assert [s_["repeat"] for s_ in ls["steps"] if s_["followed"]] == [1], ls
+    assert rp["offsets_cm1"][0] > 1.0 and abs(rp["offsets_corrected_cm1"][0]) < 0.3, rp
     assert rp["median_cm1"] == pytest.approx(0.0, abs=0.2) and not rp.get("anchored_to_laser_line")
     st = c["calibration"]["stored_correction"]
     assert st.get("laser_line_cm1") is not None and st["zero_mode"] == "absolute"
+    # a threshold from the calibration's own repeats: warned, and nothing learned from them (.25.18)
+    assert any("own repeats" in w for w in c["warnings"])
+    assert R.spectro_repeatability(P.load(), 532, 1800).get("laser_line_sd_cm1") is None
+    # a series (the spectrometer still) learns the laser line's jitter
+    (bdir / "sim_landing").write_text("0")
+    ser = {"kind": "series", "sample": {"name": "Si"}, "setup": dict(SETUP),
+           "acquire": {"center_cm1": 250, "exposure_s": 0.2}, "series": {"count": 6, "interval_s": 0},
+           "process": {"peaks": [{"name": "Si", "near_cm1": 520.7, "window_cm1": 30}]}}
+    s0 = run_inline({"s": ser})["studies"]["s"]
+    assert s0["checks"]["laser_line_jitter"]["spectra"] == 6
     learned = R.spectro_repeatability(P.load(), 532, 1800).get("laser_line_sd_cm1")
     assert learned is not None and learned < 0.5
     thr = R.landing_threshold(P.load(), 532, 1800)["threshold_cm1"]
@@ -2023,6 +2034,8 @@ def test_calibration_anchored_to_the_laser_line_removes_landing_scatter():
     sim._landing_n = 0
     s = run_inline({"s": dict(sp, acquire=dict(sp["acquire"], laser_reference="report"))})["studies"]["s"]
     assert abs(s["peaks_by_name"]["Si"]["position_cm1"] - 520.7) > 0.8
+    # the reference reported is the correction's laser line (the repeats' median), not the first repeat's
+    assert s["checks"]["laser_line"]["reference_cm1"] == pytest.approx(st["laser_line_cm1"], abs=0.001)
     (bdir / "sim_landing").unlink()
     (bdir / "sim_laser_line").unlink()
     # calibration.anchor: auto | always | off
@@ -2140,13 +2153,19 @@ def test_series_zero_creep_reported_learned_and_widens_the_expected_uncertainty(
             "laser_line": {"ok": True, "position_cm1": -4.0 + 0.005 * (i % 2)}} for i in range(6)]
     z = R.zero_creep(pts, {}, 637.75, 1200, "centred")
     assert z["significant"] and z["laser_line_steady"] and z["cm1_per_min"] == pytest.approx(0.1, abs=0.01)
+    # one series is not enough (.25.18: a rate must recur in 2 of the last 3 series)
+    assert R.spectro_repeatability(P.load(), 637.75, 1200).get("zero_creep_cm1_per_min") is None
+    R.zero_creep(pts, {}, 637.75, 1200, "centred")
     assert R.spectro_repeatability(P.load(), 637.75, 1200)["zero_creep_cm1_per_min"] == pytest.approx(0.1, abs=0.01)
     flat = [dict(p, peaks=[{"name": "Si", "ok": True, "position_cm1": 521.0 + (0.02 if p["point"] % 2 else 0)}])
             for p in pts]
     assert not R.zero_creep(flat, {}, 637.75, 1200, "centred")["significant"]
+    R.zero_creep(flat, {}, 637.75, 1200, "centred")          # two quiet series after it: no longer applied
+    assert R.spectro_repeatability(P.load(), 637.75, 1200).get("zero_creep_cm1_per_min") is None
     # the expected uncertainty grows with the correction's age in minutes (532 @ 1800 in the simulator)
     xcal.clear()
-    store.write("spectro_repeatability.json", {"532@1800": {"moved_sd_cm1": 0.2, "zero_creep_cm1_per_min": 0.1}})
+    store.write("spectro_repeatability.json", {"532@1800": {"moved_sd_cm1": 0.2, "zero_creep_cm1_per_min": 0.1,
+                                                            "zero_creep_v": R.CREEP_VERSION}})
     S.ensure(config.active_bridge_dir())
     cal = {"kind": "calibration", "sample": {"name": "Si"}, "setup": dict(SETUP),
            "acquire": {"center_cm1": 520.7, "exposure_s": 1}, "calibration": {"adjust": "ls6t"},
@@ -2185,9 +2204,11 @@ def test_map_live_band_sets_labspecs_cursors_on_the_live_and_native_maps():
     S.ensure(config.active_bridge_dir())
     m = run_inline({"m": st})["studies"]["m"]
     assert m["live_band"]["set"] == 1 and m["live_band"]["sent"] == "510.7;530.7", m.get("live_band")
+    assert m["live_band"]["picture"].endswith("live_band.wmf") and Path(m["live_band"]["picture"]).exists()
     nat = dict(st, map=dict(st["map"], engine="native"))
     m = run_inline({"m": nat})["studies"]["m"]
     assert m["live_band"]["set"] == 1 and m["live_band"]["on"] == 0, m.get("live_band")
+    assert Path(m["live_band"]["picture"]).exists()
 
 
 def test_landing_threshold_reads_the_profile_and_one_step_cannot_hide_itself():
@@ -2202,6 +2223,13 @@ def test_landing_threshold_reads_the_profile_and_one_step_cannot_hide_itself():
     prof["spectrometer"]["repeatability"] = {"637.75@1200": {"still_sd_cm1": 0.15, "moved_sd_cm1": 0.25}}
     th = R.landing_threshold(prof, 637.75, 1200)
     assert "still_sd_cm1" in th["from"] and th["threshold_cm1"] == 0.5
+    # a value learned before .25.18 (all repeats, steps included: 0.353) is not used
+    store.write("spectro_repeatability.json", {"637.75@1200": {"laser_line_sd_cm1": 0.353}})
+    assert "still_sd_cm1" in R.landing_threshold(prof, 637.75, 1200)["from"]
+    R.learn_laser_line_sd(637.75, 1200, "centred", 0.12, "a series (the spectrometer still)")
+    th = R.landing_threshold(prof, 637.75, 1200)
+    assert th["laser_line_sd_used_cm1"] == 0.12 and "measured" in th["from"]
+    store.write("spectro_repeatability.json", {})
     prof["spectrometer"]["repeatability"]["637.75@1200"]["laser_line_sd_cm1"] = 0.3
     th = R.landing_threshold(prof, 637.75, 1200)
     assert "laser_line_sd_cm1" in th["from"] and th["threshold_cm1"] == pytest.approx(0.9)
@@ -2210,7 +2238,7 @@ def test_landing_threshold_reads_the_profile_and_one_step_cannot_hide_itself():
     reps = [{"laser_line": {"ok": True, "position_cm1": -4.0 + d}} for d in (0.74, -0.59, 0.0, 0.05, -0.05)]
     offs = [0.0, -0.80, 0.0, 0.05, -0.02]
     ls = R._landing_steps(reps, offs, prof, 637.75, 1200, "centred")
-    assert "MAD" in ls["threshold"]["from"] and ls["threshold"]["threshold_cm1"] == 0.5
+    assert "tightest" in ls["threshold"]["from"] and ls["threshold"]["threshold_cm1"] == 0.5
     fol = {s_["repeat"]: s_["followed"] for s_ in ls["steps"]}
     assert fol == {1: False, 2: True}, ls["steps"]
     assert ls["offs_eff"][1] == pytest.approx(-0.21, abs=0.01)

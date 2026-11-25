@@ -41,7 +41,7 @@ gLastCmdEnd = Timer
 ' The live view keeps it: its crash (2026-11-24) was MapEx's axes passed as a Variant, with the shutter automatic too;
 ' releasing the hold at each view made the 637.75 nm laser hop at every point (.24.3). If LabSpec froze in a view with
 ' the shutter held, the heartbeat's shutter_held makes ls6t say the laser may still reach the sample
-Const HOLD_VERBS = ",ping,status,acquire,map_native,guide,move_xy,move,view,remove,save,labels,last_error,message,shutter_hold,"
+Const HOLD_VERBS = ",ping,status,acquire,map_native,guide,move_xy,move,view,remove,save,labels,last_error,message,shutter_hold,paint,"
 gHoldOn = False
 gHoldLabel = ""
 gHoldLastWhy = ""
@@ -1808,6 +1808,29 @@ Sub SetBand(id, cmd, res)
     res("band_on") = id
 End Sub
 
+' A data object's display exported as a picture with its cursors (map.live_band: where LabSpec put the red
+' cursors, without looking at the screen). As HORIBA's "Cut-Off.vbs" does: Paint EXPORT_WMF (2), the data's ID,
+' SHOW_SINGLE + SHOW_CURSORS (10), a .wmf path whose folder exists.
+Sub VPaint(cmd, res)
+    Dim id, path, r
+    id = CLng(ParseNum(GetP(cmd, "id", "0")))
+    path = GetP(cmd, "path", "")
+    If path = "" Then
+        Fail res, "paint needs 'path'"
+        Exit Sub
+    End If
+    On Error Resume Next
+    r = LabSpec.Paint(2, id, CLng(ParseNum(GetP(cmd, "flags", "10"))), 0, 0, 0, 0, path)
+    If Err.Number <> 0 Then
+        Fail res, ErrText("Paint")
+        Err.Clear
+        Exit Sub
+    End If
+    res("paint_return") = r
+    res("exists") = Bit(fso.FileExists(path))
+    If Not fso.FileExists(path) Then Fail res, "LabSpec wrote no picture (Paint returned " & r & ")"
+End Sub
+
 Sub VView(cmd, res)
     Dim name, action, kind, id, arr, dataId, mapId, pid, r, p, fv, tv, ax, ay, axA(), ayA(), k
     Dim vals(1), labels(1), units(1), disp(1)
@@ -3144,6 +3167,7 @@ Sub HandleFile(path)
             Case "autofocus": VAutofocus cmd, res
             Case "acquire": VAcquire cmd, res
             Case "view": VView cmd, res
+            Case "paint": VPaint cmd, res
             Case "remove"
                 On Error Resume Next
                 LabSpec.Exec CLng(ParseNum(GetP(cmd, "id", "0"))), 2, pp     ' REMOVE_DATA

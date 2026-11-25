@@ -805,6 +805,13 @@ class SimLabSpec:
         return {"band_set": 1, "band_unit_before": "1/cm", "band_sent": f"{f:g};{t:g}",
                 "band_readback": f"{f:g};{t:g}", "band_on": data_id}
 
+    def v_paint(self, p):
+        """Paint EXPORT_WMF: the data's display with its cursors (a placeholder file in the simulator)."""
+        path = Path(p["path"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"\xd7\xcd\xc6\x9a sim wmf")      # the placeable-WMF magic number only
+        return {"paint_return": 0, "exists": 1}
+
     def v_map_native(self, p):
         """LabSpec's mapping engine: the grid of the axes given (absolute stage positions), X fastest; one window at
         center_nm; written like the bridge's dump (spectra contiguous), each spectrum measured at its position."""
@@ -930,7 +937,7 @@ class SimLabSpec:
                 return {"ok": 0, "error": "LabSpec could not create the map (Map returned -2147467259)"}
             self.views[name] = {"kind": p.get("kind"), "n": 1, "index": [p.get("index")],
                                 "axis_x": p.get("axis_x"), "axis_y": p.get("axis_y")}
-            return {"view": name, **self._band(p, 7)}
+            return {"view": name, **({"mapex_return": 31} if p.get("kind") == "mapex" else {}), **self._band(p, 31)}
         if name not in self.views:
             return {"ok": 0, "error": f"no view {name!r}"}
         if action == "add":
