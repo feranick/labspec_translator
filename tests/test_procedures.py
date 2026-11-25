@@ -1629,6 +1629,11 @@ def test_expected_uncertainty_warned_above_the_tolerance():
     prof = P.load()
     P.save(dict(prof, spectrometer=dict(prof.get("spectrometer") or {}, repeatability={"532@1800": {"moved_sd_cm1": 0.3}})))
     assert runner.spectro_repeatability(P.load(), 532, 1800) == {"moved_sd_cm1": 0.3, "source": "profile"}
+    # windows LabSpec places itself have their own entry, never the approach-based one
+    store.write("spectro_repeatability.json", {"532@1800": {"moved_sd_cm1": 0.3, "approach_nm": -2.0}})
+    assert runner.spectro_repeatability(P.load(), 532, 1800, "labspec") == {}
+    store.write("spectro_repeatability.json", {"532@1800@labspec": {"moved_sd_cm1": 0.5}})
+    assert runner.spectro_repeatability(P.load(), 532, 1800, "labspec")["moved_sd_cm1"] == 0.5
     P.save(prof)
     store.write("spectro_repeatability.json", {})
     xcal.clear()

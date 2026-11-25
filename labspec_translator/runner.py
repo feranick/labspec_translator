@@ -3422,11 +3422,15 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
         if corr:
             # (2026-11-24: checks.zero showed the last calibration stored, -2.09 @ 676.75 nm, while the correction
             # used was -0.01 @ 650.19): the one applied here, and what the rest is
-            rep_ = spectro_repeatability(prof, laser, grating)
+            # LabSpec places extended ranges and its own maps' windows itself: no approach there, their own entry
+            rep_place = "labspec" if (placement == "labspec" or (kind == "map" and
+                                                                 plan.map_engine(study, prof) == "native")) else "centred"
+            rep_ = spectro_repeatability(prof, laser, grating, rep_place)
             if rep_.get("moved_sd_cm1"):
                 # the zero across spectrometer moves is no better than the spectrometer repeats (2026-11-24, 600:
                 # SD 0.9-1.2 cm-1 moved, 0.12 without moves); the calibration's own pass tolerance stays as it is
-                corr = dict(corr, expected_uncertainty_cm1=rep_["moved_sd_cm1"])
+                corr = dict(corr, expected_uncertainty_cm1=rep_["moved_sd_cm1"],
+                            expected_uncertainty_from=f"{rep_.get('source')}, {rep_place} placement")
                 tol_u = float(prof["checks"]["si_tol_cm1"])
                 if float(rep_["moved_sd_cm1"]) > tol_u:
                     warnings.append(f"the zero here is good to about +-{float(rep_['moved_sd_cm1']):.1f} cm-1 (the "
@@ -3435,7 +3439,8 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
                                     "the spectrometer in between")
             zs = checks["zero"] = dict(zs, correction_used={**{k: corr.get(k) for k in (
                 "a", "b", "time", "centre_nm", "interpolated_between_nm", "centre_far", "laser_line_cm1", "placement",
-                "range_match", "range_cm1", "pooled", "pooled_from", "repeats", "expected_uncertainty_cm1")
+                "range_match", "range_cm1", "pooled", "pooled_from", "repeats", "expected_uncertainty_cm1",
+                "expected_uncertainty_from")
                 if corr.get(k) is not None}, **({"age_h": round(xcal.age_h(corr), 2)} if xcal.age_h(corr) is not None
                                                  else {})},
                 note="offset_cm1 is this laser and grating's last calibration check (any window); "
@@ -4061,18 +4066,19 @@ def zero_state(laser, grating, prof: dict) -> dict:
     return out
 
 
-def spectro_repeatability(prof: dict, laser, grating) -> dict:
+def spectro_repeatability(prof: dict, laser, grating, placement: str = "centred") -> dict:
     """How well the spectrometer repeats at laser@grating: the profile's spectrometer.repeatability["<laser>@<grating>"]
     (set by a person), else the last measured (LS6T_HOME/spectro_repeatability.json); a moved SD measured with another
-    approach_nm than the profile's now does not count."""
-    kk = f"{float(laser):g}@{_f(grating) or 0:g}"
+    approach_nm than the profile's now does not count. Windows LabSpec places itself (extended ranges, its own maps)
+    get no approach: their entry is "<laser>@<grating>@labspec", never the approach-based one (Nicola, 2026-11-25)."""
+    kk = f"{float(laser):g}@{_f(grating) or 0:g}" + ("@labspec" if placement == "labspec" else "")
     sp_ = prof.get("spectrometer") or {}
     own = (sp_.get("repeatability") or {}).get(kk)
     if own:
         return dict(own, source="profile")
     rec = dict((store.read("spectro_repeatability.json") or {}).get(kk) or {})
-    if rec.get("moved_sd_cm1") is not None and float(rec.get("approach_nm", 0) or 0) != \
-            float(sp_.get("approach_nm", 0) or 0):
+    if placement != "labspec" and rec.get("moved_sd_cm1") is not None and \
+            float(rec.get("approach_nm", 0) or 0) != float(sp_.get("approach_nm", 0) or 0):
         rec.pop("moved_sd_cm1")
     return dict(rec, source="measured") if rec else {}
 
@@ -4208,9 +4214,10 @@ def _calibration_result(study, prof, rec, ref_lines, laser, grating, rng, reques
                         "spectrometer_moved": moved, "outliers": stt["outliers"], "settled": stt["settled"]}
             if stt["settled"] and len(use) >= 3:
                 rec_r = store.read("spectro_repeatability.json") or {}
-                kk = f"{float(laser):g}@{_f(grating) or 0:g}"
-                rec_r.setdefault(kk, {})["moved_sd_cm1" if moved else "still_sd_cm1"] = round(sd, 3)
-                if moved:
+                lab_placed = not rng.get("single", True)        # LabSpec placed the window: no approach applies
+                kk = f"{float(laser):g}@{_f(grating) or 0:g}" + ("@labspec" if lab_placed else "")
+                rec_r.setdefault(kk, {})["moved_sd_cm1" if (moved or lab_placed) else "still_sd_cm1"] = round(sd, 3)
+                if moved and not lab_placed:
                     rec_r[kk]["approach_nm"] = float((prof.get("spectrometer") or {}).get("approach_nm", 0) or 0)
                 rec_r[kk]["time"] = time.strftime("%Y-%m-%dT%H:%M:%S")
                 store.write("spectro_repeatability.json", rec_r)
