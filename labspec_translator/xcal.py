@@ -107,7 +107,7 @@ def get(laser_nm, grating, centre_nm=None, placement: str | None = None, range_c
 def store(laser_nm, grating, a: float, b: float, reference: str, lines: list, request: str | None = None,
           centre_nm=None, laser_line_cm1=None, laser_line_fwhm_cm1=None, placement: str | None = None,
           pool: str = "per_centre", repeats: dict | None = None, range_cm1=None,
-          cm1_per_px: float | None = None) -> dict:
+          cm1_per_px: float | None = None, zero_mode: str | None = None) -> dict:
     """Keeps the correction per window centre (2026-11-24: two Si calibrations a minute apart, in two windows, gave
     -0.72 and -2.40 cm-1: each had overwritten the other)."""
     d = load()
@@ -120,6 +120,10 @@ def store(laser_nm, grating, a: float, b: float, reference: str, lines: list, re
         rec["placement"] = placement          # centred (ls6t placed the window) or labspec (LabSpec placed a range)
     if repeats:
         rec["repeats"] = repeats              # n, mean, sd of the repeats
+    if zero_mode:
+        # 'anchored': measured relative to the laser line (laser_line_cm1); 'absolute': the line alone. Both from the
+        # spectra as measured (any laser-line shift of the calibration study undone: Nicola, 2026-11-25)
+        rec["zero_mode"] = zero_mode
     if laser_line_cm1 is not None:
         # where the laser line sat when this was measured: a later spectrum is brought back to it before the
         # correction applies (laser_reference 'correct'), so the laser's move is not counted twice

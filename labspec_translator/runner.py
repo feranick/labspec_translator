@@ -3674,6 +3674,12 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
         elif corr.get("centre_unknown"):
             warnings.append("the correction's window centre is not known (a calibration stored before "
                             "2026.11.24.8): the zero differs between windows")
+        if not corr.get("zero_mode"):
+            # (2026-11-25: a correction stored from a calibration run with laser_reference correct_each, -0.64 at
+            # 1200, carried that study's laser-line shift into 'report' spectra: Si 520.40 vs 521.0)
+            warnings.append("the correction in use was stored before 2026.11.25.13: if its calibration ran with "
+                            "acquire.laser_reference correct or correct_each, its zero carries that study's laser-line "
+                            "shift; calibrate again")
         lkc = P.laser_key(prof, laser) if laser else None
         max_h = float((prof["lasers"][lkc].get("calibration_max_age_h") if lkc else None)
                       or prof.get("calibration", {}).get("max_age_h", 24))
@@ -3715,9 +3721,19 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
     lk_ = P.laser_key(prof, laser) if laser else None
     # the laser's own default (2026-11-24: the 637.75 nm laser's wavelength drifts, about 0.07 nm overnight and
     # +0.5 cm-1 within 30 s: 'correct' follows it whenever the laser line is in the window)
-    ll_mode = study.get("acquire", {}).get("laser_reference") or \
-        ((prof["lasers"][lk_].get("laser_reference") if lk_ else None) or "report")
+    ll_asked = study.get("acquire", {}).get("laser_reference")
+    ll_mode = ll_asked or ((prof["lasers"][lk_].get("laser_reference") if lk_ else None) or "report")
     ll_mode_asked = ll_mode
+    # a correction measured relative to a narrow laser line (its calibration stored where the line was): later
+    # spectra are brought to that line first, landing and all (Nicola, 2026-11-25: at 1200 the repeats' Si scattered
+    # 0.76 cm-1 with the spectrometer's landing, Si - laser line 0.06). Asked for explicitly, the study's own choice
+    if (not ll_asked and kind != "calibration" and ll_mode in ("report", "correct") and corr
+            and corr.get("laser_line_cm1") is not None
+            and not laser_line_too_broad(corr.get("laser_line_fwhm_cm1"), corr.get("lines"))):
+        ll_mode = ll_mode_asked = "anchor"
+    anchor = ll_mode == "anchor"
+    if anchor:
+        ll_mode = "correct"
     # 'correct' follows the laser line's steps (a mode hop), not its slow drift: following every spectrum's line
     # over-corrected a series (2026-11-24: Si 520.52 -> 520.00 while the laser line crept up; the line's measured
     # position moves more than the Raman lines, partly its shape on the edge filter). 'correct_each' is the old way.
@@ -3854,7 +3870,16 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
                     moved.append(float(np.median(v_)) - r0)
             dpk = float(np.median(moved)) if moved else None
             why = None
-            if abs(d_) <= fmin:
+            landing = False
+            if anchor and abs(d_) <= fmin:
+                # anchored: a small step is the spectrometer's landing (both lines move alike) unless the Raman peaks
+                # say otherwise (the line on the edge filter's slope moving twice as much: 2026-11-24)
+                if dpk is not None and abs(dpk - d_) > max(0.3, 0.25 * abs(d_)):
+                    why = (f"the Raman peaks moved {dpk:+.2f} cm-1, not {d_:+.2f}: not the spectrometer's landing "
+                           "(the laser line moved alone)")
+                else:
+                    landing = True
+            elif abs(d_) <= fmin:
                 why = (f"{d_:+.2f} cm-1 from the reference, not over {fmin:g}: not a hop (the laser line on the edge "
                        "filter moves more than the Raman lines)")
             elif dpk is not None and abs(dpk - d_) > max(0.5 * abs(d_), 1.0):
@@ -3869,8 +3894,9 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
                                    "drift_cm1": round(pl[-1][1] - pl[0][1], 3), "step_cm1": round(d_, 3),
                                    "raman_moved_cm1": None if dpk is None else round(dpk, 3),
                                    "applied": why is None, **({"not_applied_because": why} if why else {}),
+                                   **({"landing": True} if landing else {}),
                                    **({"unconfirmed": True} if why is None and dpk is None else {})})
-            if why is None and dpk is None:
+            if why is None and dpk is None and not landing:
                 warnings.append(f"zero: a laser-line step of {d_:+.1f} cm-1 (points {pl[0][0]}-{pl[-1][0]}) was applied "
                                 "without Raman peaks to confirm it (unconfirmed: a hop, or a bad fit of the laser "
                                 "line)")
@@ -4110,6 +4136,8 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
         how = "none"
     checks["zero_correction"] = {"method": how, "laser_reference": ll_mode_asked,
                                  **({"follows": "every spectrum's laser line (slow drift too)" if follow_each else
+                                     "the spectrometer's landing (any step from the calibration's laser line the Raman "
+                                     "peaks do not contradict) and hops" if anchor else
                                      f"a hop only: a plateau's step from the reference over "
                                      f"{float(prof['checks'].get('laser_follow_min_cm1', FOLLOW_MIN_CM1)):g} cm-1 "
                                      "that the Raman peaks follow too; otherwise the stored correction alone",
@@ -4153,7 +4181,10 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
         if cal_ref is not None:
             dr = round(float(np.median([v for _, v in lls])) - cal_ref, 2)
             checks["laser_line"]["drift_since_calibration_cm1"] = dr
-            if abs(dr) > ZERO_JUMP_CM1:
+            if abs(dr) > ZERO_JUMP_CM1 and kind == "calibration":
+                warnings.append(f"the laser line sits {dr:+.1f} cm-1 from where it was at the last calibration: the "
+                                "laser is in another mode; this calibration measures the zero in the mode it is in now")
+            elif abs(dr) > ZERO_JUMP_CM1:
                 # 2026-11-25: a native map ran with the 637.75 laser hopped (line -8.5 cm-1 from the calibration's,
                 # Si mean 512.69, 'zero uncertain' at 13 of 25) and said reliable: a different mode is not drift
                 unreliable.append(f"the laser line sits {dr:+.1f} cm-1 from where it was at the calibration: the laser "
@@ -4182,6 +4213,11 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
                    "moves with it")
             if ll_mode == "correct":
                 warnings.append(msg + "; corrected (acquire.laser_reference 'correct')")
+            elif kind == "calibration" and len(per_point) > 1:
+                # the repeats are judged by the calibration itself: relative to a narrow laser line (a landing
+                # moves both), or by their step test (2026-11-25: a -1.9 landing made a 1200 calibration unreliable
+                # while Si - laser line held to 0.06)
+                warnings.append(msg + "; the calibration's repeats judge it (calibration.repeats)")
             else:
                 unreliable.append(msg + "; use acquire.laser_reference 'correct' with the laser line in the window")
     ss = same_spot_check(kind, per_point, warnings, unreliable) if kind in ("spectrum", "series") else None
@@ -4373,13 +4409,41 @@ def repeat_stats(offs: list) -> dict:
 
 
 def _repeat_offsets(per_point, ref_lines) -> list:
-    """Each repeat's offset (mean of its lines' measured - reference); None where no line was fitted."""
+    """Each repeat's offset (mean of its lines' measured - reference), as measured: a laser-line shift the study
+    applied (laser_reference correct / correct_each) is undone, so the correction never depends on the calibration
+    study's mode (Nicola, 2026-11-25); None where no line was fitted."""
     out = []
     for r_ in per_point:
-        e = [pk["position_cm1"] - ref for ref, pk in zip(ref_lines, r_.get("peaks") or [])
+        llc_ = float(r_.get("laser_line_correction_cm1") or 0.0)
+        e = [pk["position_cm1"] - llc_ - ref for ref, pk in zip(ref_lines, r_.get("peaks") or [])
              if pk.get("ok") and pk.get("position_cm1") is not None]
         out.append(float(np.mean(e)) if e else None)
     return out
+
+
+def _anchor_repeats(repeats: list, offs: list, lines: list, cal: dict, b: float) -> dict | None:
+    """Calibration repeats judged relative to the laser line (Nicola, 2026-11-25): when every repeat has a laser line
+    narrow enough to be a reference (not at 600 gr/mm: ~21 cm-1 wide on the edge filter) and the fit is an offset
+    only. Returns the stats of (line - laser line), the laser line's median, or None. calibration.anchor 'off'
+    keeps the absolute repeats."""
+    if str(cal.get("anchor", "auto")) == "off" or float(b) != 1.0:
+        return None
+    lls, ws = [], []
+    for r_ in repeats:
+        l_ = r_.get("laser_line") or {}
+        ok_ = bool(l_.get("ok")) and l_.get("position_cm1") is not None and not l_.get("suspect")
+        lls.append(float(l_["position_cm1"]) if ok_ else None)
+        if ok_ and l_.get("fwhm_cm1"):
+            ws.append(float(l_["fwhm_cm1"]))
+    if not ws or laser_line_too_broad(float(np.median(ws)), lines):
+        return None
+    # offs are as measured (_repeat_offsets undoes this study's laser-line shifts)
+    rel = [None if (o is None or l_ is None) else o - l_ for o, l_ in zip(offs, lls)]
+    n_off = sum(o is not None for o in offs)
+    if sum(v is not None for v in rel) < max(2, n_off - 1):
+        return None
+    return {"stats": repeat_stats(rel), "relative": rel, "laser_lines": lls,
+            "laser_line_cm1": float(np.median([v for v in lls if v is not None]))}
 
 
 def _calibration_result(study, prof, rec, ref_lines, laser, grating, rng, request, checks, unreliable,
@@ -4393,9 +4457,13 @@ def _calibration_result(study, prof, rec, ref_lines, laser, grating, rng, reques
     wc, wc_from = window_centre_used(rng, [rec])
     tol = float(cal.get("tol_cm1", prof["checks"]["si_tol_cm1"]))
     lines = []
+    # as measured: a laser-line shift this calibration study applied (laser_reference correct / correct_each) is
+    # undone, so the stored zero means the same whatever the study's mode (Nicola, 2026-11-25)
+    llc0 = float(rec.get("laser_line_correction_cm1") or 0.0)
     for ref, pk in zip(ref_lines, rec.get("peaks") or []):
-        lines.append({"reference_cm1": ref, "measured_cm1": pk.get("position_cm1") if pk.get("ok") else None,
-                      "error_cm1": round(pk["position_cm1"] - ref, 4) if pk.get("ok") else None,
+        pos_ = (float(pk["position_cm1"]) - llc0) if pk.get("ok") and pk.get("position_cm1") is not None else None
+        lines.append({"reference_cm1": ref, "measured_cm1": pos_,
+                      "error_cm1": round(pos_ - ref, 4) if pos_ is not None else None,
                       "fwhm_cm1": pk.get("fwhm_cm1"), "snr": pk.get("snr"), "why": pk.get("why"),
                       "warning": pk.get("warning")})
     ok = [l for l in lines if l["measured_cm1"] is not None]
@@ -4425,19 +4493,54 @@ def _calibration_result(study, prof, rec, ref_lines, laser, grating, rng, reques
         # several spectra, the spectrometer re-placed before each (2026-11-24, 600 gr/mm: the same window gave
         # +9.22 / +9.47 / +9.86 cm-1, a scatter larger than the fit's own error): the correction is their mean
         offs = _repeat_offsets(repeats, ref_lines)
-        stt = repeat_stats(offs)
+        stt_abs = repeat_stats(offs)
+        stt = stt_abs
+        anc = _anchor_repeats(repeats, offs, lines, cal, b)
+        if anc:
+            # 2026-11-25, 637.75 @ 1200: Si 521.41, 520.10, 519.62, 519.82, 519.58 (SD 0.76) but Si - laser line
+            # 524.43, 524.44, 524.36, 524.51, 524.42 (SD 0.06): the scatter is the spectrometer's landing, common to
+            # both lines. Judged and stored relative to the laser line (later spectra are brought to its position)
+            stt = anc["stats"]
         use = stt["kept"]
         if len(use) >= 2:
             centre_o = float(stt["centre"])
             sd = float(np.std(use, ddof=1))
-            a = a + (float(np.mean(meas - refs)) - centre_o) * b      # the zero moved to the repeats' median
-            worst = abs(centre_o)
+            if anc:
+                ll_ref_c = anc["laser_line_cm1"]
+                a = -(centre_o + ll_ref_c)                    # true = a + (measured - (LL - LL_ref)), b = 1
+                centre_o = centre_o + ll_ref_c                # the offset with the laser line where it was
+            else:
+                a = a + (float(np.mean(meas - refs)) - centre_o) * b      # the zero moved to the repeats' median
+            worst = abs(float(stt_abs["centre"])) if stt_abs.get("centre") is not None else abs(centre_o)
             moved = bool((study.get("calibration") or {}).get("repeats_move", True))
             rep_info = {"n": len(use), "offsets_cm1": [None if o is None else round(o, 3) for o in offs],
-                        "median_cm1": round(centre_o, 3), "mean_cm1": round(float(np.mean(use)), 3),
+                        "median_cm1": round(centre_o, 3),
+                        "mean_cm1": round(float(np.mean(use)) + (anc["laser_line_cm1"] if anc else 0.0), 3),
                         "sd_cm1": round(sd, 3), "sem_cm1": round(sd / math.sqrt(len(use)), 3),
                         "spectrometer_moved": moved, "outliers": stt["outliers"], "settled": stt["settled"]}
-            if stt["settled"] and len(use) >= 3:
+            if anc:
+                rep_info["anchored_to_laser_line"] = {
+                    "laser_line_cm1": round(anc["laser_line_cm1"], 3),
+                    "relative_cm1": [None if v is None else round(v, 3) for v in anc["relative"]],
+                    "laser_lines_cm1": [None if v is None else round(v, 3) for v in anc["laser_lines"]],
+                    "landing_sd_cm1": round(float(np.std([o for o in offs if o is not None], ddof=1)), 3)
+                    if sum(o is not None for o in offs) >= 2 else None,
+                    "why": "the laser line is narrow and in the window: the zero is judged relative to it, which "
+                           "removes the spectrometer's landing scatter (later spectra with the laser line in the "
+                           "window are brought to its position: acquire.laser_reference 'anchor')"}
+                rep_info["absolute_outliers"] = stt_abs["outliers"]
+                res["anchored"] = True
+            # spread from successive differences (sqrt(mean d^2 / 2)): a slow creep does not count as scatter
+            # (2026-11-25, ext600: 9.26, 8.75, 7.85, 7.51, 8.17 passed the creep test; SD 0.70 overstated the
+            # repositioning spread)
+            seq_ = list(stt_abs.get("kept") or [])          # in order, outliers left out
+            sd_succ = (float(np.sqrt(np.mean(np.diff(seq_) ** 2) / 2.0)) if len(seq_) >= 3 else None)
+            if sd_succ is not None:
+                rep_info["sd_successive_cm1"] = round(sd_succ, 3)
+            if stt_abs["settled"] and len(stt_abs["kept"]) >= 3:
+                sd = float(np.std(stt_abs["kept"], ddof=1)) if anc else sd       # the landing scatter itself
+                if sd_succ is not None and sd_succ < sd:
+                    sd = sd_succ
                 rec_r = store.read("spectro_repeatability.json") or {}
                 lab_placed = not rng.get("single", True)        # LabSpec placed the window: no approach applies
                 kk = f"{float(laser):g}@{_f(grating) or 0:g}" + ("@labspec" if lab_placed else "")
@@ -4546,15 +4649,25 @@ def _calibration_result(study, prof, rec, ref_lines, laser, grating, rng, reques
             llc = {}
         # stored only once the whole study is judged reliable (store_pending, at the end of run_any): 2026-11-25,
         # two calibrations unreliable for multimode points and laser-line jumps still stored their corrections
+        anc_ll = ((rep_info or {}).get("anchored_to_laser_line") or {}).get("laser_line_cm1")
+        if anc_ll is None and rep_info and llc.get("ok"):
+            # repeats, not anchored: the laser line's median over them (the first alone carries its own landing)
+            lls_ = [float((r_.get("laser_line") or {})["position_cm1"]) for r_ in (repeats or [])
+                    if (r_.get("laser_line") or {}).get("ok") and not (r_.get("laser_line") or {}).get("suspect")]
+            if lls_:
+                llc = dict(llc, position_cm1=float(np.median(lls_)))
         res["_pending_store"] = {
             "args": [float(laser), _f(grating), float(a), float(b), refname, lines, request],
-            "kw": dict(centre_nm=wc, pool=cal.get("store", "auto"), cm1_per_px=px, repeats=rep_info,
-                       laser_line_cm1=llc.get("position_cm1") if llc.get("ok") else None,
+            # anchored: one correction per window (the landing scatter that pooling averaged is gone)
+            "kw": dict(centre_nm=wc, pool=("per_centre" if anc_ll is not None and cal.get("store", "auto") == "auto"
+                                           else cal.get("store", "auto")), cm1_per_px=px, repeats=rep_info,
+                       laser_line_cm1=anc_ll if anc_ll is not None else
+                       (llc.get("position_cm1") if llc.get("ok") else None),
                        laser_line_fwhm_cm1=llc.get("fwhm_cm1") if llc.get("ok") else None,
                        placement="labspec" if not rng.get("single", True) else "centred",
                        range_cm1=[rng["from_cm1"], rng["to_cm1"]] if (wc is None and not rng.get("single", True)
                                                                         and rng.get("from_cm1") is not None)
-                       else None)}
+                       else None, zero_mode="anchored" if anc_ll is not None else "absolute")}
     elif not res["pass"]:
         unreliable.append(f"the {'Si' if refname == 'si' else refname} line is at {first['measured_cm1']:.2f} cm-1, "
                           f"{first['measured_cm1'] - first['reference_cm1']:+.2f} from {first['reference_cm1']}: "
@@ -4581,7 +4694,9 @@ def store_pending(res: dict, warnings: list, unreliable: list) -> None:
     st = xcal.store(*pend["args"], **pend["kw"])
     res["stored_as"] = (("one correction for every window of " if st.get("pooled") else
                          "for this range: " if st.get("range_cm1") else "per window centre: ")
-                        + combo(laser, grating) + " (" + st["pool"]["why"] + ")")
+                        + combo(laser, grating) + " (" + st["pool"]["why"] + ")"
+                        + ("; relative to the laser line (later spectra with it in the window are brought to it "
+                           "first: laser_reference 'anchor')" if pend["kw"].get("zero_mode") == "anchored" else ""))
     if st.get("drift_at_centre"):
         dr = st["drift_at_centre"]
         warnings.append(f"the zero at this window moved {dr['cm1']:+.2f} cm-1 since {dr['since']}"

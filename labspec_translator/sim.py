@@ -1106,6 +1106,15 @@ class SimLabSpec:
         # sim_shift_after_first: every spectrum after the first since the file appeared lands 8.7 cm-1 low (the
         # XploRA, 2026-11-23: points 1-4 of a request at 512 cm-1, point 0 at 520.3)
         hopped = False
+        fl = self.dir / "sim_landing"
+        if fl.exists() and not laser_off:
+            # the spectrometer landing elsewhere after each move: 'd1,d2,...' cm-1, one per acquisition in turn, the
+            # whole axis (laser line too) shifted (Nicola, 2026-11-25: Si scattered 0.76, Si - laser line 0.06)
+            vals = [float(v) for v in fl.read_text().split(",") if v.strip()]
+            k_ = getattr(self, "_landing_n", 0)
+            self._landing_n = k_ + 1
+            a0, b0 = xs_ or (0.0, 1.0)
+            xs_ = (a0 + vals[k_ % len(vals)], b0)
         if (self.dir / "sim_shift_after_first").exists():
             if getattr(self, "_shift_armed", False) and not getattr(self, "held", False):
                 xs_ = (-8.7, 1.0)

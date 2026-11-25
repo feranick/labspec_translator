@@ -16,7 +16,8 @@ TOP_KEYS = {"kind", "sample", "setup", "acquire", "focus", "points", "map", "ser
             "calibration", "background", "filters", "cutoff"}
 FILTERS_KEYS = {"line_cm1", "window_cm1", "labels", "exposure_s", "max_exposure_s"}
 CUTOFF_KEYS = {"from_cm1", "to_cm1", "light", "laser_off", "plateau_cm1"}
-CAL_KEYS = {"reference", "lines_cm1", "tol_cm1", "adjust", "window_cm1", "repeats", "store", "repeats_move"}
+CAL_KEYS = {"reference", "lines_cm1", "tol_cm1", "adjust", "window_cm1", "repeats", "store", "repeats_move",
+            "anchor"}
 BG_KEYS = {"name", "laser_off"}
 DEPTH_KEYS = {"from_um", "to_um", "step_um", "refractive_index", "engine", "swift"}
 MOVE_KEYS = {"x_um", "y_um", "to_um", "dz_um", "stay", "snapshot", "travel", "focus"}
@@ -115,8 +116,10 @@ def study_format(status: dict | None = None) -> dict:
                        "subtract_background: a stored background's name, laser_reference: report | correct | "
                        "correct_each (when the window includes the laser line near 0 cm-1: it is fitted in every "
                        "spectrum; correct shifts the spectra by the laser line's steps, so a laser mode hop does not "
-                       "move the peaks, without following its slow creep; correct_each by every spectrum's own "
-                       "line), warmup_s: a discarded acquisition of that many seconds before the first spectrum "
+                       "move the peaks, without following its slow creep; anchor (the default when the stored "
+                       "correction was calibrated against a narrow laser line, e.g. 1200 gr/mm) also brings each "
+                       "spectrometer landing back to the calibration's laser line; correct_each by every spectrum's "
+                       "own line), warmup_s: a discarded acquisition of that many seconds before the first spectrum "
                        "(the laser fires; default the profile's lasers.<laser>.warmup_s), shutter: auto (LabSpec "
                        "opens and closes the laser shutter around each spectrum) | hold (held open from the first "
                        "spectrum to the last, as HORIBA's mapping scripts do; needs the verified shutter; default "
@@ -335,6 +338,9 @@ def validate_study(name: str, study: dict, prof: dict) -> dict:
         if cal.get("repeats_move") is not None and not isinstance(cal["repeats_move"], bool):
             errors.append("calibration.repeats_move: true (the spectrometer sent away and back before each repeat: "
                           "noise plus repositioning) or false (it stays: noise alone)")
+        if cal.get("anchor", "auto") not in ("auto", "off"):
+            errors.append("calibration.anchor: auto (with a narrow laser line in the window, the zero is judged and "
+                          "stored relative to it, which removes the spectrometer's landing scatter) or off")
         if cal.get("store", "auto") not in ("auto", "per_centre", "pooled"):
             errors.append("calibration.store: auto (pooled at coarse gratings, per window centre otherwise), "
                           "per_centre or pooled")
@@ -509,7 +515,8 @@ def validate_study(name: str, study: dict, prof: dict) -> dict:
         # inside LabSpec's own map)
         settled = plan.hold_shutter(study, prof, s.get("laser_nm")) or \
             (plan.settle_s(prof, s.get("laser_nm")) > 0 and not native)
-    if unstable and multi and (study.get("acquire") or {}).get("laser_reference") not in ("correct", "correct_each") \
+    if unstable and multi and (study.get("acquire") or {}).get("laser_reference") not in ("correct", "correct_each",
+                                                                                         "anchor") \
             and not settled:
         why = (f"the {prof['lasers'][lk]['nm']:g} nm laser changes between acquisitions on this instrument (profile "
                f"lasers.{lk}.unstable_multi): every spectrum after the first may be shifted (about 8 cm-1 on "
@@ -627,9 +634,11 @@ def validate_study(name: str, study: dict, prof: dict) -> dict:
     if a.get("ics", "labspec") not in ("labspec", True, False):
         errors.append("acquire.ics: labspec (LabSpec's setting, off where the profile's ics.off_for says), true or "
                       "false")
-    if a.get("laser_reference", "report") not in ("report", "correct", "correct_each"):
-        errors.append("acquire.laser_reference: report, correct (follows the laser line's steps, a mode hop) or "
-                      "correct_each (follows every spectrum's laser line, slow drift too)")
+    if a.get("laser_reference", "report") not in ("report", "correct", "correct_each", "anchor"):
+        errors.append("acquire.laser_reference: report, correct (follows the laser line's steps, a mode hop), "
+                      "anchor (also the spectrometer's landing: small steps from the calibration's laser line that "
+                      "the Raman peaks do not contradict) or correct_each (follows every spectrum's laser line, slow "
+                      "drift too)")
     if a.get("range_placement", "centre") not in ("centre", "labspec"):
         errors.append("acquire.range_placement: centre (a range within one window is acquired centred on it and cut "
                       "by ls6t) or labspec (LabSpec places the window, From at its blue edge)")

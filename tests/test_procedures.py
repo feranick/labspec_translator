@@ -971,8 +971,9 @@ def test_laser_line_and_stored_correction_do_not_count_the_zero_twice():
     # a hop over 3 cm-1 was followed, but the zero there is flagged uncertain (2026-11-24: about 1 cm-1 left)
     assert zc["uncertain_points"] == [0] and "a hop" in s["spectra"][0]["zero_uncertain"]
     assert any("zero uncertain" in w for w in s["warnings"])
-    # report mode: the stored correction only
-    st = run_inline({"s": dict(sp, acquire=acq)})
+    # report mode (asked: with a laser line in the correction the default is 'anchor', 2026.11.25.13): the stored
+    # correction only
+    st = run_inline({"s": dict(sp, acquire=dict(acq, laser_reference="report"))})
     assert st["studies"]["s"]["checks"]["zero_correction"]["method"].startswith("the stored correction only")
     (bdir / "sim_shift_after_first").unlink()
     xcal.clear()
@@ -1971,3 +1972,84 @@ def test_unreliable_calibration_stores_nothing_and_fixed_profile_problems_clear(
     vf.write_text(_j.dumps({"637.75@600": {"moved_sd_cm1": 0.25, "still_sd_cm1": 0.26}}))
     assert api.profile_set("spectrometer.repeatability", "@" + str(vf))["ok"]
     assert "problems" not in _j.loads(pf.read_text(encoding="utf-8")) and not P.load().get("problems")
+
+
+def test_calibration_anchored_to_the_laser_line_removes_landing_scatter():
+    """Nicola, 2026-11-25 (637.75 @ 1200): Si 521.41, 520.10, 519.62, 519.82, 519.58 (SD 0.76), Si - laser line
+    524.43, 524.44, 524.36, 524.51, 524.42 (SD 0.06): the spectrometer's landing moves both lines. The zero is judged
+    relative to a narrow laser line, and later spectra are brought to it (laser_reference 'anchor' by default)."""
+    from labspec_translator import xcal
+    xcal.clear()
+    bdir = config.active_bridge_dir()
+    sim = S.ensure(bdir)
+    (bdir / "sim_laser_line").write_text("1")
+    (bdir / "sim_landing").write_text("1.6,-0.3,0.2,-0.5,0.1,0.4,-0.2")
+    sim._landing_n = 0
+    cal = {"kind": "calibration", "sample": {"name": "Si"}, "setup": dict(SETUP),
+           "acquire": {"center_cm1": 250, "exposure_s": 1},
+           "calibration": {"adjust": "ls6t", "repeats": 5}, "video": {"before": False}}
+    c = run_inline({"c": cal})["studies"]["c"]
+    rp = c["calibration"]["repeats"]
+    an = rp.get("anchored_to_laser_line")
+    assert an and rp["settled"] and rp["sd_cm1"] < 0.25, rp
+    assert an["landing_sd_cm1"] > 0.5 and not rp["outliers"], rp
+    assert c["reliable"], c["unreliable_because"]
+    st = c["calibration"]["stored_correction"]
+    assert st.get("laser_line_cm1") is not None and not st.get("pooled")
+    # a later spectrum landing 1.2 cm-1 elsewhere: brought back to the calibration's laser line
+    (bdir / "sim_landing").write_text("1.2")
+    sim._landing_n = 0
+    sp = {"kind": "spectrum", "sample": {"name": "Si"}, "setup": dict(SETUP),
+          "acquire": {"center_cm1": 250, "exposure_s": 1},
+          "process": {"peaks": [{"name": "Si", "near_cm1": 520.7, "window_cm1": 30}]}}
+    s = run_inline({"s": sp})["studies"]["s"]
+    zc = s["checks"]["zero_correction"]
+    assert zc["laser_reference"] == "anchor" and any(p.get("landing") for p in zc.get("plateaus") or []), zc
+    assert abs(s["peaks_by_name"]["Si"]["position_cm1"] - 520.7) < 0.3, s["peaks_by_name"]["Si"]
+    # without the anchor (report): the landing stays in the result
+    s = run_inline({"s": dict(sp, acquire=dict(sp["acquire"], laser_reference="report"))})["studies"]["s"]
+    assert abs(s["peaks_by_name"]["Si"]["position_cm1"] - 520.7) > 0.8
+    (bdir / "sim_landing").unlink()
+    (bdir / "sim_laser_line").unlink()
+    # calibration.anchor 'off' and the validation
+    assert F.validate({"c": dict(cal, calibration=dict(cal["calibration"], anchor="off"))})["c"]["ok"]
+    assert not F.validate({"c": dict(cal, calibration=dict(cal["calibration"], anchor="x"))})["c"]["ok"]
+
+
+def test_calibration_in_correct_mode_stores_the_zero_as_measured_and_creep_is_not_scatter(monkeypatch):
+    """Nicola, 2026-11-25: a correction stored from a calibration run with laser_reference correct/correct_each was
+    relative to that study's laser-line shifts, so a 'report' spectrum got the wrong zero; and ext600's repeats
+    9.26, 8.75, 7.85, 7.51, 8.17 (a creep) gave SD 0.70 as the repositioning spread."""
+    from labspec_translator import xcal
+    import labspec_translator.runner as R
+    xcal.clear()
+    bdir = config.active_bridge_dir()
+    sim = S.ensure(bdir)
+    (bdir / "sim_laser_line").write_text("1")
+    (bdir / "sim_landing").write_text("2.0")              # every spectrum lands 2 cm-1 high
+    sim._landing_n = 0
+    cal = {"kind": "calibration", "sample": {"name": "Si"}, "setup": dict(SETUP),
+           "acquire": {"center_cm1": 250, "exposure_s": 1, "laser_reference": "correct_each"},
+           "calibration": {"adjust": "ls6t"}, "video": {"before": False}}
+    c = run_inline({"c": cal})["studies"]["c"]["calibration"]
+    st = c["stored_correction"]
+    assert st["zero_mode"] == "absolute" or st["zero_mode"] == "anchored"
+    # report spectrum, same landing: the stored zero brings Si to 520.7 whatever the calibration study's mode
+    sp = {"kind": "spectrum", "sample": {"name": "Si"}, "setup": dict(SETUP),
+          "acquire": {"center_cm1": 250, "exposure_s": 1, "laser_reference": "report"},
+          "process": {"peaks": [{"name": "Si", "near_cm1": 520.7, "window_cm1": 30}]}}
+    s = run_inline({"s": sp})["studies"]["s"]
+    assert abs(s["peaks_by_name"]["Si"]["position_cm1"] - 520.7) < 0.3, s["peaks_by_name"]["Si"]
+    (bdir / "sim_landing").unlink()
+    (bdir / "sim_laser_line").unlink()
+    # a creep: the successive-difference spread, not the SD, goes to the repeatability store
+    xcal.clear()
+    monkeypatch.setattr(R, "_repeat_offsets", lambda reps, lines: [9.26, 8.75, 7.85, 7.51, 8.17][:len(reps)])
+    monkeypatch.setattr(R, "_anchor_repeats", lambda *a, **k: None)
+    cal5 = {"kind": "calibration", "sample": {"name": "Si"}, "setup": dict(SETUP, grating=600),
+            "acquire": {"center_cm1": 520.7, "exposure_s": 0.2}, "calibration": {"adjust": "ls6t", "repeats": 5}}
+    c = run_inline({"c": cal5})["studies"]["c"]["calibration"]
+    rp = c["repeats"]
+    assert rp["sd_successive_cm1"] < rp["sd_cm1"]
+    if rp["settled"]:
+        assert c["repeatability"]["moved_sd_cm1"] == pytest.approx(rp["sd_successive_cm1"], abs=0.002)
