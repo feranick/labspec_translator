@@ -119,6 +119,11 @@ def test_connect_detect_and_disconnect(tmp_path, monkeypatch, capsys):
     assert b["connection"]["type"] == "stdio" and b["connection"]["args"] == C.MODULE_ARGS
     assert "\\\\" not in b["connection"]["env"]["LS6T_HOME"].lstrip("\\")
     assert any(x["name"] == "jumper" for x in bs)
+    # and the ls6t skill into Bionic's skills folder (2026-11-25: where Settings > Skills put it)
+    sk = u / ".lmstudio" / "skills" / "ls6t" / "SKILL.md"
+    assert sk.read_text(encoding="utf-8") == C.skill_source().read_text(encoding="utf-8")
+    assert "name: ls6t" in sk.read_text(encoding="utf-8")
+    (sk.parent / "notes.txt").write_text("the person's own file")
     cc = json.loads((u / ".claude.json").read_text())
     assert cc["numStartups"] == 7 and cc["projects"] == {"C:/x": {"mcpServers": {}}}
     assert cc["mcpServers"]["ls6t"]["type"] == "stdio" and cc["mcpServers"]["ls6t"]["command"] == sys.executable
@@ -142,6 +147,7 @@ def test_connect_detect_and_disconnect(tmp_path, monkeypatch, capsys):
     out = json.loads(capsys.readouterr().out)
     assert sorted(sum((r["removed"] for r in out["files"]), [])) == ["ls6t"] * 10 + ["ls6t-sim"]
     assert [x["name"] for x in json.loads((bi / "ng-mcp.json").read_text())["servers"]] == ["jumper"]
+    assert not sk.exists() and (sk.parent / "notes.txt").exists()          # only ls6t's SKILL.md went
     assert json.loads((u / ".claude.json").read_text())["numStartups"] == 7
     assert set(json.loads((tmp_path / "u" / ".cursor" / "mcp.json").read_text())["mcpServers"]) == {"other"}
     assert json.loads((tmp_path / "u" / ".gemini" / "settings.json").read_text())["mcpServers"] == {}

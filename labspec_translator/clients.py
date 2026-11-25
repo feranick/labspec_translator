@@ -12,7 +12,7 @@ Each app keeps its MCP servers in its own file. ls6t knows nine that start local
 | copilot | GitHub Copilot (VS Code / Visual Studio agent, Copilot CLI) | %COPILOT_HOME%\mcp-config.json or ~/.copilot/mcp-config.json |
 | windsurf | Windsurf (Cascade)                                     | ~/.codeium/windsurf/mcp_config.json (and windsurf-next's when present) |
 | lmstudio | LM Studio (local models: nothing leaves the PC)        | ~/.lmstudio/mcp.json                             |
-| bionic  | LM Studio Bionic (the agent app; its own list)          | ~/.lmstudio/apps/bionic/.internal/ng-mcp.json ({"servers": [...]}) |
+| bionic  | LM Studio Bionic (the agent app; its own list)          | ~/.lmstudio/apps/bionic/.internal/ng-mcp.json ({"servers": [...]}); and the ls6t skill: ~/.lmstudio/skills/ls6t/SKILL.md |
 
 The Gemini app and ChatGPT on the web take only remote servers (an internet address): ls6t does not offer the
 instrument to the internet, so they cannot use it.
@@ -290,6 +290,49 @@ def _undouble(v):
     while "\\\\" in body:
         body = body.replace("\\\\", "\\")
     return lead + body
+
+
+SKILL_NAME = "ls6t"
+
+
+def skill_source() -> Path:
+    """The ls6t skill shipped with the package (Agent Skills format: SKILL.md, name ls6t)."""
+    return Path(__file__).parent / "skills" / SKILL_NAME / "SKILL.md"
+
+
+def bionic_skill_file() -> Path:
+    """Where Bionic keeps a skill added in Settings > Skills (2026-11-25, Nicola: %USERPROFILE%\\.lmstudio\\skills\\ls6t\\
+    SKILL.md; its own built-ins are under apps\\bionic\\.internal\\skills, pinned by hash: never touched)."""
+    return _home() / ".lmstudio" / "skills" / SKILL_NAME / "SKILL.md"
+
+
+def install_skill() -> dict:
+    """The ls6t skill into Bionic's skills folder: only SKILL.md is written (a different one there is backed up);
+    nothing else in the folder is touched."""
+    src, dst = skill_source(), bionic_skill_file()
+    text = src.read_text(encoding="utf-8")
+    if dst.exists() and dst.read_text(encoding="utf-8-sig") == text:
+        return {"skill": str(dst), "note": "skill 'ls6t' already up to date"}
+    backup = _backup_and_write(dst, text)
+    return {"skill": str(dst), "note": ("updated" if backup else "added") + " skill 'ls6t'",
+            **({"skill_backup": str(backup)} if backup else {})}
+
+
+def remove_skill() -> dict:
+    """The ls6t skill out of Bionic: SKILL.md when it is ls6t's (its name), the folder only if then empty."""
+    dst = bionic_skill_file()
+    if not dst.exists():
+        return {}
+    head = dst.read_text(encoding="utf-8-sig")[:400]
+    if not re.search(r"^name:\s*ls6t\s*$", head, flags=re.M):
+        return {"skill_kept": f"{dst}: not ls6t's skill"}
+    dst.unlink()
+    out = {"skill_removed": str(dst)}
+    try:
+        dst.parent.rmdir()                  # only when empty: other files of the person's stay
+    except OSError:
+        out["skill_folder_kept"] = f"{dst.parent}: holds other files"
+    return out
 
 
 def bionic_servers(cfg: dict) -> dict:
@@ -665,6 +708,12 @@ def connect(clients: list, python: str, sim: bool = False, main: bool = True, te
                                               forced={"LS6T_MODE": "sim", **tm})
                         notes.append(n)
                     rep["backup"] = _str(write_json(path, cfg))
+                    try:
+                        sk = install_skill()
+                        notes.append(sk.pop("note"))
+                        rep.update(sk)
+                    except OSError as exc:
+                        rep["warning"] = f"the ls6t skill could not be written ({exc}): add it in Bionic's Settings > Skills"
                 else:
                     cfg = read_json(path)
                     notes = []
@@ -753,6 +802,7 @@ def disconnect(clients: list, python: str) -> list[dict]:
                             rep["removed"].append(name)
                     if rep["removed"]:
                         write_json(path, cfg)
+                    rep.update(remove_skill())
                 else:
                     cfg = read_json(path)
                     for name in (ENTRY, SIM_ENTRY):

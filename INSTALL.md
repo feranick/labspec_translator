@@ -334,6 +334,9 @@ ls6t tools appear in a new chat or session (Claude: the tools / connectors menu)
   the installer's *LM Studio Bionic* box); start it again and check that `ls6t` is switched on under Settings > MCP.
   If you added ls6t there by hand, `ls6t connect bionic` takes that entry over (its paths typed with doubled
   backslashes are made single). Bionic was found in `C:\Program Files\Bionic` on the instrument PC.
+  The ls6t **skill** (how to turn a request into studies, with the instrument's defaults and recipes) is installed with
+  it: `%USERPROFILE%\.lmstudio\skills\ls6t\SKILL.md`, the folder Bionic uses for skills added in Settings > Skills.
+  Restart Bionic and check that `ls6t` is listed and switched on there; type `@` in the chat to call it explicitly.
 
 **Apps that can also run commands on the PC.** The ChatGPT desktop app / Codex, Gemini CLI, Cursor, Claude Code,
 GitHub Copilot's agent and Windsurf (and Claude with a terminal extension) can run shell commands. An LLM that cannot find what it wants in ls6t's tools may then try to

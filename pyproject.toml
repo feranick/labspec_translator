@@ -31,4 +31,4 @@ packages = ["labspec_translator"]
 version = { attr = "labspec_translator.__version__" }
 
 [tool.setuptools.package-data]
-labspec_translator = ["vbs/*.vbs"]
+labspec_translator = ["vbs/*.vbs", "skills/*/SKILL.md"]
