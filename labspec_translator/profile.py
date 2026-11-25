@@ -332,6 +332,8 @@ def load(path: Path | None = None) -> dict:
                 pass
     if p.is_file():
         data = json.loads(p.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            data.pop("problems", None)      # written by .25.10's profile set: found at load time, never stored
         problems: list = []
         prof = _merge(DEFAULT_PROFILE, data, problems)
         rp = (prof.get("spectrometer") or {}).get("repeatability") or {}
@@ -372,7 +374,9 @@ def load(path: Path | None = None) -> dict:
 def save(prof: dict, path: Path | None = None) -> Path:
     p = Path(path) if path else config.profile_path()
     p.parent.mkdir(parents=True, exist_ok=True)
-    data = {k: v for k, v in prof.items() if k not in ("measured", "path")}
+    # 'problems' is what load() found, never part of the file (2026-11-25: profile set saved it, and the next load
+    # still reported a problem the set had just fixed)
+    data = {k: v for k, v in prof.items() if k not in ("measured", "path", "problems")}
     tmp = p.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, indent=1), encoding="utf-8")
     from .bridge import replace_retry

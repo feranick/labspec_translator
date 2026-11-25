@@ -1653,6 +1653,10 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
                    "protocol": BRIDGE_PROTOCOL})
     if not per_point:
         result["why"] = stop_exc.why if stop_exc else "no spectrum was measured"
+    if result.get("calibration"):
+        store_pending(result["calibration"], warnings, unreliable)
+        if (checks.get("calibration") or {}).get("outcome"):
+            checks["calibration"]["outcome"] = result["calibration"].get("outcome")
     if kind == "calibration" and (result.get("calibration") or {}).get("fwhm_cm1"):
         _record_resolution(result, after, prof, warnings, str(ctx.folder))
     result["expect"] = evaluate_expect(study.get("expect", []), result)
@@ -4540,31 +4544,53 @@ def _calibration_result(study, prof, rec, ref_lines, laser, grating, rng, reques
             res["laser_line_rejected"] = broad
             warnings.append(f"the calibration's laser line is not kept as a reference: {broad}")
             llc = {}
-        st = xcal.store(laser, grating, a, b, refname, lines, request, centre_nm=wc,
-                        pool=cal.get("store", "auto"), cm1_per_px=px, repeats=rep_info,
-                        laser_line_cm1=llc.get("position_cm1") if llc.get("ok") else None,
-                        laser_line_fwhm_cm1=llc.get("fwhm_cm1") if llc.get("ok") else None,
-                        placement="labspec" if not rng.get("single", True) else "centred",
-                        range_cm1=[rng["from_cm1"], rng["to_cm1"]] if (wc is None and not rng.get("single", True)
-                                                                         and rng.get("from_cm1") is not None) else None)
-        res["stored_as"] = (("one correction for every window of " if st.get("pooled") else
-                             "for this range: " if st.get("range_cm1") else "per window centre: ")
-                            + combo(laser, grating) + " (" + st["pool"]["why"] + ")")
-        if st.get("drift_at_centre"):
-            dr = st["drift_at_centre"]
-            warnings.append(f"the zero at this window moved {dr['cm1']:+.2f} cm-1 since {dr['since']}"
-                            + (f"; the corrections at {', '.join(str(o['centre_nm']) for o in st.get('older_centres', []))}"
-                               " nm are older and still carry that drift: calibrate them again"
-                               if st.get("older_centres") else ""))
-        res["stored_correction"] = st
-        warnings.append(f"ls6t now corrects later spectra ({xcal.key(laser, grating)}): true = {a:+.3f} + "
-                        f"{b:.6f} x measured")
+        # stored only once the whole study is judged reliable (store_pending, at the end of run_any): 2026-11-25,
+        # two calibrations unreliable for multimode points and laser-line jumps still stored their corrections
+        res["_pending_store"] = {
+            "args": [float(laser), _f(grating), float(a), float(b), refname, lines, request],
+            "kw": dict(centre_nm=wc, pool=cal.get("store", "auto"), cm1_per_px=px, repeats=rep_info,
+                       laser_line_cm1=llc.get("position_cm1") if llc.get("ok") else None,
+                       laser_line_fwhm_cm1=llc.get("fwhm_cm1") if llc.get("ok") else None,
+                       placement="labspec" if not rng.get("single", True) else "centred",
+                       range_cm1=[rng["from_cm1"], rng["to_cm1"]] if (wc is None and not rng.get("single", True)
+                                                                        and rng.get("from_cm1") is not None)
+                       else None)}
     elif not res["pass"]:
         unreliable.append(f"the {'Si' if refname == 'si' else refname} line is at {first['measured_cm1']:.2f} cm-1, "
                           f"{first['measured_cm1'] - first['reference_cm1']:+.2f} from {first['reference_cm1']}: "
                           f"adjust the zero in LabSpec for {combo(laser, grating)} (calibration.adjust 'labspec' "
                           "guides it), or let ls6t correct (adjust 'ls6t')")
     return res
+
+
+def store_pending(res: dict, warnings: list, unreliable: list) -> None:
+    """A calibration's correction, stored only when the study ended reliable; otherwise nothing is stored, the
+    correction in use stays, and stored_as / outcome say so (Nicola, 2026-11-25)."""
+    from . import xcal
+    pend = res.pop("_pending_store", None)
+    if not pend:
+        return
+    laser, grating, a, b = pend["args"][:4]
+    if unreliable:
+        res["stored_as"] = ("nothing stored: the calibration is unreliable (" + "; ".join(u[:120] for u in unreliable[:3])
+                            + "); the correction in use stays")
+        res.pop("corrected", None)
+        res["outcome"] = (f"measured {res.get('offset_cm1', 0):+.2f} cm-1 but NOT stored: the calibration is unreliable; "
+                          "the correction in use stays")
+        return
+    st = xcal.store(*pend["args"], **pend["kw"])
+    res["stored_as"] = (("one correction for every window of " if st.get("pooled") else
+                         "for this range: " if st.get("range_cm1") else "per window centre: ")
+                        + combo(laser, grating) + " (" + st["pool"]["why"] + ")")
+    if st.get("drift_at_centre"):
+        dr = st["drift_at_centre"]
+        warnings.append(f"the zero at this window moved {dr['cm1']:+.2f} cm-1 since {dr['since']}"
+                        + (f"; the corrections at {', '.join(str(o['centre_nm']) for o in st.get('older_centres', []))}"
+                           " nm are older and still carry that drift: calibrate them again"
+                           if st.get("older_centres") else ""))
+    res["stored_correction"] = st
+    warnings.append(f"ls6t now corrects later spectra ({xcal.key(laser, grating)}): true = {a:+.3f} + "
+                    f"{b:.6f} x measured")
 
 
 def _native_map(ctx: Ctx, name: str, study: dict, sd: Path, rng: dict, laser: float, acq: dict, x0, y0, zref,

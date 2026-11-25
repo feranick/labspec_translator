@@ -1264,6 +1264,7 @@ def test_maintainer_session_2026_11_23_afternoon(tmp_path):
     assert any("not measured well enough" in u for u in unreliable)
     good = {"peaks": [{"ok": True, "position_cm1": 520.33, "fwhm_cm1": 5.0, "snr": 80.0}]}
     cal = runner._calibration_result(study, prof, good, [520.7], 532.0, 1200, {}, "r", {}, [], [])
+    runner.store_pending(cal, [], [])           # stored once the study ends reliable (2026.11.25.12)
     assert cal["trusted"] and cal["pass"] and cal["stored_correction"]
     # the bridge's start-up inventory only when needed
     br = Path(api.install_bridge(tmp_path / "vbs")["files"]["ls6t_bridge.vbs"]).read_text()

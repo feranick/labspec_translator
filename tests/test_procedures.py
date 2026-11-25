@@ -1935,3 +1935,39 @@ def test_laser_line_far_from_the_calibrations_makes_the_result_unreliable():
     (bdir / "sim_xshift").unlink()
     (bdir / "sim_laser_line").unlink()
     assert not s["reliable"] and any("another mode" in u for u in s["unreliable_because"]), s["unreliable_because"]
+
+
+def test_unreliable_calibration_stores_nothing_and_fixed_profile_problems_clear(monkeypatch, tmp_path):
+    """2026-11-25: two unreliable calibrations (multimode points, laser-line jumps) still stored their corrections;
+    and profile_problems still named spectrometer.repeatability after `profile set` had fixed it."""
+    import json as _j
+    from labspec_translator import xcal
+    import labspec_translator.runner as R
+    xcal.clear()
+    real = R.analyse
+
+    def unreliable_analyse(*a, **k):
+        out = real(*a, **k)
+        a[8].append("the laser line jumped -1.9 cm-1 (test)")            # unreliable, as on the instrument
+        return out
+    monkeypatch.setattr(R, "analyse", unreliable_analyse)
+    cal = {"kind": "calibration", "sample": {"name": "Si"}, "setup": dict(SETUP),
+           "acquire": {"center_cm1": 520.7, "exposure_s": 1}, "calibration": {"adjust": "ls6t"}}
+    c = run_inline({"c": cal})["studies"]["c"]
+    assert "calibration" in c, {k: c.get(k) for k in ("why", "unreliable_because", "ok")}
+    assert not c["reliable"] and c["calibration"]["stored_as"].startswith("nothing stored"), c["calibration"]
+    assert "NOT stored" in c["calibration"]["outcome"] and xcal.load() == {}
+    monkeypatch.setattr(R, "analyse", real)
+    c = run_inline({"c": cal})["studies"]["c"]
+    assert c["reliable"] and "per window centre" in c["calibration"]["stored_as"] and xcal.load()
+    # a problem found at load, fixed by profile set: gone at the next load (it was saved into the file)
+    _profile_with_shutter(tmp_path)
+    pf = config.profile_path()
+    d = _j.loads(pf.read_text(encoding="utf-8"))
+    d["spectrometer"]["repeatability"] = "{637.75@600: {...}}"
+    pf.write_text(_j.dumps(d), encoding="utf-8")
+    assert P.load().get("problems")
+    vf = tmp_path / "rep.json"
+    vf.write_text(_j.dumps({"637.75@600": {"moved_sd_cm1": 0.25, "still_sd_cm1": 0.26}}))
+    assert api.profile_set("spectrometer.repeatability", "@" + str(vf))["ok"]
+    assert "problems" not in _j.loads(pf.read_text(encoding="utf-8")) and not P.load().get("problems")
