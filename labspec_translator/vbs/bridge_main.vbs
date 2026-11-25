@@ -1491,7 +1491,7 @@ Sub VAcquireInner(cmd, res)
         cur = MotorValue(spm)
         Err.Clear
     End If
-    If f > 0 And f = t And GetP(cmd, "center_move", "1") = "1" And IsNumeric(cur) And cur <> "" Then
+    If f > 0 And f = t And GetP(cmd, "center_move", "1") = "1" And IsNumeric(cur) And cur <> "" And GetP(cmd, "spectro_force", "0") <> "1" Then
         If Abs(CDbl(cur) - f) <= ParseNum(GetP(cmd, "spectro_tol_nm", "0.01")) Then
             res("spectro_nm") = cur
             res("spectro_asked_nm") = f
@@ -2616,7 +2616,12 @@ Sub VMapNative(cmd, res)
             Err.Clear
             Exit Sub
         End If
-        If r > 0 Then WaitMotor "Spectro", r, 120, res
+        ' wait for this last move whatever MoveMotor returned (2026-11-25: 'before' read the approach point)
+        If r > 0 Then
+            WaitMotor "Spectro", r, 120, res
+        Else
+            WaitMotor "Spectro", gNoId, 120, res
+        End If
         res("spectro_before_map") = MotorValue("Spectro")
     End If
     ' the axes: all off, then the ones asked for

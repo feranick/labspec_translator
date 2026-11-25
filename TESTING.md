@@ -1046,7 +1046,11 @@ the profile when settled: `ls6t profile set spectrometer.repeatability '{"637.75
 "moved_sd_cm1": 0.30}}'`. Repeat the test at 1200 and 1800 to fill the others. **.25.4:** extended ranges and native maps are placed by LabSpec (no approach): measure
 their spread with calibration repeats over the range (stored as `"637.75@600@labspec"`). **.25.5:** a native map now reads the
 spectrometer when LabSpec's map has started and after it: `native_map.spectrometer.moved_by_labspec` says whether
-LabSpec re-placed it (send it with the next native map test). **Test:** 637.75 @ 600, `repeats: 5`, at 300 and at 1000 cm⁻¹:
+LabSpec re-placed it (send it with the next native map test).
+**2026-11-25, with approach −2:** 600 still 0.26 / moved 0.19–0.30, 1200 0.15 / 0.25, 1800 0.16 / 0.25 cm⁻¹ (profile set).
+**From 2026.11.25.6** the first move after a grating change is forced and approached (`t_spectro_approach_s` in its
+phases); the native map's `before_map_nm` should now equal the centre. For a LabSpec-placed test at 600 use a range
+wider than one window (e.g. 100–5000 cm⁻¹). **Test:** 637.75 @ 600, `repeats: 5`, at 300 and at 1000 cm⁻¹:
 the two means within about 2 × SEM of each other; `stored_as` pooled; a spectrum afterwards uses it at any centre.
 **Extended range and maps (.15):** the stitched 100–3200 cm⁻¹ range (2 windows, seam ~1945 cm⁻¹) read Si 1.5 low with
 a one-window correction; `noise_sigma` ~0.16 against a real 1.3–1.4 (DeNoise Lite: lag-1 r 0.85–0.88), so SNRs were

@@ -1194,6 +1194,12 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
 
     # ---- points
     acq = plan.acquire_step(study, prof, rng)
+    appr_ = float((prof.get("spectrometer") or {}).get("approach_nm", 0) or 0)
+    if appr_ and acq.get("verb", "acquire") == "acquire":
+        # every acquisition of the study (the warm-up too) from the same side (2026-11-25: the discarded first
+        # spectrum after a grating change made the move without the approach, and the repeats then skipped it)
+        acq = dict(acq, spectro_approach_nm=appr_)
+    grating_changed = str(before.get("grating")) != str(after.get("grating"))
     focus = study.get("focus", {})
     af = focus.get("autofocus")
     every = int(focus.get("every", 0) or 0)
@@ -1322,13 +1328,18 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
                 # start of a request; the 637.75 nm laser's mode was right for the first spectrum of each request only
                 ctx.call("status", timeout_s=15, **motor_args(prof))
             cal_reps = kind == "calibration" and int((study.get("calibration") or {}).get("repeats", 1) or 1) > 1
-            grating_changed = str(before.get("grating")) != str(after.get("grating"))
+            # after a grating change LabSpec re-places the spectrometer when the turret turns: the first move of the
+            # study is always made (with its approach), even when the spectrometer already reads the centre
+            first_acq = dict(acq, spectro_force=1) if grating_changed else acq
+            warmed = False
             if k == 0 and warmup_s(study, prof, laser) > 0:
-                warmup_info = _warmup(ctx, acq, sd, warmup_s(study, prof, laser))
+                warmup_info = _warmup(ctx, first_acq, sd, warmup_s(study, prof, laser))
+                warmed = True
             elif k == 0 and cal_reps and grating_changed:
                 # the first spectrum after a grating change was the outlier twice (2026-11-24: 11.31, 11.09 against
                 # ~9.5): one discarded first
-                warmup_info = _warmup(ctx, acq, sd, float(acq.get("exposure_s") or 1.0))
+                warmup_info = _warmup(ctx, first_acq, sd, float(acq.get("exposure_s") or 1.0))
+                warmed = True
                 warmup_info["why"] = "the first spectrum after a grating change (calibration repeats)"
             out = sd / "spectra" / f"p{k:05d}.txt"
             params = dict(acq)
@@ -1343,11 +1354,10 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
                           site=str(study.get("sample", {}).get("site", ""))[:100])
             if study.get("sample", {}).get("notes"):
                 params["remark"] = str(study["sample"]["notes"])[:200]     # LabSpec's Remark, after "ls6t <seq>"
-            appr = float((prof.get("spectrometer") or {}).get("approach_nm", 0) or 0)
-            if appr:
-                params["spectro_approach_nm"] = appr     # every move from the same side (backlash test)
+            if k == 0 and grating_changed and not warmed:
+                params["spectro_force"] = 1
             if kind == "calibration" and k > 0 and (study.get("calibration") or {}).get("repeats_move", True):
-                params["spectro_jog_nm"] = appr or 3.0   # re-placed: each repeat lands on the pixels afresh
+                params["spectro_jog_nm"] = appr_ or 3.0  # re-placed: each repeat lands on the pixels afresh
             if native and kind != "map":             # series too (2026-11-23: no .l6s for series spectra)
                 params["native"] = str(sd / "spectra" / f"p{k:05d}.l6s")
             if ctx.hold_wanted and not ctx.holding and str(params.get("laser_off", "0")) != "1":
@@ -4101,6 +4111,7 @@ def _cm1_per_px(rec: dict, laser, near_cm1: float) -> float | None:
         return None
 
 
+OUTLIER_K = 6.0   # an outlier repeat: over 6 x the others' SD from their mean (and 0.3 cm-1)
 STEP_T = 5.0      # a step between two runs of repeats: their means over 5 x the pooled standard error
 TREND_T = 5.0     # a creep: a slope over 5 x its standard error (few repeats: a 1 % false alarm, not 5 %)
 
@@ -4117,11 +4128,24 @@ def repeat_stats(offs: list) -> dict:
     if v.size < 2:
         return dict(out, centre=float(v[0]) if v.size else None, kept=v.tolist(), outliers=[], step=None,
                     settled=True)
-    med = float(np.median(v))
-    mad = 1.4826 * float(np.median(np.abs(v - med)))
-    sdiff = 1.4826 * float(np.median(np.abs(np.diff(v)))) / math.sqrt(2) if v.size > 2 else 0.0
-    lim = max(3 * max(mad, sdiff), 0.3)
-    idx = [i for i in range(v.size) if abs(v[i] - med) > lim] if v.size >= 4 else []
+    # an outlier: off the others' mean by more than OUTLIER_K x their SD (as a prediction for one more), and 0.3 cm-1
+    # (2026-11-25: 9.597 among 8.90s was missed when the jump itself inflated the noise estimate); at most one per
+    # five repeats, the worst first. Pure noise: ~4 % of 5-repeat sets lose one, under 1 % from 8 repeats.
+    idx: list = []
+    if v.size >= 4:
+        for _ in range(max(1, v.size // 5)):
+            rest = [i for i in range(v.size) if i not in idx]
+            worst = None
+            for i in rest:
+                o = v[[j for j in rest if j != i]]
+                lim_i = max(OUTLIER_K * float(np.std(o, ddof=1)) * math.sqrt(1 + 1 / o.size), 0.3)
+                dev = abs(v[i] - float(np.mean(o)))
+                if dev > lim_i and (worst is None or dev / lim_i > worst[0]):
+                    worst = (dev / lim_i, i)
+            if worst is None:
+                break
+            idx.append(worst[1])
+        idx.sort()
     keep = np.asarray([v[i] for i in range(v.size) if i not in idx])
     step = None
     if keep.size >= 4:

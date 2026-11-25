@@ -135,6 +135,9 @@ def store(laser_nm, grating, a: float, b: float, reference: str, lines: list, re
     if centre_nm is not None:
         ck = f"{float(centre_nm):.2f}"
         old = by.get(ck)
+        orp = (old or {}).get("repeats") or {}
+        if orp and ("median_cm1" not in orp or orp.get("settled") is False):
+            old = None              # repeats from before 2026.11.25.1 or not settled: no drift against them
         if old and old.get("request") != request and _t(rec) - _t(old) > POOL_WINDOW_H * 3600:
             # the same window measured again later: the drift since then, which older entries elsewhere still carry
             drift = {"centre_nm": float(centre_nm), "since": old.get("time"),

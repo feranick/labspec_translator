@@ -1662,3 +1662,28 @@ def test_native_map_spectrometer_read_back_picks_the_repeatability_entry():
     assert m["native_map"]["spectrometer"]["moved_by_labspec"] and cu["expected_uncertainty_cm1"] == 0.6
     store.write("spectro_repeatability.json", {})
     xcal.clear()
+
+
+def test_outlier_after_a_jump_forced_first_move_and_no_drift_against_old_entries():
+    """2026-11-25 (.25.5): 9.597 among 8.90s was not flagged (the jump inflated the noise estimate); the first move
+    after a grating change had no approach (the discarded first spectrum made it); drift_at_centre compared with a
+    pre-2026.11.25.1 entry."""
+    from labspec_translator import xcal
+    r = runner.repeat_stats([8.913, 8.904, 8.903, 9.597, 8.758])
+    assert r["outliers"] == [3] and abs(r["centre"] - 8.904) < 0.01
+    assert runner.repeat_stats([11.09, 8.96, 9.17, 8.94, 9.51])["outliers"] == [0]
+    xcal.clear()
+    xcal.store(637.75, 600, -11.35, 1.0, "si", [], centre_nm=681.19, request="night",
+               repeats={"n": 5, "sd_cm1": 0.2, "settled": True})
+    d = xcal.load()
+    for v in list(d["637.75@600"]["by_centre"].values()) + [d["637.75@600"]]:
+        v["time"] = "2026-11-24T23:38:43"
+    xcal._save(d)
+    r2 = xcal.store(637.75, 600, -9.96, 1.0, "si", [], centre_nm=681.19, request="day",
+                    repeats={"n": 5, "sd_cm1": 0.2, "median_cm1": 9.96, "settled": True})
+    assert "drift_at_centre" not in r2
+    xcal.clear()
+    text = api.compose_vbs(config.active_bridge_dir(), config.home())["ls6t_bridge.vbs"]
+    assert 'GetP(cmd, "spectro_force", "0") <> "1"' in text
+    nm = text.split("Sub VMapNative")[1].split("End Sub")[0]
+    assert nm.index('WaitMotor "Spectro", gNoId, 120, res') < nm.index('res("spectro_before_map")')
