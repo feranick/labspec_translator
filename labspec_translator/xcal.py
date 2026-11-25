@@ -140,6 +140,14 @@ def store(laser_nm, grating, a: float, b: float, reference: str, lines: list, re
             drift = {"centre_nm": float(centre_nm), "since": old.get("time"),
                      "cm1": round(float(rec["a"]) - float(old["a"]), 3)}
         by[ck] = rec
+    if centre_nm is None and range_cm1 is not None:
+        # an extended range: kept for that range, nothing to compare per window
+        rec["pool"] = {"pooled": False, "why": f"kept for the range {range_key(range_cm1)} cm-1"}
+        d[k] = dict((d.get(k) or {}), by_range=br)
+        if not d[k].get("a"):
+            d[k].update({kk: vv for kk, vv in rec.items() if kk not in ("pool",)})
+        _save(d)
+        return dict(rec)
     pooled, why, cents = pool_decision(by, pool, cm1_per_px, rec)
     rec["pool"] = {"pooled": pooled, "why": why}
     _fr, older = fresh_entries(by, rec)
@@ -176,6 +184,8 @@ def _t(rec) -> float:
 
 def _se(rec) -> float | None:
     r = rec.get("repeats") or {}
+    if r.get("drifting") and not r.get("settled"):
+        return None                           # a trend over the repeats: their scatter is not noise
     if r.get("sem_cm1") is not None:
         return float(r["sem_cm1"])
     if r.get("sd_cm1") is not None and r.get("n"):

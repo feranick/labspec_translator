@@ -1564,3 +1564,32 @@ def test_correlated_noise_auto_peaks_stitch_seams_range_corrections_and_headers(
           "map": {"x_um": [-4, 4, 2], "y_um": [-4, 4, 2]}}
     e = plan.estimate(st, P.load())["seconds"]
     assert e["total"] - e["setup"] < 25 * 4.5, e
+
+
+def test_seam_dip_repeat_drift_calibration_open_wait_and_estimate_breakdown():
+    """.18 on the instrument: the seam of a 2-window range (1.56 -> 1.12 -> 1.60 cm-1, one step) was missed; the
+    637.75 laser was still settling during repeats (11.31, 10.00, 9.99, 9.58, 9.60) and their SEM called a 0.75 cm-1
+    difference real; the points estimate's breakdown was inconsistent (5.3 s x 25 > the total)."""
+    from labspec_translator import xcal
+    x = np.concatenate([np.arange(100, 1945, 1.56), [1945 + 1.12], 1945 + 1.12 + np.arange(1, 800) * 1.60])
+    assert runner.stitch_seams(x) and abs(runner.stitch_seams(x)[0] - 1945) < 5
+    d = runner.repeat_drift([11.31, 10.00, 9.99, 9.58, 9.60])
+    assert d and d["slope"] < 0 and d["settled"] and d["dropped_leading"] >= 1
+    assert runner.repeat_drift([9.5, 9.7, 9.4, 9.6, 9.55]) is None
+    # a drifting, never-settled set of repeats is no standard error for the window comparison
+    assert xcal._se({"repeats": {"n": 5, "sd_cm1": 0.6, "drifting": True, "settled": False}}) is None
+    prof = P.load()
+    lk = next(k for k, v in prof["lasers"].items() if abs(v["nm"] - 532) < 1)
+    prof["lasers"][lk].update(mode_hops=True)
+    assert plan.hold_open_s(prof, 532, "calibration") == plan.CAL_OPEN_DEFAULT_S
+    assert plan.hold_open_s(prof, 532, "spectrum") == plan.HOLD_OPEN_DEFAULT_S
+    st = {"kind": "map", "sample": {"name": "Si"}, "setup": dict(SETUP, grating=1200),
+          "acquire": {"center_cm1": 520, "exposure_s": 1, "accumulations": 2, "shutter": "hold"},
+          "map": {"x_um": [-4, 4, 2], "y_um": [-4, 4, 2]}}
+    e = plan.estimate(st, P.load())["seconds"]
+    assert e["acquisitions"] <= e["total"] and e["first_acquisition"] >= e["per_acquisition"]
+    # an extended-range calibration is kept for its range, and says so
+    xcal.clear()
+    r = xcal.store(637.75, 1200, 1.5, 1.0, "si", [], placement="labspec", range_cm1=[100, 3200])
+    assert "kept for the range 100-3200" in r["pool"]["why"]
+    xcal.clear()

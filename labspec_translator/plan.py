@@ -917,7 +917,10 @@ def settle_s(prof: dict, laser) -> float:
 HOLD_OPEN_DEFAULT_S = 5.0   # a laser marked mode_hops / unstable_multi without its own settle_s
 
 
-def hold_open_s(prof: dict, laser) -> float:
+CAL_OPEN_DEFAULT_S = 40.0   # before a calibration, a laser marked mode_hops / unstable_multi without its own value
+
+
+def hold_open_s(prof: dict, laser, kind: str | None = None) -> float:
     """The wait after the shutter hold opens the shutter, before the first spectrum (the laser settling in its mode:
     2026-11-24, the 637.75 nm laser's first held spectrum had its laser line 9.9 cm-1 wide, then about 6):
     lasers.<k>.hold_open_s; by default the laser's settle_s (the time it needs after a shutter cycle), or 5 s for a
@@ -926,6 +929,13 @@ def hold_open_s(prof: dict, laser) -> float:
     if not lk:
         return 0.0
     L = prof["lasers"][lk]
+    if kind == "calibration":
+        # a calibration needs the laser settled, not just in its mode (2026-11-24, 637.75 nm: the zero still moved by
+        # 1.7 cm-1 over the first ~40 s after the shutter opened, with 4.5 s of open wait)
+        if L.get("calibration_open_s") is not None:
+            return max(0.0, float(L["calibration_open_s"]))
+        if L.get("mode_hops") or L.get("unstable_multi"):
+            return CAL_OPEN_DEFAULT_S
     if L.get("hold_open_s") is not None:
         return max(0.0, float(L["hold_open_s"]))
     st = float(L.get("settle_s") or 0.0)
@@ -1053,22 +1063,26 @@ def estimate(study: dict, prof: dict, current: dict | None = None) -> dict:
         if k > 0 and not held_:
             total += settle_s(prof, laser)          # the pause between spectra (a laser that needs it)
         if k == 0 and held_:
-            total += hold_open_s(prof, laser)       # the laser settling after the hold opens the shutter
+            total += hold_open_s(prof, laser, study.get("kind"))    # the laser settling after the hold opens it
     vd = study.get("video") or {}
     v = prof.get("video", {})
     shots = int(bool(vd.get("before", study.get("kind") == "calibration"))) + int(bool(vd.get("after")))
     total += shots * (float(v.get("settle_s", 1.5)) + 5.0 +
                       (float(v.get("laser_s", 1.0)) if vd.get("with_laser") else 0.0))
+    held_all = hold_shutter(study, prof, laser)
+    acq_next = acq_next_s(study, prof, rng, held_all)
+    acq_total = acq_s + acq_next * max(len(pts) - 1, 0)
     series_wait = 0.0
     if study.get("kind") == "series":
         series_wait = max(0.0, float(study.get("series", {}).get("interval_s", 0)) * (len(pts) - 1)
-                          - acq_s * (len(pts) - 1)) if len(pts) > 1 else 0.0
+                          - acq_next * (len(pts) - 1)) if len(pts) > 1 else 0.0
         total += series_wait
     snap_s = shots * (float(v.get("settle_s", 1.5)) + 5.0 + (float(v.get("laser_s", 1.0)) if vd.get("with_laser")
                                                               else 0.0))
     return {"minutes": round(total / 60.0, 2), "points": len(pts), "windows": rng.get("windows"),
-            "seconds": {"setup": round(setup, 1), "setup_parts": parts, "per_acquisition": round(acq_s, 2),
-                        "acquisitions": round(acq_s * len(pts), 1), "video_snapshots": round(snap_s, 1),
+            "seconds": {"setup": round(setup, 1), "setup_parts": parts, "per_acquisition": round(acq_next, 2),
+                        "first_acquisition": round(acq_s, 2),
+                        "acquisitions": round(acq_total, 1), "video_snapshots": round(snap_s, 1),
                         **({"series_waits": round(series_wait, 1)} if study.get("kind") == "series" else {}),
                         "total": round(total, 1)},
             "not_included": "the operator's answers in LabSpec (the go-ahead before the first exposure, the "
