@@ -1750,11 +1750,38 @@ Function NumList(s)
     NumList = a
 End Function
 
-' The spectral band a map shows (Nicola, 2026-11-25: "during mapping show me the map with the silicon peak"):
-' LabSpec's red cursors, PutValue id, "PointerLimits" (index 0: red 1 X, index 2: red 2 X; GetValue first for the
-' rest), switched on with "ActiveCursors" (index 0: ACTIVATE_CURSOR 1, + ACTIVATE_BASELINE 2). HORIBA's
+'' The spectral band a map shows (Nicola, 2026-11-25: "during mapping show me the map with the silicon peak"):
+' LabSpec's red cursors, PutValue id, "PointerLimits", switched on with "ActiveCursors" (index 0: ACTIVATE_CURSOR 1,
+' + ACTIVATE_BASELINE 2). The help lists red 1 X, red 1 Y, red 2 X, ... but HORIBA's own script sets indexes 0 and
+' 1 as the two limits, and with 0 and 2 LabSpec drew one red limit and a green cursor (T9.11, 2026-11-25): 0 and
+' 1 here, the whole array reported before and after. HORIBA's
 ' "Axial Resolution.vbs" sets DisplayUnit 1/cm, then the limits in cm-1 (280 / 320 around a 300 cm-1 window):
 ' the values are in the display unit; with nm displayed they are given in nm, other units are set to 1/cm first.
+Function JoinArr(v)
+    Dim k, s
+    s = ""
+    If IsArray(v) Then
+        For k = LBound(v) To UBound(v)
+            If k > LBound(v) Then s = s & ";"
+            s = s & v(k)
+        Next
+    End If
+    JoinArr = s
+End Function
+
+' What LabSpec's map took from the band set on 0 before it (a native map): its cursors and their activation
+Sub BandReadback(id, res)
+    Dim lim, ac
+    On Error Resume Next
+    LabSpec.GetValue id, "PointerLimits", lim
+    If Err.Number = 0 And IsArray(lim) Then res("band_map_limits") = JoinArr(lim)
+    Err.Clear
+    LabSpec.GetValue id, "ActiveCursors", ac
+    If Err.Number = 0 And IsArray(ac) Then res("band_map_active") = JoinArr(ac)
+    Err.Clear
+    On Error GoTo 0
+End Sub
+
 Sub SetBand(id, cmd, res)
     Dim u, arr, ac, f, t, las, a, b, rb
     f = ParseNum(GetP(cmd, "band_from_cm1", "0"))
@@ -1784,8 +1811,9 @@ Sub SetBand(id, cmd, res)
         Err.Clear
         Exit Sub
     End If
+    res("band_array_before") = JoinArr(arr)
     arr(0) = a
-    arr(2) = b
+    arr(1) = b
     LabSpec.PutValue id, "PointerLimits", arr
     If Err.Number <> 0 Then
         res("band_set") = 0
@@ -1795,13 +1823,20 @@ Sub SetBand(id, cmd, res)
     End If
     LabSpec.GetValue id, "ActiveCursors", ac
     If Err.Number = 0 And IsArray(ac) Then
+        res("band_active_before") = JoinArr(ac)
         ac(0) = 1
         If GetP(cmd, "band_baseline", "0") = "1" Then ac(0) = 3
         LabSpec.PutValue id, "ActiveCursors", ac
+        ac = Empty
+        LabSpec.GetValue id, "ActiveCursors", ac
+        If IsArray(ac) Then res("band_active_after") = JoinArr(ac)
     End If
     Err.Clear
     LabSpec.GetValue id, "PointerLimits", rb
-    If Err.Number = 0 And IsArray(rb) Then res("band_readback") = rb(0) & ";" & rb(2)
+    If Err.Number = 0 And IsArray(rb) Then
+        res("band_readback") = rb(0) & ";" & rb(1)
+        res("band_array_after") = JoinArr(rb)
+    End If
     Err.Clear
     res("band_set") = 1
     res("band_sent") = a & ";" & b
@@ -1812,7 +1847,7 @@ End Sub
 ' cursors, without looking at the screen). As HORIBA's "Cut-Off.vbs" does: Paint EXPORT_WMF (2), the data's ID,
 ' SHOW_SINGLE + SHOW_CURSORS (10), a .wmf path whose folder exists.
 Sub VPaint(cmd, res)
-    Dim id, path, r
+    Dim id, path, r, u, xf, xt, las
     id = CLng(ParseNum(GetP(cmd, "id", "0")))
     path = GetP(cmd, "path", "")
     If path = "" Then
@@ -1820,6 +1855,26 @@ Sub VPaint(cmd, res)
         Exit Sub
     End If
     On Error Resume Next
+    ' the display zoomed on the band first (SetScaleEx: the view's own units; nm converted with the laser)
+    If GetP(cmd, "x_from_cm1", "") <> "" Then
+        xf = ParseNum(GetP(cmd, "x_from_cm1", "0"))
+        xt = ParseNum(GetP(cmd, "x_to_cm1", "0"))
+        las = ParseNum(GetP(cmd, "laser_nm", "0"))
+        u = ""
+        LabSpec.GetValue 0, "DisplayUnit", u
+        Err.Clear
+        If LCase(Trim(u)) = "nm" And las > 0 Then
+            xf = 1E7 / (1E7 / las - xf)
+            xt = 1E7 / (1E7 / las - xt)
+        End If
+        LabSpec.SetScaleEx id, xf, xt, ParseNum(GetP(cmd, "y_from", "0")), ParseNum(GetP(cmd, "y_to", "0"))
+        If Err.Number <> 0 Then
+            res("scale_error") = ErrText("SetScaleEx")
+            Err.Clear
+        Else
+            res("scale_set") = xf & ";" & xt & ";" & GetP(cmd, "y_from", "0") & ";" & GetP(cmd, "y_to", "0")
+        End If
+    End If
     r = LabSpec.Paint(2, id, CLng(ParseNum(GetP(cmd, "flags", "10"))), 0, 0, 0, 0, path)
     If Err.Number <> 0 Then
         Fail res, ErrText("Paint")
@@ -2844,6 +2899,7 @@ Sub VMapNative(cmd, res)
     res("spectro_after_map") = MotorValue("Spectro")
     res("id") = id
     res("seconds_map") = Elapsed(tMap)
+    If GetP(cmd, "band_from_cm1", "") <> "" Then BandReadback id, res
     If WriteData(id, outBase & ".map.txt", res, "map") Then res("out") = outBase & ".map.txt"
     On Error Resume Next
     r = LabSpec.Save(id, outBase & ".l6s", "")

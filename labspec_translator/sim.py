@@ -802,15 +802,19 @@ class SimLabSpec:
             return {}
         f, t = float(p["band_from_cm1"]), float(p["band_to_cm1"])
         self.band = (f, t, str(p.get("band_baseline", "0")) == "1")
+        act = 3 if self.band[2] else 1
         return {"band_set": 1, "band_unit_before": "1/cm", "band_sent": f"{f:g};{t:g}",
-                "band_readback": f"{f:g};{t:g}", "band_on": data_id}
+                "band_readback": f"{f:g};{t:g}", "band_on": data_id, "band_active_after": f"{act};0;0",
+                **({"band_map_active": f"{act};0;0"} if data_id == 0 else {})}
 
     def v_paint(self, p):
         """Paint EXPORT_WMF: the data's display with its cursors (a placeholder file in the simulator)."""
         path = Path(p["path"])
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"\xd7\xcd\xc6\x9a sim wmf")      # the placeable-WMF magic number only
-        return {"paint_return": 0, "exists": 1}
+        sc = ({"scale_set": f"{p['x_from_cm1']};{p['x_to_cm1']};{p['y_from']};{p['y_to']}"}
+              if p.get("x_from_cm1") not in (None, "") else {})
+        return {"paint_return": 0, "exists": 1, **sc}
 
     def v_map_native(self, p):
         """LabSpec's mapping engine: the grid of the axes given (absolute stage positions), X fastest; one window at

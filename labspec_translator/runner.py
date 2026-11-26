@@ -1368,12 +1368,23 @@ def _band_said(ctx: Ctx, r: dict, tag: str, warnings: list) -> None:
     did = r.get("mapex_return") if r.get("mapex_return") not in (None, "") else r.get("id")
     if did not in (None, "") and info.get("set") == 1:
         info["data_id"] = int(float(did))
+    # the red cursor's activation as LabSpec reads it back (index 0: 1 cursor, +2 baseline), on the data it was set
+    # on (on: 0 = LabSpec's default before its own map) and, for a native map, on the map it made (map_active)
+    for src_, dst_ in (("active_after", "red"), ("map_active", "red_on_the_map")):
+        v_ = str(info.get(src_) or "").split(";")[0]
+        if v_ not in ("",):
+            try:
+                n_ = int(float(v_))
+                info[dst_] = {"cursor": bool(n_ & 1), "baseline": bool(n_ & 2)}
+            except ValueError:
+                pass
     ctx.live_band = info
     if info.get("set") != 1:
         warnings.append(f"the live map's band (map.live_band) was not set in LabSpec: {r.get(f'{tag}_error') or '?'}")
 
 
-def _paint_band(ctx: Ctx, sd: Path, warnings: list) -> None:
+def _paint_band(ctx: Ctx, sd: Path, warnings: list, per_point: list | None = None, study: dict | None = None,
+                laser=None) -> None:
     """The live map's spectrum display exported with its cursors (map.live_band), so where LabSpec put them can be
     checked without the screen (Nicola, 2026-11-25): live_band.wmf, and a .png next to it where Pillow can draw
     WMF (Windows)."""
@@ -1381,8 +1392,30 @@ def _paint_band(ctx: Ctx, sd: Path, warnings: list) -> None:
     if not lb or lb.get("set") != 1 or lb.get("data_id") in (None, ""):
         return
     path = sd / "live_band.wmf"
+    # zoomed on the band +-200 cm-1, the intensity scaled to the spectra there (T9.11: x 100-2250 and y 0-5000 for
+    # counts of about 200: the Si peak was invisible)
+    scale = {}
+    band = plan.live_band(study) if study else None
+    if band and laser:
+        lo, hi = band["from_cm1"] - 200.0, band["to_cm1"] + 200.0
+        ymin, ymax = None, None
+        for rec in (per_point or [])[:400]:
+            try:
+                sp = spectra.read(rec["file"])
+                sh, _ = spectra.to_shift(sp["x"], sp["meta"].get("x_unit", "nm"), laser)
+                sel = (np.asarray(sh) >= lo) & (np.asarray(sh) <= hi)
+                if sel.any():
+                    yy = np.asarray(sp["y"])[sel]
+                    ymin = float(yy.min()) if ymin is None else min(ymin, float(yy.min()))
+                    ymax = float(yy.max()) if ymax is None else max(ymax, float(yy.max()))
+            except Exception:  # noqa: BLE001 - only the picture's scale
+                continue
+        if ymin is not None and ymax is not None and ymax > ymin:
+            pad = 0.05 * (ymax - ymin)
+            scale = {"x_from_cm1": round(lo, 2), "x_to_cm1": round(hi, 2), "y_from": round(ymin - pad, 2),
+                     "y_to": round(ymax + pad, 2), "laser_nm": float(laser)}
     try:
-        r = ctx.call("paint", timeout_s=30, id=lb["data_id"], path=str(path), flags=10)
+        r = ctx.call("paint", timeout_s=30, id=lb["data_id"], path=str(path), flags=10, **scale)
     except Stop as exc:
         if exc.by in ("cancel", "operator"):
             raise
@@ -1392,10 +1425,18 @@ def _paint_band(ctx: Ctx, sd: Path, warnings: list) -> None:
         lb["picture_error"] = r.get("error")
         return
     lb["picture"] = str(path)
+    if r.get("scale_set"):
+        lb["picture_scale"] = r["scale_set"]
+    elif r.get("scale_error"):
+        lb["picture_scale_error"] = r["scale_error"]
     try:
         from PIL import Image as _Img
         png = path.with_suffix(".png")
         with _Img.open(path) as im:
+            try:
+                im.load(dpi=200)              # a WMF drawn larger (Pillow on Windows)
+            except TypeError:
+                im.load()
             im.save(png)
         lb["picture_png"] = str(png)
     except Exception as exc:  # noqa: BLE001 - WMF is drawn by Pillow on Windows only
@@ -1689,8 +1730,8 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
         except Stop as exc:
             stop_exc = stop_exc or exc
 
-    if kind == "map" and stop_exc is None and not native_map:
-        _paint_band(ctx, sd, warnings)           # the live map's display with its cursors (map.live_band)
+    if kind == "map" and stop_exc is None:
+        _paint_band(ctx, sd, warnings, per_point, study, laser)   # the live map's display with its cursors
     # ---- analysis and checks
     t_an = time.time()
     _progress(sd, stage="analysing")
@@ -2776,6 +2817,22 @@ def _labspec_params(ctx: Ctx) -> dict | None:
     return out or None
 
 
+def objective_laser_note(objective, laser) -> str:
+    """A note when the objective is made for another range than the laser (Nicola, 2026-11-25: 785 nm through
+    x100_VIS: Si weak and broad, SNR 10, FWHM 1.5 x)."""
+    o, las = str(objective or "").upper(), _f(laser)
+    if not o or las is None:
+        return ""
+    if "VIS" in o and las >= 700:
+        return (f"; the objective {objective} is made for visible light: at {las:g} nm an NIR objective gives more "
+                "signal and a sharper focus")
+    if ("NIR" in o or "IR" in o.split("_")[-1]) and las < 600:
+        return f"; the objective {objective} is made for the near infrared: at {las:g} nm a VIS objective suits better"
+    if "UV" in o and las >= 450:
+        return f"; the objective {objective} is made for the UV"
+    return ""
+
+
 def _record_resolution(result: dict, after: dict, prof: dict, warnings: list, request: str):
     """The reference line's width after a calibration: the spectral resolution for this laser, grating and slit,
     compared with its first measurement and with the profile's performance.resolution_cm1, if set."""
@@ -2794,7 +2851,8 @@ def _record_resolution(result: dict, after: dict, prof: dict, warnings: list, re
     if fw > float(pf.get("resolution_tol", 1.25)) * base:
         out["worse_than_baseline"] = True
         warnings.append(f"the {cal.get('reference')} line is {fw:.2f} cm-1 wide, {fw / base:.2f} x its first "
-                        f"measurement ({base:.2f}) for {k}: alignment, focus or slit?")
+                        f"measurement ({base:.2f}) for {k}: alignment, focus or slit?"
+                        + objective_laser_note(after.get("objective"), laser))
     spec = (pf.get("resolution_cm1") or {}).get(f"{grating:g}" if grating else "")
     if spec is not None:
         out["specification_cm1"] = float(spec)
@@ -4293,13 +4351,21 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
                                   "again in the mode it measures in")
             elif abs(dr) > STALE_DRIFT_CM1:
                 # (2026-11-24: a map used a 5.5 h old correction with the line +0.78 away, no warning; Si 521.30)
-                warnings.append(f"the laser line sits {dr:+.1f} cm-1 from where it was at the calibration (drift "
-                                "since then, or a calibration made with another spectrometer window), not a hop: "
-                                "the zero has likely moved too; calibrate again"
-                                + ("; followed (laser_reference)" if ll_mode == "correct" and (
-                                    follow_each or any(p_.get("applied") for p_ in plateau_report)) else
-                                    "; not followed: under the laser_reference step threshold "
-                                    "(checks.zero_correction.plateaus)" if ll_mode == "correct" else ""))
+                followed_ = ll_mode == "correct" and (follow_each or any(p_.get("applied") for p_ in plateau_report))
+                if followed_:
+                    # (2026-11-25: "the zero has likely moved too; calibrate again; followed" read as a contradiction)
+                    landed_ = any(p_.get("landing") and p_.get("applied") for p_ in plateau_report)
+                    warnings.append(f"the laser line sat {dr:+.1f} cm-1 from where it was at the calibration"
+                                    + (" (a landing step, the Raman lines moved alike)" if landed_ else "")
+                                    + ": followed (laser_reference): the spectra were brought back to the "
+                                      "calibration's laser line")
+                else:
+                    warnings.append(f"the laser line sits {dr:+.1f} cm-1 from where it was at the calibration (drift "
+                                    "since then, or a calibration made with another spectrometer window), not a "
+                                    "hop: the zero has likely moved too; calibrate again"
+                                    + ("; not followed: under the laser_reference step threshold, or the Raman "
+                                       "lines did not move with it (checks.zero_correction.plateaus)"
+                                       if ll_mode == "correct" else ""))
         if jumps:
             after_ = checks["laser_line"]["points_after_a_jump"]
             smv = any(h.get("after_spectrometer_move") for h in hop_info)
@@ -4326,9 +4392,14 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
                  and r_["point"] not in ll_bad]
         if len(lls_s) >= 5 and not hop_info:
             jit = float(np.sqrt(np.mean(np.diff(lls_s) ** 2) / 2.0))
-            checks["laser_line_jitter"] = {"sd_cm1": round(jit, 4), "spectra": len(lls_s),
-                                           "learned_as": learn_laser_line_sd(laser, grating, placement, jit,
-                                                                             "a series (the spectrometer still)")}
+            lrn_ = learn_laser_line_sd(laser, grating, placement, jit, "a series (the spectrometer still)")
+            hist_ = (store.read("spectro_repeatability.json") or {}).get(
+                f"{float(laser):g}@{_f(grating) or 0:g}" + ("@labspec" if placement == "labspec" else ""), {}).get(
+                "laser_line_sd_cm1_history") or []
+            checks["laser_line_jitter"] = {"sd_cm1": round(jit, 4), "spectra": len(lls_s), "learned_as": lrn_,
+                                           "learned_from": f"the median of the last {len(hist_)} values learned "
+                                                           f"({', '.join(f'{h:g}' for h in hist_)}): this series' "
+                                                           "and earlier ones"}
         zc_ = zero_creep(per_point, excluded, laser, grating, placement)
         if zc_:
             checks["zero_creep"] = zc_
@@ -4737,7 +4808,8 @@ def _landing_steps(repeats: list, offs: list, prof: dict, laser, grating, placem
             steps.append({"repeat": i + 1, "laser_line_step_cm1": round(d, 3), "raman_moved_cm1": round(dpk, 3),
                           "followed": True})
         else:
-            quiet.append(l_)
+            # not a landing, and not the laser line's ordinary scatter either (a bad fit, the line moving alone):
+            # left out of what is learned (2026-11-25, 600: a -1.09 jump left in made the learned value 0.65)
             steps.append({"repeat": i + 1, "laser_line_step_cm1": round(d, 3), "raman_moved_cm1": round(dpk, 3),
                           "followed": False, "why": "the Raman lines did not move with it"})
     q_sd = float(np.std(quiet, ddof=1)) if len(quiet) >= 3 else None
@@ -5073,6 +5145,7 @@ def store_pending(res: dict, warnings: list, unreliable: list) -> None:
     pend = res.pop("_pending_store", None)
     if not pend:
         return
+    res["zero_mode"] = pend["kw"].get("zero_mode")
     laser, grating, a, b = pend["args"][:4]
     if unreliable:
         res["stored_as"] = ("nothing stored: the calibration is unreliable (" + "; ".join(u[:120] for u in unreliable[:3])
@@ -5133,7 +5206,6 @@ def _native_map(ctx: Ctx, name: str, study: dict, sd: Path, rng: dict, laser: fl
                  acq_time=mp.get("acq_time", "interface"), chunk=int(mp.get("export_chunk", 65536) or 0),
                  **params, **plan.band_params(study, laser), **motor_args(prof))
     _band_said(ctx, r, "band", warnings)
-    _paint_band(ctx, sd, warnings)
     # what LabSpec took for each axis (GetMappingParams after setting them), how it was started, how long it took
     ctx.native_info = {k: r[k] for k in r if str(k).endswith("_readback")}
     ctx.native_info.update({k: _f(r.get(k)) if k != "axes" else r.get(k)

@@ -2000,6 +2000,7 @@ def test_calibration_anchored_to_the_laser_line_removes_landing_scatter():
     assert rp["median_cm1"] == pytest.approx(0.0, abs=0.2) and not rp.get("anchored_to_laser_line")
     st = c["calibration"]["stored_correction"]
     assert st.get("laser_line_cm1") is not None and st["zero_mode"] == "absolute"
+    assert c["calibration"]["zero_mode"] == "absolute"
     # a threshold from the calibration's own repeats: warned, and nothing learned from them (.25.18)
     assert any("own repeats" in w for w in c["warnings"])
     assert R.spectro_repeatability(P.load(), 532, 1800).get("laser_line_sd_cm1") is None
@@ -2023,6 +2024,7 @@ def test_calibration_anchored_to_the_laser_line_removes_landing_scatter():
     zc = s["checks"]["zero_correction"]
     assert zc["laser_reference"] == "anchor" and any(p.get("landing") for p in zc.get("plateaus") or []), zc
     assert abs(s["peaks_by_name"]["Si"]["position_cm1"] - 520.7) < 0.3, s["peaks_by_name"]["Si"]
+    assert not any("calibrate again" in w and "followed" in w for w in s["warnings"]), s["warnings"]
     # within the laser line's own scatter: not followed (no fit noise added)
     (bdir / "sim_landing").write_text(str(thr / 2))
     sim._landing_n = 0
@@ -2205,8 +2207,13 @@ def test_map_live_band_sets_labspecs_cursors_on_the_live_and_native_maps():
     m = run_inline({"m": st})["studies"]["m"]
     assert m["live_band"]["set"] == 1 and m["live_band"]["sent"] == "510.7;530.7", m.get("live_band")
     assert m["live_band"]["picture"].endswith("live_band.wmf") and Path(m["live_band"]["picture"]).exists()
-    nat = dict(st, map=dict(st["map"], engine="native"))
+    xf, xt, yf, yt = (float(v) for v in m["live_band"]["picture_scale"].split(";"))
+    assert (xf, xt) == (310.7, 730.7) and yt > yf                       # the band +-200 cm-1, y from the spectra
+    assert m["live_band"]["red"] == {"cursor": True, "baseline": False}
+    nat = dict(st, map=dict(st["map"], engine="native", live_band={"near_cm1": 520.7, "window_cm1": 30,
+                                                                    "baseline": True}))
     m = run_inline({"m": nat})["studies"]["m"]
+    assert m["live_band"]["red_on_the_map"] == {"cursor": True, "baseline": True}, m["live_band"]
     assert m["live_band"]["set"] == 1 and m["live_band"]["on"] == 0, m.get("live_band")
     assert Path(m["live_band"]["picture"]).exists()
 
@@ -2241,4 +2248,6 @@ def test_landing_threshold_reads_the_profile_and_one_step_cannot_hide_itself():
     assert "tightest" in ls["threshold"]["from"] and ls["threshold"]["threshold_cm1"] == 0.5
     fol = {s_["repeat"]: s_["followed"] for s_ in ls["steps"]}
     assert fol == {1: False, 2: True}, ls["steps"]
+    assert ls["n_quiet"] == 3                    # the unfollowed jump is not learned as scatter (.25.19)
+    assert "visible" in R.objective_laser_note("x100_VIS", 785.04) and not R.objective_laser_note("x100_VIS", 637.75)
     assert ls["offs_eff"][1] == pytest.approx(-0.21, abs=0.01)
