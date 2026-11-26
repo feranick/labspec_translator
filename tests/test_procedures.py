@@ -2286,6 +2286,19 @@ def test_window_distance_widens_the_uncertainty_and_a_big_jump_waits_for_confirm
     (config.active_bridge_dir() / "sim_xshift").unlink()
     assert c["reliable"] and c["calibration"].get("jump_confirmed"), c["calibration"].get("stored_as")
     assert R.JUMP_CONFIRM_MIN_CM1 == 2.0
+    # the same jump after a day: ordinary drift (2 + 24 h / 6 = 6 cm-1 allowed), stored at once
+    xcal.clear()
+    store.write("xcal_pending.json", {})
+    run_inline({"c": cal})
+    d = xcal.load()
+    for v_ in d.values():
+        for e_ in (v_.get("by_centre") or {}).values():
+            e_["time"] = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(time.time() - 24 * 3600))
+    xcal._save(d)
+    (config.active_bridge_dir() / "sim_xshift").write_text("5.0,1.0")
+    c = run_inline({"c": cal})["studies"]["c"]
+    (config.active_bridge_dir() / "sim_xshift").unlink()
+    assert c["reliable"] and not c["calibration"].get("needs_confirmation"), c["calibration"].get("stored_as")
     # the flat tools: one accumulation gets the spike removal's extra one; the calibration's window
     out = api.calibrate_si(laser_nm=532, grating=1800, repeats=2, objective="x100", center_cm1=500, inline=True,
                            wait_total_s=60)

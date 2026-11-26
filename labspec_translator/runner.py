@@ -4559,6 +4559,8 @@ WINDOW_SAME_NM = 0.05          # within this of the calibration's centre: the sa
 WINDOW_TERM_CAP_CM1 = 2.0      # the window term, at most (between windows: a cm-1 or more, 2026-11-24)
 JUMP_CONFIRM_MIN_CM1 = 2.0     # a new correction this far (or 3 x the repositioning) from the last one at that
 #                                window waits for a second calibration to confirm it (2400: -2.53 -> +6.30)
+JUMP_AGE_CM1_PER_H = 1.0 / 6   # plus the drift the last correction's age allows (637.75: 2-3 cm-1 within a day)
+JUMP_AGE_CAP_CM1 = 4.0         # at most this much for the age
 
 
 def landing_threshold(prof: dict, laser, grating, placement: str = "centred", fallback_sd=None) -> dict:
@@ -5192,7 +5194,10 @@ def store_pending(res: dict, warnings: list, unreliable: list, prof: dict | None
     if same_win and float(b) == 1.0 and float(prev.get("b") or 1.0) == 1.0:
         mv = float((spectro_repeatability(prof or {}, laser, grating, kw_.get("placement") or "centred")
                     if prof else {}).get("moved_sd_cm1") or 0.3)
-        thr = max(JUMP_CONFIRM_MIN_CM1, 3.0 * mv)
+        # ordinary day-to-day drift is not a jump (Nicola, 2026-11-25): the limit grows with the last correction's
+        # age, 1 cm-1 per 6 h, at most JUMP_AGE_CAP_CM1; a sudden jump still waits for a second calibration
+        age_prev = xcal.age_h(prev) or 0.0
+        thr = max(JUMP_CONFIRM_MIN_CM1, 3.0 * mv) + min(JUMP_AGE_CAP_CM1, JUMP_AGE_CM1_PER_H * float(age_prev))
         jump = float(a) - float(prev["a"])
         if abs(jump) > thr:
             pk = f"{xcal.key(laser, grating)}@{kw_.get('centre_nm')}@{kw_.get('placement')}@{kw_.get('range_cm1')}"
@@ -5220,8 +5225,9 @@ def store_pending(res: dict, warnings: list, unreliable: list, prof: dict | None
                 res.pop("corrected", None)
                 res["needs_confirmation"] = True
                 unreliable.append(f"the zero moved {-jump:+.2f} cm-1 since the last calibration at this window "
-                                  f"({prev.get('time')}): more than {thr:.1f} cm-1 (3 x the repositioning, at least "
-                                  f"{JUMP_CONFIRM_MIN_CM1:g}); calibrate again: a second calibration that agrees stores "
+                                  f"({prev.get('time')}, {age_prev:.1f} h ago): more than {thr:.1f} cm-1 (3 x the "
+                                  f"repositioning, at least {JUMP_CONFIRM_MIN_CM1:g}, plus 1 per 6 h of age up to "
+                                  f"{JUMP_AGE_CAP_CM1:g}); calibrate again: a second calibration that agrees stores "
                                   "it")
                 return
     st = xcal.store(*pend["args"], **pend["kw"])
