@@ -1706,7 +1706,7 @@ def test_flat_tools_for_small_models_string_studies_rejected_log_and_measure_onl
     assert api.snap_objective(prof, "x100_VIS") in [str(o) for o in prof["objectives"]]
     r = api.measure_spectrum(laser_nm=533, center_cm1=520.7, exposure_s=0.2, accumulations=1, grating=1800,
                              filter="10%", objective="x100", inline=True, wait_total_s=60)
-    assert r["done"] and r["study"]["setup"]["laser_nm"] == 532.0 and r["study"]["acquire"]["spike"] == "none"
+    assert r["done"] and r["study"]["setup"]["laser_nm"] == 532.0 and r["study"]["acquire"]["spike"] == "double_auto"
     pk = r["studies"]["spectrum"]["peaks"]["peak"]
     assert abs(pk["position_cm1"] - 520.7) < 1.0 and r["studies"]["spectrum"]["reliable"] is not None
     c = api.calibrate_si(laser_nm=532, grating=1800, repeats=3, filter="10%", objective="x100", inline=True,
@@ -2255,3 +2255,43 @@ def test_landing_threshold_reads_the_profile_and_one_step_cannot_hide_itself():
     assert ls["n_quiet"] == 3                    # the unfollowed jump is not learned as scatter (.25.19)
     assert "visible" in R.objective_laser_note("x100_VIS", 785.04) and not R.objective_laser_note("x100_VIS", 637.75)
     assert ls["offs_eff"][1] == pytest.approx(-0.21, abs=0.01)
+
+
+def test_window_distance_widens_the_uncertainty_and_a_big_jump_waits_for_confirmation():
+    """Nicola, 2026-11-25: Si +0.66 off at a window ~0.9 nm from the 1200 calibration's, against +-0.25 expected;
+    and at 2400 the zero moved -2.53 -> +6.30 cm-1 and was stored with a warning only."""
+    from labspec_translator import xcal, store
+    import labspec_translator.runner as R
+    xcal.clear()
+    store.write("xcal_pending.json", {})
+    store.write("spectro_repeatability.json", {})
+    S.ensure(config.active_bridge_dir())
+    cal = {"kind": "calibration", "sample": {"name": "Si"}, "setup": dict(SETUP),
+           "acquire": {"center_cm1": 520.7, "exposure_s": 1}, "calibration": {"adjust": "ls6t"},
+           "video": {"before": False}}
+    c = run_inline({"c": cal})["studies"]["c"]
+    assert c["reliable"] and c["calibration"].get("stored_correction")
+    sp = {"kind": "spectrum", "sample": {"name": "Si"}, "setup": dict(SETUP),
+          "acquire": {"center_cm1": 500.0, "exposure_s": 1}}
+    s = run_inline({"s": sp})["studies"]["s"]
+    cu = s["checks"]["zero"]["correction_used"]
+    assert cu.get("window_distance_nm", 0) > 0.3 and "another window centre" in cu["expected_uncertainty_from"], cu
+    assert any("calibrate_si with center_cm1=" in w for w in s["warnings"])
+    # the zero jumps by 5 cm-1: not stored until a second calibration agrees
+    (config.active_bridge_dir() / "sim_xshift").write_text("5.0,1.0")
+    c = run_inline({"c": cal})["studies"]["c"]
+    assert not c["reliable"] and c["calibration"].get("needs_confirmation"), c["calibration"].get("stored_as")
+    assert c["calibration"]["stored_as"].startswith("nothing stored yet")
+    c = run_inline({"c": cal})["studies"]["c"]
+    (config.active_bridge_dir() / "sim_xshift").unlink()
+    assert c["reliable"] and c["calibration"].get("jump_confirmed"), c["calibration"].get("stored_as")
+    assert R.JUMP_CONFIRM_MIN_CM1 == 2.0
+    # the flat tools: one accumulation gets the spike removal's extra one; the calibration's window
+    out = api.calibrate_si(laser_nm=532, grating=1800, repeats=2, objective="x100", center_cm1=500, inline=True,
+                           wait_total_s=60)
+    assert out["study"]["acquire"]["center_cm1"] == 500.0
+    m = api.measure_spectrum(laser_nm=532, grating=1800, accumulations=1, objective="x100", inline=True,
+                             wait_total_s=60)
+    assert m["study"]["acquire"]["spike"] == "double_auto"
+    xcal.clear()
+    store.write("xcal_pending.json", {})

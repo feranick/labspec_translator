@@ -1765,7 +1765,8 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
     if not per_point:
         result["why"] = stop_exc.why if stop_exc else "no spectrum was measured"
     if result.get("calibration"):
-        store_pending(result["calibration"], warnings, unreliable)
+        store_pending(result["calibration"], warnings, unreliable, prof)
+        result["reliable"] = bool(per_point) and not unreliable     # a jump waiting for confirmation
         if (checks.get("calibration") or {}).get("outcome"):
             checks["calibration"]["outcome"] = result["calibration"].get("outcome")
     if kind == "calibration" and (result.get("calibration") or {}).get("fwhm_cm1"):
@@ -3754,15 +3755,36 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
                           if creep_ and age_m_ is not None else 0.0)
             if age_m_ is not None:
                 corr = dict(corr, age_min=round(float(age_m_), 1))
-            if rep_.get("moved_sd_cm1") or creep_term:
+            # another window centre than the calibration's: the zero differs between windows (2026-11-25, 637.75 @
+            # 1200: calibrated at 659.66 nm, measured centred ~0.9 nm away: Si +0.66 against +-0.25 expected)
+            dist_ = None
+            if not corr.get("pooled") and not corr.get("range_match"):
+                if corr.get("interpolated_between_nm") and wc is not None:
+                    dist_ = min(abs(float(wc) - float(c_)) for c_ in corr["interpolated_between_nm"])
+                elif corr.get("centre_distance_nm") is not None:
+                    dist_ = float(corr["centre_distance_nm"])
+            centre_term = (min(WINDOW_TERM_CAP_CM1, WINDOW_ZERO_CM1_PER_NM * dist_)
+                           if dist_ is not None and dist_ > WINDOW_SAME_NM else 0.0)
+            if centre_term:
+                corr = dict(corr, window_distance_nm=round(dist_, 3))
+                if kind != "calibration" and laser and (corr.get("centre_nm") is not None):
+                    c_cm1 = round(1e7 / float(laser) - 1e7 / float(wc), 1) if wc else None
+                    warnings.append(f"the correction was calibrated at a window {dist_:.2f} nm from this one: the zero "
+                                    f"may differ by about +-{centre_term:.1f} cm-1 here; for the best zero calibrate at "
+                                    "this window" + (f" (calibrate_si with center_cm1={c_cm1:g}, or calibration "
+                                                     f"acquire.center_cm1 {c_cm1:g})" if c_cm1 is not None else ""))
+            if rep_.get("moved_sd_cm1") or creep_term or centre_term:
                 # the zero across spectrometer moves is no better than the spectrometer repeats (2026-11-24, 600:
                 # SD 0.9-1.2 cm-1 moved, 0.12 without moves); and it creeps with the correction's age (2026-11-25,
                 # 637.75 @ 1200: ~+0.1 cm-1 per minute after a calibration); the pass tolerance stays as it is
                 mv_ = float(rep_.get("moved_sd_cm1") or 0.0)
-                corr = dict(corr, expected_uncertainty_cm1=round(math.hypot(mv_, creep_term), 3),
+                corr = dict(corr, expected_uncertainty_cm1=round(math.sqrt(mv_ ** 2 + creep_term ** 2
+                                                                           + centre_term ** 2), 3),
                             expected_uncertainty_from=f"{rep_.get('source')}, {rep_place} placement"
                             + (f"; the zero's creep ({abs(float(creep_)):.2f} cm-1/min learned) x the correction's "
-                               f"age ({float(age_m_):.0f} min), at most {CREEP_CAP_CM1:g}" if creep_term else ""))
+                               f"age ({float(age_m_):.0f} min), at most {CREEP_CAP_CM1:g}" if creep_term else "")
+                            + (f"; another window centre ({dist_:.2f} nm away: {WINDOW_ZERO_CM1_PER_NM:g} cm-1 per nm, "
+                               f"at most {WINDOW_TERM_CAP_CM1:g})" if centre_term else ""))
                 rep_ = dict(rep_, moved_sd_cm1=corr["expected_uncertainty_cm1"])
                 tol_u = float(prof["checks"]["si_tol_cm1"])
                 if float(rep_["moved_sd_cm1"]) > tol_u:
@@ -3776,7 +3798,7 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
             zs = checks["zero"] = dict(zs, correction_used={**{k: corr.get(k) for k in (
                 "a", "b", "time", "centre_nm", "interpolated_between_nm", "centre_far", "laser_line_cm1", "placement",
                 "range_match", "range_cm1", "pooled", "pooled_from", "repeats", "expected_uncertainty_cm1",
-                "expected_uncertainty_from", "age_min")
+                "expected_uncertainty_from", "age_min", "window_distance_nm")
                 if corr.get(k) is not None}, **({"age_h": round(xcal.age_h(corr), 2)} if xcal.age_h(corr) is not None
                                                  else {})},
                 note="offset_cm1 is this laser and grating's last calibration check (any window); "
@@ -4532,6 +4554,11 @@ LANDING_MIN_CM1 = 0.5         # and at least this
 LL_SD_DEFAULT_CM1 = 0.2       # the laser line's own scatter until learned (637.75 @ 1200, 2026-11-25: ~0.2)
 LL_SD_VERSION = 2             # learned laser_line_sd_cm1 values from 2026.11.25.18 on (older ones are ignored)
 CREEP_CAP_CM1 = 2.0           # the zero's creep counted into the expected uncertainty, at most
+WINDOW_ZERO_CM1_PER_NM = 0.75  # the zero's difference between window centres (2026-11-25, 1200: +0.66 at ~0.9 nm)
+WINDOW_SAME_NM = 0.05          # within this of the calibration's centre: the same window
+WINDOW_TERM_CAP_CM1 = 2.0      # the window term, at most (between windows: a cm-1 or more, 2026-11-24)
+JUMP_CONFIRM_MIN_CM1 = 2.0     # a new correction this far (or 3 x the repositioning) from the last one at that
+#                                window waits for a second calibration to confirm it (2400: -2.53 -> +6.30)
 
 
 def landing_threshold(prof: dict, laser, grating, placement: str = "centred", fallback_sd=None) -> dict:
@@ -5138,7 +5165,7 @@ def _calibration_result(study, prof, rec, ref_lines, laser, grating, rng, reques
     return res
 
 
-def store_pending(res: dict, warnings: list, unreliable: list) -> None:
+def store_pending(res: dict, warnings: list, unreliable: list, prof: dict | None = None) -> None:
     """A calibration's correction, stored only when the study ended reliable; otherwise nothing is stored, the
     correction in use stays, and stored_as / outcome say so (Nicola, 2026-11-25)."""
     from . import xcal
@@ -5154,6 +5181,49 @@ def store_pending(res: dict, warnings: list, unreliable: list) -> None:
         res["outcome"] = (f"measured {res.get('offset_cm1', 0):+.2f} cm-1 but NOT stored: the calibration is unreliable; "
                           "the correction in use stays")
         return
+    # a large jump from the last correction at this window waits for a second calibration (Nicola, 2026-11-25:
+    # 2400, -2.53 -> +6.30 cm-1 in a day, stored with a warning only; the laser line outside the window could not
+    # tell a landing or a hop)
+    kw_ = pend["kw"]
+    prev = xcal.get(laser, grating, kw_.get("centre_nm"), kw_.get("placement"), range_cm1=kw_.get("range_cm1"))
+    same_win = prev is not None and (prev.get("range_match") or (
+        not prev.get("interpolated_between_nm") and not prev.get("centre_far") and not prev.get("pooled")
+        and prev.get("centre_distance_nm") is not None and float(prev["centre_distance_nm"]) <= 1.0))
+    if same_win and float(b) == 1.0 and float(prev.get("b") or 1.0) == 1.0:
+        mv = float((spectro_repeatability(prof or {}, laser, grating, kw_.get("placement") or "centred")
+                    if prof else {}).get("moved_sd_cm1") or 0.3)
+        thr = max(JUMP_CONFIRM_MIN_CM1, 3.0 * mv)
+        jump = float(a) - float(prev["a"])
+        if abs(jump) > thr:
+            pk = f"{xcal.key(laser, grating)}@{kw_.get('centre_nm')}@{kw_.get('placement')}@{kw_.get('range_cm1')}"
+            pend_all = store.read("xcal_pending.json") or {}
+            p_ = pend_all.get(pk)
+            agree = max(1.0, 3.0 * mv)
+            fresh = p_ is not None and xcal.age_h({"time": p_.get("time")}) is not None and \
+                xcal.age_h({"time": p_.get("time")}) <= 4.0
+            if fresh and abs(float(a) - float(p_["a"])) <= agree:
+                pend_all.pop(pk, None)
+                store.write("xcal_pending.json", pend_all)
+                res["jump_confirmed"] = {"from_cm1": round(-float(prev["a"]), 3), "to_cm1": round(-float(a), 3),
+                                         "first_seen": p_.get("time"), "request": p_.get("request")}
+                warnings.append(f"the zero moved {-jump:+.2f} cm-1 since {prev.get('time')}; a second calibration "
+                                f"({p_.get('time')}) agrees, so the new correction is stored")
+            else:
+                pend_all[pk] = {"a": round(float(a), 5), "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                                "request": pend["args"][6] if len(pend["args"]) > 6 else None}
+                store.write("xcal_pending.json", pend_all)
+                res["stored_as"] = (f"nothing stored yet: the zero moved {-jump:+.2f} cm-1 since {prev.get('time')} "
+                                    f"(more than {thr:.1f}); a second calibration that agrees (within {agree:.1f}) "
+                                    "stores it; the correction in use stays")
+                res["outcome"] = (f"measured {res.get('offset_cm1', 0):+.2f} cm-1, NOT stored yet: a jump of "
+                                  f"{-jump:+.2f} cm-1 waits for a second calibration")
+                res.pop("corrected", None)
+                res["needs_confirmation"] = True
+                unreliable.append(f"the zero moved {-jump:+.2f} cm-1 since the last calibration at this window "
+                                  f"({prev.get('time')}): more than {thr:.1f} cm-1 (3 x the repositioning, at least "
+                                  f"{JUMP_CONFIRM_MIN_CM1:g}); calibrate again: a second calibration that agrees stores "
+                                  "it")
+                return
     st = xcal.store(*pend["args"], **pend["kw"])
     res["stored_as"] = (("one correction for every window of " if st.get("pooled") else
                          "for this range: " if st.get("range_cm1") else "per window centre: ")

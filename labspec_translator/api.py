@@ -319,7 +319,9 @@ def measure_spectrum(laser_nm=637.75, center_cm1=None, from_cm1=None, to_cm1=Non
     try:
         las = snap_laser(prof, laser_nm)
         acq = {"exposure_s": float(exposure_s), "accumulations": int(accumulations),
-               "spike": "double" if int(accumulations) >= 2 else "none"}
+               # one accumulation: one more taken for the spike removal (2026-11-25: "spike removal is off" warned
+               # on the small model's 1-accumulation request)
+               "spike": "double" if int(accumulations) >= 2 else "double_auto"}
         if from_cm1 is not None and to_cm1 is not None:
             acq["range_cm1"] = [float(from_cm1), float(to_cm1)]
         else:
@@ -339,9 +341,11 @@ def measure_spectrum(laser_nm=637.75, center_cm1=None, from_cm1=None, to_cm1=Non
     return out
 
 
-def calibrate_si(laser_nm=637.75, grating=1200, repeats=5, filter=None, objective="x100_VIS",
-                 wait_total_s: float | None = None, inline: bool = False) -> dict:
-    """A silicon calibration (520.7 cm-1) from flat arguments: the correction ls6t applies to later spectra."""
+def calibrate_si(laser_nm=637.75, grating=1200, repeats=5, filter=None, objective="x100_VIS", center_cm1=None,
+                 from_cm1=None, to_cm1=None, wait_total_s: float | None = None, inline: bool = False) -> dict:
+    """A silicon calibration (520.7 cm-1) from flat arguments: the correction ls6t applies to later spectra. The
+    window is centred on Si, or where the measurements will be (center_cm1, or from_cm1 + to_cm1): the zero
+    differs between windows (2026-11-25, 1200: +0.66 cm-1 with the window ~0.9 nm off the calibration's)."""
     prof = P.load()
     try:
         las = snap_laser(prof, laser_nm)
@@ -353,6 +357,10 @@ def calibrate_si(laser_nm=637.75, grating=1200, repeats=5, filter=None, objectiv
                            "objective": snap_objective(prof, objective)},
                  "acquire": {"center_cm1": 520.7, "exposure_s": 1, "accumulations": 2, "spike": "double"},
                  "calibration": cal, "video": {"before": False}}
+        if center_cm1 is not None:
+            study["acquire"]["center_cm1"] = float(center_cm1)
+        elif from_cm1 is not None and to_cm1 is not None:
+            study["acquire"]["center_cm1"] = round((float(from_cm1) + float(to_cm1)) / 2.0, 2)
     except (TypeError, ValueError) as exc:
         log_rejected("calibrate_si", {"laser_nm": laser_nm, "grating": grating}, str(exc))
         return {"ok": False, "error": str(exc)}

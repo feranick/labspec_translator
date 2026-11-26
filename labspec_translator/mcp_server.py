@@ -206,11 +206,15 @@ async def measure_spectrum(ctx: Context, laser_nm: float = 637.75, center_cm1: f
 
 
 @server.tool()
-async def calibrate_si(ctx: Context, laser_nm: float = 637.75, grating: float = 1200, repeats: int = 5) -> dict:
+async def calibrate_si(ctx: Context, laser_nm: float = 637.75, grating: float = 1200, repeats: int = 5,
+                       center_cm1: float | None = None, from_cm1: float | None = None,
+                       to_cm1: float | None = None) -> dict:
     """Calibrates the spectral zero on silicon (520.7 cm-1) for this laser and grating and waits for it (up to about
     90 s; then call study_status with its request): ls6t then corrects later spectra. All arguments optional
-    (laser_nm 638 is taken as 637.75)."""
-    return await _keepalive(ctx, functools.partial(api.calibrate_si, laser_nm, grating, repeats),
+    (laser_nm 638 is taken as 637.75). To measure later at another window, give the same center_cm1 (or from_cm1 and
+    to_cm1) here: the zero differs between windows."""
+    return await _keepalive(ctx, functools.partial(api.calibrate_si, laser_nm, grating, repeats,
+                                                   center_cm1=center_cm1, from_cm1=from_cm1, to_cm1=to_cm1),
                             msg=api.flat_progress)
 
 
