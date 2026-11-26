@@ -2216,8 +2216,13 @@ def references() -> dict:
             "alignment": {k: v.get("last_check") for k, v in alignment_status()["lasers"].items()}}
 
 
-def references_clear(what: str, name: str | None = None) -> dict:
-    """A person's clean-up: what = correction (all, or laser@grating), background (a name), spot (all)."""
+LEARNED_FIELDS = ("zero_drift", "first_landing", "laser_line_sd", "zero_creep", "window_zero", "moved_sd", "still_sd")
+
+
+def references_clear(what: str, name: str | None = None, field: str | None = None) -> dict:
+    """A person's clean-up: what = correction (all, or laser@grating), background (a name), spot (all), learned
+    (laser@grating[@labspec], one field or all: the values ls6t learns per laser and grating; 2026-11-26: a drift rate
+    learned from a bad pair had to be removed)."""
     from . import background as BG
     from . import spot as SP
     from . import xcal
@@ -2239,7 +2244,31 @@ def references_clear(what: str, name: str | None = None) -> dict:
         return {"deleted": name}
     if what == "spot":
         return SP.forget()
-    raise ValueError("what: correction, background or spot")
+    if what == "learned":
+        from . import store as ST
+        if not name:
+            raise ValueError("learned: give LASER@GRATING (e.g. 637.75@1200), and a field to clear only that one: "
+                             + ", ".join(LEARNED_FIELDS))
+        if field and field not in LEARNED_FIELDS:
+            raise ValueError(f"learned field {field!r}: one of {', '.join(LEARNED_FIELDS)}")
+        rec = ST.read("spectro_repeatability.json") or {}
+        las_, _, rest_ = name.partition("@")
+        try:
+            key_ = f"{float(las_):g}@{rest_}" if rest_ else name
+        except ValueError:
+            key_ = name
+        e = rec.get(key_)
+        if not e:
+            return {"cleared": [], "note": f"nothing learned for {key_} (have: {', '.join(rec) or 'none'})"}
+        gone = [k for k in list(e) if (k.startswith(field) if field else
+                                        any(k.startswith(f_) for f_ in LEARNED_FIELDS))]
+        for k in gone:
+            e.pop(k, None)
+        if not e:
+            rec.pop(key_)
+        ST.write("spectro_repeatability.json", rec)
+        return {"cleared": sorted(gone), "key": key_}
+    raise ValueError("what: correction, background, spot or learned")
 
 
 def spot_forget(objective: str | None = None, laser_nm: float | None = None) -> dict:

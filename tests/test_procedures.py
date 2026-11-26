@@ -2372,19 +2372,22 @@ def test_unfollowed_laser_line_drift_widens_the_expected_uncertainty():
 
 
 
-def test_zero_drift_between_calibrations_is_learned_and_counted():
+def test_zero_drift_between_calibrations_is_learned_and_counted(tmp_path):
     """Nicola, 2026-11-25 (T9.14): 1.9 h after the calibration Si read +0.93 / +0.45 off with +-0.25 reported; a
-    series right after calibrating does not see an hours-scale drift: successive calibrations at one window do."""
+    series right after calibrating does not see an hours-scale drift: successive calibrations at one window do.
+    2026-11-26 (T9.20 3b): learned only from good pairs (>= 3 repeats each, the shutter held, the laser line steady),
+    time-weighted, and applied once 2 pairs exist; one sign (+ = reads higher); a learned value can be cleared."""
     from labspec_translator import xcal, store
     import labspec_translator.runner as R
+    _profile_with_shutter(tmp_path)
     xcal.clear()
     store.write("xcal_pending.json", {})
     store.write("spectro_repeatability.json", {})
     bdir = config.active_bridge_dir()
     S.ensure(bdir)
     cal = {"kind": "calibration", "sample": {"name": "Si"}, "setup": dict(SETUP),
-           "acquire": {"center_cm1": 520.7, "exposure_s": 1}, "calibration": {"adjust": "ls6t"},
-           "video": {"before": False}}
+           "acquire": {"center_cm1": 520.7, "exposure_s": 0.5, "shutter": "hold"},
+           "calibration": {"adjust": "ls6t", "repeats": 3}, "video": {"before": False}}
 
     def age_all(hours):
         d = xcal.load()
@@ -2393,25 +2396,41 @@ def test_zero_drift_between_calibrations_is_learned_and_counted():
                 e_["time"] = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(time.time() - hours * 3600))
         xcal._save(d)
     run_inline({"c": cal})
+    # a single-fit calibration without the hold: reported, not learned
     age_all(2.0)
-    (bdir / "sim_xshift").write_text("1.0,1.0")              # the zero moved 1 cm-1 in 2 h
-    c = run_inline({"c": cal})["studies"]["c"]
-    (bdir / "sim_xshift").unlink()
+    single = dict(cal, acquire=dict(cal["acquire"], shutter="auto"), calibration={"adjust": "ls6t"})
+    c = run_inline({"c": single})["studies"]["c"]
     zd = c["calibration"]["zero_drift_since_last"]
-    assert zd["cm1_per_h"] == pytest.approx(0.5, abs=0.15), zd
-    # one sign convention: + = the reference line reads higher (here the scale reads 1 cm-1 high)
-    assert zd["cm1"] == pytest.approx(1.0, abs=0.2), zd
-    dac = (c["calibration"].get("stored_correction") or {}).get("drift_at_centre")
-    assert dac is None or dac["cm1"] == pytest.approx(zd["cm1"], abs=0.05), dac
+    assert zd["not_learned_because"] and "learned_zero_drift_cm1_per_h" not in zd, zd
+    run_inline({"c": cal})
+    for k_, shift_ in enumerate(("1.0,1.0", "2.0,1.0")):            # the zero moving 1 cm-1 every 2 h
+        age_all(2.0)
+        (bdir / "sim_xshift").write_text(shift_)
+        c = run_inline({"c": cal})["studies"]["c"]
+        zd = c["calibration"]["zero_drift_since_last"]
+        assert "not_learned_because" not in zd, zd
+        assert zd["cm1"] == pytest.approx(1.0, abs=0.25), zd                     # + = reads higher
+        dac = (c["calibration"].get("stored_correction") or {}).get("drift_at_centre")
+        assert dac and dac["cm1"] == pytest.approx(zd["cm1"], abs=0.05), dac     # the same sign and size
+        if k_ == 0:
+            assert zd.get("learned_zero_drift_cm1_per_h") is None                # one pair: not applied yet
+    (bdir / "sim_xshift").unlink()
+    assert zd["learned_zero_drift_cm1_per_h"] == pytest.approx(0.5, abs=0.15), zd
     assert R.spectro_repeatability(P.load(), 532, 1800)["zero_drift_cm1_per_h"] == pytest.approx(0.5, abs=0.15)
     age_all(2.0)
     sp = {"kind": "spectrum", "sample": {"name": "Si"}, "setup": dict(SETUP),
           "acquire": {"center_cm1": 520.7, "exposure_s": 1}}
     cu = run_inline({"s": sp})["studies"]["s"]["checks"]["zero"]["correction_used"]
     assert cu["expected_uncertainty_cm1"] >= 0.8 and "between calibrations" in cu["expected_uncertainty_from"], cu
+    # a person clears it
+    r = api.references_clear("learned", "532@1800", "zero_drift")
+    assert "zero_drift_cm1_per_h" in r["cleared"]
+    assert R.spectro_repeatability(P.load(), 532, 1800).get("zero_drift_cm1_per_h") is None
+    # a value learned before .26.6 (no version) is not used
+    store.write("spectro_repeatability.json", {"532@1800": {"zero_drift_cm1_per_h": 1.06}})
+    assert R.spectro_repeatability(P.load(), 532, 1800).get("zero_drift_cm1_per_h") is None
     xcal.clear()
     store.write("spectro_repeatability.json", {})
-
 
 def test_calibration_repeats_land_like_spectra(monkeypatch):
     """Nicola, 2026-11-25 22:18: since .18 the 1200 repeats jogged by the approach itself (-2) and skipped the

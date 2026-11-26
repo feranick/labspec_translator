@@ -133,8 +133,10 @@ def main(argv=None) -> int:
     s.add_argument("value", nargs="?", help="set: the value (JSON)")
     s = sub.add_parser("references")
     s.add_argument("action", choices=["show", "clear"])
-    s.add_argument("what", nargs="?", choices=["correction", "background", "spot"])
+    s.add_argument("what", nargs="?", choices=["correction", "background", "spot", "learned"])
     s.add_argument("name", nargs="?")
+    s.add_argument("field", nargs="?", help="learned: zero_drift | first_landing | laser_line_sd | zero_creep | "
+                                            "window_zero | moved_sd | still_sd (all when left out)")
     s = sub.add_parser("spot")
     s.add_argument("action", choices=["status", "forget"])
     s.add_argument("--objective")
@@ -306,8 +308,9 @@ def main(argv=None) -> int:
             _print(api.references())
         else:
             if not a.what:
-                ap.error("references clear needs: correction [LASER@GRATING[@CENTRE_NM]] | background NAME | spot")
-            _print(api.references_clear(a.what, a.name))
+                ap.error("references clear needs: correction [LASER@GRATING[@CENTRE_NM]] | background NAME | spot | "
+                         "learned LASER@GRATING [FIELD]")
+            _print(api.references_clear(a.what, a.name, a.field))
     elif a.cmd == "spot":
         _print(api.spot_status() if a.action == "status" else api.spot_forget(a.objective, a.laser))
     elif a.cmd == "alignment":

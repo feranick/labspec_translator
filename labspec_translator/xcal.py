@@ -107,7 +107,7 @@ def get(laser_nm, grating, centre_nm=None, placement: str | None = None, range_c
 def store(laser_nm, grating, a: float, b: float, reference: str, lines: list, request: str | None = None,
           centre_nm=None, laser_line_cm1=None, laser_line_fwhm_cm1=None, placement: str | None = None,
           pool: str = "per_centre", repeats: dict | None = None, range_cm1=None,
-          cm1_per_px: float | None = None, zero_mode: str | None = None) -> dict:
+          cm1_per_px: float | None = None, zero_mode: str | None = None, shutter: str | None = None) -> dict:
     """Keeps the correction per window centre (2026-11-24: two Si calibrations a minute apart, in two windows, gave
     -0.72 and -2.40 cm-1: each had overwritten the other)."""
     d = load()
@@ -120,6 +120,8 @@ def store(laser_nm, grating, a: float, b: float, reference: str, lines: list, re
         rec["placement"] = placement          # centred (ls6t placed the window) or labspec (LabSpec placed a range)
     if repeats:
         rec["repeats"] = repeats              # n, mean, sd of the repeats
+    if shutter:
+        rec["shutter"] = shutter              # 'held' (the laser settled) or 'auto' (cycling): for the drift learning
     if zero_mode:
         # 'anchored': measured relative to the laser line (laser_line_cm1); 'absolute': the line alone. Both from the
         # spectra as measured (any laser-line shift of the calibration study undone: Nicola, 2026-11-25)
@@ -142,7 +144,9 @@ def store(laser_nm, grating, a: float, b: float, reference: str, lines: list, re
         orp = (old or {}).get("repeats") or {}
         if orp and ("median_cm1" not in orp or orp.get("settled") is False):
             old = None              # repeats from before 2026.11.25.1 or not settled: no drift against them
-        if old and old.get("request") != request and _t(rec) - _t(old) > POOL_WINDOW_H * 3600:
+        if old and old.get("request") != request:
+            # any later calibration of the same window, whatever the time between (2026-11-26: a second one 30 min
+            # later moved +1.04 and said nothing; the first, at +0.52, had been reported)
             # the same window measured again later: the drift since then, which older entries elsewhere still carry
             drift = {"centre_nm": float(centre_nm), "since": old.get("time"),
                      # the zero's move as the reference line reads it (its offset: + = reads higher), the same

@@ -4756,6 +4756,8 @@ def spectro_repeatability(prof: dict, laser, grating, placement: str = "centred"
     rp_ = sp_.get("repeatability") if isinstance(sp_.get("repeatability"), dict) else {}
     own = rp_.get(kk)
     rec = dict((store.read("spectro_repeatability.json") or {}).get(kk) or {})
+    if rec.get("zero_drift_cm1_per_h") is not None and rec.get("zero_drift_v") != DRIFT_VERSION:
+        rec.pop("zero_drift_cm1_per_h")            # learned before 2026.11.26.6 (single fits, a cycling shutter)
     if rec.get("zero_creep_cm1_per_min") is not None and rec.get("zero_creep_v") != CREEP_VERSION:
         rec.pop("zero_creep_cm1_per_min")          # one series' rate from before 2026.11.25.18: not applied
     if rec.get("laser_line_sd_cm1") is not None and rec.get("laser_line_sd_v") != LL_SD_VERSION:
@@ -5036,16 +5038,27 @@ def _learn_first_landing(result: dict, warm: dict, laser, grating, rng: dict) ->
                             "learned_cm1": e["first_landing_cm1"]}
 
 
-def learn_zero_drift(laser, grating, placement: str, rate: float) -> float:
-    """The zero's drift per hour between calibrations at one window, per laser@grating: the median of the last 5."""
+DRIFT_VERSION = 2       # zero-drift rates learned from 2026.11.26.6 on (older ones: single fits, a cycling shutter)
+DRIFT_MIN_PAIRS = 2     # a rate counts once learned from this many good pairs
+
+
+def learn_zero_drift(laser, grating, placement: str, cm1: float, hours: float) -> float | None:
+    """The zero's drift per hour between calibrations at one window, per laser@grating, from good pairs only (the
+    caller's rules): the time-weighted rate over the last 5 pairs, sum |change| / sum hours (2026-11-26: the plain
+    mean of 0.04 over 13 h and 2.08 over 0.5 h gave 1.06), applied once DRIFT_MIN_PAIRS pairs exist."""
     rec_r = store.read("spectro_repeatability.json") or {}
     kk = f"{float(laser):g}@{_f(grating) or 0:g}" + ("@labspec" if placement == "labspec" else "")
     e = rec_r.setdefault(kk, {})
-    hist = (list(e.get("zero_drift_history") or []) + [round(float(rate), 4)])[-5:]
-    e.update(zero_drift_history=hist, zero_drift_cm1_per_h=round(float(np.median(hist)), 4),
-             zero_drift_time=time.strftime("%Y-%m-%dT%H:%M:%S"))
+    hist = list(e.get("zero_drift_history") or []) if e.get("zero_drift_v") == DRIFT_VERSION else []
+    hist = (hist + [{"cm1": round(abs(float(cm1)), 4), "hours": round(float(hours), 3),
+                     "time": time.strftime("%Y-%m-%dT%H:%M:%S")}])[-5:]
+    e.update(zero_drift_history=hist, zero_drift_v=DRIFT_VERSION, zero_drift_time=time.strftime("%Y-%m-%dT%H:%M:%S"))
+    if len(hist) >= DRIFT_MIN_PAIRS:
+        e["zero_drift_cm1_per_h"] = round(sum(h["cm1"] for h in hist) / max(sum(h["hours"] for h in hist), 1e-6), 4)
+    else:
+        e.pop("zero_drift_cm1_per_h", None)
     store.write("spectro_repeatability.json", rec_r)
-    return e["zero_drift_cm1_per_h"]
+    return e.get("zero_drift_cm1_per_h")
 
 
 def learn_window_rate(laser, grating, placement: str, centre_nm, a: float, request=None) -> dict | None:
@@ -5477,7 +5490,9 @@ def _calibration_result(study, prof, rec, ref_lines, laser, grating, rng, reques
                        # anchored (every later spectrum brought to the laser line, threshold 0) only with
                        # calibration.anchor 'always'; a single spectrum too is 'absolute' (T9.21: "follows ... over 0
                        # cm-1" after one, while the landing steps use the learned threshold)
-                       zero_mode="anchored" if anc_ll is not None else "absolute")}
+                       zero_mode="anchored" if anc_ll is not None else "absolute",
+                       shutter="held" if any(str((r_.get("shutter_hold_after") or {}).get("held")) == "yes"
+                                             for r_ in (repeats or [rec])) else "auto")}
     elif not res["pass"]:
         unreliable.append(f"the {'Si' if refname == 'si' else refname} line is at {first['measured_cm1']:.2f} cm-1, "
                           f"{first['measured_cm1'] - first['reference_cm1']:+.2f} from {first['reference_cm1']}: "
@@ -5551,12 +5566,34 @@ def store_pending(res: dict, warnings: list, unreliable: list, prof: dict | None
         # the zero's drift over hours, from successive calibrations at this window (Nicola, 2026-11-25: 1.9 h after
         # the calibration Si read +0.93 / +0.45 off; a series right after calibrating does not see that)
         age_p = xcal.age_h(prev) or 0.0
-        if 0.5 <= age_p <= 24.0 and not res.get("needs_confirmation"):
-            dr_h = abs(float(a) - float(prev["a"])) / age_p
-            res["zero_drift_since_last"] = {"cm1": round(-(float(a) - float(prev["a"])), 3),
-                                            "hours": round(age_p, 2), "cm1_per_h": round(dr_h, 3),
-                                            "learned_cm1_per_h": learn_zero_drift(
-                                                laser, grating, kw_.get("placement") or "centred", dr_h)}
+        if age_p > 0 and not res.get("needs_confirmation"):
+            ch = -(float(a) - float(prev["a"]))           # + = the reference line reads higher (as drift_at_centre)
+            zd = {"cm1": round(ch, 3), "hours": round(age_p, 2),
+                  "zero_drift_cm1_per_h": round(abs(ch) / age_p, 3) if age_p > 0 else None}
+            # learned only from good pairs (Nicola, 2026-11-26: 1.06 cm-1/h learned at 1200 from two single fits
+            # with the shutter cycling and the laser changing mode, against +0.01 in 2 h with the hold)
+            why_not = []
+            n_new = int(((res.get("repeats") or {}).get("n")) or 1)
+            n_old = int(((prev.get("repeats") or {}).get("n")) or 1)
+            if min(n_new, n_old) < 3:
+                why_not.append(f"a calibration with fewer than 3 repeats ({n_old} and {n_new})")
+            if kw_.get("shutter") != "held" or prev.get("shutter") != "held":
+                why_not.append("the shutter was not held in both (the laser may change mode as it cycles)")
+            ll_new, ll_old = kw_.get("laser_line_cm1"), prev.get("laser_line_cm1")
+            if ll_new is not None and ll_old is not None:
+                thr_ll = float(landing_threshold(prof or {}, laser, grating, kw_.get("placement") or "centred")
+                               ["threshold_cm1"]) if prof else 0.5
+                if abs(float(ll_new) - float(ll_old)) > thr_ll:
+                    why_not.append(f"the laser line moved {float(ll_new) - float(ll_old):+.2f} cm-1 between them "
+                                   f"(over {thr_ll:g}: a laser mode change, not the spectrometer's drift)")
+            if not 0.5 <= age_p <= 24.0:
+                why_not.append(f"{age_p:.1f} h apart (pairs 0.5 to 24 h apart are used)")
+            if why_not:
+                zd["not_learned_because"] = why_not
+            else:
+                zd["learned_zero_drift_cm1_per_h"] = learn_zero_drift(laser, grating, kw_.get("placement") or
+                                                                      "centred", ch, age_p)
+            res["zero_drift_since_last"] = zd
     st = xcal.store(*pend["args"], **pend["kw"])
     res["stored_as"] = (("one correction for every window of " if st.get("pooled") else
                          "for this range: " if st.get("range_cm1") else "per window centre: ")
