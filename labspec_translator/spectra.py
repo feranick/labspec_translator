@@ -297,7 +297,9 @@ def fit_peak(x, y, near: float, window: float = 40.0, shape: str = "pseudo_voigt
                stderr_position_cm1=round(float(perr[1]), 4) if math.isfinite(perr[1]) else None,
                r2=round(1 - ss_res / ss_tot, 5), snr=round(h / s, 2) if s and math.isfinite(s) else None)
     if out["snr"] is not None and out["snr"] < detect_snr:
+        # the same fields as a fitted peak, null (T9.18: the summary and the study result differed)
         return {"name": name, "near_cm1": near, "window_cm1": window, "shape": shape, "ok": False,
+                "position_cm1": None, "fwhm_cm1": None, "height": None,
                 "detected": False, "snr": out["snr"], "why": f"not detected (SNR {out['snr']:g} < {detect_snr:g})"}
     out["detected"] = True
     if edge:
@@ -305,18 +307,37 @@ def fit_peak(x, y, near: float, window: float = 40.0, shape: str = "pseudo_voigt
     return out
 
 
-def find_peaks(x, y, n: int = 3, sigma: float | None = None, min_snr: float = 5.0) -> list[float]:
-    """Positions (cm-1) of the n most prominent peaks above min_snr x noise."""
-    from scipy.signal import find_peaks as fp
+AUTO_FROM_CM1 = 50.0    # automatic peaks only from here (the laser line and the edge filter below)
+
+
+def find_peaks(x, y, n: int = 3, sigma: float | None = None, min_snr: float = 5.0, widths: bool = False):
+    """Positions (cm-1) of the n most prominent peaks above min_snr x noise; widths=True: [(position, FWHM cm-1)]
+    (a broad band, e.g. Si's second order near 950 cm-1, needs a wider fit window than a sharp line). The search
+    runs on the spectrum and on a smoothed copy (a broad weak band is found there)."""
+    from scipy.signal import find_peaks as fp, peak_widths
+    x = np.asarray(x, float)
     y = np.asarray(y, float)
     s = sigma if sigma is not None else noise_sigma(y)
     if not s or not math.isfinite(s):
         s = max(float(np.std(y)) * 0.01, 1e-12)
-    idx, props = fp(y, prominence=min_snr * s, distance=3)
-    if not len(idx):
-        return []
-    order = np.argsort(props["prominences"])[::-1][:n]
-    return sorted(float(np.asarray(x)[idx[i]]) for i in order)
+    dx = float(np.median(np.abs(np.diff(x)))) if x.size > 1 else 1.0
+    found: dict = {}
+    for k_sm in (1, 9):
+        ys = y if k_sm == 1 else np.convolve(y, np.ones(k_sm) / k_sm, mode="same")
+        s_ = s if k_sm == 1 else s / math.sqrt(k_sm)
+        idx, props = fp(ys, prominence=min_snr * s_, distance=3)
+        if not len(idx):
+            continue
+        w = peak_widths(ys, idx, rel_height=0.5)[0] * dx
+        for i, pi in enumerate(idx):
+            pos = float(x[pi])
+            if any(abs(pos - p0) < max(w[i], found[p0][1]) / 2 for p0 in found):
+                continue
+            found[pos] = (float(props["prominences"][i]) / s_, float(w[i]))
+    best = sorted(found.items(), key=lambda kv: kv[1][0], reverse=True)[:n]
+    if widths:
+        return sorted((p, wd) for p, (_, wd) in best)
+    return sorted(p for p, _ in best)
 
 
 def line_signal(x, y, line: float, window: float) -> float:
@@ -375,11 +396,19 @@ def analyze(shift, y, process: dict, min_snr: float = 10.0, detect_snr: float = 
     auto = False
     if not specs:
         auto = True
-        specs = [{"near_cm1": p} for p in find_peaks(x, yc, int(process.get("auto_peaks", 3)), sigma)]
+        # the fit window from the peak's own width (a broad band: up to 200 cm-1); nothing below the edge filter's
+        # usable cut-off (T9.18: the laser line at -3.35, SNR 162, came first and Si second)
+        lo_ = float(process.get("auto_from_cm1", AUTO_FROM_CM1) or 0.0)
+        sel_ = np.abs(x) >= lo_
+        specs = [{"near_cm1": p, "window_cm1": float(min(200.0, max(40.0, 3.0 * w)))}
+                 for p, w in (find_peaks(x[sel_], yc[sel_], int(process.get("auto_peaks", 3)), sigma, widths=True)
+                              if sel_.sum() > 10 else [])]
     peaks = []
     for i, ps in enumerate(specs):
         r = fit_peak(x, yc, float(ps["near_cm1"]), float(ps.get("window_cm1", 40.0)),
                      ps.get("shape", "pseudo_voigt"), sigma, ps.get("name") or f"peak{i}", detect_snr)
+        for f_ in ("position_cm1", "fwhm_cm1", "height"):
+            r.setdefault(f_, None)           # the same fields for every peak, null where not fitted
         if auto and r.get("ok"):
             # an auto-found 'peak' narrower than the sampling allows, or that the line shape hardly fits, is noise
             # (2026-11-24: 'peak1' 1.88 cm-1 wide, one point, r2 0.62; 'peak2' r2 0.64 in the noise ripple)
@@ -393,6 +422,11 @@ def analyze(shift, y, process: dict, min_snr: float = 10.0, detect_snr: float = 
             r["warning"] = (r.get("warning", "") + "; " if r.get("warning") else "") + \
                 f"weak: SNR {r['snr']:g} < {min_snr:g} (longer exposure or more accumulations)"
         peaks.append(r)
+    if auto:
+        # a peak found but not fitted is not listed (T9.18: peak0 / peak2 with no position, SNR 3 and 1.3)
+        out["auto_peaks_rejected"] = [{"near_cm1": round(float(r.get("near_cm1") or 0), 2), "why": r.get("why")}
+                                      for r in peaks if not r.get("ok")]
+        peaks = [r for r in peaks if r.get("ok")]
     out["peaks"] = peaks
     out["auto_peaks"] = auto
     # a narrow Raman line looks like a spike in one spectrum: spikes inside a fitted peak do not count

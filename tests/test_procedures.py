@@ -1397,7 +1397,8 @@ def test_corrections_by_placement_one_centre_cleared_and_unconfirmed_hops():
     assert api.references_clear("correction", "637.75@1200@676.75")["cleared"] == 1
     assert list(xcal.load()["637.75@1200"]["by_centre"]) == ["650.19"]
     xcal.clear()
-    # a hop without Raman peaks to confirm it: applied, flagged
+    # a hop without process.peaks: the automatically found Si confirms it (.26.2; before, applied and flagged
+    # unconfirmed)
     bdir = config.active_bridge_dir()
     sim = S.ensure(bdir)
     (bdir / "sim_laser_line").write_text("1")
@@ -1407,7 +1408,7 @@ def test_corrections_by_placement_one_centre_cleared_and_unconfirmed_hops():
           "acquire": {"center_cm1": 250, "exposure_s": 1, "laser_reference": "correct"}}
     s = run_inline({"s": st})["studies"]["s"]
     pl = s["checks"]["zero_correction"]["plateaus"]
-    assert pl[1]["applied"] and pl[1].get("unconfirmed") and any("unconfirmed" in w for w in s["warnings"]), pl
+    assert pl[1]["applied"] and pl[1].get("raman_moved_cm1") is not None and not pl[1].get("unconfirmed"), pl
     (bdir / "sim_shift_after_first").unlink()
 
 
@@ -1623,7 +1624,7 @@ def test_expected_uncertainty_warned_above_the_tolerance():
     sp = {"kind": "spectrum", "sample": {"name": "Si"}, "setup": SETUP, "acquire": {"center_cm1": 520.7, "exposure_s": 1}}
     s = run_inline({"s": sp})["studies"]["s"]
     assert s["checks"]["zero"]["correction_used"]["expected_uncertainty_cm1"] == 1.1
-    assert any("repositions that much" in w for w in s["warnings"])
+    assert any("good to about +-1.10" in w for w in s["warnings"]), s["warnings"]
     # measured with another approach than the profile's now: not used; the profile's own value wins
     store.write("spectro_repeatability.json", {"532@1800": {"moved_sd_cm1": 1.1, "approach_nm": 0.0}})
     assert "moved_sd_cm1" not in runner.spectro_repeatability(P.load(), 532, 1800)
@@ -2032,7 +2033,12 @@ def test_calibration_anchored_to_the_laser_line_removes_landing_scatter():
     assert zc["laser_reference"] == "anchor" and any(p.get("landing") for p in zc.get("plateaus") or []), zc
     assert abs(s["peaks_by_name"]["Si"]["position_cm1"] - 520.7) < 0.3, s["peaks_by_name"]["Si"]
     assert not any("calibrate again" in w and "followed" in w for w in s["warnings"]), s["warnings"]
-    # within the laser line's own scatter: not followed (no fit noise added)
+    # no process.peaks: the automatically found Si confirms the step too (T9.18)
+    sim._landing_n = 0
+    s_auto = run_inline({"s": {k_: v_ for k_, v_ in sp.items() if k_ != "process"}})["studies"]["s"]
+    pl_a = s_auto["checks"]["zero_correction"].get("plateaus") or []
+    assert pl_a and pl_a[0]["applied"] and pl_a[0].get("landing"), pl_a
+        # within the laser line's own scatter: not followed (no fit noise added)
     (bdir / "sim_landing").write_text(str(thr / 2))
     sim._landing_n = 0
     s = run_inline({"s": sp})["studies"]["s"]
@@ -2357,6 +2363,11 @@ def test_unfollowed_laser_line_drift_widens_the_expected_uncertainty():
     sim._ll_drift_n_fixed = False
     cu = s["checks"]["zero"]["correction_used"]
     assert cu["expected_uncertainty_cm1"] >= 0.8 and "not followed" in cu["expected_uncertainty_from"], cu
+    assert cu["expected_uncertainty_parts"]["first_landing"] >= 0.8          # the landing, once (not added twice)
+    tol_ = float(P.load()["checks"]["si_tol_cm1"])
+    if cu["expected_uncertainty_cm1"] > tol_:
+        quoted = [w for w in s["warnings"] if "good to about" in w]
+        assert len(quoted) == 1 and f"+-{cu['expected_uncertainty_cm1']:.2f}" in quoted[0], quoted
     xcal.clear()
 
 
@@ -2436,7 +2447,15 @@ def test_first_landing_after_a_grating_change_learned_and_counted_where_nothing_
     fl = c["calibration"].get("first_landing")
     assert fl is not None and "learned_cm1" in fl, c.get("warmup")
     rec_ = store.read("spectro_repeatability.json")
-    rec_["532@600"]["first_landing_cm1"] = 1.2
+    rec_["532@600"].update(first_landing_cm1=1.2, first_landing_history=[1.2])       # one: not applied yet
+    store.write("spectro_repeatability.json", rec_)
+    sp0 = {"kind": "spectrum", "sample": {"name": "Si"}, "setup": dict(SETUP, grating=600),
+           "acquire": {"center_cm1": 520.7, "exposure_s": 0.2}}
+    run_inline({"s": dict(sp0, setup=dict(SETUP))})
+    s0 = run_inline({"s": sp0})["studies"]["s"]
+    assert "first landing" not in str(s0["checks"]["zero"]["correction_used"].get("expected_uncertainty_from"))
+    rec_ = store.read("spectro_repeatability.json")
+    rec_["532@600"].update(first_landing_cm1=1.2, first_landing_history=[1.1, 1.2, 1.3])   # three: applied
     store.write("spectro_repeatability.json", rec_)
     sp = {"kind": "spectrum", "sample": {"name": "Si"}, "setup": dict(SETUP, grating=600),
           "acquire": {"center_cm1": 520.7, "exposure_s": 0.2}}
@@ -2487,3 +2506,39 @@ def test_broad_laser_line_follows_large_landing_steps_only():
     (bdir / "sim_landing").unlink()
     (bdir / "sim_laser_line").unlink()
     xcal.clear()
+
+
+
+def test_auto_peaks_skip_the_laser_line_drop_failed_fits_and_find_a_broad_band():
+    """Nicola, 2026-11-26 (T9.18): without peak_cm1 the laser line at -3.35 (SNR 162) came first and Si second;
+    failed fits were listed with no position; the ~950 second-order band was not found."""
+    from labspec_translator import spectra as SP
+    x = np.linspace(-100, 1200, 2600)
+    rng_ = np.random.default_rng(3)
+    y = (5000 * np.exp(-0.5 * (x / 3.0) ** 2) + 1000 * np.exp(-0.5 * ((x - 520.7) / 2.5) ** 2)
+         + 60 * np.exp(-0.5 * ((x - 960) / 25.0) ** 2) + 100 + rng_.normal(0, 3, x.size))
+    a = SP.analyze(x, y, {"baseline": {"degree": 1}})
+    pos = [p["position_cm1"] for p in a["peaks"]]
+    assert all(abs(p_) > 50 for p_ in pos) and any(abs(p_ - 520.7) < 1 for p_ in pos), pos
+    assert any(abs(p_ - 960) < 10 for p_ in pos), pos
+    assert all(p["ok"] for p in a["peaks"])
+    # a not-detected peak has the same fields, null
+    nd = SP.analyze(x, y, {"peaks": [{"name": "none", "near_cm1": 300.0}]})["peaks"][0]
+    assert nd["ok"] is False and "position_cm1" in nd and nd["position_cm1"] is None
+
+
+def test_summary_carries_the_expected_uncertainty():
+    from labspec_translator import xcal, store
+    xcal.clear()
+    store.write("xcal_pending.json", {})
+    store.write("spectro_repeatability.json", {"532@1800": {"moved_sd_cm1": 0.3, "approach_nm": -2.0}})
+    S.ensure(config.active_bridge_dir())
+    run_inline({"c": {"kind": "calibration", "sample": {"name": "Si"}, "setup": dict(SETUP),
+                      "acquire": {"center_cm1": 520.7, "exposure_s": 1}, "calibration": {"adjust": "ls6t"},
+                      "video": {"before": False}}})
+    m = api.measure_spectrum(laser_nm=532, grating=1800, objective="x100", filter="10%", peak_cm1=520.7,
+                             inline=True, wait_total_s=60)
+    st = m["studies"]["spectrum"]
+    assert st.get("expected_uncertainty_cm1") is not None and "position_cm1" in st["peaks"]["peak"], st
+    xcal.clear()
+    store.write("spectro_repeatability.json", {})

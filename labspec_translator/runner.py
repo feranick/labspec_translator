@@ -3821,9 +3821,12 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
             fl_ = rep_.get("first_landing_cm1")
             can_follow_ = (corr.get("laser_line_cm1") is not None
                            and not laser_line_too_broad(corr.get("laser_line_fwhm_cm1"), corr.get("lines")))
-            first_term = float(fl_) if (fl_ and checks.get("grating_changed") and not can_follow_) else 0.0
-            if first_term:
-                creep_term = math.hypot(creep_term, first_term)
+            # applied once learned from several calibrations (Nicola, 2026-11-26: 2.34 from one warm-up)
+            n_fl_ = len(rep_.get("first_landing_history") or []) if rep_.get("source") != "profile" or \
+                not ((((prof.get("spectrometer") or {}).get("repeatability") or {}).get(
+                    f"{float(laser):g}@{_f(grating) or 0:g}") or {}).get("first_landing_cm1")) else FIRST_LANDING_MIN_N
+            first_term = float(fl_) if (fl_ and checks.get("grating_changed") and not can_follow_
+                                        and n_fl_ >= FIRST_LANDING_MIN_N) else 0.0
             # the correction's own uncertainty: its repeats' standard error (600: SD ~0.27 over 5 -> ~0.12)
             sem_term = float(((corr.get("repeats") or {}).get("sem_cm1")) or 0.0)
             if rep_.get("moved_sd_cm1") or creep_term or centre_term or sem_term:
@@ -3831,8 +3834,13 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
                 # SD 0.9-1.2 cm-1 moved, 0.12 without moves); and it creeps with the correction's age (2026-11-25,
                 # 637.75 @ 1200: ~+0.1 cm-1 per minute after a calibration); the pass tolerance stays as it is
                 mv_ = float(rep_.get("moved_sd_cm1") or 0.0)
-                corr = dict(corr, expected_uncertainty_cm1=round(math.sqrt(mv_ ** 2 + creep_term ** 2
-                                                                           + centre_term ** 2 + sem_term ** 2), 3),
+                # its parts, so a later term for the same cause replaces rather than adds (the landing: the learned
+                # first landing, or the Raman peaks' observed move: T9.18, 2.34 and 1.57 gave +-2.84)
+                parts_ = {"repositioning": round(mv_, 3), "drift": round(creep_term, 3),
+                          "first_landing": round(first_term, 3), "window": round(centre_term, 3),
+                          "correction_sem": round(sem_term, 3)}
+                corr = dict(corr, expected_uncertainty_cm1=_u_total(parts_),
+                            expected_uncertainty_parts={k_: v_ for k_, v_ in parts_.items() if v_},
                             expected_uncertainty_from=f"{rep_.get('source')}, {rep_place} placement"
                             + (f"; the zero's drift since the calibration ({float(age_m_):.0f} min: "
                                + (f"creep {abs(float(creep_)):.2f} cm-1/min" if creep_ else "")
@@ -3846,19 +3854,11 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
                                f"from {rep_.get('window_zero_from') or rep_.get('source')}, at most "
                                f"{WINDOW_TERM_CAP_CM1:g})" if centre_term else ""))
                 rep_ = dict(rep_, moved_sd_cm1=corr["expected_uncertainty_cm1"])
-                tol_u = float(prof["checks"]["si_tol_cm1"])
-                if float(rep_["moved_sd_cm1"]) > tol_u:
-                    warnings.append(f"the zero here is good to about +-{float(rep_['moved_sd_cm1']):.1f} cm-1 ("
-                                    + (f"the spectrometer's repositioning on {combo(laser, grating)} and the zero's "
-                                       f"creep over the correction's {float(age_m_):.0f} min"
-                                       if creep_term else
-                                       f"the spectrometer repositions that much on {combo(laser, grating)}")
-                                    + f"), more than the tolerance ({tol_u:g}): calibrate shortly before, and measure "
-                                    "at the same centre without moving the spectrometer in between")
+                # the warning quoting it is said once, at the end of the analysis, with the final value
             zs = checks["zero"] = dict(zs, correction_used={**{k: corr.get(k) for k in (
                 "a", "b", "time", "centre_nm", "interpolated_between_nm", "centre_far", "laser_line_cm1", "placement",
                 "range_match", "range_cm1", "pooled", "pooled_from", "repeats", "expected_uncertainty_cm1",
-                "expected_uncertainty_from", "age_min", "window_distance_nm")
+                "expected_uncertainty_from", "expected_uncertainty_parts", "age_min", "window_distance_nm")
                 if corr.get(k) is not None}, **({"age_h": round(xcal.age_h(corr), 2)} if xcal.age_h(corr) is not None
                                                  else {})},
                 note="offset_cm1 is this laser and grating's last calibration check (any window); "
@@ -4013,6 +4013,19 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
     hop_info: list = []
     pk_specs = [(float(pk_["near_cm1"]), float(pk_.get("window_cm1", 40.0))) for pk_ in (process.get("peaks") or [])
                 if isinstance(pk_, dict) and pk_.get("near_cm1") is not None]
+    if not pk_specs:
+        # no peaks asked: the strongest ones found in the first spectrum confirm laser-line steps too (T9.18: an
+        # auto-found Si at 520.19 did not confirm a -0.57 step, "no Raman peak to confirm it")
+        try:
+            r0 = next(r_ for r_ in per_point if r_["point"] not in excluded)
+            sp0 = r0.get("_sp") or spectra.read(r0["file"])
+            sh0, _ = spectra.to_shift(sp0["x"], sp0["meta"].get("x_unit", "nm"), laser)
+            x0_, y0_ = spectra.sort_xy(sh0, sp0["y"])
+            yc0 = np.asarray(y0_, float) - spectra.baseline(x0_, y0_, 3)
+            pk_specs = [(p_, float(min(200.0, max(30.0, 3.0 * w_))))
+                        for p_, w_ in spectra.find_peaks(x0_, yc0, 3, widths=True) if abs(p_) > 40.0]
+        except (StopIteration, KeyError, OSError, ValueError, TypeError):
+            pk_specs = []
     raw: list = []
     for rec in per_point:
         if rec["point"] in excluded:
@@ -4146,6 +4159,12 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
         for pt, idx_ in ll_bad_idx.items():
             if idx_ < len(plateaus) and plateaus[idx_]:
                 plateau_step[pt] = plateau_step.get(plateaus[idx_][0][0], 0.0)
+    # automatic peaks from the edge filter's usable cut-off on (measured, or HORIBA's QC), at least 50 cm-1
+    auto_proc = process
+    if not process.get("peaks") and laser:
+        from . import perf
+        cut_ = perf.cutoff_for(laser, grating)
+        auto_proc = dict(process, auto_from_cm1=max(spectra.AUTO_FROM_CM1, float(cut_ or 0.0)))
     for rec in per_point:
         sp = rec.pop("_sp") if "_sp" in rec else spectra.read(rec["file"])
         try:
@@ -4199,7 +4218,7 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
                                 "spectrum")
         if crop is not None:
             shift, y = np.asarray(shift)[crop], np.asarray(y)[crop]
-        a = spectra.analyze(shift, y, process, min_snr, prof["checks"].get("detect_snr", 5.0),
+        a = spectra.analyze(shift, y, auto_proc, min_snr, prof["checks"].get("detect_snr", 5.0),
                             float(prof["detector"].get("e_per_count") or 1.0))
         _spikes_where_meaningful(a, laser, grating, ll)
         if ext_range and rec["point"] == per_point[0]["point"]:
@@ -4397,8 +4416,9 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
         checks["zero_correction"]["uncertain_points"] = uncertain[:50]
         checks["zero_correction"]["method"] += "; zero uncertain at some points (see spectra[].zero_uncertain)"
         warnings.append(f"zero uncertain at {len(uncertain)} spectra (points {', '.join(map(str, uncertain[:10]))}): "
-                        "the laser line jumped or broadened; positions there may be off by about a cm-1 even after "
-                        "following it")
+                        "the laser line jumped or broadened"
+                        + ("; positions there may be off by about a cm-1 even after following it" if followed else
+                           " (not followed): see checks.zero.correction_used.expected_uncertainty_cm1"))
         if len(uncertain) > max(1, len(per_point) // 10):
             unreliable.append(f"zero uncertain at {len(uncertain)} of {len(per_point)} spectra (the laser line jumped "
                               "or broadened: checks.zero_correction.uncertain_points)")
@@ -4457,8 +4477,11 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
                     dpk_ = max(dpks_) if dpks_ else None
                     if isinstance(cu_, dict):
                         t_ = max(DRIFT_RAMAN_FRACTION * abs(dr), dpk_ or 0.0)
-                        cu_["expected_uncertainty_cm1"] = round(math.hypot(
-                            float(cu_.get("expected_uncertainty_cm1") or 0.0), t_), 3)
+                        parts_ = dict(cu_.get("expected_uncertainty_parts") or {})
+                        # the learned first landing and the move seen here are the same landing: the larger one
+                        parts_["first_landing"] = max(float(parts_.get("first_landing") or 0.0), round(t_, 3))
+                        cu_["expected_uncertainty_parts"] = parts_
+                        cu_["expected_uncertainty_cm1"] = _u_total(parts_)
                         cu_["expected_uncertainty_from"] = (str(cu_.get("expected_uncertainty_from") or "")
                                                             + f"; the laser line {dr:+.2f} cm-1 from the calibration's, "
                                                             + (f"the Raman peaks {dpk_:.2f}, " if dpk_ is not None
@@ -4467,9 +4490,7 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
                                                             f"{DRIFT_RAMAN_FRACTION:g} the line's)").lstrip("; ")
                     if dpk_ is not None and dpk_ >= 0.3:
                         warnings.append(f"since the calibration the laser line moved {dr:+.2f} cm-1 and the Raman peaks "
-                                        f"{dpk_:.2f}, not alike (not followed): positions here are uncertain by about "
-                                        f"+-{max(DRIFT_RAMAN_FRACTION * abs(dr), dpk_):.1f} cm-1 "
-                                        "(checks.zero.correction_used.expected_uncertainty_cm1); calibrate again")
+                                        f"{dpk_:.2f}, not alike: not followed; calibrate again")
                     warnings.append(f"the laser line sits {dr:+.1f} cm-1 from where it was at the calibration (drift "
                                     "since then, or a calibration made with another spectrometer window), not a "
                                     "hop: the zero has likely moved too; calibrate again"
@@ -4494,6 +4515,19 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
                 warnings.append(msg + "; the calibration's repeats judge it (calibration.repeats)")
             else:
                 unreliable.append(msg + "; use acquire.laser_reference 'correct' with the laser line in the window")
+    cu_f = (checks.get("zero") or {}).get("correction_used")
+    if isinstance(cu_f, dict) and cu_f.get("expected_uncertainty_cm1") is not None:
+        tol_u = float(prof["checks"]["si_tol_cm1"])
+        eu_ = float(cu_f["expected_uncertainty_cm1"])
+        if eu_ > tol_u:
+            # one statement with the final value (T9.18: three warnings quoted +-2.4, +-1.6 and "about a cm-1"
+            # while the field said +-2.84)
+            parts_s = ", ".join(f"{k_.replace('_', ' ')} {float(v_):.2f}"
+                                for k_, v_ in (cu_f.get("expected_uncertainty_parts") or {}).items() if v_)
+            warnings.append(f"the zero here is good to about +-{eu_:.2f} cm-1 (checks.zero.correction_used: "
+                            f"{parts_s or cu_f.get('expected_uncertainty_from')}), more than the tolerance "
+                            f"({tol_u:g}): calibrate shortly before, and measure at the same centre without moving "
+                            "the spectrometer in between")
     if kind == "series" and laser:
         # the laser line's jitter with the spectrometer still (a series moves nothing): its own scatter, learned
         # for the landing threshold (Nicola, 2026-11-25); successive differences, so a creep does not count
@@ -4945,6 +4979,14 @@ def learn_window_rate(laser, grating, placement: str, centre_nm, a: float, reque
     store.write("spectro_repeatability.json", rec_r)
     return {"pairs": [{"other_centre_nm": c_, "cm1_per_nm": v} for v, c_ in samples],
             "learned_cm1_per_nm": e["window_zero_cm1_per_nm"]}
+
+
+FIRST_LANDING_MIN_N = 3  # the first-landing term counts once learned from this many calibrations
+
+
+def _u_total(parts: dict) -> float:
+    """The expected uncertainty from its independent parts (in quadrature)."""
+    return round(math.sqrt(sum(float(v) ** 2 for v in parts.values() if v)), 3)
 
 
 CREEP_VERSION = 2       # zero-creep rates learned from 2026.11.25.18 on (a single series' rate is no longer applied)

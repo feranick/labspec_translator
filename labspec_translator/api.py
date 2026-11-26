@@ -247,8 +247,13 @@ def _summary(st: dict) -> dict:
         pk = r.get("peaks_by_name") or {}
         if not pk and (r.get("spectra") or []):
             pk = {p.get("name"): p for p in (r["spectra"][0].get("peaks") or []) if p.get("name")}
-        s["peaks"] = {k: {f: v.get(f) for f in ("position_cm1", "fwhm_cm1", "height", "snr", "ok", "why")
-                          if v.get(f) is not None} for k, v in pk.items()}
+        # the same fields for every peak, null where not fitted (T9.18)
+        s["peaks"] = {k: {f: v.get(f) for f in ("position_cm1", "fwhm_cm1", "height", "snr", "ok")}
+                      | ({"why": v["why"]} if v.get("why") else {}) for k, v in pk.items()}
+        # how far to trust a position: the zero's expected uncertainty (T9.18: a small model needs it)
+        cu_ = ((r.get("checks") or {}).get("zero") or {}).get("correction_used") or {}
+        if cu_.get("expected_uncertainty_cm1") is not None:
+            s["expected_uncertainty_cm1"] = cu_["expected_uncertainty_cm1"]
         cal = r.get("calibration") or {}
         if cal:
             s["calibration"] = {k: cal.get(k) for k in ("offset_cm1", "pass", "trusted", "outcome", "stored_as",
