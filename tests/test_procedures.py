@@ -2214,6 +2214,10 @@ def test_map_live_band_sets_labspecs_cursors_on_the_live_and_native_maps():
                                                                     "baseline": True}))
     m = run_inline({"m": nat})["studies"]["m"]
     assert m["live_band"]["red_on_the_map"] == {"cursor": True, "baseline": True}, m["live_band"]
+    assert m["live_band"].get("picture_scale"), m["live_band"]          # a native map's points are in memory
+    # a maintainer repairs one index of LabSpec's default cursors (.16-.18 wrote 535.7 into index 2)
+    c = api.bridge_call("cursors", {"id": 0, "set": "2:0"})
+    assert c["limits_after"].split(";")[2] == "0", c
     assert m["live_band"]["set"] == 1 and m["live_band"]["on"] == 0, m.get("live_band")
     assert Path(m["live_band"]["picture"]).exists()
 

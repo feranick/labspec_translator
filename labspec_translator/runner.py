@@ -1173,7 +1173,7 @@ LASER_MAY_BE_ON = ("THE LASER MAY STILL REACH THE SAMPLE: ls6t held the laser sh
 NO_HOLD_KINDS = ("move", "background", "cutoff")      # no laser, or the laser off on purpose
 # the bridge commands that keep the shutter held (bridge_main.vbs HOLD_VERBS)
 HOLD_VERBS = ("ping", "status", "acquire", "map_native", "guide", "move_xy", "move", "view", "remove", "save",
-              "labels", "last_error", "message", "shutter_hold", "paint")      # video and others release it
+              "labels", "last_error", "message", "shutter_hold", "paint", "cursors")      # video and others release it
 
 
 def _study_laser(study: dict, ctx: Ctx):
@@ -1370,7 +1370,7 @@ def _band_said(ctx: Ctx, r: dict, tag: str, warnings: list) -> None:
         info["data_id"] = int(float(did))
     # the red cursor's activation as LabSpec reads it back (index 0: 1 cursor, +2 baseline), on the data it was set
     # on (on: 0 = LabSpec's default before its own map) and, for a native map, on the map it made (map_active)
-    for src_, dst_ in (("active_after", "red"), ("map_active", "red_on_the_map")):
+    for src_, dst_ in (("active_after", "red"), ("map_active_after", "red_on_the_map")):
         v_ = str(info.get(src_) or "").split(";")[0]
         if v_ not in ("",):
             try:
@@ -1401,7 +1401,7 @@ def _paint_band(ctx: Ctx, sd: Path, warnings: list, per_point: list | None = Non
         ymin, ymax = None, None
         for rec in (per_point or [])[:400]:
             try:
-                sp = spectra.read(rec["file"])
+                sp = rec.get("_sp") or spectra.read(rec["file"])        # a native map's points: in memory
                 sh, _ = spectra.to_shift(sp["x"], sp["meta"].get("x_unit", "nm"), laser)
                 sel = (np.asarray(sh) >= lo) & (np.asarray(sh) <= hi)
                 if sel.any():

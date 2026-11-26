@@ -41,7 +41,7 @@ gLastCmdEnd = Timer
 ' The live view keeps it: its crash (2026-11-24) was MapEx's axes passed as a Variant, with the shutter automatic too;
 ' releasing the hold at each view made the 637.75 nm laser hop at every point (.24.3). If LabSpec froze in a view with
 ' the shutter held, the heartbeat's shutter_held makes ls6t say the laser may still reach the sample
-Const HOLD_VERBS = ",ping,status,acquire,map_native,guide,move_xy,move,view,remove,save,labels,last_error,message,shutter_hold,paint,"
+Const HOLD_VERBS = ",ping,status,acquire,map_native,guide,move_xy,move,view,remove,save,labels,last_error,message,shutter_hold,paint,cursors,"
 gHoldOn = False
 gHoldLabel = ""
 gHoldLastWhy = ""
@@ -1769,21 +1769,8 @@ Function JoinArr(v)
     JoinArr = s
 End Function
 
-' What LabSpec's map took from the band set on 0 before it (a native map): its cursors and their activation
-Sub BandReadback(id, res)
-    Dim lim, ac
-    On Error Resume Next
-    LabSpec.GetValue id, "PointerLimits", lim
-    If Err.Number = 0 And IsArray(lim) Then res("band_map_limits") = JoinArr(lim)
-    Err.Clear
-    LabSpec.GetValue id, "ActiveCursors", ac
-    If Err.Number = 0 And IsArray(ac) Then res("band_map_active") = JoinArr(ac)
-    Err.Clear
-    On Error GoTo 0
-End Sub
-
-Sub SetBand(id, cmd, res)
-    Dim u, arr, ac, f, t, las, a, b, rb
+Sub SetBand(id, cmd, res, tag)
+    Dim u, arr, ac, f, t, las, a, b, rb, want, cur
     f = ParseNum(GetP(cmd, "band_from_cm1", "0"))
     t = ParseNum(GetP(cmd, "band_to_cm1", "0"))
     las = ParseNum(GetP(cmd, "band_laser_nm", "0"))
@@ -1791,7 +1778,7 @@ Sub SetBand(id, cmd, res)
     u = ""
     LabSpec.GetValue 0, "DisplayUnit", u
     Err.Clear
-    res("band_unit_before") = u
+    res(tag & "_unit_before") = u
     If InStr(LCase(u), "cm") > 0 Then
         a = f
         b = t
@@ -1800,54 +1787,110 @@ Sub SetBand(id, cmd, res)
         b = 1E7 / (1E7 / las - t)
     Else
         LabSpec.PutValue 0, "DisplayUnit", "1/cm"
-        res("band_unit_set") = "1/cm"
+        res(tag & "_unit_set") = "1/cm"
         a = f
         b = t
     End If
     LabSpec.GetValue id, "PointerLimits", arr
     If Err.Number <> 0 Or Not IsArray(arr) Then
-        res("band_set") = 0
-        res("band_error") = "GetValue PointerLimits: " & ErrText("PointerLimits")
+        res(tag & "_set") = 0
+        res(tag & "_error") = "GetValue PointerLimits: " & ErrText("PointerLimits")
         Err.Clear
         Exit Sub
     End If
-    res("band_array_before") = JoinArr(arr)
+    res(tag & "_array_before") = JoinArr(arr)
     arr(0) = a
     arr(1) = b
     LabSpec.PutValue id, "PointerLimits", arr
     If Err.Number <> 0 Then
-        res("band_set") = 0
-        res("band_error") = "PutValue PointerLimits: " & ErrText("PointerLimits")
+        res(tag & "_set") = 0
+        res(tag & "_error") = "PutValue PointerLimits: " & ErrText("PointerLimits")
         Err.Clear
         Exit Sub
     End If
+    ' the red cursor switched on (and its baseline when asked) only if it is not already: on a live map that
+    ' read 1;1;1, writing it read back 0;0;0 (T9.13, 2026-11-25), the cursors still drawn
     LabSpec.GetValue id, "ActiveCursors", ac
     If Err.Number = 0 And IsArray(ac) Then
-        res("band_active_before") = JoinArr(ac)
-        ac(0) = 1
-        If GetP(cmd, "band_baseline", "0") = "1" Then ac(0) = 3
-        LabSpec.PutValue id, "ActiveCursors", ac
-        ac = Empty
-        LabSpec.GetValue id, "ActiveCursors", ac
-        If IsArray(ac) Then res("band_active_after") = JoinArr(ac)
+        res(tag & "_active_before") = JoinArr(ac)
+        want = 1
+        If GetP(cmd, "band_baseline", "0") = "1" Then want = 3
+        cur = CLng(ParseNum(CStr(ac(0))))
+        If (cur And want) <> want Then
+            ac(0) = cur Or want
+            LabSpec.PutValue id, "ActiveCursors", ac
+            res(tag & "_active_written") = JoinArr(ac)
+            ac = Empty
+            LabSpec.GetValue id, "ActiveCursors", ac
+        End If
+        If IsArray(ac) Then res(tag & "_active_after") = JoinArr(ac)
     End If
     Err.Clear
     LabSpec.GetValue id, "PointerLimits", rb
     If Err.Number = 0 And IsArray(rb) Then
-        res("band_readback") = rb(0) & ";" & rb(1)
-        res("band_array_after") = JoinArr(rb)
+        res(tag & "_readback") = rb(0) & ";" & rb(1)
+        res(tag & "_array_after") = JoinArr(rb)
     End If
     Err.Clear
-    res("band_set") = 1
-    res("band_sent") = a & ";" & b
-    res("band_on") = id
+    res(tag & "_set") = 1
+    res(tag & "_sent") = a & ";" & b
+    res(tag & "_on") = id
+End Sub
+
+' A maintainer's look at (and repair of) a data object's cursors: `ls6t bridge call cursors id=0`, and
+' set="2:<value>;..." / active="0:1;..." to write single indexes (2026-11-25: .16-.18 wrote 535.7 into index 2 of
+' LabSpec's default cursors, and new maps inherit it)
+Sub VCursors(cmd, res)
+    Dim id, arr, ac, parts, k, kv
+    id = CLng(ParseNum(GetP(cmd, "id", "0")))
+    On Error Resume Next
+    LabSpec.GetValue id, "PointerLimits", arr
+    If Err.Number <> 0 Or Not IsArray(arr) Then
+        Fail res, "GetValue PointerLimits: " & ErrText("PointerLimits")
+        Err.Clear
+        Exit Sub
+    End If
+    res("limits_before") = JoinArr(arr)
+    LabSpec.GetValue id, "ActiveCursors", ac
+    If IsArray(ac) Then res("active_before") = JoinArr(ac)
+    Err.Clear
+    If GetP(cmd, "set", "") <> "" Then
+        parts = Split(GetP(cmd, "set", ""), ";")
+        For k = 0 To UBound(parts)
+            kv = Split(parts(k), ":")
+            If UBound(kv) = 1 Then arr(CLng(kv(0))) = ParseNum(kv(1))
+        Next
+        LabSpec.PutValue id, "PointerLimits", arr
+        res("limits_written") = JoinArr(arr)
+    End If
+    If GetP(cmd, "active", "") <> "" And IsArray(ac) Then
+        parts = Split(GetP(cmd, "active", ""), ";")
+        For k = 0 To UBound(parts)
+            kv = Split(parts(k), ":")
+            If UBound(kv) = 1 Then ac(CLng(kv(0))) = CLng(ParseNum(kv(1)))
+        Next
+        LabSpec.PutValue id, "ActiveCursors", ac
+        res("active_written") = JoinArr(ac)
+    End If
+    If Err.Number <> 0 Then
+        Fail res, ErrText("PutValue")
+        Err.Clear
+        Exit Sub
+    End If
+    arr = Empty
+    LabSpec.GetValue id, "PointerLimits", arr
+    If IsArray(arr) Then res("limits_after") = JoinArr(arr)
+    ac = Empty
+    LabSpec.GetValue id, "ActiveCursors", ac
+    If IsArray(ac) Then res("active_after") = JoinArr(ac)
+    Err.Clear
 End Sub
 
 ' A data object's display exported as a picture with its cursors (map.live_band: where LabSpec put the red
 ' cursors, without looking at the screen). As HORIBA's "Cut-Off.vbs" does: Paint EXPORT_WMF (2), the data's ID,
 ' SHOW_SINGLE + SHOW_CURSORS (10), a .wmf path whose folder exists.
 Sub VPaint(cmd, res)
-    Dim id, path, r, u, xf, xt, las
+    Dim id, path, r, u, xf, xt, las, p
     id = CLng(ParseNum(GetP(cmd, "id", "0")))
     path = GetP(cmd, "path", "")
     If path = "" Then
@@ -1855,6 +1898,11 @@ Sub VPaint(cmd, res)
         Exit Sub
     End If
     On Error Resume Next
+    ' the data's window brought to the front first: SetScaleEx sets the active window's scale, and Paint drew the
+    ' stored view (T9.13: picture_scale 305.7-735.7 sent, the picture 100-2250 cm-1, 0-5800 counts)
+    LabSpec.Exec id, LS_SHOW_DATA, p
+    Err.Clear
+    LabSpec.Pause 300
     ' the display zoomed on the band first (SetScaleEx: the view's own units; nm converted with the laser)
     If GetP(cmd, "x_from_cm1", "") <> "" Then
         xf = ParseNum(GetP(cmd, "x_from_cm1", "0"))
@@ -1873,6 +1921,9 @@ Sub VPaint(cmd, res)
             Err.Clear
         Else
             res("scale_set") = xf & ";" & xt & ";" & GetP(cmd, "y_from", "0") & ";" & GetP(cmd, "y_to", "0")
+            LabSpec.SetScale xf, xt, ParseNum(GetP(cmd, "y_from", "0")), ParseNum(GetP(cmd, "y_to", "0"))
+            Err.Clear
+            LabSpec.Pause 300
         End If
     End If
     r = LabSpec.Paint(2, id, CLng(ParseNum(GetP(cmd, "flags", "10"))), 0, 0, 0, 0, path)
@@ -1927,7 +1978,7 @@ Sub VView(cmd, res)
             If Err.Number = 0 And mapId > 0 Then
                 LabSpec.Exec mapId, LS_SHOW_DATA, p
                 gViews(name) = Array("mapex", 0, mapId, ax, ay)
-                If GetP(cmd, "band_from_cm1", "") <> "" Then SetBand mapId, cmd, res
+                If GetP(cmd, "band_from_cm1", "") <> "" Then SetBand mapId, cmd, res, "band"
             ElseIf Err.Number = 0 Then
                 Fail res, "LabSpec could not create the map (MapEx returned " & mapId & "; LabSpec's last error: " & _
                           LabSpecError() & ")"
@@ -2823,7 +2874,7 @@ Sub VMapNative(cmd, res)
     ' From = To, and LabSpec made an empty "Pixel" map without measuring
     ' the band the live map shows (map.live_band): set on the default data (0) before the map, as HORIBA's
     ' "Axial Resolution.vbs" does: LabSpec's Acq holds the script for the whole map
-    If GetP(cmd, "band_from_cm1", "") <> "" Then SetBand 0, cmd, res
+    If GetP(cmd, "band_from_cm1", "") <> "" Then SetBand 0, cmd, res, "band"
     mode = LS_ACQ_SPECTRAL_IMAGE + LS_ACQ_AUTO_SHOW
     If GetP(cmd, "horiba_start", "1") <> "1" Then mode = LS_ACQ_SPECTRAL_IMAGE + CLng(ParseNum(GetP(cmd, "mode_flags", "0")))
     res("acq_mode") = mode
@@ -2899,7 +2950,8 @@ Sub VMapNative(cmd, res)
     res("spectro_after_map") = MotorValue("Spectro")
     res("id") = id
     res("seconds_map") = Elapsed(tMap)
-    If GetP(cmd, "band_from_cm1", "") <> "" Then BandReadback id, res
+    ' and on the map LabSpec made (the default's values may not all carry over: T9.13, the baseline did not)
+    If GetP(cmd, "band_from_cm1", "") <> "" Then SetBand id, cmd, res, "band_map"
     If WriteData(id, outBase & ".map.txt", res, "map") Then res("out") = outBase & ".map.txt"
     On Error Resume Next
     r = LabSpec.Save(id, outBase & ".l6s", "")
@@ -3224,6 +3276,7 @@ Sub HandleFile(path)
             Case "acquire": VAcquire cmd, res
             Case "view": VView cmd, res
             Case "paint": VPaint cmd, res
+            Case "cursors": VCursors cmd, res
             Case "remove"
                 On Error Resume Next
                 LabSpec.Exec CLng(ParseNum(GetP(cmd, "id", "0"))), 2, pp     ' REMOVE_DATA

@@ -803,9 +803,25 @@ class SimLabSpec:
         f, t = float(p["band_from_cm1"]), float(p["band_to_cm1"])
         self.band = (f, t, str(p.get("band_baseline", "0")) == "1")
         act = 3 if self.band[2] else 1
-        return {"band_set": 1, "band_unit_before": "1/cm", "band_sent": f"{f:g};{t:g}",
-                "band_readback": f"{f:g};{t:g}", "band_on": data_id, "band_active_after": f"{act};0;0",
-                **({"band_map_active": f"{act};0;0"} if data_id == 0 else {})}
+        out = {"band_set": 1, "band_unit_before": "1/cm", "band_sent": f"{f:g};{t:g}",
+               "band_readback": f"{f:g};{t:g}", "band_on": data_id, "band_active_after": f"{act};0;0",
+               "band_array_after": f"{f:g};{t:g};0;0;640;0;0;0;0;0;0;0"}
+        if data_id == 0:                     # a native map: set again on the map LabSpec made
+            out.update({"band_map_set": 1, "band_map_on": 950, "band_map_active_after": f"{act};0;0",
+                        "band_map_readback": f"{f:g};{t:g}"})
+        return out
+
+    def v_cursors(self, p):
+        """A data object's cursors (maintainer): PointerLimits / ActiveCursors, single indexes written."""
+        cur = getattr(self, "cursors", None) or [500.0, 540.0, 0.0, 0.0, 640.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        before = ";".join(f"{v:g}" for v in cur)
+        for item in str(p.get("set", "")).split(";"):
+            if ":" in item:
+                k, v = item.split(":", 1)
+                cur[int(k)] = float(v)
+        self.cursors = cur
+        return {"limits_before": before, "limits_after": ";".join(f"{v:g}" for v in cur), "active_before": "1;1;1",
+                "active_after": "1;1;1"}
 
     def v_paint(self, p):
         """Paint EXPORT_WMF: the data's display with its cursors (a placeholder file in the simulator)."""
