@@ -1728,6 +1728,8 @@ def test_flat_tools_for_small_models_string_studies_rejected_log_and_measure_onl
     hs = C.handshake(_s.executable, ["-m", "labspec_translator.mcp_server"], env, timeout_s=90)
     assert hs.get("ok"), hs
     assert {"measure_spectrum", "calibrate_si", "study_status", "instrument"} <= set(hs["tools"])
+    # the arguments the server publishes (not only the CLI's): calibrate_si takes the window (2026.11.25.21)
+    assert {"center_cm1", "from_cm1", "to_cm1"} <= set(hs["tool_args"]["calibrate_si"]), hs["tool_args"]
     assert "snapshot" not in hs["tools"] and "run_benchmarks" not in hs["tools"]
     full = C.handshake(_s.executable, ["-m", "labspec_translator.mcp_server"], dict(env, LS6T_TOOLS="full"), timeout_s=90)
     assert "snapshot" in full["tools"] and "measure_spectrum" in full["tools"]

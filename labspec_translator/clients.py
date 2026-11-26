@@ -915,7 +915,11 @@ def handshake(command: str, args: list, env: dict | None = None, timeout_s: floa
         if not tl or "result" not in tl:
             raise RuntimeError("no answer to tools/list")
         out.update(ok=True, seconds=round(time.monotonic() - t0, 2),
-                   tools=[t["name"] for t in tl["result"].get("tools", [])])
+                   tools=[t["name"] for t in tl["result"].get("tools", [])],
+                   # each tool's arguments as the server publishes them (2026-11-25: after an update the app still
+                   # showed calibrate_si without center_cm1: an old server process)
+                   tool_args={t["name"]: sorted(((t.get("inputSchema") or {}).get("properties") or {}))
+                              for t in tl["result"].get("tools", [])})
     except (RuntimeError, OSError, ValueError) as exc:
         out.update(ok=False, error=str(exc))
     finally:
