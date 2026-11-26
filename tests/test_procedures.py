@@ -1705,10 +1705,15 @@ def test_flat_tools_for_small_models_string_studies_rejected_log_and_measure_onl
         api.snap_laser(prof, 600)
     assert api.snap_objective(prof, "x100_VIS") in [str(o) for o in prof["objectives"]]
     r = api.measure_spectrum(laser_nm=533, center_cm1=520.7, exposure_s=0.2, accumulations=1, grating=1800,
-                             filter="10%", objective="x100", inline=True, wait_total_s=60)
+                             filter="10%", objective="x100", peak_cm1=520.7, inline=True, wait_total_s=60)
     assert r["done"] and r["study"]["setup"]["laser_nm"] == 532.0 and r["study"]["acquire"]["spike"] == "double_auto"
     pk = r["studies"]["spectrum"]["peaks"]["peak"]
     assert abs(pk["position_cm1"] - 520.7) < 1.0 and r["studies"]["spectrum"]["reliable"] is not None
+    # peak_cm1 left out: no peak fitted by default, the strongest ones are found (2026-11-25: the default was 520.7,
+    # so a small model fitted Si on any sample)
+    r2 = api.measure_spectrum(laser_nm=532, exposure_s=0.2, accumulations=2, grating=1800, filter="10%",
+                              objective="x100", inline=True, wait_total_s=60)
+    assert "process" not in r2["study"] and r2["done"], r2.get("study")
     c = api.calibrate_si(laser_nm=532, grating=1800, repeats=3, filter="10%", objective="x100", inline=True,
                          wait_total_s=60)
     assert c["done"] and "offset_cm1" in c["studies"]["calibration"]["calibration"]
@@ -2413,3 +2418,72 @@ def test_calibration_repeats_land_like_spectra(monkeypatch):
     run_inline({"c": cal})
     reps = [p for p in sent if p.get("spectro_jog_nm") is not None]
     assert reps and all(p["spectro_jog_nm"] == 3.0 and p["spectro_approach_nm"] == -2.0 for p in reps), reps[:2]
+
+
+def test_first_landing_after_a_grating_change_learned_and_counted_where_nothing_can_be_followed():
+    """Nicola, 2026-11-25 (T9.17): at 600, right after a grating change, Si read 522.19 / 522.12 with +-0.33: no
+    laser line to follow there. The calibration's warm-up spectrum (the first landing after the change) against the
+    repeats' median is learned, and counted after a grating change where nothing can be followed."""
+    from labspec_translator import xcal, store
+    xcal.clear()
+    store.write("xcal_pending.json", {})
+    store.write("spectro_repeatability.json", {})
+    S.ensure(config.active_bridge_dir())
+    cal = {"kind": "calibration", "sample": {"name": "Si"}, "setup": dict(SETUP, grating=600),
+           "acquire": {"center_cm1": 520.7, "exposure_s": 0.2}, "calibration": {"adjust": "ls6t", "repeats": 3},
+           "video": {"before": False}}
+    c = run_inline({"c": cal})["studies"]["c"]
+    fl = c["calibration"].get("first_landing")
+    assert fl is not None and "learned_cm1" in fl, c.get("warmup")
+    rec_ = store.read("spectro_repeatability.json")
+    rec_["532@600"]["first_landing_cm1"] = 1.2
+    store.write("spectro_repeatability.json", rec_)
+    sp = {"kind": "spectrum", "sample": {"name": "Si"}, "setup": dict(SETUP, grating=600),
+          "acquire": {"center_cm1": 520.7, "exposure_s": 0.2}}
+    run_inline({"s": dict(sp, setup=dict(SETUP))})                     # to 1800 first
+    s = run_inline({"s": sp})["studies"]["s"]                          # then back to 600: a grating change
+    cu = s["checks"]["zero"]["correction_used"]
+    assert cu["expected_uncertainty_cm1"] >= 1.2 and "first landing" in cu["expected_uncertainty_from"], cu
+    s = run_inline({"s": sp})["studies"]["s"]                          # no change: not counted
+    assert "first landing" not in str(s["checks"]["zero"]["correction_used"].get("expected_uncertainty_from"))
+    xcal.clear()
+    store.write("spectro_repeatability.json", {})
+
+
+def test_broad_laser_line_follows_large_landing_steps_only():
+    """Nicola, 2026-11-25 23:54 (600 gr/mm): after 1200 -> 600 the laser line moved +1.9 and Si +2.25 with it, a
+    landing step; the 22.6 cm-1 line was rejected as an anchor, so nothing was followed (Si 522.32 at +-0.33). A
+    broad line now catches large steps (over 1 cm-1, the Raman lines confirming)."""
+    from labspec_translator import xcal, store
+    xcal.clear()
+    store.write("xcal_pending.json", {})
+    store.write("spectro_repeatability.json", {})
+    bdir = config.active_bridge_dir()
+    sim = S.ensure(bdir)
+    (bdir / "sim_laser_line").write_text("1")
+    cal = {"kind": "calibration", "sample": {"name": "Si"}, "setup": dict(SETUP, grating=600),
+           "acquire": {"center_cm1": 250, "exposure_s": 1}, "calibration": {"adjust": "ls6t"},
+           "video": {"before": False}}
+    run_inline({"c": cal})
+    d = xcal.load()
+    for v_ in d.values():                              # as if the line were 22.6 cm-1 wide (the XploRA at 600)
+        for e_ in (v_.get("by_centre") or {}).values():
+            e_["laser_line_fwhm_cm1"] = 60.0
+    xcal._save(d)
+    sp = {"kind": "spectrum", "sample": {"name": "Si"}, "setup": dict(SETUP, grating=600),
+          "acquire": {"center_cm1": 250, "exposure_s": 1},
+          "process": {"peaks": [{"name": "Si", "near_cm1": 520.7, "window_cm1": 30}]}}
+    (bdir / "sim_landing").write_text("2.0")
+    sim._landing_n = 0
+    s = run_inline({"s": sp})["studies"]["s"]
+    pl = s["checks"]["zero_correction"]["plateaus"]
+    assert pl and pl[0]["applied"] and pl[0].get("landing"), pl
+    assert abs(s["peaks_by_name"]["Si"]["position_cm1"] - 520.7) < 0.3
+    (bdir / "sim_landing").write_text("0.7")           # under the broad line's 1 cm-1: not followed
+    sim._landing_n = 0
+    s = run_inline({"s": sp})["studies"]["s"]
+    pl = s["checks"]["zero_correction"]["plateaus"]
+    assert pl and not pl[0]["applied"], pl
+    (bdir / "sim_landing").unlink()
+    (bdir / "sim_laser_line").unlink()
+    xcal.clear()

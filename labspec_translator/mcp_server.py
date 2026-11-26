@@ -82,7 +82,8 @@ MEASURE_ONLY = os.environ.get("LS6T_TOOLS", "full").strip().lower() == "measure"
 if MEASURE_ONLY:
     INSTRUCTIONS = """labspec-translator runs Raman measurements on a HORIBA XploRA through LabSpec 6.
 To measure a spectrum call measure_spectrum (flat arguments, all with defaults: laser_nm 637.75, center_cm1 520.7 or
-from_cm1 + to_cm1, exposure_s, accumulations, grating, filter, objective, peak_cm1). To calibrate on silicon call
+from_cm1 + to_cm1, exposure_s, accumulations, grating, filter, objective; peak_cm1 only for a known peak, e.g. 520.7
+for silicon: left out, the strongest peaks are found). To calibrate on silicon call
 calibrate_si. Both wait for the result. If the answer says it is still running, call study_status with its request.
 Report the numbers in the answer only: peak position, FWHM, SNR, 'reliable' (if false, why), warnings.
 If the LabSpec bridge is not running, ask the user to start ls6t_bridge.vbs in LabSpec (Processing > Scripts)."""
@@ -192,14 +193,14 @@ def run_studies(studies: dict | str, wait_s: float = 45, order: list[str] | None
 async def measure_spectrum(ctx: Context, laser_nm: float = 637.75, center_cm1: float | None = None,
                            from_cm1: float | None = None, to_cm1: float | None = None, exposure_s: float = 1.0,
                            accumulations: int = 2, grating: float = 1200, filter: str | None = None,
-                           objective: str = "x100_VIS", peak_cm1: float | None = 520.7,
+                           objective: str = "x100_VIS", peak_cm1: float | None = None,
                            sample: str = "sample") -> dict:
     """Measures one Raman spectrum and waits for it (up to about 90 s), returning the result in a few numbers.
     All arguments are optional: laser_nm (638 is taken as 637.75, 785 as 785.04), center_cm1 (one detector window
     centred there) or from_cm1 + to_cm1 (a range), exposure_s, accumulations, grating, filter (never above 10%;
     default the laser's own, else 1%),
-    objective, peak_cm1 (the peak to fit; null: the strongest are found), sample (its name). If the answer says it
-    is still running, call study_status with its request."""
+    objective, peak_cm1 (the peak to fit, e.g. 520.7 for silicon; left out: the strongest peaks are found), sample
+    (its name). If the answer says it is still running, call study_status with its request."""
     return await _keepalive(ctx, functools.partial(api.measure_spectrum, laser_nm, center_cm1, from_cm1, to_cm1,
                                                    exposure_s, accumulations, grating, filter, objective, peak_cm1,
                                                    sample), msg=api.flat_progress)

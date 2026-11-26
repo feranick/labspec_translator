@@ -311,10 +311,11 @@ def run_and_wait(studies: dict, wait_total_s: float | None = None, inline: bool 
 
 
 def measure_spectrum(laser_nm=637.75, center_cm1=None, from_cm1=None, to_cm1=None, exposure_s=1.0,
-                     accumulations=2, grating=1200, filter=None, objective="x100_VIS", peak_cm1=520.7,
+                     accumulations=2, grating=1200, filter=None, objective="x100_VIS", peak_cm1=None,
                      sample="sample", wait_total_s: float | None = None, inline: bool = False) -> dict:
     """One spectrum from flat arguments (for small models): a centre, or from/to for a range; a peak fitted near
-    peak_cm1 (None: the strongest peaks are found)."""
+    peak_cm1 (None, the default: the strongest peaks are found; 2026-11-25: the default was 520.7, so a small model
+    that left it out fitted Si on any sample)."""
     prof = P.load()
     try:
         las = snap_laser(prof, laser_nm)

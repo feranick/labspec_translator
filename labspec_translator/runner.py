@@ -1765,9 +1765,13 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
     # ---- analysis and checks
     t_an = time.time()
     _progress(sd, stage="analysing")
+    if grating_changed:
+        checks["grating_changed"] = True     # the first landing after it (analyse: the expected uncertainty)
     result = analyse(name, study, per_point, prof, laser, rng, sd, warnings, unreliable, checks,
                      grating=_f(after.get("grating")) or _f(study.get("setup", {}).get("grating")),
                      request=str(ctx.folder))
+    if kind == "calibration" and warmup_info and "grating change" in str(warmup_info.get("why", "")):
+        _learn_first_landing(result, warmup_info, laser, _f(after.get("grating")), rng)
     if stop_exc is not None:
         if stop_exc.by in ("cancel", "operator", "bridge", "timeout"):
             unreliable.append(f"stopped after {len(per_point)} of {len(pts)} points: {stop_exc.why}")
@@ -3813,19 +3817,31 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
                                     f"may differ by about +-{centre_term:.1f} cm-1 here; for the best zero calibrate at "
                                     "this window" + (f" (calibrate_si with center_cm1={c_cm1:g}, or calibration "
                                                      f"acquire.center_cm1 {c_cm1:g})" if c_cm1 is not None else ""))
-            if rep_.get("moved_sd_cm1") or creep_term or centre_term:
+            # the first landing after a grating change, where no laser line can bring it back (600: ~+1.4)
+            fl_ = rep_.get("first_landing_cm1")
+            can_follow_ = (corr.get("laser_line_cm1") is not None
+                           and not laser_line_too_broad(corr.get("laser_line_fwhm_cm1"), corr.get("lines")))
+            first_term = float(fl_) if (fl_ and checks.get("grating_changed") and not can_follow_) else 0.0
+            if first_term:
+                creep_term = math.hypot(creep_term, first_term)
+            # the correction's own uncertainty: its repeats' standard error (600: SD ~0.27 over 5 -> ~0.12)
+            sem_term = float(((corr.get("repeats") or {}).get("sem_cm1")) or 0.0)
+            if rep_.get("moved_sd_cm1") or creep_term or centre_term or sem_term:
                 # the zero across spectrometer moves is no better than the spectrometer repeats (2026-11-24, 600:
                 # SD 0.9-1.2 cm-1 moved, 0.12 without moves); and it creeps with the correction's age (2026-11-25,
                 # 637.75 @ 1200: ~+0.1 cm-1 per minute after a calibration); the pass tolerance stays as it is
                 mv_ = float(rep_.get("moved_sd_cm1") or 0.0)
                 corr = dict(corr, expected_uncertainty_cm1=round(math.sqrt(mv_ ** 2 + creep_term ** 2
-                                                                           + centre_term ** 2), 3),
+                                                                           + centre_term ** 2 + sem_term ** 2), 3),
                             expected_uncertainty_from=f"{rep_.get('source')}, {rep_place} placement"
                             + (f"; the zero's drift since the calibration ({float(age_m_):.0f} min: "
                                + (f"creep {abs(float(creep_)):.2f} cm-1/min" if creep_ else "")
                                + (", " if creep_ and drh_ else "")
                                + (f"{float(drh_):.2f} cm-1/h between calibrations" if drh_ else "")
-                               + f", learned; at most {CREEP_CAP_CM1:g} each)" if creep_term else "")
+                               + f", learned; at most {CREEP_CAP_CM1:g} each)" if creep_term and (creep_ or drh_) else "")
+                            + (f"; the first landing after a grating change ({first_term:.2f} cm-1 learned; no laser "
+                               "line to bring it back)" if first_term else "")
+                            + (f"; the correction's own standard error ({sem_term:.2f})" if sem_term else "")
                             + (f"; another window centre ({dist_:.2f} nm away: {float(wrate_ or 0):.2f} cm-1 per nm "
                                f"from {rep_.get('window_zero_from') or rep_.get('source')}, at most "
                                f"{WINDOW_TERM_CAP_CM1:g})" if centre_term else ""))
@@ -3935,14 +3951,17 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
     # a correction measured relative to a narrow laser line (its calibration stored where the line was): later
     # spectra are brought to that line first, landing and all (Nicola, 2026-11-25: at 1200 the repeats' Si scattered
     # 0.76 cm-1 with the spectrometer's landing, Si - laser line 0.06). Asked for explicitly, the study's own choice
+    corr_broad = bool(corr and laser_line_too_broad(corr.get("laser_line_fwhm_cm1"), corr.get("lines")))
     if (not ll_asked and kind != "calibration" and ll_mode in ("report", "correct") and corr
-            and corr.get("laser_line_cm1") is not None
-            and not laser_line_too_broad(corr.get("laser_line_fwhm_cm1"), corr.get("lines"))):
+            and corr.get("laser_line_cm1") is not None):
+        # a broad line (600 gr/mm) too, for large steps only (land_thr below)
         ll_mode = ll_mode_asked = "anchor"
     # what a landing step must exceed: none for a correction anchored throughout (calibration.anchor 'always'),
     # else LANDING_K x the laser line's own scatter, learned per laser@grating (Nicola, 2026-11-25)
     land_thr = (0.0 if (corr or {}).get("zero_mode") == "anchored" else
                 float(landing_threshold(prof, laser, grating, placement)["threshold_cm1"])) if laser else 0.0
+    if corr_broad:
+        land_thr = max(land_thr, BROAD_LANDING_MIN_CM1)
     anchor = ll_mode == "anchor"
     if anchor:
         ll_mode = "correct"
@@ -3961,6 +3980,8 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
     ll_ref_cal = False
     if corr and ll_mode == "correct":
         broad = laser_line_too_broad(corr.get("laser_line_fwhm_cm1"), corr.get("lines"))
+        if broad and anchor and corr.get("laser_line_cm1") is not None:
+            broad = None                              # anchor: a broad line for large steps (land_thr)
         if corr.get("laser_line_cm1") is not None and not broad:
             ll_ref, ll_ref_from = float(corr["laser_line_cm1"]), f"the stored correction's calibration ({corr['time']})"
             ll_ref_cal = True
@@ -4618,6 +4639,7 @@ def spectro_repeatability(prof: dict, laser, grating, placement: str = "centred"
 
 LANDING_K = 3.0               # a landing step: the laser line off the calibration's by this x its own scatter
 LANDING_MIN_CM1 = 0.5         # and at least this
+BROAD_LANDING_MIN_CM1 = 1.0   # with a broad laser line (600 gr/mm, ~22 cm-1): large steps only
 LL_SD_DEFAULT_CM1 = 0.2       # the laser line's own scatter until learned (637.75 @ 1200, 2026-11-25: ~0.2)
 LL_SD_VERSION = 2             # learned laser_line_sd_cm1 values from 2026.11.25.18 on (older ones are ignored)
 CREEP_CAP_CM1 = 2.0           # the zero's creep counted into the expected uncertainty, at most
@@ -4849,6 +4871,38 @@ def zero_creep(per_point: list, excluded: dict, laser, grating, placement: str) 
     return out
 
 
+def _learn_first_landing(result: dict, warm: dict, laser, grating, rng: dict) -> None:
+    """The first landing after a grating change against the repeats' median (Nicola, 2026-11-25: at 600, where no
+    laser line can be followed, spectra right after a grating change read ~+1.4 with +-0.33 reported): the
+    calibration's discarded warm-up spectrum is that landing; |its offset - the median| is learned per laser@grating
+    (first_landing_cm1, median of the last 5) and added to later spectra's expected uncertainty after a change."""
+    cal = (result or {}).get("calibration") or {}
+    rep = cal.get("repeats") or {}
+    ref = cal.get("reference_cm1")
+    if not rep or rep.get("median_cm1") is None or ref is None or not warm.get("file") or not laser:
+        return
+    try:
+        sp = spectra.read(warm["file"])
+        sh, _ = spectra.to_shift(sp["x"], sp["meta"].get("x_unit", "nm"), laser)
+        xs, ys = spectra.sort_xy(sh, sp["y"])
+        pk = spectra.fit_peak(xs, ys, float(ref), 30.0)
+    except Exception:  # noqa: BLE001 - only a learned spread
+        return
+    if not pk.get("ok") or pk.get("position_cm1") is None:
+        return
+    off = float(pk["position_cm1"]) - float(ref)
+    d = off - float(rep["median_cm1"])
+    placement = "labspec" if not rng.get("single", True) else "centred"
+    rec_r = store.read("spectro_repeatability.json") or {}
+    kk = f"{float(laser):g}@{_f(grating) or 0:g}" + ("@labspec" if placement == "labspec" else "")
+    e = rec_r.setdefault(kk, {})
+    hist = (list(e.get("first_landing_history") or []) + [round(abs(d), 4)])[-5:]
+    e.update(first_landing_history=hist, first_landing_cm1=round(float(np.median(hist)), 4))
+    store.write("spectro_repeatability.json", rec_r)
+    cal["first_landing"] = {"offset_cm1": round(off, 3), "vs_repeats_median_cm1": round(d, 3),
+                            "learned_cm1": e["first_landing_cm1"]}
+
+
 def learn_zero_drift(laser, grating, placement: str, rate: float) -> float:
     """The zero's drift per hour between calibrations at one window, per laser@grating: the median of the last 5."""
     rec_r = store.read("spectro_repeatability.json") or {}
@@ -4915,7 +4969,8 @@ def learn_zero_creep(laser, grating, placement: str, rate: float, significant: b
     return e.get("zero_creep_cm1_per_min")
 
 
-def _landing_steps(repeats: list, offs: list, prof: dict, laser, grating, placement: str) -> dict:
+def _landing_steps(repeats: list, offs: list, prof: dict, laser, grating, placement: str,
+                   min_thr: float = 0.0) -> dict:
     """Calibration repeats with a landing step: a laser line off the repeats' median by more than the landing
     threshold (LANDING_K x the line's own scatter) AND the Raman lines moved by the same (within max(0.3, 0.25 x
     step)): that repeat's offset is brought back by the step. Returns offs_eff (None if the laser line is not in
@@ -4934,6 +4989,8 @@ def _landing_steps(repeats: list, offs: list, prof: dict, laser, grating, placem
     # to hide itself (Nicola, 2026-11-25, 1200: SD 0.35 with the step in it; the step -0.59 not followed)
     sd_own = _tight_sd(have)
     thr = landing_threshold(prof, laser, grating, placement, fallback_sd=max(sd_own, 0.05))
+    if min_thr and float(thr["threshold_cm1"]) < min_thr:
+        thr = dict(thr, threshold_cm1=float(min_thr), broad_line_minimum=True)    # a broad line: large steps only
     t_ = float(thr["threshold_cm1"])
     ov = [o for o in offs if o is not None]
     o_med = float(np.median(ov)) if ov else 0.0
@@ -5059,7 +5116,11 @@ def _calibration_result(study, prof, rec, ref_lines, laser, grating, rng, reques
                 # landing STEPS only (Nicola, 2026-11-25: anchoring every repeat added the laser line's ~0.2 fit noise
                 # when there was no landing jump): a repeat whose laser line sits off the others' by more than
                 # LANDING_K x its own scatter, with the Raman lines moved alike, is brought back by that step
-                lst = _landing_steps(repeats, offs, prof, laser, grating, "labspec" if lab_placed_ else "centred")
+                ws_ = [float((r_.get("laser_line") or {}).get("fwhm_cm1")) for r_ in repeats
+                       if (r_.get("laser_line") or {}).get("ok") and (r_.get("laser_line") or {}).get("fwhm_cm1")]
+                broad_r = laser_line_too_broad(float(np.median(ws_)), lines) if ws_ else None
+                lst = _landing_steps(repeats, offs, prof, laser, grating, "labspec" if lab_placed_ else "centred",
+                                     min_thr=BROAD_LANDING_MIN_CM1 if broad_r else 0.0)
                 if lst.get("offs_eff") is not None:
                     stt = repeat_stats(lst["offs_eff"])
         anc_why_not = anc.get("why_not") if anc else None
@@ -5243,13 +5304,15 @@ def _calibration_result(study, prof, rec, ref_lines, laser, grating, rng, reques
         llc = dict(rec.get("laser_line") or {})
         broad = laser_line_too_broad(llc.get("fwhm_cm1"), lines) if llc.get("ok") else None
         if broad:
-            res["laser_line_rejected"] = broad
-            warnings.append(f"the calibration's laser line is not kept as a reference: {broad}")
-            llc = {}
+            # kept, but only to catch large landing steps (Nicola, 2026-11-25, 600: after 1200 -> 600 the laser line
+            # moved +1.9 and Si +2.25 with it; a 22.6 cm-1 line still shows a step that big)
+            res["laser_line_broad"] = broad
+            warnings.append(f"the calibration's laser line is no fine reference ({broad}): kept only to catch large "
+                            f"landing steps (over {BROAD_LANDING_MIN_CM1:g} cm-1, the Raman lines moving alike)")
         # stored only once the whole study is judged reliable (store_pending, at the end of run_any): 2026-11-25,
         # two calibrations unreliable for multimode points and laser-line jumps still stored their corrections
         anc_ll = ((rep_info or {}).get("anchored_to_laser_line") or {}).get("laser_line_cm1")
-        if anc_ll is None and not broad and \
+        if anc_ll is None and \
                 ((rep_info or {}).get("landing_steps") or {}).get("laser_line_median_cm1") is not None:
             llc = dict(llc or {}, ok=True, position_cm1=rep_info["landing_steps"]["laser_line_median_cm1"])
         elif anc_ll is None and rep_info and llc.get("ok"):
@@ -5271,7 +5334,7 @@ def _calibration_result(study, prof, rec, ref_lines, laser, grating, rng, reques
                                                                         and rng.get("from_cm1") is not None)
                        else None,
                        zero_mode="anchored" if (anc_ll is not None or (
-                           not rep_info and llc.get("ok") and float(b) == 1.0
+                           not rep_info and llc.get("ok") and float(b) == 1.0 and not broad
                            and str(cal.get("anchor", "auto")) != "off")) else "absolute")}
     elif not res["pass"]:
         unreliable.append(f"the {'Si' if refname == 'si' else refname} line is at {first['measured_cm1']:.2f} cm-1, "
