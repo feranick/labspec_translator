@@ -2207,6 +2207,7 @@ def test_map_live_band_sets_labspecs_cursors_on_the_live_and_native_maps():
     m = run_inline({"m": st})["studies"]["m"]
     assert m["live_band"]["set"] == 1 and m["live_band"]["sent"] == "510.7;530.7", m.get("live_band")
     assert m["live_band"]["picture"].endswith("live_band.wmf") and Path(m["live_band"]["picture"]).exists()
+    assert Path(m["live_band"]["picture_ls6t"]).exists()          # ls6t's own picture (Paint keeps its stored view)
     xf, xt, yf, yt = (float(v) for v in m["live_band"]["picture_scale"].split(";"))
     assert (xf, xt) == (310.7, 730.7) and yt > yf                       # the band +-200 cm-1, y from the spectra
     assert m["live_band"]["red"] == {"cursor": True, "baseline": False}
@@ -2273,10 +2274,25 @@ def test_window_distance_widens_the_uncertainty_and_a_big_jump_waits_for_confirm
     assert c["reliable"] and c["calibration"].get("stored_correction")
     sp = {"kind": "spectrum", "sample": {"name": "Si"}, "setup": dict(SETUP),
           "acquire": {"center_cm1": 500.0, "exposure_s": 1}}
+    # no rate known (none learned, none in the profile): the distance is reported, no term (.21's 0.75 was a guess)
     s = run_inline({"s": sp})["studies"]["s"]
     cu = s["checks"]["zero"]["correction_used"]
-    assert cu.get("window_distance_nm", 0) > 0.3 and "another window centre" in cu["expected_uncertainty_from"], cu
+    assert cu.get("window_distance_nm", 0) > 0.3 and "another window" not in str(cu.get("expected_uncertainty_from"))
+    # learned from two calibrations at centres >= 1 nm apart within 2 h
+    cal2 = dict(cal, acquire=dict(cal["acquire"], center_cm1=900.0))
+    c2 = run_inline({"c": cal2})["studies"]["c"]
+    wr = c2["calibration"].get("window_rate")
+    assert wr and wr["learned_cm1_per_nm"] >= 0, c2["calibration"].get("stored_as")
+    rec_ = store.read("spectro_repeatability.json")
+    rec_["532@1800"]["window_zero_cm1_per_nm"] = 0.5                    # as if learned: 0.5 cm-1 per nm
+    store.write("spectro_repeatability.json", rec_)
+    s = run_inline({"s": sp})["studies"]["s"]
+    cu = s["checks"]["zero"]["correction_used"]
+    assert "another window centre" in cu["expected_uncertainty_from"], cu
     assert any("calibrate_si with center_cm1=" in w for w in s["warnings"])
+    xcal.clear()
+    store.write("spectro_repeatability.json", {})
+    run_inline({"c": cal})
     # the zero jumps by 5 cm-1: not stored until a second calibration agrees
     (config.active_bridge_dir() / "sim_xshift").write_text("5.0,1.0")
     c = run_inline({"c": cal})["studies"]["c"]
@@ -2308,3 +2324,90 @@ def test_window_distance_widens_the_uncertainty_and_a_big_jump_waits_for_confirm
     assert m["study"]["acquire"]["spike"] == "double_auto"
     xcal.clear()
     store.write("xcal_pending.json", {})
+
+
+def test_unfollowed_laser_line_drift_widens_the_expected_uncertainty():
+    """Nicola, 2026-11-25 21:26: the laser line +1.7 from the calibration's, correctly not followed (Si moved +0.66,
+    not alike), but the expected uncertainty stayed 0.25: half the unfollowed drift is now counted."""
+    from labspec_translator import xcal, store
+    xcal.clear()
+    store.write("xcal_pending.json", {})
+    bdir = config.active_bridge_dir()
+    sim = S.ensure(bdir)
+    (bdir / "sim_laser_line").write_text("1")
+    cal = {"kind": "calibration", "sample": {"name": "Si"}, "setup": dict(SETUP),
+           "acquire": {"center_cm1": 250, "exposure_s": 1}, "calibration": {"adjust": "ls6t"},
+           "video": {"before": False}}
+    run_inline({"c": cal})
+    (bdir / "sim_laser_line_drift").write_text("1.7")
+    sim._ll_drift_n_fixed = True
+    sp = {"kind": "spectrum", "sample": {"name": "Si"}, "setup": dict(SETUP),
+          "acquire": {"center_cm1": 250, "exposure_s": 1},
+          "process": {"peaks": [{"name": "Si", "near_cm1": 520.7, "window_cm1": 30}]}}
+    s = run_inline({"s": sp})["studies"]["s"]
+    (bdir / "sim_laser_line_drift").unlink()
+    (bdir / "sim_laser_line").unlink()
+    sim._ll_drift_n_fixed = False
+    cu = s["checks"]["zero"]["correction_used"]
+    assert cu["expected_uncertainty_cm1"] >= 0.8 and "not followed" in cu["expected_uncertainty_from"], cu
+    xcal.clear()
+
+
+
+def test_zero_drift_between_calibrations_is_learned_and_counted():
+    """Nicola, 2026-11-25 (T9.14): 1.9 h after the calibration Si read +0.93 / +0.45 off with +-0.25 reported; a
+    series right after calibrating does not see an hours-scale drift: successive calibrations at one window do."""
+    from labspec_translator import xcal, store
+    import labspec_translator.runner as R
+    xcal.clear()
+    store.write("xcal_pending.json", {})
+    store.write("spectro_repeatability.json", {})
+    bdir = config.active_bridge_dir()
+    S.ensure(bdir)
+    cal = {"kind": "calibration", "sample": {"name": "Si"}, "setup": dict(SETUP),
+           "acquire": {"center_cm1": 520.7, "exposure_s": 1}, "calibration": {"adjust": "ls6t"},
+           "video": {"before": False}}
+
+    def age_all(hours):
+        d = xcal.load()
+        for v_ in d.values():
+            for e_ in (v_.get("by_centre") or {}).values():
+                e_["time"] = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(time.time() - hours * 3600))
+        xcal._save(d)
+    run_inline({"c": cal})
+    age_all(2.0)
+    (bdir / "sim_xshift").write_text("1.0,1.0")              # the zero moved 1 cm-1 in 2 h
+    c = run_inline({"c": cal})["studies"]["c"]
+    (bdir / "sim_xshift").unlink()
+    zd = c["calibration"]["zero_drift_since_last"]
+    assert zd["cm1_per_h"] == pytest.approx(0.5, abs=0.15), zd
+    assert R.spectro_repeatability(P.load(), 532, 1800)["zero_drift_cm1_per_h"] == pytest.approx(0.5, abs=0.15)
+    age_all(2.0)
+    sp = {"kind": "spectrum", "sample": {"name": "Si"}, "setup": dict(SETUP),
+          "acquire": {"center_cm1": 520.7, "exposure_s": 1}}
+    cu = run_inline({"s": sp})["studies"]["s"]["checks"]["zero"]["correction_used"]
+    assert cu["expected_uncertainty_cm1"] >= 0.8 and "between calibrations" in cu["expected_uncertainty_from"], cu
+    xcal.clear()
+    store.write("spectro_repeatability.json", {})
+
+
+def test_calibration_repeats_land_like_spectra(monkeypatch):
+    """Nicola, 2026-11-25 22:18: since .18 the 1200 repeats jogged by the approach itself (-2) and skipped the
+    approach move; spectra land via the approach: fresh spectra read +0.45 to +0.93 high. The repeats now jog to
+    the other side (|approach| + 1), then approach, then the centre."""
+    import labspec_translator.runner as R
+    sent = []
+    real = R.Ctx.call
+
+    def spy(self, verb, timeout_s=60.0, **params):
+        if verb == "acquire":
+            sent.append(dict(params))
+        return real(self, verb, timeout_s=timeout_s, **params)
+    monkeypatch.setattr(R.Ctx, "call", spy)
+    S.ensure(config.active_bridge_dir())
+    cal = {"kind": "calibration", "sample": {"name": "Si"}, "setup": dict(SETUP),
+           "acquire": {"center_cm1": 520.7, "exposure_s": 0.2}, "calibration": {"adjust": "ls6t", "repeats": 3},
+           "video": {"before": False}}
+    run_inline({"c": cal})
+    reps = [p for p in sent if p.get("spectro_jog_nm") is not None]
+    assert reps and all(p["spectro_jog_nm"] == 3.0 and p["spectro_approach_nm"] == -2.0 for p in reps), reps[:2]

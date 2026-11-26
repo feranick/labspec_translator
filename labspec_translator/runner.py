@@ -1379,6 +1379,14 @@ def _band_said(ctx: Ctx, r: dict, tag: str, warnings: list) -> None:
             except ValueError:
                 pass
     ctx.live_band = info
+    asked_base = any(str(r.get(k_) or "").split(";")[0] == "3"
+                     for k_ in (f"{tag}_active_written", f"{tag}_map_active_written"))
+    for k_ in ("red", "red_on_the_map"):
+        if asked_base and isinstance(info.get(k_), dict) and not info[k_].get("baseline"):
+            warnings.append("LabSpec did not take the baseline under the band (ActiveCursors written 3, read back "
+                            f"{info.get('active_after') or info.get('map_active_after')}): the live map shows the "
+                            "band's plain sum")
+            break
     if info.get("set") != 1:
         warnings.append(f"the live map's band (map.live_band) was not set in LabSpec: {r.get(f'{tag}_error') or '?'}")
 
@@ -1389,7 +1397,24 @@ def _paint_band(ctx: Ctx, sd: Path, warnings: list, per_point: list | None = Non
     checked without the screen (Nicola, 2026-11-25): live_band.wmf, and a .png next to it where Pillow can draw
     WMF (Windows)."""
     lb = getattr(ctx, "live_band", None)
-    if not lb or lb.get("set") != 1 or lb.get("data_id") in (None, ""):
+    if not lb or lb.get("set") != 1:
+        return
+    band_ = plan.live_band(study) if study else None
+    if band_ and laser:
+        # ls6t's own picture: LabSpec's Paint keeps its stored view (T9.14: zoom sent, picture 100-2250 / 0-5800)
+        try:
+            from . import render
+            curves = []
+            for rec in (per_point or [])[:400]:
+                sp = rec.get("_sp") or spectra.read(rec["file"])
+                sh, _ = spectra.to_shift(sp["x"], sp["meta"].get("x_unit", "nm"), laser)
+                curves.append((sh, sp["y"]))
+            pic = render.band_png(sd / "live_band_ls6t.png", curves, band_,
+                                  f"{band_.get('name') or 'band'}: {band_['from_cm1']:g}-{band_['to_cm1']:g} cm-1")
+            lb["picture_ls6t"] = pic["path"]
+        except Exception as exc:  # noqa: BLE001 - only a picture
+            lb["picture_ls6t_error"] = f"{type(exc).__name__}: {exc}"
+    if lb.get("data_id") in (None, ""):
         return
     path = sd / "live_band.wmf"
     # zoomed on the band +-200 cm-1, the intensity scaled to the spectra there (T9.11: x 100-2250 and y 0-5000 for
@@ -1642,7 +1667,12 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
                 # re-placed: each repeat lands on the pixels afresh; the first repeat too (2026-11-25, 600: after
                 # the warm-up repeat 1 still kept the first approach's landing, +0.91 laser line / +1.12 Si): every
                 # repeat lands the same way, after a jog
-                params["spectro_jog_nm"] = appr_ or 3.0
+                # away to the other side, then the approach, then the centre: the path a spectrum's landing takes
+                # (Nicola, 2026-11-25: with the jog equal to the approach, -2, the repeats skipped the approach
+                # move and landed differently from spectra: fresh spectra read +0.45 to +0.93 high at 1200)
+                jog_ = (prof.get("spectrometer") or {}).get("repeat_jog_nm")
+                params["spectro_jog_nm"] = float(jog_) if jog_ not in (None, "") else (
+                    abs(appr_) + 1.0 if appr_ else 3.0)
             if native and kind != "map":             # series too (2026-11-23: no .l6s for series spectra)
                 params["native"] = str(sd / "spectra" / f"p{k:05d}.l6s")
             if ctx.hold_wanted and not ctx.holding and str(params.get("laser_off", "0")) != "1":
@@ -3753,6 +3783,10 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
             creep_ = rep_.get("zero_creep_cm1_per_min")
             creep_term = (min(CREEP_CAP_CM1, abs(float(creep_)) * float(age_m_))
                           if creep_ and age_m_ is not None else 0.0)
+            # and over hours, from successive calibrations at one window (learned; none known, none counted)
+            drh_ = rep_.get("zero_drift_cm1_per_h")
+            if drh_ and age_m_ is not None and age_m_ > 15.0:
+                creep_term = math.hypot(creep_term, min(CREEP_CAP_CM1, float(drh_) * float(age_m_) / 60.0))
             if age_m_ is not None:
                 corr = dict(corr, age_min=round(float(age_m_), 1))
             # another window centre than the calibration's: the zero differs between windows (2026-11-25, 637.75 @
@@ -3763,10 +3797,16 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
                     dist_ = min(abs(float(wc) - float(c_)) for c_ in corr["interpolated_between_nm"])
                 elif corr.get("centre_distance_nm") is not None:
                     dist_ = float(corr["centre_distance_nm"])
-            centre_term = (min(WINDOW_TERM_CAP_CM1, WINDOW_ZERO_CM1_PER_NM * dist_)
-                           if dist_ is not None and dist_ > WINDOW_SAME_NM else 0.0)
-            if centre_term:
+            # the rate is learned from calibrations at different centres (or set in the profile): none known, no term
+            # (.21 assumed 0.75 cm-1/nm from a case that was 0.19 nm off, not 0.9: Nicola, 2026-11-25)
+            wrate_ = rep_.get("window_zero_cm1_per_nm")
+            centre_term = (min(WINDOW_TERM_CAP_CM1, float(wrate_) * dist_)
+                           if wrate_ and dist_ is not None and dist_ > WINDOW_SAME_NM else 0.0)
+            if centre_term < 0.1:
+                centre_term = 0.0
+            if dist_ is not None and dist_ > WINDOW_SAME_NM:
                 corr = dict(corr, window_distance_nm=round(dist_, 3))
+            if centre_term:
                 if kind != "calibration" and laser and (corr.get("centre_nm") is not None):
                     c_cm1 = round(1e7 / float(laser) - 1e7 / float(wc), 1) if wc else None
                     warnings.append(f"the correction was calibrated at a window {dist_:.2f} nm from this one: the zero "
@@ -3781,10 +3821,14 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
                 corr = dict(corr, expected_uncertainty_cm1=round(math.sqrt(mv_ ** 2 + creep_term ** 2
                                                                            + centre_term ** 2), 3),
                             expected_uncertainty_from=f"{rep_.get('source')}, {rep_place} placement"
-                            + (f"; the zero's creep ({abs(float(creep_)):.2f} cm-1/min learned) x the correction's "
-                               f"age ({float(age_m_):.0f} min), at most {CREEP_CAP_CM1:g}" if creep_term else "")
-                            + (f"; another window centre ({dist_:.2f} nm away: {WINDOW_ZERO_CM1_PER_NM:g} cm-1 per nm, "
-                               f"at most {WINDOW_TERM_CAP_CM1:g})" if centre_term else ""))
+                            + (f"; the zero's drift since the calibration ({float(age_m_):.0f} min: "
+                               + (f"creep {abs(float(creep_)):.2f} cm-1/min" if creep_ else "")
+                               + (", " if creep_ and drh_ else "")
+                               + (f"{float(drh_):.2f} cm-1/h between calibrations" if drh_ else "")
+                               + f", learned; at most {CREEP_CAP_CM1:g} each)" if creep_term else "")
+                            + (f"; another window centre ({dist_:.2f} nm away: {float(wrate_ or 0):.2f} cm-1 per nm "
+                               f"from {rep_.get('window_zero_from') or rep_.get('source')}, at most "
+                               f"{WINDOW_TERM_CAP_CM1:g})" if centre_term else ""))
                 rep_ = dict(rep_, moved_sd_cm1=corr["expected_uncertainty_cm1"])
                 tol_u = float(prof["checks"]["si_tol_cm1"])
                 if float(rep_["moved_sd_cm1"]) > tol_u:
@@ -4382,6 +4426,29 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
                                     + ": followed (laser_reference): the spectra were brought back to the "
                                       "calibration's laser line")
                 else:
+                    # not followed: the Raman lines may have moved by part of it (2026-11-25: laser line +1.7, Si
+                    # +0.66 against +-0.25 expected): the expected uncertainty takes it in
+                    cu_ = (checks.get("zero") or {}).get("correction_used")
+                    # the Raman peaks' own move from where they read at the calibration, when known (T9.14: laser
+                    # line +1.79 / Si +0.93 and +1.09 / +0.45, reported +-0.25): the larger of it and half the drift
+                    dpks_ = [abs(float(p_["raman_moved_cm1"])) for p_ in plateau_report
+                             if not p_.get("applied") and p_.get("raman_moved_cm1") is not None]
+                    dpk_ = max(dpks_) if dpks_ else None
+                    if isinstance(cu_, dict):
+                        t_ = max(DRIFT_RAMAN_FRACTION * abs(dr), dpk_ or 0.0)
+                        cu_["expected_uncertainty_cm1"] = round(math.hypot(
+                            float(cu_.get("expected_uncertainty_cm1") or 0.0), t_), 3)
+                        cu_["expected_uncertainty_from"] = (str(cu_.get("expected_uncertainty_from") or "")
+                                                            + f"; the laser line {dr:+.2f} cm-1 from the calibration's, "
+                                                            + (f"the Raman peaks {dpk_:.2f}, " if dpk_ is not None
+                                                               else "")
+                                                            + f"not followed (the larger of the peaks' move and x "
+                                                            f"{DRIFT_RAMAN_FRACTION:g} the line's)").lstrip("; ")
+                    if dpk_ is not None and dpk_ >= 0.3:
+                        warnings.append(f"since the calibration the laser line moved {dr:+.2f} cm-1 and the Raman peaks "
+                                        f"{dpk_:.2f}, not alike (not followed): positions here are uncertain by about "
+                                        f"+-{max(DRIFT_RAMAN_FRACTION * abs(dr), dpk_):.1f} cm-1 "
+                                        "(checks.zero.correction_used.expected_uncertainty_cm1); calibrate again")
                     warnings.append(f"the laser line sits {dr:+.1f} cm-1 from where it was at the calibration (drift "
                                     "since then, or a calibration made with another spectrometer window), not a "
                                     "hop: the zero has likely moved too; calibrate again"
@@ -4554,8 +4621,11 @@ LANDING_MIN_CM1 = 0.5         # and at least this
 LL_SD_DEFAULT_CM1 = 0.2       # the laser line's own scatter until learned (637.75 @ 1200, 2026-11-25: ~0.2)
 LL_SD_VERSION = 2             # learned laser_line_sd_cm1 values from 2026.11.25.18 on (older ones are ignored)
 CREEP_CAP_CM1 = 2.0           # the zero's creep counted into the expected uncertainty, at most
-WINDOW_ZERO_CM1_PER_NM = 0.75  # the zero's difference between window centres (2026-11-25, 1200: +0.66 at ~0.9 nm)
 WINDOW_SAME_NM = 0.05          # within this of the calibration's centre: the same window
+WINDOW_PAIR_MIN_NM = 1.0       # two calibrations this far apart (or more) give a window rate (closer: noise)
+WINDOW_PAIR_MAX_H = 0.25       # and within this time of each other, or in the same request (drift stays out)
+DRIFT_RAMAN_FRACTION = 0.5     # an unfollowed laser-line drift moves the Raman lines about this much of it (the
+#                                line on the edge filter moves about twice as much: 2026-11-24)
 WINDOW_TERM_CAP_CM1 = 2.0      # the window term, at most (between windows: a cm-1 or more, 2026-11-24)
 JUMP_CONFIRM_MIN_CM1 = 2.0     # a new correction this far (or 3 x the repositioning) from the last one at that
 #                                window waits for a second calibration to confirm it (2400: -2.53 -> +6.30)
@@ -4777,6 +4847,50 @@ def zero_creep(per_point: list, excluded: dict, laser, grating, placement: str) 
         if learned is not None:
             out["learned"] = learned
     return out
+
+
+def learn_zero_drift(laser, grating, placement: str, rate: float) -> float:
+    """The zero's drift per hour between calibrations at one window, per laser@grating: the median of the last 5."""
+    rec_r = store.read("spectro_repeatability.json") or {}
+    kk = f"{float(laser):g}@{_f(grating) or 0:g}" + ("@labspec" if placement == "labspec" else "")
+    e = rec_r.setdefault(kk, {})
+    hist = (list(e.get("zero_drift_history") or []) + [round(float(rate), 4)])[-5:]
+    e.update(zero_drift_history=hist, zero_drift_cm1_per_h=round(float(np.median(hist)), 4),
+             zero_drift_time=time.strftime("%Y-%m-%dT%H:%M:%S"))
+    store.write("spectro_repeatability.json", rec_r)
+    return e["zero_drift_cm1_per_h"]
+
+
+def learn_window_rate(laser, grating, placement: str, centre_nm, a: float, request=None) -> dict | None:
+    """How much the zero differs between window centres, per nm, from this calibration and another one of the same
+    laser@grating at least WINDOW_PAIR_MIN_NM away and within WINDOW_PAIR_MAX_H (closer pairs are mostly the
+    repositioning's noise): learned per laser@grating as the median of the last 5 (window_zero_cm1_per_nm)."""
+    from . import xcal
+    if centre_nm is None:
+        return None
+    rec = xcal.load().get(xcal.key(laser, grating)) or {}
+    now = time.time()
+    samples = []
+    for c_, e_ in (rec.get("by_centre") or {}).items():
+        try:
+            dc = abs(float(c_) - float(centre_nm))
+            age = (now - time.mktime(time.strptime(e_["time"], "%Y-%m-%dT%H:%M:%S"))) / 3600.0
+        except (KeyError, ValueError, TypeError):
+            continue
+        paired = (request is not None and e_.get("request") == request) or age <= WINDOW_PAIR_MAX_H
+        if dc >= WINDOW_PAIR_MIN_NM and paired and e_.get("placement", "centred") == placement:
+            samples.append((round(abs(float(e_["a"]) - float(a)) / dc, 4), float(c_)))
+    if not samples:
+        return None
+    rec_r = store.read("spectro_repeatability.json") or {}
+    kk = f"{float(laser):g}@{_f(grating) or 0:g}" + ("@labspec" if placement == "labspec" else "")
+    e = rec_r.setdefault(kk, {})
+    hist = (list(e.get("window_zero_history") or []) + [s_[0] for s_ in samples])[-5:]
+    e.update(window_zero_history=hist, window_zero_cm1_per_nm=round(float(np.median(hist)), 4),
+             window_zero_from=f"calibrations at different centres ({len(hist)})")
+    store.write("spectro_repeatability.json", rec_r)
+    return {"pairs": [{"other_centre_nm": c_, "cm1_per_nm": v} for v, c_ in samples],
+            "learned_cm1_per_nm": e["window_zero_cm1_per_nm"]}
 
 
 CREEP_VERSION = 2       # zero-creep rates learned from 2026.11.25.18 on (a single series' rate is no longer applied)
@@ -5230,6 +5344,16 @@ def store_pending(res: dict, warnings: list, unreliable: list, prof: dict | None
                                   f"{JUMP_AGE_CAP_CM1:g}); calibrate again: a second calibration that agrees stores "
                                   "it")
                 return
+    if same_win and float(b) == 1.0:
+        # the zero's drift over hours, from successive calibrations at this window (Nicola, 2026-11-25: 1.9 h after
+        # the calibration Si read +0.93 / +0.45 off; a series right after calibrating does not see that)
+        age_p = xcal.age_h(prev) or 0.0
+        if 0.5 <= age_p <= 24.0 and not res.get("needs_confirmation"):
+            dr_h = abs(float(a) - float(prev["a"])) / age_p
+            res["zero_drift_since_last"] = {"cm1": round(-(float(a) - float(prev["a"])), 3),
+                                            "hours": round(age_p, 2), "cm1_per_h": round(dr_h, 3),
+                                            "learned_cm1_per_h": learn_zero_drift(
+                                                laser, grating, kw_.get("placement") or "centred", dr_h)}
     st = xcal.store(*pend["args"], **pend["kw"])
     res["stored_as"] = (("one correction for every window of " if st.get("pooled") else
                          "for this range: " if st.get("range_cm1") else "per window centre: ")
@@ -5245,6 +5369,10 @@ def store_pending(res: dict, warnings: list, unreliable: list, prof: dict | None
     res["stored_correction"] = st
     warnings.append(f"ls6t now corrects later spectra ({xcal.key(laser, grating)}): true = {a:+.3f} + "
                     f"{b:.6f} x measured")
+    wr = learn_window_rate(laser, grating, kw_.get("placement") or "centred", kw_.get("centre_nm"), float(a),
+                           pend["args"][6] if len(pend["args"]) > 6 else None)
+    if wr:
+        res["window_rate"] = wr
 
 
 def _native_map(ctx: Ctx, name: str, study: dict, sd: Path, rng: dict, laser: float, acq: dict, x0, y0, zref,

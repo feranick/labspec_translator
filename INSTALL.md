@@ -422,6 +422,14 @@ ls6t bench
 Then end the bridge (`ls6t instrument end-bridge`), start the new `ls6t_bridge.vbs` in LabSpec, and restart
 the Claude app. A bridge of another protocol version is refused with a message saying to reinstall it.
 
+**Restart the MCP server too.** The app (Claude, LM Studio, LM Studio Bionic) starts `ls6t`'s MCP server as its
+own process when it starts, and keeps it running: refreshing the tool list in the app asks that old process,
+which still has the old tools (2026-11-25: after updating to .21, `calibrate_si` still showed only laser_nm,
+grating and repeats, without `center_cm1`). Quit the app completely (on Windows also from the tray) and start it
+again, or switch the ls6t server off and on in the app's MCP settings. A remote client that reaches ls6t through
+`ls6t connect` needs the same: restart the program that runs the server. `instrument status` (or `ls6t --version`
+from that client's session) shows the version it is talking to.
+
 ## Offline install
 
 Instrument PCs are often kept off the network. On a connected Windows computer with the same Python version:

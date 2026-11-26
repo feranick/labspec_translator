@@ -49,6 +49,47 @@ def spectrum_png(path: Path, files: list, process: dict, laser: float | None, ti
     return {"path": str(path), "what": "spectrum with baseline and fitted peaks"}
 
 
+def band_png(path: Path, curves: list, band: dict, title: str) -> dict:
+    """map.live_band drawn by ls6t (LabSpec's Paint exports its stored view, not the zoom set before it: T9.14):
+    the map's spectra (mean and spread) over the band +-200 cm-1, the band between two red lines, y scaled to
+    the counts there. curves: [(shift_cm1, counts), ...]."""
+    plt = _plt()
+    lo, hi = float(band["from_cm1"]), float(band["to_cm1"])
+    x0, x1 = lo - 200.0, hi + 200.0
+    grid = np.linspace(x0, x1, 600)
+    ys = []
+    for x, y in curves:
+        x = np.asarray(x, float)
+        y = np.asarray(y, float)
+        o = np.argsort(x)
+        x, y = x[o], y[o]
+        if x[0] <= x1 and x[-1] >= x0:
+            ys.append(np.interp(grid, x, y, left=np.nan, right=np.nan))
+    fig, ax = plt.subplots(figsize=(8, 4.2), dpi=130)
+    if ys:
+        Y = np.vstack(ys)
+        mean = np.nanmean(Y, axis=0)
+        lo_q, hi_q = np.nanpercentile(Y, 10, axis=0), np.nanpercentile(Y, 90, axis=0)
+        ax.fill_between(grid, lo_q, hi_q, color="0.8", lw=0, label="10-90 % of the points")
+        ax.plot(grid, mean, color="k", lw=1.0, label=f"mean of {len(ys)} spectra")
+        fin = np.isfinite(hi_q) & np.isfinite(lo_q)
+        if fin.any():
+            pad = 0.05 * (np.nanmax(hi_q) - np.nanmin(lo_q) or 1.0)
+            ax.set_ylim(np.nanmin(lo_q) - pad, np.nanmax(hi_q) + pad)
+    ax.axvspan(lo, hi, color="C3", alpha=0.12, lw=0)
+    for v in (lo, hi):
+        ax.axvline(v, color="C3", lw=1.2, ls="--")
+    ax.set_xlim(x0, x1)
+    ax.set_xlabel("Raman shift (cm$^{-1}$)")
+    ax.set_ylabel("counts")
+    ax.set_title(title, fontsize=10)
+    ax.legend(fontsize=7, loc="upper right")
+    fig.tight_layout()
+    fig.savefig(path)
+    plt.close(fig)
+    return {"path": str(path), "what": f"the map's spectra over the band {lo:g}-{hi:g} cm-1 (red lines)"}
+
+
 def map_png(path: Path, grid: np.ndarray, xs, ys, title: str, unit: str) -> dict:
     plt = _plt()
     fig, ax = plt.subplots(figsize=(5.2, 4.4), dpi=110)
