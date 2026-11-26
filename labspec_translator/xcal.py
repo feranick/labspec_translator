@@ -299,6 +299,25 @@ def clear(laser_nm=None, grating=None) -> int:
     return n
 
 
+def at_centre(laser_nm, grating, centre_nm, placement: str | None = None, range_cm1=None) -> dict | None:
+    """The correction measured at this window itself (or this range), never pooled or interpolated: what a new
+    calibration there is compared with (2026-11-26: at 1200 the pooled correction hid three calibrations at
+    659.66 nm from the drift and jump checks)."""
+    rec = load().get(key(laser_nm, grating))
+    if not rec:
+        return None
+    if range_cm1 is not None:
+        r_ = (rec.get("by_range") or {}).get(range_key(range_cm1))
+        return dict(r_, range_match=True) if r_ else None
+    if centre_nm is None:
+        return None
+    by = {k: v for k, v in (rec.get("by_centre") or {}).items() if _usable(v, placement)}
+    near = min(((abs(float(k) - float(centre_nm)), k) for k in by), default=None)
+    if near is None or near[0] > CENTRE_TOL_NM:
+        return None
+    return dict(by[near[1]], centre_nm=float(near[1]), centre_distance_nm=round(near[0], 3))
+
+
 def age_min(rec: dict) -> float | None:
     """The correction's age in minutes (unrounded: the zero creeps by the minute, 2026-11-25)."""
     try:

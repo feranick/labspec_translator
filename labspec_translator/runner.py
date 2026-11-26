@@ -3796,7 +3796,11 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
             # another window centre than the calibration's: the zero differs between windows (2026-11-25, 637.75 @
             # 1200: calibrated at 659.66 nm, measured centred ~0.9 nm away: Si +0.66 against +-0.25 expected)
             dist_ = None
-            if not corr.get("pooled") and not corr.get("range_match"):
+            if corr.get("pooled") and wc is not None and corr.get("pooled_from"):
+                # a pooled correction: the distance to the nearest centre it was measured at (T9.19: 663.86 nm
+                # against 659.66 / 660.76, not reported)
+                dist_ = min(abs(float(wc) - float(c_)) for c_ in corr["pooled_from"])
+            elif not corr.get("pooled") and not corr.get("range_match"):
                 if corr.get("interpolated_between_nm") and wc is not None:
                     dist_ = min(abs(float(wc) - float(c_)) for c_ in corr["interpolated_between_nm"])
                 elif corr.get("centre_distance_nm") is not None:
@@ -3953,8 +3957,9 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
     # 0.76 cm-1 with the spectrometer's landing, Si - laser line 0.06). Asked for explicitly, the study's own choice
     corr_broad = bool(corr and laser_line_too_broad(corr.get("laser_line_fwhm_cm1"), corr.get("lines")))
     if (not ll_asked and kind != "calibration" and ll_mode in ("report", "correct") and corr
-            and corr.get("laser_line_cm1") is not None):
-        # a broad line (600 gr/mm) too, for large steps only (land_thr below)
+            and corr.get("laser_line_cm1") is not None and not corr_broad):
+        # not with a broad line (600 gr/mm): it misjudges landings (Nicola, 2026-11-26: +3.48 then +1.92 three
+        # seconds apart with no move, Si steady; following made Si 519.16 and 521.01, worse than not following)
         ll_mode = ll_mode_asked = "anchor"
     # what a landing step must exceed: none for a correction anchored throughout (calibration.anchor 'always'),
     # else LANDING_K x the laser line's own scatter, learned per laser@grating (Nicola, 2026-11-25)
@@ -3971,6 +3976,13 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
     follow_each = ll_mode == "correct_each"
     if follow_each:
         ll_mode = "correct"
+    if corr_broad and ll_mode == "correct":
+        # a broad laser line (600 gr/mm, clipped by the edge filter) is never followed, for hops or landings (Nicola,
+        # 2026-11-26: +3.48 and +1.92 three seconds apart with no move, Si steady): it only flags a move
+        ll_mode, anchor, follow_each = "report", False, False
+        warnings.append(f"the laser line is broad at this grating (clipped by the edge filter): not followed "
+                        f"(laser_reference '{ll_mode_asked}' set aside); it only flags a move (the expected "
+                        "uncertainty takes it in)")
     # The two zero corrections must not count the same thing twice: a stored correction (xcal) was measured with the
     # laser where it was then. With laser_reference 'correct' each spectrum is first brought back to the laser line
     # of THAT calibration (stored with it), then the correction applies: the stored offset relative to the laser
@@ -4013,6 +4025,8 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
     hop_info: list = []
     pk_specs = [(float(pk_["near_cm1"]), float(pk_.get("window_cm1", 40.0))) for pk_ in (process.get("peaks") or [])
                 if isinstance(pk_, dict) and pk_.get("near_cm1") is not None]
+    pk_names = [str(pk_.get("name") or f"peak{i_}") for i_, pk_ in enumerate(process.get("peaks") or [])
+                if isinstance(pk_, dict) and pk_.get("near_cm1") is not None]
     if not pk_specs:
         # no peaks asked: the strongest ones found in the first spectrum confirm laser-line steps too (T9.18: an
         # auto-found Si at 520.19 did not confirm a -0.57 step, "no Raman peak to confirm it")
@@ -4024,6 +4038,7 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
             yc0 = np.asarray(y0_, float) - spectra.baseline(x0_, y0_, 3)
             pk_specs = [(p_, float(min(200.0, max(30.0, 3.0 * w_))))
                         for p_, w_ in spectra.find_peaks(x0_, yc0, 3, widths=True) if abs(p_) > 40.0]
+            pk_names = [f"found at {p_:.1f}" for p_, _ in pk_specs]
         except (StopIteration, KeyError, OSError, ValueError, TypeError):
             pk_specs = []
     raw: list = []
@@ -4040,13 +4055,20 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
         if not (l_ and l_.get("ok")):
             continue
         xs_, ys_ = spectra.sort_xy(sh_, rec["_sp"]["y"])
+        try:
+            ys_ = np.asarray(ys_, float) - spectra.baseline(xs_, ys_, 3)
+        except Exception:  # noqa: BLE001 - the raw spectrum then
+            pass
         pks_ = []
         for near_, win_ in pk_specs:
             try:
                 f_ = spectra.fit_peak(xs_, ys_, near_, win_)
             except Exception:                    # a fit that cannot run here only leaves the hop unconfirmed
                 f_ = {}
-            pks_.append(float(f_["position_cm1"]) if f_.get("ok") and f_.get("position_cm1") is not None else None)
+            # only a well fitted peak confirms (T9.19: a step "confirmed" with Si not fitted in the result)
+            good_ = (f_.get("ok") and f_.get("position_cm1") is not None
+                     and (f_.get("r2") is None or float(f_["r2"]) >= 0.8))
+            pks_.append(float(f_["position_cm1"]) if good_ else None)
         raw.append((rec["point"], float(l_["position_cm1"]), pks_))
     cur: list = []
     for pt, pos_, pks_ in raw:
@@ -4138,15 +4160,23 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
             elif abs(d_) <= fmin:
                 why = (f"{d_:+.2f} cm-1 from the reference, not over {fmin:g}: not a hop (the laser line on the edge "
                        "filter moves more than the Raman lines)")
-            elif dpk is not None and abs(dpk - d_) > max(0.5 * abs(d_), 1.0):
+            elif dpk is not None and abs(dpk - d_) > (max(0.3, 0.25 * abs(d_)) if corr_broad
+                                                     else max(0.5 * abs(d_), 1.0)):
+                # with a broad laser line a hop needs the same close confirmation as a landing (2026-11-26, 600:
+                # line +3.48, Si +1.99 was applied)
                 why = f"the Raman peaks moved {dpk:+.2f} cm-1, not {d_:+.2f}: not a hop"
+            elif dpk is None and corr_broad:
+                why = (f"{d_:+.2f} cm-1 with a broad laser line and no fitted Raman peak to confirm it: not "
+                       "followed")
             elif dpk is None and abs(d_) <= UNCONFIRMED_MIN_CM1:
                 # a sample without sharp Raman peaks cannot confirm it (Nicola, 2026-11-24): only a large step
                 why = (f"{d_:+.2f} cm-1 and no Raman peak to confirm it (process.peaks): only a step over "
                        f"{UNCONFIRMED_MIN_CM1:g} cm-1 is applied unconfirmed")
             for pt, _ in pl:
                 plateau_step[pt] = 0.0 if why else d_
+            conf_ = [pk_names[j] for j in ref_pk if any(raw_pk.get(pt) and raw_pk[pt][j] is not None for pt, _ in pl)]
             plateau_report.append({"points": [pt for pt, _ in pl], "laser_line_cm1": round(med, 3),
+                                   **({"confirmed_by": conf_} if dpk is not None else {}),
                                    "drift_cm1": round(pl[-1][1] - pl[0][1], 3), "step_cm1": round(d_, 3),
                                    "raman_moved_cm1": None if dpk is None else round(dpk, 3),
                                    "applied": why is None, **({"not_applied_because": why} if why else {}),
@@ -4242,7 +4272,10 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
                    noise_correlation=a.get("noise_correlation"), spikes=len(a["spikes"]), spike_cm1=a.get("spike_cm1", [])[:20],
                    spike_info=a.get("spike_info", [])[:20],
                    from_cm1=a["from_cm1"],
-                   to_cm1=a["to_cm1"], peaks=a["peaks"], bands=a["bands"], auto_peaks=a["auto_peaks"])
+                   to_cm1=a["to_cm1"], peaks=a["peaks"], bands=a["bands"], auto_peaks=a["auto_peaks"],
+                   **({"auto_peaks_rejected": a.get("auto_peaks_rejected") or []} if a["auto_peaks"] else {}),
+                   **({"spikes_in_requested_peaks": a["spikes_in_requested_peaks"]}
+                      if a.get("spikes_in_requested_peaks") else {}))
         if sat["saturated"]:
             sat_points.append(rec["point"])
         if a["spikes"]:
@@ -4347,6 +4380,24 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
                      "not_detected_points": sorted(set(undetected))[:50]}
     if failed and kind != "map":
         warnings.append(f"a peak fit failed in {len(set(failed))} spectra (see peaks[].why)")
+    # a requested peak that could not be fitted makes the result unreliable (T9.19: reliable true with the only
+    # requested peak failed): in most spectra (a spectrum, a series, a calibration), or in every one (a map)
+    if process.get("peaks") and per_point and kind != "calibration":
+        names_ = [str(p_.get("name") or f"peak{i_}") for i_, p_ in enumerate(process["peaks"])]
+        for i_, nm_ in enumerate(names_):
+            fails_ = [r_["point"] for r_ in per_point if r_["point"] not in excluded
+                      and len(r_.get("peaks") or []) > i_ and not r_["peaks"][i_].get("ok")]
+            n_ = len([r_ for r_ in per_point if r_["point"] not in excluded])
+            if n_ and (len(fails_) == n_ if kind == "map" else len(fails_) * 2 > n_):
+                why_ = next((r_["peaks"][i_].get("why") for r_ in per_point if r_["point"] in fails_
+                             and r_["peaks"][i_].get("why")), None)
+                cut_ = [c_ for r_ in per_point if r_["point"] in fails_ for c_ in (r_.get("spikes_in_requested_peaks") or [])]
+                unreliable.append(f"the requested peak {nm_} was not fitted in {len(fails_)} of {n_} spectra"
+                                  + (f" ({why_})" if why_ else "")
+                                  + (f"; narrow features at {', '.join(f'{c_:g}' for c_ in cut_[:4])} cm-1 inside "
+                                     "its window: at a coarse grating LabSpec's multi-accumulation spike filter can "
+                                     "cut a line that moved between the accumulations; acquire.spike 'single' or "
+                                     "one accumulation avoids it" if cut_ else ""))
     if undetected and kind != "map" and process.get("peaks"):
         warnings.append(f"a requested peak was not detected in {len(set(undetected))} spectra (see peaks[].why)")
 
@@ -4447,7 +4498,8 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
             if abs(dr) > ZERO_JUMP_CM1 and kind == "calibration":
                 warnings.append(f"the laser line sits {dr:+.1f} cm-1 from where it was at the last calibration: the "
                                 "laser is in another mode; this calibration measures the zero in the mode it is in now")
-            elif abs(dr) > ZERO_JUMP_CM1:
+            elif abs(dr) > ZERO_JUMP_CM1 and not corr_broad:
+                # (not with a broad line: at 600 it read +3.48 and +1.92 three seconds apart, no move: 2026-11-26)
                 # 2026-11-25: a native map ran with the 637.75 laser hopped (line -8.5 cm-1 from the calibration's,
                 # Si mean 512.69, 'zero uncertain' at 13 of 25) and said reliable: a different mode is not drift
                 unreliable.append(f"the laser line sits {dr:+.1f} cm-1 from where it was at the calibration: the laser "
@@ -4466,6 +4518,19 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
                                     + (" (a landing step, the Raman lines moved alike)" if landed_ else "")
                                     + ": followed (laser_reference): the spectra were brought back to the "
                                       "calibration's laser line")
+                elif corr_broad:
+                    # a broad line only flags it (2026-11-26, 600)
+                    cu_ = (checks.get("zero") or {}).get("correction_used")
+                    if isinstance(cu_, dict):
+                        parts_ = dict(cu_.get("expected_uncertainty_parts") or {})
+                        parts_["first_landing"] = max(float(parts_.get("first_landing") or 0.0),
+                                                      round(DRIFT_RAMAN_FRACTION * abs(dr), 3))
+                        cu_["expected_uncertainty_parts"] = parts_
+                        cu_["expected_uncertainty_cm1"] = _u_total(parts_)
+                    warnings.append(f"the broad laser line reads {dr:+.1f} cm-1 from the calibration's: the "
+                                    "spectrometer may have landed elsewhere (not followed: the line is clipped by the "
+                                    "edge filter); for the best zero calibrate again at this centre (calibrate_si "
+                                    "with the same grating and center_cm1)")
                 else:
                     # not followed: the Raman lines may have moved by part of it (2026-11-25: laser line +1.7, Si
                     # +0.66 against +-0.25 expected): the expected uncertainty takes it in
@@ -4614,6 +4679,8 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
         out["peaks"] = first.get("peaks", [])
         out["peaks_by_name"] = {pk["name"]: pk for pk in first.get("peaks", []) if pk.get("name")}
         out["bands"] = first.get("bands", {})
+        if first.get("auto_peaks"):
+            out["auto_peaks_rejected"] = first.get("auto_peaks_rejected") or []
     if kind == "calibration" and per_point:
         out["calibration"] = _calibration_result(study, prof, per_point[0], ref_lines, laser, grating, rng, request,
                                                  checks, unreliable, warnings, repeats=per_point)
@@ -5406,10 +5473,8 @@ def store_pending(res: dict, warnings: list, unreliable: list, prof: dict | None
     # 2400, -2.53 -> +6.30 cm-1 in a day, stored with a warning only; the laser line outside the window could not
     # tell a landing or a hop)
     kw_ = pend["kw"]
-    prev = xcal.get(laser, grating, kw_.get("centre_nm"), kw_.get("placement"), range_cm1=kw_.get("range_cm1"))
-    same_win = prev is not None and (prev.get("range_match") or (
-        not prev.get("interpolated_between_nm") and not prev.get("centre_far") and not prev.get("pooled")
-        and prev.get("centre_distance_nm") is not None and float(prev["centre_distance_nm"]) <= 1.0))
+    prev = xcal.at_centre(laser, grating, kw_.get("centre_nm"), kw_.get("placement"), range_cm1=kw_.get("range_cm1"))
+    same_win = prev is not None
     if same_win and float(b) == 1.0 and float(prev.get("b") or 1.0) == 1.0:
         mv = float((spectro_repeatability(prof or {}, laser, grating, kw_.get("placement") or "centred")
                     if prof else {}).get("moved_sd_cm1") or 0.3)
@@ -5631,13 +5696,16 @@ def _point_summary(r: dict) -> dict:
             "saturated", "noise_sigma", "noise_sigma_pixel", "noise_correlation", "denoise", "spikes", "spike_cm1",
             "spike_info", "from_cm1", "to_cm1", "peaks", "bands",
             "x_correction", "laser_line_correction_cm1", "zero_uncertain", "excluded",
-            "background",
+            "background", "auto_peaks_rejected", "spikes_in_requested_peaks",
             "ics", "auto_exposure", "optics_check", "t_start", "shutter_hold_after")
-    return {k: r.get(k) for k in keys if k not in ("auto_exposure", "optics_check", "t_start",
+    out = {k: r.get(k) for k in keys if k not in ("auto_exposure", "optics_check", "t_start",
                                                     "laser_line_correction_cm1", "zero_uncertain", "excluded",
                                                     "shutter_hold_after", "noise_sigma_pixel", "noise_correlation",
                                                     "denoise")
-            or r.get(k) is not None}
+           or r.get(k) is not None}
+    if r.get("auto_peaks"):
+        out["auto_peaks_rejected"] = r.get("auto_peaks_rejected") or []      # always there, empty or not (T9.19)
+    return out
 
 
 def _quantities(per_point, process) -> dict:

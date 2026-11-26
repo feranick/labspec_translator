@@ -2469,10 +2469,11 @@ def test_first_landing_after_a_grating_change_learned_and_counted_where_nothing_
     store.write("spectro_repeatability.json", {})
 
 
-def test_broad_laser_line_follows_large_landing_steps_only():
-    """Nicola, 2026-11-25 23:54 (600 gr/mm): after 1200 -> 600 the laser line moved +1.9 and Si +2.25 with it, a
-    landing step; the 22.6 cm-1 line was rejected as an anchor, so nothing was followed (Si 522.32 at +-0.33). A
-    broad line now catches large steps (over 1 cm-1, the Raman lines confirming)."""
+def test_broad_laser_line_is_not_followed_by_default():
+    """Nicola, 2026-11-26 11:44 (600 gr/mm): with no spectrometer move the broad laser line read +3.48 then +1.92
+    three seconds apart while Si stayed ~+2.1; following it made Si 519.16 and 521.01, worse than not following.
+    .26.1 followed large steps of a broad line; now a broad line is not followed by default (the landing goes into
+    the expected uncertainty), and with laser_reference 'correct' a hop needs the Raman peaks' close confirmation."""
     from labspec_translator import xcal, store
     xcal.clear()
     store.write("xcal_pending.json", {})
@@ -2491,23 +2492,23 @@ def test_broad_laser_line_follows_large_landing_steps_only():
     xcal._save(d)
     sp = {"kind": "spectrum", "sample": {"name": "Si"}, "setup": dict(SETUP, grating=600),
           "acquire": {"center_cm1": 250, "exposure_s": 1},
-          "process": {"peaks": [{"name": "Si", "near_cm1": 520.7, "window_cm1": 30}]}}
+          "process": {"peaks": [{"name": "Si", "near_cm1": 520.7, "window_cm1": 60}]}}
     (bdir / "sim_landing").write_text("2.0")
     sim._landing_n = 0
     s = run_inline({"s": sp})["studies"]["s"]
-    pl = s["checks"]["zero_correction"]["plateaus"]
-    assert pl and pl[0]["applied"] and pl[0].get("landing"), pl
-    assert abs(s["peaks_by_name"]["Si"]["position_cm1"] - 520.7) < 0.3
-    (bdir / "sim_landing").write_text("0.7")           # under the broad line's 1 cm-1: not followed
+    assert s["checks"]["zero_correction"]["laser_reference"] != "anchor"
+    assert abs(s["peaks_by_name"]["Si"]["position_cm1"] - 520.7) > 1.5          # the landing stays, not followed
+    cu = s["checks"]["zero"]["correction_used"]
+    assert cu["expected_uncertainty_cm1"] >= 1.0, cu                             # and is counted
+    assert any("calibrate again at this centre" in w for w in s["warnings"]), s["warnings"]
+    # asked to follow (correct): set aside with a broad line, for hops and landings alike
     sim._landing_n = 0
-    s = run_inline({"s": sp})["studies"]["s"]
-    pl = s["checks"]["zero_correction"]["plateaus"]
-    assert pl and not pl[0]["applied"], pl
+    s = run_inline({"s": dict(sp, acquire=dict(sp["acquire"], laser_reference="correct"))})["studies"]["s"]
+    assert any("set aside" in w for w in s["warnings"]) and not any(
+        r_.get("laser_line_correction_cm1") for r_ in s["spectra"]), s["warnings"]
     (bdir / "sim_landing").unlink()
     (bdir / "sim_laser_line").unlink()
     xcal.clear()
-
-
 
 def test_auto_peaks_skip_the_laser_line_drop_failed_fits_and_find_a_broad_band():
     """Nicola, 2026-11-26 (T9.18): without peak_cm1 the laser line at -3.35 (SNR 162) came first and Si second;
@@ -2542,3 +2543,36 @@ def test_summary_carries_the_expected_uncertainty():
     assert st.get("expected_uncertainty_cm1") is not None and "position_cm1" in st["peaks"]["peak"], st
     xcal.clear()
     store.write("spectro_repeatability.json", {})
+
+
+def test_t919_fixes_window_requested_peak_failure_confirmation_and_reporting():
+    """Nicola, 2026-11-26 T9.19: the peak window at 600; reliable true with the requested peak failed; spikes
+    flagged inside the requested peak's window; confirmed_by; auto_peaks_rejected always present; the pooled
+    correction's window distance; a pooled correction hiding the per-centre ones from the drift check."""
+    from labspec_translator import spectra as SP, xcal
+    # the fit window widened to 9 points at a coarse sampling
+    x = np.arange(400.0, 640.0, 4.5)
+    y = 100 + 900 * np.exp(-0.5 * ((x - 520.7) / 2.0) ** 2)
+    f = SP.fit_peak(x, y, 520.7, 30.0)
+    assert f.get("window_widened") and f["ok"], f
+    # a requested peak that fails makes the result unreliable
+    S.ensure(config.active_bridge_dir())
+    sp = {"kind": "spectrum", "sample": {"name": "Si"}, "setup": dict(SETUP),
+          "acquire": {"center_cm1": 520.7, "exposure_s": 0.2},
+          "process": {"peaks": [{"name": "ghost", "near_cm1": 700.0, "window_cm1": 20}]}}
+    s = run_inline({"s": sp})["studies"]["s"]
+    assert not s["reliable"] and any("requested peak ghost" in u for u in s["unreliable_because"]), s
+    # auto peaks: the rejected list is always there
+    s = run_inline({"s": {k_: v_ for k_, v_ in sp.items() if k_ != "process"}})["studies"]["s"]
+    assert "auto_peaks_rejected" in s and "auto_peaks_rejected" in s["spectra"][0]
+    # measure_spectrum at 600: a 60 cm-1 window
+    m = api.measure_spectrum(laser_nm=532, grating=600, objective="x100", filter="10%", peak_cm1=520.7,
+                             inline=True, wait_total_s=60)
+    assert m["study"]["process"]["peaks"][0]["window_cm1"] == 60
+    # at_centre: the per-centre correction even when the stored one is pooled
+    xcal.clear()
+    xcal.store(637.75, 1200, -0.5, 1.0, "si", [], centre_nm=659.66, placement="centred", pool="pooled")
+    xcal.store(637.75, 1200, -0.7, 1.0, "si", [], centre_nm=660.76, placement="centred", pool="pooled")
+    assert xcal.get(637.75, 1200, 659.66, "centred").get("pooled")
+    assert xcal.at_centre(637.75, 1200, 659.66, "centred")["a"] == -0.5
+    xcal.clear()

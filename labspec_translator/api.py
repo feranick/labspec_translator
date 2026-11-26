@@ -337,7 +337,9 @@ def measure_spectrum(laser_nm=637.75, center_cm1=None, from_cm1=None, to_cm1=Non
                            "objective": snap_objective(prof, objective)},
                  "acquire": acq}
         if peak_cm1 is not None:
-            study["process"] = {"peaks": [{"name": "peak", "near_cm1": float(peak_cm1), "window_cm1": 30}]}
+            # the fit window with the grating, as calibrations do (T9.19: +-15 at 600 held fewer than 7 points)
+            study["process"] = {"peaks": [{"name": "peak", "near_cm1": float(peak_cm1),
+                                           "window_cm1": 60 if float(grating) <= 600 else 30}]}
     except (TypeError, ValueError) as exc:
         log_rejected("measure_spectrum", {"laser_nm": laser_nm, "center_cm1": center_cm1, "from_cm1": from_cm1,
                                           "to_cm1": to_cm1}, str(exc))

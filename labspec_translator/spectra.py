@@ -250,6 +250,14 @@ def fit_peak(x, y, near: float, window: float = 40.0, shape: str = "pseudo_voigt
     y = np.asarray(y, float)
     out: dict = {"name": name, "near_cm1": near, "window_cm1": window, "shape": shape, "ok": False}
     sel = (x >= near - window / 2) & (x <= near + window / 2)
+    if sel.sum() < 9 and x.size >= 9:
+        # too few points for the line shape at a coarse grating (T9.19: 600 gr/mm, +-15 cm-1 held fewer than 7):
+        # widened to 9 points around it, and said so
+        dxa = float(np.median(np.abs(np.diff(x)))) or 1.0
+        window = max(window, 9.0 * dxa)
+        out["window_cm1"] = round(window, 2)
+        out["window_widened"] = True
+        sel = (x >= near - window / 2) & (x <= near + window / 2)
     if sel.sum() < 7:
         out["why"] = f"fewer than 7 points between {near - window / 2:g} and {near + window / 2:g} cm-1"
         return out
@@ -431,10 +439,18 @@ def analyze(shift, y, process: dict, min_snr: float = 10.0, detect_snr: float = 
     out["auto_peaks"] = auto
     # a narrow Raman line looks like a spike in one spectrum: spikes inside a fitted peak do not count
     keep = []
+    out["spikes_in_requested_peaks"] = []
     for i in out["spikes"]:
         xi = float(x[i])
-        if not any(pk.get("ok") and abs(xi - pk["position_cm1"]) <= 3 * max(pk["fwhm_cm1"], 1.0) for pk in peaks):
-            keep.append(i)
+        if any(pk.get("ok") and abs(xi - pk["position_cm1"]) <= 3 * max(pk["fwhm_cm1"], 1.0) for pk in peaks):
+            continue
+        # inside the window of a requested peak: where a Raman line is expected, at a coarse grating only one or two
+        # pixels wide (T9.19: Si at 600 gr/mm, cut in two by the accumulations' shift, flagged as two spikes)
+        if not auto and any(abs(xi - float(ps["near_cm1"])) <= float(ps.get("window_cm1", 40.0)) / 2
+                            for ps in specs):
+            out["spikes_in_requested_peaks"].append(round(xi, 1))
+            continue
+        keep.append(i)
     out["spikes"] = keep
     out["spike_cm1"] = [round(float(x[i]), 1) for i in keep]        # where, to tell cosmic rays from lines
     # and how strong, above the local level (counts, and in noise sigmas)
