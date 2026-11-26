@@ -57,6 +57,17 @@ def attempts(laser_nm=None) -> list:
     return [a for a in al if laser_nm is None or _key(a.get("laser_nm")) == _key(laser_nm)]
 
 
+def _profile_nm(prof: dict, laser_nm):
+    """The profile's laser nearest to laser_nm (within 5 nm), or laser_nm itself."""
+    try:
+        want = float(laser_nm)
+    except (TypeError, ValueError):
+        return laser_nm
+    have = [float(v["nm"]) for v in (prof.get("lasers") or {}).values() if isinstance(v, dict) and v.get("nm")]
+    near = min(have, key=lambda v: abs(v - want), default=None)
+    return near if near is not None and abs(near - want) <= 5.0 else want
+
+
 def gate(prof: dict, laser_nm=None) -> str | None:
     """None when ls6t may rely on the shutter for this laser; else why not (said to the LLM and the person)."""
     motor = (prof.get("motors") or {}).get("laser_shutter")
@@ -64,8 +75,13 @@ def gate(prof: dict, laser_nm=None) -> str | None:
         return "no laser shutter motor in the profile (motors.laser_shutter)"
     by = str((prof.get("shutter") or {}).get("by", "label"))
     recs = records()
-    rec = recs.get(_key(laser_nm)) if laser_nm is not None else (max(recs.values(), key=lambda r: r.get("time", 0))
-                                                                  if recs else None)
+    rec = None
+    if laser_nm is not None:
+        # the laser as the profile knows it (2026-11-26: a study asking 638 found no record for 637.75 and the hold
+        # was refused, "not been shown to block the 638 nm laser")
+        rec = recs.get(_key(laser_nm)) or recs.get(_key(_profile_nm(prof, laser_nm)))
+    elif recs:
+        rec = max(recs.values(), key=lambda r: r.get("time", 0))
     how = ("run `ls6t instrument shutter-verify` with silicon under the objective, in focus (TESTING T1.2 step 2): "
            "the Si line must disappear with the shutter closed")
     what = f"the {float(laser_nm):g} nm laser" if laser_nm is not None else "any laser"

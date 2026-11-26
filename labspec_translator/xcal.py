@@ -145,7 +145,9 @@ def store(laser_nm, grating, a: float, b: float, reference: str, lines: list, re
         if old and old.get("request") != request and _t(rec) - _t(old) > POOL_WINDOW_H * 3600:
             # the same window measured again later: the drift since then, which older entries elsewhere still carry
             drift = {"centre_nm": float(centre_nm), "since": old.get("time"),
-                     "cm1": round(float(rec["a"]) - float(old["a"]), 3)}
+                     # the zero's move as the reference line reads it (its offset: + = reads higher), the same
+                     # convention as zero_drift_since_last and the jump check (2026-11-26: the signs differed)
+                     "cm1": round(float(old["a"]) - float(rec["a"]), 3)}
         by[ck] = rec
     if centre_nm is None and range_cm1 is not None:
         # an extended range: kept for that range, nothing to compare per window

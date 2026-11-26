@@ -1518,7 +1518,7 @@ def test_calibration_repeats_pooled_at_coarse_gratings_and_run_order():
     xcal._save(d)
     r = xcal.store(637.75, 600, -9.6, 1.0, "si", [], centre_nm=659.66, request="evening", pool="auto", repeats=nr)
     assert not r.get("pooled") and "older centre" in r["pool"]["why"]
-    assert r["drift_at_centre"]["cm1"] == pytest.approx(2.51, abs=0.01) and r["older_centres"][0]["centre_nm"] == 650.19
+    assert r["drift_at_centre"]["cm1"] == pytest.approx(-2.51, abs=0.01) and r["older_centres"][0]["centre_nm"] == 650.19
     xcal.clear()
     for cen, a_ in ((540.63, -4.05), (547.16, -2.18)):                            # no repeats, coarse, real
         r = xcal.store(532, 1200, a_, 1.0, "si", [], centre_nm=cen, pool="auto", cm1_per_px=2.6)
@@ -2399,6 +2399,10 @@ def test_zero_drift_between_calibrations_is_learned_and_counted():
     (bdir / "sim_xshift").unlink()
     zd = c["calibration"]["zero_drift_since_last"]
     assert zd["cm1_per_h"] == pytest.approx(0.5, abs=0.15), zd
+    # one sign convention: + = the reference line reads higher (here the scale reads 1 cm-1 high)
+    assert zd["cm1"] == pytest.approx(1.0, abs=0.2), zd
+    dac = (c["calibration"].get("stored_correction") or {}).get("drift_at_centre")
+    assert dac is None or dac["cm1"] == pytest.approx(zd["cm1"], abs=0.05), dac
     assert R.spectro_repeatability(P.load(), 532, 1800)["zero_drift_cm1_per_h"] == pytest.approx(0.5, abs=0.15)
     age_all(2.0)
     sp = {"kind": "spectrum", "sample": {"name": "Si"}, "setup": dict(SETUP),
@@ -2469,11 +2473,12 @@ def test_first_landing_after_a_grating_change_learned_and_counted_where_nothing_
     store.write("spectro_repeatability.json", {})
 
 
-def test_broad_laser_line_is_not_followed_by_default():
-    """Nicola, 2026-11-26 11:44 (600 gr/mm): with no spectrometer move the broad laser line read +3.48 then +1.92
-    three seconds apart while Si stayed ~+2.1; following it made Si 519.16 and 521.01, worse than not following.
-    .26.1 followed large steps of a broad line; now a broad line is not followed by default (the landing goes into
-    the expected uncertainty), and with laser_reference 'correct' a hop needs the Raman peaks' close confirmation."""
+def test_broad_laser_line_followed_only_where_the_raman_peaks_moved_alike():
+    """600 gr/mm (Nicola, 2026-11-26): at 11:44 the broad laser line read +3.48 then +1.92 with no move while Si
+    stayed: following it made Si worse; at 12:50 the laser hopped (line -5.1, Si -6.4) and not following left Si
+    -5 cm-1 off, reliable. A broad line is followed only where a well fitted Raman peak moved alike (within max(1,
+    25 %)); alone, it flags the move (uncertainty, recalibrate), and a move over 2 x the expected uncertainty with
+    nothing followed is unreliable."""
     from labspec_translator import xcal, store
     xcal.clear()
     store.write("xcal_pending.json", {})
@@ -2492,21 +2497,33 @@ def test_broad_laser_line_is_not_followed_by_default():
     xcal._save(d)
     sp = {"kind": "spectrum", "sample": {"name": "Si"}, "setup": dict(SETUP, grating=600),
           "acquire": {"center_cm1": 250, "exposure_s": 1},
-          "process": {"peaks": [{"name": "Si", "near_cm1": 520.7, "window_cm1": 60}]}}
-    (bdir / "sim_landing").write_text("2.0")
+          "process": {"peaks": [{"name": "Si", "near_cm1": 520.7}]}}
+    # a real move of both (a hop or a landing): followed
+    (bdir / "sim_landing").write_text("5.0")
     sim._landing_n = 0
     s = run_inline({"s": sp})["studies"]["s"]
-    assert s["checks"]["zero_correction"]["laser_reference"] != "anchor"
-    assert abs(s["peaks_by_name"]["Si"]["position_cm1"] - 520.7) > 1.5          # the landing stays, not followed
-    cu = s["checks"]["zero"]["correction_used"]
-    assert cu["expected_uncertainty_cm1"] >= 1.0, cu                             # and is counted
-    assert any("calibrate again at this centre" in w for w in s["warnings"]), s["warnings"]
-    # asked to follow (correct): set aside with a broad line, for hops and landings alike
-    sim._landing_n = 0
-    s = run_inline({"s": dict(sp, acquire=dict(sp["acquire"], laser_reference="correct"))})["studies"]["s"]
-    assert any("set aside" in w for w in s["warnings"]) and not any(
-        r_.get("laser_line_correction_cm1") for r_ in s["spectra"]), s["warnings"]
+    pl = s["checks"]["zero_correction"]["plateaus"]
+    assert pl and pl[0]["applied"] and pl[0]["confirmed_by"] == ["Si"], pl
+    assert abs(s["peaks_by_name"]["Si"]["position_cm1"] - 520.7) < 0.5
+    assert s["peaks"][0]["window_cm1"] == 80.0                     # the requested peak's window scaled at 600
     (bdir / "sim_landing").unlink()
+    # the line moving alone: not followed, flagged
+    (bdir / "sim_laser_line_drift").write_text("3.0")
+    sim._ll_drift_n_fixed = True
+    s = run_inline({"s": sp})["studies"]["s"]
+    pl = s["checks"]["zero_correction"]["plateaus"]
+    assert pl and not pl[0]["applied"] and "moved alone" in pl[0]["not_applied_because"], pl
+    assert abs(s["peaks_by_name"]["Si"]["position_cm1"] - 520.7) < 0.5
+    assert any("calibrate again at this centre" in w for w in s["warnings"]), s["warnings"]
+    cu = s["checks"]["zero"]["correction_used"]
+    assert cu["expected_uncertainty_cm1"] >= 1.4, cu
+    # a large move alone, over 2 x the expected uncertainty, nothing followed: unreliable
+    (bdir / "sim_laser_line_drift").write_text("9.0")
+    s = run_inline({"s": sp})["studies"]["s"]
+    assert not s["reliable"] and any("more than twice the expected uncertainty" in u
+                                     for u in s["unreliable_because"]), s["unreliable_because"]
+    (bdir / "sim_laser_line_drift").unlink()
+    sim._ll_drift_n_fixed = False
     (bdir / "sim_laser_line").unlink()
     xcal.clear()
 
@@ -2576,3 +2593,13 @@ def test_t919_fixes_window_requested_peak_failure_confirmation_and_reporting():
     assert xcal.get(637.75, 1200, 659.66, "centred").get("pooled")
     assert xcal.at_centre(637.75, 1200, 659.66, "centred")["a"] == -0.5
     xcal.clear()
+
+
+def test_shutter_gate_finds_the_record_by_the_profile_laser(tmp_path):
+    """2026-11-26 (T9.20): shutter 'hold' refused for a study asking 638, the verification recorded for 637.75."""
+    from labspec_translator import shutter as SH
+    _profile_with_shutter(tmp_path)
+    prof = P.load()
+    nm = [float(v["nm"]) for v in prof["lasers"].values()][0]
+    assert SH.gate(prof, nm) is None
+    assert SH.gate(prof, nm + 0.3) is None, SH.gate(prof, nm + 0.3)     # 638 asked, 637.75 verified (as people say it)

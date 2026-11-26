@@ -3762,6 +3762,12 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
         win = calibration_window(study, grating, len(ref_lines))
         process["peaks"] = [{"name": f"ref{i}" if len(ref_lines) > 1 else "Si", "near_cm1": c, "window_cm1": win}
                             for i, c in enumerate(ref_lines)]
+    elif process.get("peaks") and _f(grating) and _f(grating) < 1200:
+        # a requested peak's default window scaled with the grating, as a calibration's (T9.20: 40 at 600, while
+        # measure_spectrum had 60): 40 x 1200 / grating, at most 90
+        dflt_ = min(90.0, 40.0 * 1200.0 / float(_f(grating)))
+        process["peaks"] = [dict(p_, window_cm1=p_.get("window_cm1", dflt_)) if isinstance(p_, dict) else p_
+                            for p_ in process["peaks"]]
     # ls6t's own spectral correction (from an earlier calibration), never on a calibration itself
     wc, wc_from = window_centre_used(rng, per_point)
     if not rng.get("single", True):
@@ -3957,9 +3963,10 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
     # 0.76 cm-1 with the spectrometer's landing, Si - laser line 0.06). Asked for explicitly, the study's own choice
     corr_broad = bool(corr and laser_line_too_broad(corr.get("laser_line_fwhm_cm1"), corr.get("lines")))
     if (not ll_asked and kind != "calibration" and ll_mode in ("report", "correct") and corr
-            and corr.get("laser_line_cm1") is not None and not corr_broad):
-        # not with a broad line (600 gr/mm): it misjudges landings (Nicola, 2026-11-26: +3.48 then +1.92 three
-        # seconds apart with no move, Si steady; following made Si 519.16 and 521.01, worse than not following)
+            and corr.get("laser_line_cm1") is not None):
+        # a broad line (600 gr/mm) too, but only where a well fitted Raman peak moved alike (the plateau rules
+        # below): it misjudges moves alone (+3.48 then +1.92 with no move, Si steady: 2026-11-26 11:44), yet a real
+        # hop moves both (12:50: line -5.1, Si -6.4)
         ll_mode = ll_mode_asked = "anchor"
     # what a landing step must exceed: none for a correction anchored throughout (calibration.anchor 'always'),
     # else LANDING_K x the laser line's own scatter, learned per laser@grating (Nicola, 2026-11-25)
@@ -3976,13 +3983,11 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
     follow_each = ll_mode == "correct_each"
     if follow_each:
         ll_mode = "correct"
-    if corr_broad and ll_mode == "correct":
-        # a broad laser line (600 gr/mm, clipped by the edge filter) is never followed, for hops or landings (Nicola,
-        # 2026-11-26: +3.48 and +1.92 three seconds apart with no move, Si steady): it only flags a move
-        ll_mode, anchor, follow_each = "report", False, False
-        warnings.append(f"the laser line is broad at this grating (clipped by the edge filter): not followed "
-                        f"(laser_reference '{ll_mode_asked}' set aside); it only flags a move (the expected "
-                        "uncertainty takes it in)")
+    if corr_broad and follow_each:
+        # a broad laser line is never followed spectrum by spectrum (it moves on its own: 2026-11-26 11:44)
+        follow_each = False
+        warnings.append("the laser line is broad at this grating (clipped by the edge filter): followed only where a "
+                        "fitted Raman peak moved alike, not spectrum by spectrum (correct_each set aside)")
     # The two zero corrections must not count the same thing twice: a stored correction (xcal) was measured with the
     # laser where it was then. With laser_reference 'correct' each spectrum is first brought back to the laser line
     # of THAT calibration (stored with it), then the correction applies: the stored offset relative to the laser
@@ -3992,8 +3997,8 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
     ll_ref_cal = False
     if corr and ll_mode == "correct":
         broad = laser_line_too_broad(corr.get("laser_line_fwhm_cm1"), corr.get("lines"))
-        if broad and anchor and corr.get("laser_line_cm1") is not None:
-            broad = None                              # anchor: a broad line for large steps (land_thr)
+        if broad and corr.get("laser_line_cm1") is not None:
+            broad = None                              # a broad line too: only Raman-confirmed steps (plateau rules)
         if corr.get("laser_line_cm1") is not None and not broad:
             ll_ref, ll_ref_from = float(corr["laser_line_cm1"]), f"the stored correction's calibration ({corr['time']})"
             ll_ref_cal = True
@@ -4143,7 +4148,21 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
             dpk = float(np.median(moved)) if moved else None
             why = None
             landing = False
-            if anchor and abs(d_) <= fmin:
+            if corr_broad:
+                # a broad line (600 gr/mm): any step, a landing or a hop, only where a well fitted Raman peak moved
+                # alike, within max(1 cm-1, 25 %) (Nicola, 2026-11-26)
+                if abs(d_) <= land_thr:
+                    why = (f"{d_:+.2f} cm-1 from the calibration's laser line, within the broad line's scatter (a "
+                           f"step must exceed {land_thr:g}): not followed")
+                elif dpk is None:
+                    why = (f"{d_:+.2f} cm-1 with a broad laser line and no fitted Raman peak to confirm it: not "
+                           "followed")
+                elif abs(dpk - d_) > max(1.0, 0.25 * max(abs(d_), abs(dpk))):
+                    why = (f"the Raman peaks moved {dpk:+.2f} cm-1, not {d_:+.2f}: the broad laser line moved alone "
+                           "(not followed)")
+                else:
+                    landing = abs(d_) <= fmin
+            elif anchor and abs(d_) <= fmin:
                 # a landing step: beyond the laser line's own scatter, and the Raman peaks moved alike (the line on
                 # the edge filter's slope moves twice as much when the laser drifts: 2026-11-24)
                 if abs(d_) <= land_thr:
@@ -4511,6 +4530,9 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
             elif abs(dr) > STALE_DRIFT_CM1:
                 # (2026-11-24: a map used a 5.5 h old correction with the line +0.78 away, no warning; Si 521.30)
                 followed_ = ll_mode == "correct" and (follow_each or any(p_.get("applied") for p_ in plateau_report))
+                # the expected uncertainty before this move is counted in (the rule below compares with it)
+                eu_before = float(((checks.get("zero") or {}).get("correction_used") or {}).get(
+                    "expected_uncertainty_cm1") or 0.0)
                 if followed_:
                     # (2026-11-25: "the zero has likely moved too; calibrate again; followed" read as a contradiction)
                     landed_ = any(p_.get("landing") and p_.get("applied") for p_ in plateau_report)
@@ -4519,12 +4541,16 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
                                     + ": followed (laser_reference): the spectra were brought back to the "
                                       "calibration's laser line")
                 elif corr_broad:
-                    # a broad line only flags it (2026-11-26, 600)
+                    # a broad line not followed only flags it (2026-11-26, 600): the larger of the Raman peaks'
+                    # own move and half the line's
                     cu_ = (checks.get("zero") or {}).get("correction_used")
+                    dpks_ = [abs(float(p_["raman_moved_cm1"])) for p_ in plateau_report
+                             if not p_.get("applied") and p_.get("raman_moved_cm1") is not None]
+                    dpk_ = max(dpks_) if dpks_ else None
                     if isinstance(cu_, dict):
                         parts_ = dict(cu_.get("expected_uncertainty_parts") or {})
                         parts_["first_landing"] = max(float(parts_.get("first_landing") or 0.0),
-                                                      round(DRIFT_RAMAN_FRACTION * abs(dr), 3))
+                                                      round(max(DRIFT_RAMAN_FRACTION * abs(dr), dpk_ or 0.0), 3))
                         cu_["expected_uncertainty_parts"] = parts_
                         cu_["expected_uncertainty_cm1"] = _u_total(parts_)
                     warnings.append(f"the broad laser line reads {dr:+.1f} cm-1 from the calibration's: the "
@@ -4562,6 +4588,12 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
                                     + ("; not followed: under the laser_reference step threshold, or the Raman "
                                        "lines did not move with it (checks.zero_correction.plateaus)"
                                        if ll_mode == "correct" else ""))
+                eu_u = eu_before
+                if not followed_ and abs(dr) > 2.0 * max(eu_u, 0.1):
+                    # (T9.20, 600, shutter cycling: the laser hopped, line -5.1 / Si -6.4, reported reliable at +-2.58)
+                    unreliable.append(f"the laser line moved {dr:+.1f} cm-1 since the calibration, more than twice the "
+                                      f"expected uncertainty (+-{eu_u:.2f}), and nothing was followed: positions may be "
+                                      "off by about that; calibrate again")
         if jumps:
             after_ = checks["laser_line"]["points_after_a_jump"]
             smv = any(h.get("after_spectrometer_move") for h in hop_info)
@@ -5442,9 +5474,10 @@ def _calibration_result(study, prof, rec, ref_lines, laser, grating, rng, reques
                        range_cm1=[rng["from_cm1"], rng["to_cm1"]] if (wc is None and not rng.get("single", True)
                                                                         and rng.get("from_cm1") is not None)
                        else None,
-                       zero_mode="anchored" if (anc_ll is not None or (
-                           not rep_info and llc.get("ok") and float(b) == 1.0 and not broad
-                           and str(cal.get("anchor", "auto")) != "off")) else "absolute")}
+                       # anchored (every later spectrum brought to the laser line, threshold 0) only with
+                       # calibration.anchor 'always'; a single spectrum too is 'absolute' (T9.21: "follows ... over 0
+                       # cm-1" after one, while the landing steps use the learned threshold)
+                       zero_mode="anchored" if anc_ll is not None else "absolute")}
     elif not res["pass"]:
         unreliable.append(f"the {'Si' if refname == 'si' else refname} line is at {first['measured_cm1']:.2f} cm-1, "
                           f"{first['measured_cm1'] - first['reference_cm1']:+.2f} from {first['reference_cm1']}: "
@@ -5532,7 +5565,8 @@ def store_pending(res: dict, warnings: list, unreliable: list, prof: dict | None
                            "first: laser_reference 'anchor')" if pend["kw"].get("zero_mode") == "anchored" else ""))
     if st.get("drift_at_centre"):
         dr = st["drift_at_centre"]
-        warnings.append(f"the zero at this window moved {dr['cm1']:+.2f} cm-1 since {dr['since']}"
+        warnings.append(f"the zero at this window moved {dr['cm1']:+.2f} cm-1 (the reference line reads that much "
+                        f"{'higher' if dr['cm1'] >= 0 else 'lower'}) since {dr['since']}"
                         + (f"; the corrections at {', '.join(str(o['centre_nm']) for o in st.get('older_centres', []))}"
                            " nm are older and still carry that drift: calibrate them again"
                            if st.get("older_centres") else ""))
