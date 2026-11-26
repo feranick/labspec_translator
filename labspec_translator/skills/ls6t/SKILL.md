@@ -36,12 +36,19 @@ User: "calibrate", "check the zero", "calibrate the 600 grating"
 calibrate_si(laser_nm=638, grating=600)
 ```
 
+## At 600 gr/mm: calibrate first
+
+If the user asks for grating 600 (or a wide range at 600) and the sample is the silicon wafer, first call
+`calibrate_si(laser_nm=..., grating=600, center_cm1=<the same centre>)`, then measure with
+`measure_spectrum`. At 600 ls6t cannot correct the spectrometer's landing by itself.
+
 ## After the call
 
 - The tool waits for the result. If the answer says it is not finished, call
   `study_status(request=<the request it gave>, wait_s=50)` until it is done.
-- Report the numbers from the answer: peak position, FWHM, SNR (calibration: the offset and how it
-  was stored). Say if it is not reliable, and why. List the warnings in one line each.
+- Report the numbers from the answer: peak position, FWHM, SNR, and `expected_uncertainty_cm1` as
+  "± that" on the position (calibration: the offset and how it was stored). Say if it is not
+  reliable, and why. List the warnings in one line each.
 - Never invent a number.
 
 ## Do not
