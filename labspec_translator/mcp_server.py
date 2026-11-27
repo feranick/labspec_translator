@@ -207,6 +207,14 @@ async def measure_spectrum(ctx: Context, laser_nm: float = 637.75, center_cm1: f
 
 
 @server.tool()
+async def laser_check(ctx: Context, laser_nm: float = 637.75, grating: float = 1200) -> dict:
+    """A quick laser health check: one short silicon spectrum (the shutter held), compared with the last good state.
+    Answers verdict healthy | mode_change | multimode | low_signal with the reasons and what to do next. Use it
+    before calibrating, or when results look off. The sample must be the silicon wafer."""
+    return await _keepalive(ctx, functools.partial(api.laser_check, laser_nm, grating), msg=api.flat_progress)
+
+
+@server.tool()
 async def calibrate_si(ctx: Context, laser_nm: float = 637.75, grating: float = 1200, repeats: int = 5,
                        center_cm1: float | None = None, from_cm1: float | None = None,
                        to_cm1: float | None = None) -> dict:

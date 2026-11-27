@@ -1200,6 +1200,7 @@ def run_any(name: str, study: dict, ctx: Ctx) -> dict:
     lets it go; released here at the end."""
     kind = study.get("kind", "spectrum")
     ctx.live_band = None                     # map.live_band: what LabSpec took, this study's own
+    ctx.laser_health = None                  # a laser check (process.laser_check, calibration.precheck)
     laser = (study.get("setup") or {}).get("laser_nm")
     if laser is None:
         laser = (ctx.start or {}).get("laser_nm")
@@ -1714,6 +1715,17 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
             if hdr_dn:
                 rec["denoise"] = hdr_dn
             per_point.append(rec)
+            if (kind == "calibration" and k == 0 and int((study.get("calibration") or {}).get("repeats", 1) or 1) > 1
+                    and (study.get("calibration") or {}).get("precheck", True) is not False and laser):
+                # the laser's health from the first repeat, before the others (Nicola, 2026-11-27: five repeats were
+                # measured in a multimode episode): multimode or a weak signal stops the calibration
+                hc_ = laser_health(prof, laser, _f(after.get("grating")), out, acq.get("exposure_s"),
+                                   "labspec" if not rng.get("single", True) else "centred")
+                ctx.laser_health = hc_
+                if hc_["verdict"] in ("multimode", "low_signal"):
+                    raise Stop(f"calibration not run: the laser is not healthy ({hc_['verdict']}: "
+                               + "; ".join(hc_["reasons"]) + "). Wait for it to settle, or power-cycle the laser, "
+                               "then calibrate again (calibration.precheck false calibrates anyway)", "study")
             if r.get("hold_after_acq_held") == "no" and not any("shutter hold was lost" in w for w in warnings):
                 warnings.append(f"the shutter hold was lost at point {k}: LabSpec read ShutterMode "
                                 f"{r.get('hold_after_acq_shutter_mode')}, the shutter '"
@@ -1793,12 +1805,19 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
         timing=tm,
         **({"warmup": warmup_info} if warmup_info else {}),
         **({"native_map": ctx.native_info} if native_map and getattr(ctx, "native_info", None) else {}),
+        **({"laser_health": ctx.laser_health} if getattr(ctx, "laser_health", None) else {}),
         **({"live_band": dict(ctx.live_band, asked=plan.live_band(study))}
            if getattr(ctx, "live_band", None) else {}),
         execution={"mode": config.mode(), "bridge": ctx.bridge_version, "translator": __version__,
                    "protocol": BRIDGE_PROTOCOL})
     if not per_point:
         result["why"] = stop_exc.why if stop_exc else "no spectrum was measured"
+    if (study.get("process") or {}).get("laser_check") and per_point and laser:
+        hc_ = laser_health(prof, laser, _f(after.get("grating")), per_point[0].get("file"),
+                           acq.get("exposure_s"))
+        result["laser_health"] = hc_
+        if hc_["verdict"] != "healthy":
+            warnings.append(f"laser check: {hc_['verdict']} ({'; '.join(hc_['reasons'])})")
     if result.get("calibration"):
         store_pending(result["calibration"], warnings, unreliable, prof)
         cr_ = result["calibration"]
@@ -2895,9 +2914,12 @@ def _record_resolution(result: dict, after: dict, prof: dict, warnings: list, re
     out = {"key": k, "fwhm_cm1": round(fw, 3), "baseline_cm1": base, "measurements": rec["n"]}
     if fw > float(pf.get("resolution_tol", 1.25)) * base:
         out["worse_than_baseline"] = True
+        ch_ = result.get("checks") or {}
+        laser_bad_ = ch_.get("laser_mode_change_cm1") is not None or (ch_.get("linewidth") or {}).get("multimode")
         warnings.append(f"the {cal.get('reference')} line is {fw:.2f} cm-1 wide, {fw / base:.2f} x its first "
-                        f"measurement ({base:.2f}) for {k}: alignment, focus or slit?"
-                        + objective_laser_note(after.get("objective"), laser))
+                        f"measurement ({base:.2f}) for {k}: "
+                        + ("the laser (a mode change or multimode): wait or power-cycle the laser" if laser_bad_ else
+                           "alignment, focus or slit?" + objective_laser_note(after.get("objective"), laser)))
     spec = (pf.get("resolution_cm1") or {}).get(f"{grating:g}" if grating else "")
     if spec is not None:
         out["specification_cm1"] = float(spec)
@@ -4259,8 +4281,9 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
             # the laser changed mode (T9.23 run 2: the line -14.0 against -4.6, Si at 510.3 outside a +-15 window):
             # the reference lines searched where the move puts them, and the change named
             mv_ = float(ll["position_cm1"]) - float(ll_ref)
-            half_ = min(float(p_.get("window_cm1", 40.0)) for p_ in process["peaks"]) / 2.0
-            if abs(mv_) > half_:
+            # always centred on where the move puts the line (T9.24-pre, 01:01: a -9.5 move, under the half window
+            # of 15, left Si 4 cm-1 from the edge, FWHM 11.9: every fit clipped)
+            if abs(mv_) > 0.5:
                 proc_pt = dict(auto_proc, peaks=[dict(p_, near_cm1=float(p_["near_cm1"]) + mv_)
                                                  for p_ in process["peaks"]])
                 rec["searched_shifted_cm1"] = round(mv_, 2)
@@ -4644,15 +4667,22 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
             else:
                 unreliable.append(msg + "; use acquire.laser_reference 'correct' with the laser line in the window")
     shifted_ = [r_["searched_shifted_cm1"] for r_ in per_point if r_.get("searched_shifted_cm1") is not None]
+    mode_change_ = None
     if shifted_:
-        warnings.append(f"laser mode change: the laser line moved {float(np.median(shifted_)):+.1f} cm-1 since the "
-                        "stored calibration, so the reference line was searched there "
-                        f"({len(shifted_)} spectra); this calibration measures the zero in the new mode")
-        checks["laser_mode_change_cm1"] = round(float(np.median(shifted_)), 2)
+        mv_med = float(np.median(shifted_))
+        sd_mc = float(landing_threshold(prof, laser, grating, placement)["laser_line_sd_used_cm1"]) if laser else 0.2
+        if abs(mv_med) > max(HEALTH_MOVE_MIN_CM1, 3.0 * sd_mc):
+            mode_change_ = mv_med
+            checks["laser_mode_change_cm1"] = round(mv_med, 2)
+            warnings.append(f"laser mode change: the laser line moved {mv_med:+.1f} cm-1 since the stored calibration; "
+                            "the reference line was searched where that puts it")
     # the laser running multimode: the calibration's reference line (Si) broader than at the calibration, with nothing
     # moved (T9.22 C, 600, shutter held: Si 7.56 -> 11.39 cm-1 wide and Gaussian, eta 0.69 -> 0.03, 2.5 cm-1 high)
-    if corr and kind != "calibration":
-        refs_w = [(float(l_["reference_cm1"]), float(l_["fwhm_cm1"])) for l_ in (corr.get("lines") or [])
+    corr_w = corr
+    if kind == "calibration" and laser:
+        corr_w = xcal.at_centre(laser, grating, wc, placement) or xcal.get(laser, grating, wc, placement)
+    if corr_w:
+        refs_w = [(float(l_["reference_cm1"]), float(l_["fwhm_cm1"])) for l_ in (corr_w.get("lines") or [])
                   if l_.get("fwhm_cm1") and l_.get("reference_cm1") is not None]
         broad_pts, ratios, etas = [], [], []
         n_chk = 0
@@ -4679,10 +4709,12 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
                                    **({"eta_median": round(float(np.median(etas)), 3)} if etas else {})}
             if len(broad_pts) * 2 > n_chk:
                 gauss_ = bool(etas) and float(np.median(etas)) < 0.15
+                checks["linewidth"]["multimode"] = True
                 unreliable.append(f"the reference line is {float(np.median(ratios)):.2f} x as wide as at the "
                                   "calibration" + (" and Gaussian in shape" if gauss_ else "")
+                                  + (f", with the laser line moved {mode_change_:+.1f} cm-1" if mode_change_ else "")
                                   + ": the laser is probably running multimode, and its positions are shifted; wait "
-                                    "a few minutes for it to settle, then calibrate again")
+                                    "a few minutes or power-cycle the laser, then calibrate again")
     cu_f = (checks.get("zero") or {}).get("correction_used")
     if isinstance(cu_f, dict) and (cu_f.get("expected_uncertainty_parts") or {}).get("first_landing") and \
             any(p_.get("applied") for p_ in plateau_report):
@@ -4809,7 +4841,7 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
                     med_pk.append(pk0)
                     continue
                 m_ = dict(pk0)
-                for f_ in ("position_cm1", "fwhm_cm1", "height", "snr", "eta", "r2"):
+                for f_ in ("position_cm1", "fwhm_cm1", "height", "snr", "eta", "r2", "area", "stderr_position_cm1"):
                     v_ = [float(v[f_]) for v in vals if v.get(f_) is not None]
                     if v_:
                         m_[f_] = round(float(np.median(v_)), 4)
@@ -4850,6 +4882,106 @@ def zero_state(laser, grating, prof: dict) -> dict:
               if kk != k and laser and kk.split("@")[0] == perf.key(laser)}
     if others:
         out["other_gratings"] = others
+    return out
+
+
+HEALTH_WIDTH_RATIO = 1.3       # Si this much wider than at the calibration: multimode
+HEALTH_COUNTS_RATIO = 0.5      # counts per second under this fraction of the last healthy check: low signal
+HEALTH_MOVE_MIN_CM1 = 3.0      # the laser line this far from the calibration's (or 3 x its scatter): a mode change
+LASER_LOG = "laser_log.jsonl"
+
+
+def laser_health(prof: dict, laser, grating, file, exposure_s=None, placement: str = "centred") -> dict:
+    """One Si spectrum against the last good state (Nicola, 2026-11-27: the check done by hand three times in a night):
+    the laser line against the stored correction's, the counts per second against the last healthy check, Si's FWHM
+    against the calibration's (or the performance.resolution baseline). Verdict: healthy | mode_change | multimode |
+    low_signal (the worst found first), with the reasons."""
+    from . import xcal, perf
+    out: dict = {"laser_nm": laser, "grating": _f(grating), "time": time.strftime("%Y-%m-%dT%H:%M:%S")}
+    try:
+        sp = spectra.read(file)
+        sh, _ = spectra.to_shift(sp["x"], sp["meta"].get("x_unit", "nm"), laser)
+    except Exception as exc:  # noqa: BLE001
+        return dict(out, verdict="unknown", reasons=[f"the spectrum could not be read: {exc}"])
+    xs, ys = spectra.sort_xy(sh, sp["y"])
+    ys = np.asarray(ys, float)
+    corr = xcal.get(laser, grating, None, placement) or {}
+    ll = laser_line_fit(xs, ys)
+    move = None
+    if ll and ll.get("ok"):
+        out["laser_line_cm1"] = round(float(ll["position_cm1"]), 3)
+        if corr.get("laser_line_cm1") is not None:
+            move = float(ll["position_cm1"]) - float(corr["laser_line_cm1"])
+            out["laser_line_move_cm1"] = round(move, 3)
+    g = _f(grating) or 1200.0
+    win = min(90.0, 40.0 * 1200.0 / g)
+    near = 520.7 + (move if move is not None and abs(move) > win / 2 else 0.0)
+    try:
+        yc = ys - spectra.baseline(xs, ys, 3)
+        si = spectra.fit_peak(xs, yc, near, win, name="Si")
+    except Exception:  # noqa: BLE001
+        si = {}
+    exp_ = float(exposure_s or sp["meta"].get("acq.Exposure") or 1.0) if exposure_s or sp["meta"].get(
+        "acq.Exposure") else None
+    if si.get("ok"):
+        out.update(si_cm1=round(float(si["position_cm1"]), 3), si_fwhm_cm1=round(float(si["fwhm_cm1"]), 3),
+                   si_snr=si.get("snr"), si_eta=si.get("eta"), si_height=si.get("height"))
+    out["max_counts"] = round(float(np.max(ys)), 1) if ys.size else None
+    if exp_ and si.get("ok") and si.get("height") is not None:
+        out["si_counts_per_s"] = round(float(si["height"]) / exp_, 2)
+    reasons, verdicts = [], []
+    ref_w = next((float(l_["fwhm_cm1"]) for l_ in (corr.get("lines") or [])
+                  if l_.get("fwhm_cm1") and abs(float(l_.get("reference_cm1") or 0) - 520.7) < 20), None)
+    if ref_w is None:
+        try:
+            base_ = perf.get("resolution", perf.key(laser, grating, None)) or {}
+            ref_w = float((base_.get("baseline") or {}).get("fwhm_cm1")) if base_.get("baseline") else None
+        except Exception:  # noqa: BLE001
+            ref_w = None
+    # the last healthy check of this laser and grating: its Si counts per second
+    last_ok = None
+    try:
+        for ln in reversed((config.home() / LASER_LOG).read_text(encoding="utf-8").splitlines()[-200:]):
+            e = json.loads(ln)
+            if e.get("verdict") == "healthy" and float(e.get("laser_nm") or 0) == float(laser) and \
+                    _f(e.get("grating")) == _f(grating) and e.get("si_counts_per_s"):
+                last_ok = e
+                break
+    except (OSError, ValueError):
+        pass
+    if not si.get("ok"):
+        verdicts.append("low_signal")
+        reasons.append(f"Si not found near {near:.1f} cm-1 ({si.get('why') or 'no fit'})")
+    else:
+        if ref_w and float(si["fwhm_cm1"]) > HEALTH_WIDTH_RATIO * ref_w:
+            verdicts.append("multimode")
+            reasons.append(f"Si is {float(si['fwhm_cm1']) / ref_w:.2f} x as wide as at the calibration "
+                           f"({float(si['fwhm_cm1']):.2f} vs {ref_w:.2f} cm-1)"
+                           + (", Gaussian in shape" if si.get("eta") is not None and float(si["eta"]) < 0.15 else ""))
+            out["width_ratio"] = round(float(si["fwhm_cm1"]) / ref_w, 3)
+        if last_ok and out.get("si_counts_per_s") is not None:
+            q_ = float(out["si_counts_per_s"]) / float(last_ok["si_counts_per_s"])
+            out["counts_ratio"] = round(q_, 3)
+            if q_ < HEALTH_COUNTS_RATIO:
+                verdicts.append("low_signal")
+                reasons.append(f"Si gives {q_:.2f} x the counts of the last healthy check ({last_ok.get('time')})")
+    if move is not None:
+        sd_ = float(landing_threshold(prof, laser, grating, placement)["laser_line_sd_used_cm1"]) if laser else 0.2
+        if abs(move) > max(HEALTH_MOVE_MIN_CM1, 3.0 * sd_):
+            verdicts.append("mode_change")
+            reasons.append(f"the laser line sits {move:+.2f} cm-1 from the stored correction's")
+    order = ("multimode", "low_signal", "mode_change")
+    out["verdict"] = next((v for v in order if v in verdicts), "healthy")
+    out["reasons"] = reasons
+    out["compared_with"] = {"correction": corr.get("time"), "calibration_si_fwhm_cm1": ref_w,
+                            "last_healthy": (last_ok or {}).get("time")}
+    try:
+        p_ = config.home() / LASER_LOG
+        p_.parent.mkdir(parents=True, exist_ok=True)
+        with open(p_, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(out, default=str) + "\n")
+    except OSError:
+        pass
     return out
 
 
@@ -5569,8 +5701,12 @@ def _calibration_result(study, prof, rec, ref_lines, laser, grating, rng, reques
     res["trusted"] = not doubts
     if doubts:
         res["not_trusted_because"] = doubts
+        laser_bad_ = checks.get("laser_mode_change_cm1") is not None or (checks.get("linewidth") or {}).get("multimode")
         unreliable.append("the reference line was not measured well enough to judge the zero (" + "; ".join(doubts)
-                          + "): use a stronger filter or a longer exposure, check the focus, then measure again")
+                          + ("): the laser changed mode or runs multimode (checks.laser_mode_change_cm1, "
+                             "checks.linewidth): wait a few minutes or power-cycle the laser, then calibrate again"
+                             if laser_bad_ else
+                             "): use a stronger filter or a longer exposure, check the focus, then measure again"))
     checks["calibration"] = {"pass": res["pass"], "offset_cm1": res["offset_cm1"], "worst_error_cm1": res["worst_error_cm1"],
                              "tol_cm1": tol}
     if res["trusted"]:
@@ -5662,8 +5798,9 @@ def _calibration_result(study, prof, rec, ref_lines, laser, grating, rng, reques
                        shutter="held" if any(str((r_.get("shutter_hold_after") or {}).get("held")) == "yes"
                                              for r_ in (repeats or [rec])) else "auto")}
     elif not res["pass"]:
-        unreliable.append(f"the {'Si' if refname == 'si' else refname} line is at {first['measured_cm1']:.2f} cm-1, "
-                          f"{first['measured_cm1'] - first['reference_cm1']:+.2f} from {first['reference_cm1']}: "
+        m_rep = float(res.get("measured_cm1") if res.get("measured_cm1") is not None else first["measured_cm1"])
+        unreliable.append(f"the {'Si' if refname == 'si' else refname} line is at {m_rep:.2f} cm-1, "
+                          f"{m_rep - first['reference_cm1']:+.2f} from {first['reference_cm1']}: "
                           f"adjust the zero in LabSpec for {combo(laser, grating)} (calibration.adjust 'labspec' "
                           "guides it), or let ls6t correct (adjust 'ls6t')")
     return res

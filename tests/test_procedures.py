@@ -2710,6 +2710,11 @@ def test_calibration_searches_the_reference_line_after_a_laser_mode_change():
            "acquire": {"center_cm1": 250, "exposure_s": 1}, "calibration": {"adjust": "ls6t", "repeats": 3},
            "video": {"before": False}}
     run_inline({"c": cal})
+    (bdir / "sim_xshift").write_text("-9.5,1.0")          # under the half window (01:01): searched there all the same
+    c9 = run_inline({"c": cal})["studies"]["c"]
+    assert c9["checks"].get("laser_mode_change_cm1") == pytest.approx(-9.5, abs=0.5), c9["checks"]
+    assert c9["peaks_by_name"]["Si"]["position_cm1"] == pytest.approx(511.2, abs=0.5)
+    store.write("xcal_pending.json", {})
     (bdir / "sim_xshift").write_text("-20.0,1.0")         # the whole axis 20 cm-1 low: Si at ~500.7
     c = run_inline({"c": cal})["studies"]["c"]
     (bdir / "sim_xshift").unlink()
@@ -2720,3 +2725,56 @@ def test_calibration_searches_the_reference_line_after_a_laser_mode_change():
     assert c["calibration"]["stored_as"].startswith("nothing stored"), c["calibration"]["stored_as"]   # a jump waits
     xcal.clear()
     store.write("xcal_pending.json", {})
+
+
+
+def test_laser_check_and_calibration_precheck():
+    """Nicola, 2026-11-27: a quick laser health check (verdict healthy / mode_change / multimode / low_signal, logged),
+    and calibrate_si refusing to measure its repeats when the laser is not healthy."""
+    from labspec_translator import xcal, store
+    xcal.clear()
+    store.write("xcal_pending.json", {})
+    bdir = config.active_bridge_dir()
+    S.ensure(bdir)
+    (bdir / "sim_laser_line").write_text("1")
+    log_ = config.home() / "laser_log.jsonl"
+    log_.unlink(missing_ok=True)
+    c = api.calibrate_si(laser_nm=532, grating=1200, repeats=3, objective="x100", filter="10%", inline=True,
+                         wait_total_s=90)
+    assert c["studies"]["calibration"]["reliable"], c["studies"]["calibration"]
+    h = api.laser_check(laser_nm=532, grating=1200, objective="x100", filter="10%", inline=True, wait_total_s=90)
+    assert h["verdict"] == "healthy", h.get("laser_health")
+    assert log_.exists() and "healthy" in log_.read_text()
+    (bdir / "sim_multimode").write_text("1")
+    h = api.laser_check(laser_nm=532, grating=1200, objective="x100", filter="10%", inline=True, wait_total_s=90)
+    assert h["verdict"] == "multimode" and "do not calibrate" in h["next"], h.get("laser_health")
+    c = api.calibrate_si(laser_nm=532, grating=1200, repeats=3, objective="x100", filter="10%", inline=True,
+                         wait_total_s=90)
+    st = c["studies"]["calibration"]
+    (bdir / "sim_multimode").unlink()
+    (bdir / "sim_laser_line").unlink()
+    assert st["reliable"] is False and any("calibration not run" in u for u in st["unreliable_because"]), st
+    xcal.clear()
+
+
+
+def test_calibration_in_multimode_says_laser_not_alignment():
+    """01:01 (.27.2): a calibration with Si 1.7-1.95 x wide said "alignment, focus or slit?" and "use a stronger
+    filter"; no checks.linewidth in calibrations."""
+    from labspec_translator import xcal, store
+    xcal.clear()
+    store.write("xcal_pending.json", {})
+    bdir = config.active_bridge_dir()
+    S.ensure(bdir)
+    cal = {"kind": "calibration", "sample": {"name": "Si"}, "setup": dict(SETUP),
+           "acquire": {"center_cm1": 520.7, "exposure_s": 1}, "calibration": {"adjust": "ls6t"},
+           "video": {"before": False}}
+    run_inline({"c": cal})
+    (bdir / "sim_multimode").write_text("1")
+    c = run_inline({"c": cal})["studies"]["c"]
+    (bdir / "sim_multimode").unlink()
+    assert (c["checks"].get("linewidth") or {}).get("multimode"), c["checks"].get("linewidth")
+    assert any("multimode" in u and "power-cycle" in u for u in c["unreliable_because"]), c["unreliable_because"]
+    assert not any("alignment, focus or slit" in w for w in c["warnings"])
+    assert c["calibration"]["stored_as"].startswith("nothing stored")
+    xcal.clear()

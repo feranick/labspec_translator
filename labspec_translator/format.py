@@ -17,7 +17,7 @@ TOP_KEYS = {"kind", "sample", "setup", "acquire", "focus", "points", "map", "ser
 FILTERS_KEYS = {"line_cm1", "window_cm1", "labels", "exposure_s", "max_exposure_s"}
 CUTOFF_KEYS = {"from_cm1", "to_cm1", "light", "laser_off", "plateau_cm1"}
 CAL_KEYS = {"reference", "lines_cm1", "tol_cm1", "adjust", "window_cm1", "repeats", "store", "repeats_move",
-            "anchor"}
+            "anchor", "precheck"}
 BG_KEYS = {"name", "laser_off"}
 DEPTH_KEYS = {"from_um", "to_um", "step_um", "refractive_index", "engine", "swift"}
 MOVE_KEYS = {"x_um", "y_um", "to_um", "dz_um", "stay", "snapshot", "travel", "focus"}
@@ -39,7 +39,7 @@ FOCUS_KEYS = {"autofocus", "every", "dz_um", "scan", "camera"}
 CAMERA_KEYS = {"range_um", "step_um", "settle_s"}
 MAP_KEYS = {"x_um", "y_um", "z_um", "snake", "engine", "swift", "live_band"}
 SERIES_KEYS = {"count", "interval_s"}
-PROCESS_KEYS = {"baseline", "peaks", "auto_peaks", "bands"}
+PROCESS_KEYS = {"baseline", "peaks", "auto_peaks", "bands", "laser_check"}
 PEAK_KEYS = {"near_cm1", "window_cm1", "shape", "name"}
 SHAPES = ("pseudo_voigt", "lorentz", "gauss")
 SAMPLE_KEYS = {"name", "notes", "sensitive", "unevenness_um", "site"}

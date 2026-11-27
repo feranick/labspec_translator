@@ -349,6 +349,42 @@ def measure_spectrum(laser_nm=637.75, center_cm1=None, from_cm1=None, to_cm1=Non
     return out
 
 
+def laser_check(laser_nm=637.75, grating=1200, filter=None, objective="x100_VIS", wait_total_s: float | None = None,
+                inline: bool = False) -> dict:
+    """A quick laser health check (Nicola, 2026-11-27): one short Si spectrum with the shutter held, the laser line
+    and Si in the window, compared with the last good state: verdict healthy | mode_change | multimode | low_signal,
+    logged to LS6T_HOME/laser_log.jsonl."""
+    prof = P.load()
+    try:
+        las = snap_laser(prof, laser_nm)
+        study = {"kind": "spectrum", "sample": {"name": "Si wafer"},
+                 "setup": {"laser_nm": las, "grating": float(grating), "filter": laser_filter(prof, las, filter),
+                           "objective": snap_objective(prof, objective)},
+                 # centred at 260 cm-1: the laser line (0) and Si (520.7) in one window at 600 and 1200
+                 "acquire": {"center_cm1": 260.0, "exposure_s": 1, "accumulations": 2, "spike": "double",
+                             **({"shutter": "hold"} if SH_gate_ok(prof, las) else {})},
+                 "process": {"laser_check": True, "peaks": [{"name": "Si", "near_cm1": 520.7}]}}
+    except (TypeError, ValueError) as exc:
+        log_rejected("laser_check", {"laser_nm": laser_nm, "grating": grating}, str(exc))
+        return {"ok": False, "error": str(exc)}
+    out = run_and_wait({"check": study}, wait_total_s, inline)
+    full = runner.read_json(Path(out["request"]) / "check" / "check.json", {}) if out.get("request") else {}
+    if full.get("laser_health"):
+        out["laser_health"] = full["laser_health"]
+        out["verdict"] = full["laser_health"]["verdict"]
+        out["next"] = ("healthy: calibrate or measure" if out["verdict"] == "healthy" else
+                       "the laser is not healthy: wait a few minutes and check again, or power-cycle the laser; do "
+                       "not calibrate now" if out["verdict"] in ("multimode", "low_signal") else
+                       "the laser changed mode: calibrate again (calibrate_si) before measuring")
+    out["study"] = study
+    return out
+
+
+def SH_gate_ok(prof: dict, laser) -> bool:
+    from . import shutter as SH
+    return SH.gate(prof, laser) is None
+
+
 def calibrate_si(laser_nm=637.75, grating=1200, repeats=5, filter=None, objective="x100_VIS", center_cm1=None,
                  from_cm1=None, to_cm1=None, wait_total_s: float | None = None, inline: bool = False) -> dict:
     """A silicon calibration (520.7 cm-1) from flat arguments: the correction ls6t applies to later spectra. The

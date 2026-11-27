@@ -42,6 +42,14 @@ If the user asks for grating 600 (or a wide range at 600) and the sample is the 
 `calibrate_si(laser_nm=..., grating=600, center_cm1=<the same centre>)`, then measure with
 `measure_spectrum`. At 600 ls6t cannot correct the spectrometer's landing by itself.
 
+## The laser's health
+
+`laser_check(laser_nm=..., grating=...)` (the silicon wafer under the beam) answers healthy, mode_change,
+multimode or low_signal. Run it when the user asks whether the laser is OK, or before a calibration when
+results looked off. If it says multimode or low_signal, or a calibration comes back unreliable because the
+laser changed mode or runs multimode, tell the user to wait a few minutes or power-cycle the laser. Do not
+retry at once. For two calibrations meant to measure drift, wait at least 30 minutes between them.
+
 ## After the call
 
 - The tool waits for the result. If the answer says it is not finished, call
