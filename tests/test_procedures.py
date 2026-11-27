@@ -2745,6 +2745,14 @@ def test_laser_check_and_calibration_precheck():
     h = api.laser_check(laser_nm=532, grating=1200, objective="x100", filter="10%", inline=True, wait_total_s=90)
     assert h["verdict"] == "healthy", h.get("laser_health")
     assert log_.exists() and "healthy" in log_.read_text()
+    lh = h["laser_health"]
+    st_ = h["studies"]["check"]
+    # one SNR, raw positions (no correction), the verdict and the study agree, the baseline for later counts
+    assert lh["si_snr"] == pytest.approx(st_["peaks"]["Si"]["snr"], rel=0.01), (lh, st_["peaks"])
+    assert st_["reliable"], st_
+    full = runner.read_json(Path(h["request"]) / "check" / "check.json", {})
+    assert "correction_used" not in (full["checks"].get("zero") or {})
+    assert lh["counts_baseline"] is True and "steady_for_drift_pairs" in lh
     (bdir / "sim_multimode").write_text("1")
     h = api.laser_check(laser_nm=532, grating=1200, objective="x100", filter="10%", inline=True, wait_total_s=90)
     assert h["verdict"] == "multimode" and "do not calibrate" in h["next"], h.get("laser_health")

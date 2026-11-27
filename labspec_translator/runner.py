@@ -3808,7 +3808,10 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
     placement = "labspec" if (not rng.get("single", True)) else "centred"
     ext_range = [rng["from_cm1"], rng["to_cm1"]] if (not rng.get("single", True) and (rng.get("windows") or 1) > 1
                                                       and rng.get("from_cm1") is not None) else None
-    corr = xcal.get(laser, grating, wc, placement, range_cm1=ext_range) if kind != "calibration" else None
+    # no correction on a calibration, nor on a laser check (raw positions: 2026-11-27 01:38, a check at 260 cm-1
+    # applied a 27 h old correction from another window and added its warnings)
+    corr = (xcal.get(laser, grating, wc, placement, range_cm1=ext_range)
+            if kind != "calibration" and not process.get("laser_check") else None)
     if kind != "calibration" and laser:
         zs = zero_state(laser, grating, prof)
         checks["zero"] = zs
@@ -4678,12 +4681,9 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
                             "the reference line was searched where that puts it")
     # the laser running multimode: the calibration's reference line (Si) broader than at the calibration, with nothing
     # moved (T9.22 C, 600, shutter held: Si 7.56 -> 11.39 cm-1 wide and Gaussian, eta 0.69 -> 0.03, 2.5 cm-1 high)
-    corr_w = corr
-    if kind == "calibration" and laser:
-        corr_w = xcal.at_centre(laser, grating, wc, placement) or xcal.get(laser, grating, wc, placement)
-    if corr_w:
-        refs_w = [(float(l_["reference_cm1"]), float(l_["fwhm_cm1"])) for l_ in (corr_w.get("lines") or [])
-                  if l_.get("fwhm_cm1") and l_.get("reference_cm1") is not None]
+    w_ref, w_from, _ = si_width_reference(laser, grating, placement) if laser else (None, None, None)
+    if w_ref:
+        refs_w = [(520.7, float(w_ref))]
         broad_pts, ratios, etas = [], [], []
         n_chk = 0
         for r_ in per_point:
@@ -4705,7 +4705,8 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
                 break
         if n_chk:
             checks["linewidth"] = {"vs_calibration": round(float(np.median(ratios)), 3),
-                                   "calibration_fwhm_cm1": [w_ for _, w_ in refs_w][:3],
+                                   "calibration_fwhm_cm1": [w_ for _, w_ in refs_w][:3], "reference_from": w_from,
+                                   "line": "Si",
                                    **({"eta_median": round(float(np.median(etas)), 3)} if etas else {})}
             if len(broad_pts) * 2 > n_chk:
                 gauss_ = bool(etas) and float(np.median(etas)) < 0.15
@@ -4891,12 +4892,30 @@ HEALTH_MOVE_MIN_CM1 = 3.0      # the laser line this far from the calibration's 
 LASER_LOG = "laser_log.jsonl"
 
 
+def si_width_reference(laser, grating, placement: str = "centred") -> tuple:
+    """Si's FWHM at the last stored calibration of this laser and grating (any window), else the resolution
+    baseline: the one reference for the multimode tests, in the laser check and in every study (01:38: the check said
+    healthy at 1.05 x while the study, against an older correction, said 1.34 x)."""
+    from . import xcal, perf
+    c_ = xcal.get(laser, grating, None, placement) or {}
+    w_ = next((float(l_["fwhm_cm1"]) for l_ in (c_.get("lines") or [])
+               if l_.get("fwhm_cm1") and abs(float(l_.get("reference_cm1") or 0) - 520.7) < 20), None)
+    if w_:
+        return w_, f"the calibration of {c_.get('time')}", c_
+    try:
+        b_ = (perf.get("resolution", perf.key(laser, grating, None)) or {}).get("baseline") or {}
+        if b_.get("fwhm_cm1"):
+            return float(b_["fwhm_cm1"]), "the resolution baseline", c_
+    except Exception:  # noqa: BLE001
+        pass
+    return None, None, c_
+
+
 def laser_health(prof: dict, laser, grating, file, exposure_s=None, placement: str = "centred") -> dict:
     """One Si spectrum against the last good state (Nicola, 2026-11-27: the check done by hand three times in a night):
     the laser line against the stored correction's, the counts per second against the last healthy check, Si's FWHM
     against the calibration's (or the performance.resolution baseline). Verdict: healthy | mode_change | multimode |
     low_signal (the worst found first), with the reasons."""
-    from . import xcal, perf
     out: dict = {"laser_nm": laser, "grating": _f(grating), "time": time.strftime("%Y-%m-%dT%H:%M:%S")}
     try:
         sp = spectra.read(file)
@@ -4905,7 +4924,7 @@ def laser_health(prof: dict, laser, grating, file, exposure_s=None, placement: s
         return dict(out, verdict="unknown", reasons=[f"the spectrum could not be read: {exc}"])
     xs, ys = spectra.sort_xy(sh, sp["y"])
     ys = np.asarray(ys, float)
-    corr = xcal.get(laser, grating, None, placement) or {}
+    ref_w, ref_from, corr = si_width_reference(laser, grating, placement)
     ll = laser_line_fit(xs, ys)
     move = None
     if ll and ll.get("ok"):
@@ -4917,8 +4936,10 @@ def laser_health(prof: dict, laser, grating, file, exposure_s=None, placement: s
     win = min(90.0, 40.0 * 1200.0 / g)
     near = 520.7 + (move if move is not None and abs(move) > win / 2 else 0.0)
     try:
-        yc = ys - spectra.baseline(xs, ys, 3)
-        si = spectra.fit_peak(xs, yc, near, win, name="Si")
+        # fitted as every study fits it (the same SNR: 01:38 gave 517 here and 67 in the study)
+        si = (spectra.analyze(xs, ys, {"peaks": [{"name": "Si", "near_cm1": near, "window_cm1": win}]},
+                              float(prof["checks"].get("min_snr", 10.0)),
+                              float(prof["checks"].get("detect_snr", 5.0)))["peaks"] or [{}])[0]
     except Exception:  # noqa: BLE001
         si = {}
     exp_ = float(exposure_s or sp["meta"].get("acq.Exposure") or 1.0) if exposure_s or sp["meta"].get(
@@ -4930,14 +4951,6 @@ def laser_health(prof: dict, laser, grating, file, exposure_s=None, placement: s
     if exp_ and si.get("ok") and si.get("height") is not None:
         out["si_counts_per_s"] = round(float(si["height"]) / exp_, 2)
     reasons, verdicts = [], []
-    ref_w = next((float(l_["fwhm_cm1"]) for l_ in (corr.get("lines") or [])
-                  if l_.get("fwhm_cm1") and abs(float(l_.get("reference_cm1") or 0) - 520.7) < 20), None)
-    if ref_w is None:
-        try:
-            base_ = perf.get("resolution", perf.key(laser, grating, None)) or {}
-            ref_w = float((base_.get("baseline") or {}).get("fwhm_cm1")) if base_.get("baseline") else None
-        except Exception:  # noqa: BLE001
-            ref_w = None
     # the last healthy check of this laser and grating: its Si counts per second
     last_ok = None
     try:
@@ -4953,28 +4966,39 @@ def laser_health(prof: dict, laser, grating, file, exposure_s=None, placement: s
         verdicts.append("low_signal")
         reasons.append(f"Si not found near {near:.1f} cm-1 ({si.get('why') or 'no fit'})")
     else:
+        if ref_w:
+            out["width_ratio"] = round(float(si["fwhm_cm1"]) / ref_w, 3)
         if ref_w and float(si["fwhm_cm1"]) > HEALTH_WIDTH_RATIO * ref_w:
             verdicts.append("multimode")
-            reasons.append(f"Si is {float(si['fwhm_cm1']) / ref_w:.2f} x as wide as at the calibration "
+            reasons.append(f"Si is {float(si['fwhm_cm1']) / ref_w:.2f} x as wide as at {ref_from} "
                            f"({float(si['fwhm_cm1']):.2f} vs {ref_w:.2f} cm-1)"
                            + (", Gaussian in shape" if si.get("eta") is not None and float(si["eta"]) < 0.15 else ""))
-            out["width_ratio"] = round(float(si["fwhm_cm1"]) / ref_w, 3)
         if last_ok and out.get("si_counts_per_s") is not None:
             q_ = float(out["si_counts_per_s"]) / float(last_ok["si_counts_per_s"])
             out["counts_ratio"] = round(q_, 3)
             if q_ < HEALTH_COUNTS_RATIO:
                 verdicts.append("low_signal")
                 reasons.append(f"Si gives {q_:.2f} x the counts of the last healthy check ({last_ok.get('time')})")
+    if ll and ll.get("ok") and ll.get("fwhm_cm1") and corr.get("laser_line_fwhm_cm1"):
+        # the laser line's own width, said separately (it is clipped by the edge filter: a clue, not the verdict)
+        out["laser_line_width_ratio"] = round(float(ll["fwhm_cm1"]) / float(corr["laser_line_fwhm_cm1"]), 3)
     if move is not None:
-        sd_ = float(landing_threshold(prof, laser, grating, placement)["laser_line_sd_used_cm1"]) if laser else 0.2
+        lt_ = landing_threshold(prof, laser, grating, placement) if laser else {"laser_line_sd_used_cm1": 0.2,
+                                                                                  "threshold_cm1": 0.5}
+        sd_ = float(lt_["laser_line_sd_used_cm1"])
+        # two limits for two uses (01:38: -0.655 'healthy' here, a mode change for drift pairs): a mode change
+        # (a hop) for measuring over max(3, 3 x scatter); steady enough to pair calibrations for drift within the
+        # landing threshold
+        out["steady_for_drift_pairs"] = abs(move) <= float(lt_["threshold_cm1"])
         if abs(move) > max(HEALTH_MOVE_MIN_CM1, 3.0 * sd_):
             verdicts.append("mode_change")
             reasons.append(f"the laser line sits {move:+.2f} cm-1 from the stored correction's")
     order = ("multimode", "low_signal", "mode_change")
     out["verdict"] = next((v for v in order if v in verdicts), "healthy")
     out["reasons"] = reasons
-    out["compared_with"] = {"correction": corr.get("time"), "calibration_si_fwhm_cm1": ref_w,
-                            "last_healthy": (last_ok or {}).get("time")}
+    out["compared_with"] = {"correction": corr.get("time"), "si_fwhm_reference_cm1": ref_w,
+                            "si_fwhm_reference_from": ref_from, "last_healthy": (last_ok or {}).get("time")}
+    out["counts_baseline"] = (out["verdict"] == "healthy" and out.get("si_counts_per_s") is not None)
     try:
         p_ = config.home() / LASER_LOG
         p_.parent.mkdir(parents=True, exist_ok=True)
