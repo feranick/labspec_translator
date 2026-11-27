@@ -1165,7 +1165,7 @@ class SimLabSpec:
         else:
             nm_true = nm
         rate = np.zeros_like(nm) if laser_off or self.laser_blocked else self._signal_per_s(nm_true)
-        if hopped and (self.dir / "sim_multimode_after_hop").exists():
+        if (hopped and (self.dir / "sim_multimode_after_hop").exists()) or (self.dir / "sim_multimode").exists():
             # after the hop the laser is not single-mode: every Raman line broader and weaker (2026-11-24)
             from scipy.ndimage import gaussian_filter1d
             rate = 0.35 * gaussian_filter1d(rate, 4.0)

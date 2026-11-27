@@ -336,7 +336,10 @@ ls6t tools appear in a new chat or session (Claude: the tools / connectors menu)
   `studies` object. ls6t gives them flat tools, `measure_spectrum` and `calibrate_si` (scalar arguments with
   defaults; they wait for the result), and a smaller tool set without `instrument set`, `laser_on` or `snapshot`:
   `ls6t connect bionic --tools measure` (or `lmstudio`; `--tools full` puts everything back). Calls ls6t refused
-  (invalid studies, wrong arguments) are listed by `ls6t jobs` (`rejected_calls`).
+  (invalid studies, wrong arguments) are listed by `ls6t jobs` (`rejected_calls`). With a laser that holds its
+  shutter open (`lasers.<k>.hold_shutter`, the 637.75 nm laser here), each request waits about 40 s after opening
+  it for the laser to settle (`hold_open_s`): a one-spectrum `measure_spectrum` then takes about 45 s plus the
+  acquisition, and the operator's go-ahead in LabSpec comes before that.
 - **LM Studio Bionic**: a separate app that keeps its own MCP list (Settings > MCP), so the LM Studio entry does not
   reach it (2026-11-24). Start Bionic once (it makes its folder), quit it, then connect (`ls6t connect bionic`, or
   the installer's *LM Studio Bionic* box); start it again and check that `ls6t` is switched on under Settings > MCP.

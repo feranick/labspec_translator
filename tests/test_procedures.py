@@ -2363,7 +2363,7 @@ def test_unfollowed_laser_line_drift_widens_the_expected_uncertainty():
     sim._ll_drift_n_fixed = False
     cu = s["checks"]["zero"]["correction_used"]
     assert cu["expected_uncertainty_cm1"] >= 0.8 and "not followed" in cu["expected_uncertainty_from"], cu
-    assert cu["expected_uncertainty_parts"]["first_landing"] >= 0.8          # the landing, once (not added twice)
+    assert cu["expected_uncertainty_parts"]["unfollowed_move"] >= 0.8        # its own part (.26.7), counted once
     tol_ = float(P.load()["checks"]["si_tol_cm1"])
     if cu["expected_uncertainty_cm1"] > tol_:
         quoted = [w for w in s["warnings"] if "good to about" in w]
@@ -2622,3 +2622,70 @@ def test_shutter_gate_finds_the_record_by_the_profile_laser(tmp_path):
     nm = [float(v["nm"]) for v in prof["lasers"].values()][0]
     assert SH.gate(prof, nm) is None
     assert SH.gate(prof, nm + 0.3) is None, SH.gate(prof, nm + 0.3)     # 638 asked, 637.75 verified (as people say it)
+
+
+
+def test_multimode_detected_from_the_reference_line_width_and_uncertainty_parts_named():
+    """T9.22 C (2026-11-26, 600, shutter held, nothing moved): Si 7.56 -> 11.39 cm-1 wide and Gaussian, 2.5 high, not
+    flagged; the unfollowed move had been filed as first_landing; the first landing kept after a followed step."""
+    from labspec_translator import xcal, store
+    import labspec_translator.runner as R
+    xcal.clear()
+    store.write("xcal_pending.json", {})
+    store.write("spectro_repeatability.json", {})
+    bdir = config.active_bridge_dir()
+    S.ensure(bdir)
+    cal = {"kind": "calibration", "sample": {"name": "Si"}, "setup": dict(SETUP),
+           "acquire": {"center_cm1": 520.7, "exposure_s": 1}, "calibration": {"adjust": "ls6t"},
+           "video": {"before": False}}
+    run_inline({"c": cal})
+    sp = {"kind": "spectrum", "sample": {"name": "Si"}, "setup": dict(SETUP),
+          "acquire": {"center_cm1": 520.7, "exposure_s": 1},
+          "process": {"peaks": [{"name": "Si", "near_cm1": 520.7}]}}
+    s0 = run_inline({"s": sp})["studies"]["s"]
+    assert s0["checks"]["linewidth"]["vs_calibration"] == pytest.approx(1.0, abs=0.15)
+    (bdir / "sim_multimode").write_text("1")
+    s1 = run_inline({"s": sp})["studies"]["s"]
+    (bdir / "sim_multimode").unlink()
+    assert not s1["reliable"] and any("multimode" in u for u in s1["unreliable_because"]), s1["unreliable_because"]
+    # the parts: an unfollowed move is its own part, the landing counted once
+    parts = {"repositioning": 0.3, "first_landing": 1.95, "unfollowed_move": 2.56}
+    assert R._u_total(parts) == pytest.approx((0.3 ** 2 + 2.56 ** 2) ** 0.5, abs=0.002)
+    cu = {"expected_uncertainty_parts": {"repositioning": 0.3}, "expected_uncertainty_from": "measured"}
+    R._unfollowed_term(cu, 3.59, 2.56)
+    assert cu["expected_uncertainty_parts"]["unfollowed_move"] == 2.56 and "not followed" in cu["expected_uncertainty_from"]
+    xcal.clear()
+
+
+
+def test_calibration_after_the_laser_line_moved_is_stored_with_median_statistics():
+    """2026-11-26 15:43 (.26.6): a good calibration was refused, "the laser line moved -1.2 cm-1 since the calibration,
+    more than twice the expected uncertainty (+-0.00)": a calibration exists to replace a moved zero. And its block
+    mixed the mean (offset_cm1) with the median (the correction) and showed repeat 0 only in lines."""
+    from labspec_translator import xcal, store
+    xcal.clear()
+    store.write("xcal_pending.json", {})
+    store.write("spectro_repeatability.json", {"532@1800": {"zero_drift_cm1_per_h": 1.061,
+                                                            "zero_drift_history": [0.04, 2.08]}})
+    bdir = config.active_bridge_dir()
+    S.ensure(bdir)
+    (bdir / "sim_laser_line").write_text("1")
+    cal = {"kind": "calibration", "sample": {"name": "Si"}, "setup": dict(SETUP),
+           "acquire": {"center_cm1": 250, "exposure_s": 0.5}, "calibration": {"adjust": "ls6t", "repeats": 3},
+           "video": {"before": False}}
+    run_inline({"c": cal})
+    (bdir / "sim_xshift").write_text("1.2,1.0")          # the whole axis, laser line too, 1.2 cm-1 higher
+    c = run_inline({"c": cal})["studies"]["c"]
+    (bdir / "sim_xshift").unlink()
+    (bdir / "sim_laser_line").unlink()
+    assert c["reliable"], c["unreliable_because"]
+    cc = c["calibration"]
+    assert cc["stored_as"].startswith("per window centre"), cc["stored_as"]
+    med = cc["repeats"]["median_cm1"]
+    assert cc["offset_cm1"] == pytest.approx(med, abs=1e-3) and cc["lines"][0]["error_cm1"] == pytest.approx(med, abs=1e-3)
+    assert cc["correction"]["a"] == pytest.approx(-med, abs=0.01)
+    # the old drift rate is gone from the store itself
+    e = store.read("spectro_repeatability.json").get("532@1800") or {}
+    assert "zero_drift_cm1_per_h" not in e and "zero_drift_history" not in e, e
+    xcal.clear()
+    store.write("spectro_repeatability.json", {})
