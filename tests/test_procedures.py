@@ -2401,7 +2401,7 @@ def test_zero_drift_between_calibrations_is_learned_and_counted(tmp_path):
     single = dict(cal, acquire=dict(cal["acquire"], shutter="auto"), calibration={"adjust": "ls6t"})
     c = run_inline({"c": single})["studies"]["c"]
     zd = c["calibration"]["zero_drift_since_last"]
-    assert zd["not_learned_because"] and "learned_zero_drift_cm1_per_h" not in zd, zd
+    assert zd["not_learned_because"] and "learned_zero_drift_cm1_per_h" not in zd and zd["learned"] is False, zd
     run_inline({"c": cal})
     for k_, shift_ in enumerate(("1.0,1.0", "2.0,1.0")):            # the zero moving 1 cm-1 every 2 h
         age_all(2.0)
@@ -2412,8 +2412,9 @@ def test_zero_drift_between_calibrations_is_learned_and_counted(tmp_path):
         assert zd["cm1"] == pytest.approx(1.0, abs=0.25), zd                     # + = reads higher
         dac = (c["calibration"].get("stored_correction") or {}).get("drift_at_centre")
         assert dac and dac["cm1"] == pytest.approx(zd["cm1"], abs=0.05), dac     # the same sign and size
+        assert zd["pair_cm1_per_h"] == pytest.approx(zd["cm1"] / zd["hours"], abs=0.01)   # signed, this pair
         if k_ == 0:
-            assert zd.get("learned_zero_drift_cm1_per_h") is None                # one pair: not applied yet
+            assert zd.get("learned_zero_drift_cm1_per_h") is None and zd["applied"] is False   # one pair
     (bdir / "sim_xshift").unlink()
     assert zd["learned_zero_drift_cm1_per_h"] == pytest.approx(0.5, abs=0.15), zd
     assert R.spectro_repeatability(P.load(), 532, 1800)["zero_drift_cm1_per_h"] == pytest.approx(0.5, abs=0.15)
@@ -2684,6 +2685,10 @@ def test_calibration_after_the_laser_line_moved_is_stored_with_median_statistics
     med = cc["repeats"]["median_cm1"]
     assert cc["offset_cm1"] == pytest.approx(med, abs=1e-3) and cc["lines"][0]["error_cm1"] == pytest.approx(med, abs=1e-3)
     assert cc["correction"]["a"] == pytest.approx(-med, abs=0.01)
+    # the reported line is the repeats' median too (T9.23: snr and the top-level peak came from repeat 0)
+    snrs = sorted(r_["peaks"][0]["snr"] for r_ in c["spectra"] if r_["peaks"][0].get("ok"))
+    assert cc["snr"] == pytest.approx(float(np.median(snrs)), abs=0.01)
+    assert c["peaks_by_name"]["Si"]["position_cm1"] == pytest.approx(cc["measured_cm1"], abs=0.05)
     # the old drift rate is gone from the store itself
     e = store.read("spectro_repeatability.json").get("532@1800") or {}
     assert "zero_drift_cm1_per_h" not in e and "zero_drift_history" not in e, e

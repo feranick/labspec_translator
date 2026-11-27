@@ -4019,6 +4019,11 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
     else:
         ll_ref = laser_line_reference(laser, grating)
         ll_ref_from = "calibration" if ll_ref is not None else None
+        if kind == "calibration" and laser:
+            # the last stored correction's, not the last calibration check's (which may not have been stored: T9.23)
+            st_ = xcal.at_centre(laser, grating, wc, placement) or xcal.get(laser, grating, wc, placement)
+            if st_ and st_.get("laser_line_cm1") is not None:
+                ll_ref, ll_ref_from = float(st_["laser_line_cm1"]), f"the stored correction ({st_.get('time')})"
     excluded = screen_points(per_point, laser, kind, warnings) if laser else {}
     for rec in per_point:
         if rec["point"] in excluded:
@@ -4516,6 +4521,13 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
                                 "points_after_a_jump": [pt for pl in plateaus[1:] for pt, _ in pl][:200]}
         cal_ref = (float(corr["laser_line_cm1"]) if corr and corr.get("laser_line_cm1") is not None
                    else laser_line_reference(laser, grating))
+        if kind == "calibration":
+            # the last STORED correction's laser line (T9.23: the median of a calibration that was not stored,
+            # -5.153, had become the reference; the stored one was -3.939)
+            st_ = (xcal.at_centre(laser, grating, wc, placement) or xcal.get(laser, grating, wc, placement)) \
+                if laser else None
+            if st_ and st_.get("laser_line_cm1") is not None:
+                cal_ref = float(st_["laser_line_cm1"])
         if cal_ref is not None:
             dr = round(float(np.median([v for _, v in lls])) - cal_ref, 2)
             checks["laser_line"]["drift_since_calibration_cm1"] = dr
@@ -4761,6 +4773,31 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
     if kind == "calibration" and per_point:
         out["calibration"] = _calibration_result(study, prof, per_point[0], ref_lines, laser, grating, rng, request,
                                                  checks, unreliable, warnings, repeats=per_point)
+        if len(per_point) > 1:
+            # the reference line(s) as the repeats' median, not repeat 0 (T9.23: snr 54.85 and 519.929 from repeat 0,
+            # the offset from the median)
+            med_pk = []
+            for j_, pk0 in enumerate(per_point[0].get("peaks") or []):
+                vals = [r_["peaks"][j_] for r_ in per_point if r_["point"] not in excluded
+                        and len(r_.get("peaks") or []) > j_ and r_["peaks"][j_].get("ok")]
+                if not vals:
+                    med_pk.append(pk0)
+                    continue
+                m_ = dict(pk0)
+                for f_ in ("position_cm1", "fwhm_cm1", "height", "snr", "eta", "r2"):
+                    v_ = [float(v[f_]) for v in vals if v.get(f_) is not None]
+                    if v_:
+                        m_[f_] = round(float(np.median(v_)), 4)
+                m_.update(ok=True, from_repeats=len(vals))
+                med_pk.append(m_)
+            out["peaks"] = med_pk
+            out["peaks_by_name"] = {pk["name"]: pk for pk in med_pk if pk.get("name")}
+            c_ = out["calibration"]
+            nm0 = (med_pk[0] if med_pk else {})
+            if nm0.get("snr") is not None:
+                c_["snr"] = nm0["snr"]
+            if nm0.get("fwhm_cm1") is not None:
+                c_["fwhm_cm1"] = nm0["fwhm_cm1"]
     return out
 
 
@@ -5661,8 +5698,9 @@ def store_pending(res: dict, warnings: list, unreliable: list, prof: dict | None
         age_p = xcal.age_h(prev) or 0.0
         if age_p > 0 and not res.get("needs_confirmation"):
             ch = -(float(a) - float(prev["a"]))           # + = the reference line reads higher (as drift_at_centre)
+            # this pair's rate, signed as cm1 (T9.23: 0.042 shown unsigned for a -0.452 drift, as if learned)
             zd = {"cm1": round(ch, 3), "hours": round(age_p, 2),
-                  "zero_drift_cm1_per_h": round(abs(ch) / age_p, 3) if age_p > 0 else None}
+                  "pair_cm1_per_h": round(ch / age_p, 3) if age_p > 0 else None}
             # learned only from good pairs (Nicola, 2026-11-26: 1.06 cm-1/h learned at 1200 from two single fits
             # with the shutter cycling and the laser changing mode, against +0.01 in 2 h with the hold)
             why_not = []
@@ -5683,9 +5721,13 @@ def store_pending(res: dict, warnings: list, unreliable: list, prof: dict | None
                 why_not.append(f"{age_p:.1f} h apart (pairs 0.5 to 24 h apart are used)")
             if why_not:
                 zd["not_learned_because"] = why_not
+                zd["learned"] = False
             else:
+                zd["learned"] = True
                 zd["learned_zero_drift_cm1_per_h"] = learn_zero_drift(laser, grating, kw_.get("placement") or
                                                                       "centred", ch, age_p)
+                # applied once enough good pairs exist (DRIFT_MIN_PAIRS)
+                zd["applied"] = zd["learned_zero_drift_cm1_per_h"] is not None
             res["zero_drift_since_last"] = zd
     st = xcal.store(*pend["args"], **pend["kw"])
     res["stored_as"] = (("one correction for every window of " if st.get("pooled") else
