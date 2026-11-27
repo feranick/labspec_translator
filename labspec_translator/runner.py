@@ -1720,7 +1720,8 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
                 # the laser's health from the first repeat, before the others (Nicola, 2026-11-27: five repeats were
                 # measured in a multimode episode): multimode or a weak signal stops the calibration
                 hc_ = laser_health(prof, laser, _f(after.get("grating")), out, acq.get("exposure_s"),
-                                   "labspec" if not rng.get("single", True) else "centred")
+                                   "labspec" if not rng.get("single", True) else "centred",
+                                   after.get("objective"), after.get("filter"))
                 ctx.laser_health = hc_
                 if hc_["verdict"] in ("multimode", "low_signal"):
                     raise Stop(f"calibration not run: the laser is not healthy ({hc_['verdict']}: "
@@ -1814,7 +1815,7 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
         result["why"] = stop_exc.why if stop_exc else "no spectrum was measured"
     if (study.get("process") or {}).get("laser_check") and per_point and laser:
         hc_ = laser_health(prof, laser, _f(after.get("grating")), per_point[0].get("file"),
-                           acq.get("exposure_s"))
+                           acq.get("exposure_s"), "centred", after.get("objective"), after.get("filter"))
         result["laser_health"] = hc_
         if hc_["verdict"] != "healthy":
             warnings.append(f"laser check: {hc_['verdict']} ({'; '.join(hc_['reasons'])})")
@@ -2204,6 +2205,19 @@ def focus_scan(ctx: Ctx, study: dict, laser: float, z0: float | None, sd: Path, 
             res["axial_fwhm_um"] = round(fwhm, 3)       # the depth resolution on this sample (stage µm)
         res["z_now"] = res["z_um"]
         res["z_left_at"] = "the focus found (later spectra and studies use it)"
+    # the objective's plausibility: at x50 / x100 the Raman signal falls off within a few µm of focus; flat over
+    # +-5 µm suggests a lower magnification than LabSpec reports (2026-11-27: x10 in place while LabSpec said x100)
+    mag_ = plan.objective_mag(getattr(ctx, "objective", None))
+    offs_a = np.asarray(offs, float)
+    near5 = np.abs(offs_a) <= 5.0 + 1e-6
+    if mag_ and mag_ >= 50 and near5.sum() >= 3 and offs_a.min() <= -4.0 and offs_a.max() >= 4.0 and v.max() > 0:
+        rel_ = float(v[near5].min() / v[near5].max())
+        res["objective_check"] = {"objective": getattr(ctx, "objective", None), "signal_min_over_max_5um": round(rel_, 3)}
+        if rel_ > 0.8:
+            res["objective_check"]["suspect"] = True
+            warnings.append(f"the objective may not be the one LabSpec reports ({ctx.objective}): the Raman signal "
+                            f"varies by only {100 * (1 - rel_):.0f} % over +-5 µm, as with a lower magnification "
+                            "(x100 falls off within a few µm); check the turret")
     try:
         from . import render
         res["image"] = render.focus_png(sd / "focus_scan.png", res)
@@ -2299,7 +2313,32 @@ def camera_focus(ctx: Ctx, study: dict, z0: float | None, sd: Path, warnings: li
     diff = np.asarray(l0, float) - np.asarray(l1, float)
     noise = float(np.std(diff)) / math.sqrt(2)
     band_noise = float(np.std(_band(diff))) / math.sqrt(2)
-    s_rep = abs(_sharpness(l0) - _sharpness(l1))
+    # a region to focus on (focus.camera.roi: [x0, y0, x1, y1] as fractions of the frame, or 'auto' for the most
+    # structured tile; 2026-11-27: a structured strip at the bottom, featureless Si elsewhere)
+    roi = cp.get("roi")
+    if roi == "auto":
+        a_ = np.asarray(l0, float)
+        h_, w_ = a_.shape
+        best_ = None
+        for ty in range(4):
+            for tx in range(4):
+                t_ = a_[ty * h_ // 4:(ty + 1) * h_ // 4, tx * w_ // 4:(tx + 1) * w_ // 4]
+                tex_ = _texture(t_, band_noise)
+                if best_ is None or tex_ > best_[0]:
+                    best_ = (tex_, [tx / 4, ty / 4, (tx + 1) / 4, (ty + 1) / 4])
+        roi = best_[1]
+        res["roi_auto_texture"] = round(best_[0], 2)
+    if roi:
+        res["roi"] = [round(float(v_), 3) for v_ in roi]
+
+    def crop(lum):
+        if not roi:
+            return lum
+        a_ = np.asarray(lum, float)
+        h_, w_ = a_.shape
+        x0_, y0_, x1_, y1_ = (float(v_) for v_ in roi)
+        return a_[int(y0_ * h_):max(int(y1_ * h_), int(y0_ * h_) + 8), int(x0_ * w_):max(int(x1_ * w_), int(x0_ * w_) + 8)]
+    s_rep = abs(_sharpness(crop(l0)) - _sharpness(crop(l1)))
     res["camera_noise"] = round(noise, 3)
     # coarse: from the far side toward the sample (offsets in the toward direction)
     n_away, n_tow = int(math.floor(away / step + 1e-9)), int(math.floor(toward / step + 1e-9))
@@ -2309,8 +2348,8 @@ def camera_focus(ctx: Ctx, study: dict, z0: float | None, sd: Path, warnings: li
         z = move_z(ctx, z0 + s * o, f"camera focus step {i}", focusing=True)
         _d, lum = _cam_frame(ctx, sd / f"c{i:03d}", settle)
         zs.append(z)
-        sh.append(_sharpness(lum))
-        tex.append(_texture(lum, band_noise))
+        sh.append(_sharpness(crop(lum)))
+        tex.append(_texture(crop(lum), band_noise))
     k = int(np.argmax(sh))
     res.update(offsets_um=[round(o, 3) for o in offs], z_steps_um=zs, sharpness=[round(v, 6) for v in sh],
                texture=[round(v, 2) for v in tex])
@@ -2344,7 +2383,7 @@ def camera_focus(ctx: Ctx, study: dict, z0: float | None, sd: Path, warnings: li
             z = move_z(ctx, z0 + s * o, f"camera focus fine step {j}", focusing=True)
             _d, lum = _cam_frame(ctx, sd / f"f{j:03d}", settle)
             fz.append(z)
-            fsh.append(_sharpness(lum))
+            fsh.append(_sharpness(crop(lum)))
         kb = int(np.argmax(fsh))
         ob = fo[kb]
         if 0 < kb < len(fsh) - 1:
@@ -4911,12 +4950,14 @@ def si_width_reference(laser, grating, placement: str = "centred") -> tuple:
     return None, None, c_
 
 
-def laser_health(prof: dict, laser, grating, file, exposure_s=None, placement: str = "centred") -> dict:
+def laser_health(prof: dict, laser, grating, file, exposure_s=None, placement: str = "centred", objective=None,
+                 filter_=None) -> dict:
     """One Si spectrum against the last good state (Nicola, 2026-11-27: the check done by hand three times in a night):
     the laser line against the stored correction's, the counts per second against the last healthy check, Si's FWHM
     against the calibration's (or the performance.resolution baseline). Verdict: healthy | mode_change | multimode |
     low_signal (the worst found first), with the reasons."""
-    out: dict = {"laser_nm": laser, "grating": _f(grating), "time": time.strftime("%Y-%m-%dT%H:%M:%S")}
+    out: dict = {"laser_nm": laser, "grating": _f(grating), "objective": objective, "filter": filter_,
+                 "time": time.strftime("%Y-%m-%dT%H:%M:%S")}
     try:
         sp = spectra.read(file)
         sh, _ = spectra.to_shift(sp["x"], sp["meta"].get("x_unit", "nm"), laser)
@@ -4956,8 +4997,10 @@ def laser_health(prof: dict, laser, grating, file, exposure_s=None, placement: s
     try:
         for ln in reversed((config.home() / LASER_LOG).read_text(encoding="utf-8").splitlines()[-200:]):
             e = json.loads(ln)
+            # the same objective and filter too (2026-11-27: the 01:38 baseline was taken through x10)
             if e.get("verdict") == "healthy" and float(e.get("laser_nm") or 0) == float(laser) and \
-                    _f(e.get("grating")) == _f(grating) and e.get("si_counts_per_s"):
+                    _f(e.get("grating")) == _f(grating) and e.get("si_counts_per_s") and \
+                    str(e.get("objective")) == str(objective) and str(e.get("filter")) == str(filter_):
                 last_ok = e
                 break
     except (OSError, ValueError):
@@ -4979,6 +5022,11 @@ def laser_health(prof: dict, laser, grating, file, exposure_s=None, placement: s
             if q_ < HEALTH_COUNTS_RATIO:
                 verdicts.append("low_signal")
                 reasons.append(f"Si gives {q_:.2f} x the counts of the last healthy check ({last_ok.get('time')})")
+            if q_ < 0.4 or q_ > 2.5:
+                # far from the last healthy check at the same objective and filter
+                out["objective_suspect"] = True
+                reasons.append(f"the objective may not be the one LabSpec reports ({objective}): Si gives {q_:.2f} x "
+                               "the counts of the last healthy check with it and this filter; check the turret")
     if ll and ll.get("ok") and ll.get("fwhm_cm1") and corr.get("laser_line_fwhm_cm1"):
         # the laser line's own width, said separately (it is clipped by the edge filter: a clue, not the verdict)
         out["laser_line_width_ratio"] = round(float(ll["fwhm_cm1"]) / float(corr["laser_line_fwhm_cm1"]), 3)

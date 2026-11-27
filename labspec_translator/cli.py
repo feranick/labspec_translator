@@ -133,7 +133,7 @@ def main(argv=None) -> int:
     s.add_argument("value", nargs="?", help="set: the value (JSON)")
     s = sub.add_parser("references")
     s.add_argument("action", choices=["show", "clear"])
-    s.add_argument("what", nargs="?", choices=["correction", "background", "spot", "learned"])
+    s.add_argument("what", nargs="?", choices=["correction", "background", "spot", "learned", "laser_log"])
     s.add_argument("name", nargs="?")
     s.add_argument("field", nargs="?", help="learned: zero_drift | first_landing | laser_line_sd | zero_creep | "
                                             "window_zero | moved_sd | still_sd (all when left out)")

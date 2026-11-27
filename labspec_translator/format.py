@@ -36,7 +36,7 @@ ACQ_KEYS = {"range_cm1", "center_cm1", "exposure_s", "accumulations", "auto_expo
             "range_placement"}
 AE_KEYS = {"target_counts", "min_s", "max_s", "test_s"}
 FOCUS_KEYS = {"autofocus", "every", "dz_um", "scan", "camera"}
-CAMERA_KEYS = {"range_um", "step_um", "settle_s"}
+CAMERA_KEYS = {"range_um", "step_um", "settle_s", "roi"}
 MAP_KEYS = {"x_um", "y_um", "z_um", "snake", "engine", "swift", "live_band"}
 SERIES_KEYS = {"count", "interval_s"}
 PROCESS_KEYS = {"baseline", "peaks", "auto_peaks", "bands", "laser_check"}
@@ -959,6 +959,12 @@ def _validate_camera(f: dict, prof: dict, errors: list):
             v = cm.get(k)
             if v is not None and (not _num(v) or not lo <= v <= hi):
                 errors.append(f"focus.camera.{k}: between {lo:g} and {hi:g}")
+        roi = cm.get("roi")
+        if roi is not None and roi != "auto" and not (
+                isinstance(roi, list) and len(roi) == 4 and all(_num(v) and 0 <= v <= 1 for v in roi)
+                and roi[0] < roi[2] and roi[1] < roi[3]):
+            errors.append("focus.camera.roi: 'auto' (the most structured part of the frame) or [x0, y0, x1, y1] as "
+                          "fractions of the frame (0-1, from the top left), e.g. [0, 0.75, 1, 1] for the bottom strip")
     if f.get("autofocus") == "camera" and not plan.into_sign(prof)[1]:
         errors.append("focus.autofocus 'camera': needs stage.z_into_sample (which Z direction approaches the "
                       "objective: TESTING T3.17)")

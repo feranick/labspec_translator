@@ -2284,6 +2284,24 @@ def references_clear(what: str, name: str | None = None, field: str | None = Non
         return {"deleted": name}
     if what == "spot":
         return SP.forget()
+    if what == "laser_log":
+        # the laser checks' history (their counts baselines), all or for one objective (2026-11-27: the 01:38
+        # baseline was x10)
+        p_ = config.home() / runner.LASER_LOG
+        if not p_.exists():
+            return {"cleared": 0}
+        keep, gone = [], 0
+        for ln in p_.read_text(encoding="utf-8").splitlines():
+            try:
+                e_ = json.loads(ln)
+            except ValueError:
+                continue
+            if name is None or str(e_.get("objective")) == name:
+                gone += 1
+            else:
+                keep.append(ln)
+        p_.write_text("".join(k_ + "\n" for k_ in keep), encoding="utf-8")
+        return {"cleared": gone, "objective": name}
     if what == "learned":
         from . import store as ST
         if not name:

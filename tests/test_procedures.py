@@ -2786,3 +2786,34 @@ def test_calibration_in_multimode_says_laser_not_alignment():
     assert not any("alignment, focus or slit" in w for w in c["warnings"])
     assert c["calibration"]["stored_as"].startswith("nothing stored")
     xcal.clear()
+
+
+
+def test_objective_plausibility_camera_roi_and_laser_log_by_objective():
+    """2026-11-27: x10 was in place while LabSpec said x100 for part of the tests. A flat Raman focus scan at 'x100',
+    and counts far from the last healthy check with the same objective and filter, flag it; the camera autofocus
+    takes a region; the laser log is matched and cleared by objective."""
+    import labspec_translator.runner as R
+    # the camera region
+    bdir = config.active_bridge_dir()
+    S.ensure(bdir)
+    _set_z_direction("+")
+    (bdir / "sim_defocus").write_text("3.0")
+    z0 = float(api.instrument("status")["status"]["z_um"])
+    for roi in ([0.25, 0.5, 0.5, 0.75], "auto"):            # a structured part of the simulator's frame
+        st = {"kind": "focus", "sample": {"name": "Si"}, "setup": dict(SETUP),
+              "focus": {"autofocus": "camera", "camera": {"roi": roi}}}
+        assert F.validate({"f": st})["f"]["ok"], F.validate({"f": st})["f"]["errors"]
+        f = run_inline({"f": st})["studies"]["f"]["focus"]
+        assert f["found"] and f["roi"] and f["z_um"] == pytest.approx(z0 + 3.0, abs=0.8), f
+        run_inline({"m": {"kind": "move", "sample": {"name": "Si"}, "move": {"dz_um": z0 - f["z_um"], "stay": True}}})
+    (bdir / "sim_defocus").unlink()
+    bad = dict(st, focus={"autofocus": "camera", "camera": {"roi": [0.5, 0.2, 0.1, 1]}})
+    assert any("focus.camera.roi" in e for e in F.validate({"f": bad})["f"]["errors"])
+    # the laser log: by objective and filter, cleared by objective
+    log_ = config.home() / R.LASER_LOG
+    log_.parent.mkdir(parents=True, exist_ok=True)
+    log_.write_text(json.dumps({"verdict": "healthy", "laser_nm": 532, "grating": 1200, "objective": "x10",
+                                "filter": "10%", "si_counts_per_s": 50.0, "time": "t"}) + "\n")
+    r = api.references_clear("laser_log", "x10")
+    assert r["cleared"] == 1 and log_.read_text().strip() == ""
