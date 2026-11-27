@@ -2694,3 +2694,29 @@ def test_calibration_after_the_laser_line_moved_is_stored_with_median_statistics
     assert "zero_drift_cm1_per_h" not in e and "zero_drift_history" not in e, e
     xcal.clear()
     store.write("spectro_repeatability.json", {})
+
+
+def test_calibration_searches_the_reference_line_after_a_laser_mode_change():
+    """T9.23 run 2 (2026-11-27 00:10, hold on): the laser line -14.0 against -4.6 and Si at ~510, outside its fit
+    window: "the fit sits at the edge". The reference line is now searched where the laser line's move puts it, and
+    the mode change is named; whatever the outcome, stored_as says what happened."""
+    from labspec_translator import xcal, store
+    xcal.clear()
+    store.write("xcal_pending.json", {})
+    bdir = config.active_bridge_dir()
+    S.ensure(bdir)
+    (bdir / "sim_laser_line").write_text("1")
+    cal = {"kind": "calibration", "sample": {"name": "Si"}, "setup": dict(SETUP),
+           "acquire": {"center_cm1": 250, "exposure_s": 1}, "calibration": {"adjust": "ls6t", "repeats": 3},
+           "video": {"before": False}}
+    run_inline({"c": cal})
+    (bdir / "sim_xshift").write_text("-20.0,1.0")         # the whole axis 20 cm-1 low: Si at ~500.7
+    c = run_inline({"c": cal})["studies"]["c"]
+    (bdir / "sim_xshift").unlink()
+    (bdir / "sim_laser_line").unlink()
+    assert c["checks"].get("laser_mode_change_cm1") == pytest.approx(-20.0, abs=0.5), c["checks"].get("laser_mode_change_cm1")
+    assert any("laser mode change" in w for w in c["warnings"])
+    assert c["peaks_by_name"]["Si"]["position_cm1"] == pytest.approx(500.7, abs=0.5)
+    assert c["calibration"]["stored_as"].startswith("nothing stored"), c["calibration"]["stored_as"]   # a jump waits
+    xcal.clear()
+    store.write("xcal_pending.json", {})

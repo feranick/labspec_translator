@@ -498,6 +498,10 @@ def status(request: str, wait_s: float = 0) -> dict:
               "shutter_hold_released", "trace", "profile_problems"):
         if st.get(k) is not None:
             out[k] = st[k]
+    if not out["done"] and not pending and names and st.get("state") == "running":
+        # every study has its result; the request is still closing (the shutter, the return to the start spot,
+        # LabSpec's configuration): said, not a silent 'running' (T9.23 run 2)
+        out["stage"] = "finishing: the studies are done; the request is closing (shutter, start spot)"
     if wt:
         out["next"] = ("waiting for the operator's go-ahead in LabSpec (a person at the instrument answers the "
                        "question there; LS6T_CONFIRM sets when ls6t asks): tell the user, then call study_status "

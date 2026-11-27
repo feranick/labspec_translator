@@ -1801,6 +1801,15 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
         result["why"] = stop_exc.why if stop_exc else "no spectrum was measured"
     if result.get("calibration"):
         store_pending(result["calibration"], warnings, unreliable, prof)
+        cr_ = result["calibration"]
+        if cr_.get("adjust") == "ls6t" and not cr_.get("stored_as"):
+            # said in every case (T9.23 run 2: not judged, no stored_as at all)
+            from . import xcal as _xc
+            cur_ = (_xc.get(laser, _f(after.get("grating")), cr_.get("stored_correction", {}).get("centre_nm"))
+                    if laser else None)
+            cr_["stored_as"] = ("nothing stored" + (f": {cr_['outcome']}" if cr_.get("outcome") else "")
+                                + ("; the correction in use stays" + (f" ({cur_.get('time')})" if cur_ else "")
+                                   if cur_ else "; no correction is in use for this laser and grating"))
         result["reliable"] = bool(per_point) and not unreliable     # a jump waiting for confirmation
         if (checks.get("calibration") or {}).get("outcome"):
             checks["calibration"]["outcome"] = result["calibration"].get("outcome")
@@ -4245,6 +4254,16 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
             y_counts = y
         sat = spectra.saturation(y_counts, fs, frac)
         ll = laser_line_fit(shift, y)
+        proc_pt = auto_proc
+        if kind == "calibration" and ll and ll.get("ok") and ll_ref is not None and process.get("peaks"):
+            # the laser changed mode (T9.23 run 2: the line -14.0 against -4.6, Si at 510.3 outside a +-15 window):
+            # the reference lines searched where the move puts them, and the change named
+            mv_ = float(ll["position_cm1"]) - float(ll_ref)
+            half_ = min(float(p_.get("window_cm1", 40.0)) for p_ in process["peaks"]) / 2.0
+            if abs(mv_) > half_:
+                proc_pt = dict(auto_proc, peaks=[dict(p_, near_cm1=float(p_["near_cm1"]) + mv_)
+                                                 for p_ in process["peaks"]])
+                rec["searched_shifted_cm1"] = round(mv_, 2)
         if ll:
             rec["laser_line"] = ll
             if ll_ref is None and ll.get("ok") and rec["point"] not in excluded and rec["point"] not in ll_bad:
@@ -4277,7 +4296,7 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
                                 "spectrum")
         if crop is not None:
             shift, y = np.asarray(shift)[crop], np.asarray(y)[crop]
-        a = spectra.analyze(shift, y, auto_proc, min_snr, prof["checks"].get("detect_snr", 5.0),
+        a = spectra.analyze(shift, y, proc_pt, min_snr, prof["checks"].get("detect_snr", 5.0),
                             float(prof["detector"].get("e_per_count") or 1.0))
         _spikes_where_meaningful(a, laser, grating, ll)
         if ext_range and rec["point"] == per_point[0]["point"]:
@@ -4624,6 +4643,12 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
                 warnings.append(msg + "; the calibration's repeats judge it (calibration.repeats)")
             else:
                 unreliable.append(msg + "; use acquire.laser_reference 'correct' with the laser line in the window")
+    shifted_ = [r_["searched_shifted_cm1"] for r_ in per_point if r_.get("searched_shifted_cm1") is not None]
+    if shifted_:
+        warnings.append(f"laser mode change: the laser line moved {float(np.median(shifted_)):+.1f} cm-1 since the "
+                        "stored calibration, so the reference line was searched there "
+                        f"({len(shifted_)} spectra); this calibration measures the zero in the new mode")
+        checks["laser_mode_change_cm1"] = round(float(np.median(shifted_)), 2)
     # the laser running multimode: the calibration's reference line (Si) broader than at the calibration, with nothing
     # moved (T9.22 C, 600, shutter held: Si 7.56 -> 11.39 cm-1 wide and Gaussian, eta 0.69 -> 0.03, 2.5 cm-1 high)
     if corr and kind != "calibration":
@@ -5523,6 +5548,21 @@ def _calibration_result(study, prof, rec, ref_lines, laser, grating, rng, reques
     # good enough to correct the zero by? 2026-11-23: at 1 %, 1 s the Si line was weak and its fit sat at the edge of
     # the window (525.12 cm-1); ls6t still asked for a -4.42 cm-1 correction; AutoCalibration then found 520.64
     min_snr = float(prof["checks"].get("min_snr", 10.0))
+    if repeats and len(repeats) > 1:
+        # judged on the repeats, not repeat 0 (T9.23 run 2: the reason, FWHM 15.33 and SNR 31.42 came from the
+        # dropped outlier): each line's median SNR and FWHM, and "at the edge" only if most repeats say so
+        for i_, l_ in enumerate(lines):
+            pks_ = [r_["peaks"][i_] for r_ in repeats if len(r_.get("peaks") or []) > i_ and r_["peaks"][i_].get("ok")]
+            if not pks_:
+                continue
+            for f_ in ("snr", "fwhm_cm1"):
+                v_ = [float(p_[f_]) for p_ in pks_ if p_.get(f_) is not None]
+                if v_:
+                    l_[f_] = round(float(np.median(v_)), 4)
+            edge_n = sum("edge" in str(p_.get("warning") or "") for p_ in pks_)
+            l_["warning"] = ("the fitted peak sits at the edge of its window in most repeats" if edge_n * 2 > len(pks_)
+                             else None)
+        ok = [l for l in lines if l.get("measured_cm1") is not None]
     doubts = [f"{l['reference_cm1']:g} cm-1: " + ("the fit sits at the edge of its window" if "edge" in str(l.get("warning") or "")
                                                   else f"signal-to-noise {l['snr']:.0f} (below {min_snr:g})")
               for l in ok if "edge" in str(l.get("warning") or "") or (l.get("snr") is not None and l["snr"] < min_snr)]
