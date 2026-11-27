@@ -107,7 +107,8 @@ def get(laser_nm, grating, centre_nm=None, placement: str | None = None, range_c
 def store(laser_nm, grating, a: float, b: float, reference: str, lines: list, request: str | None = None,
           centre_nm=None, laser_line_cm1=None, laser_line_fwhm_cm1=None, placement: str | None = None,
           pool: str = "per_centre", repeats: dict | None = None, range_cm1=None,
-          cm1_per_px: float | None = None, zero_mode: str | None = None, shutter: str | None = None) -> dict:
+          cm1_per_px: float | None = None, zero_mode: str | None = None, shutter: str | None = None,
+          hole_um=None, objective=None) -> dict:
     """Keeps the correction per window centre (2026-11-24: two Si calibrations a minute apart, in two windows, gave
     -0.72 and -2.40 cm-1: each had overwritten the other)."""
     d = load()
@@ -120,6 +121,10 @@ def store(laser_nm, grating, a: float, b: float, reference: str, lines: list, re
         rec["placement"] = placement          # centred (ls6t placed the window) or labspec (LabSpec placed a range)
     if repeats:
         rec["repeats"] = repeats              # n, mean, sd of the repeats
+    if hole_um is not None:
+        rec["hole_um"] = float(hole_um)       # the confocal hole and the objective it was measured with: Si moves
+    if objective:                             # 0.5-0.7 cm-1 between holes 100 and 300 (Nicola, 2026-11-27)
+        rec["objective"] = str(objective)
     if shutter:
         rec["shutter"] = shutter              # 'held' (the laser settled) or 'auto' (cycling): for the drift learning
     if zero_mode:

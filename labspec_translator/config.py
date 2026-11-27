@@ -50,6 +50,7 @@ def mode() -> str:
 
 def confirm_policy() -> str:
     c = os.environ.get("LS6T_CONFIRM", "request").strip().lower() or "request"
+    c = {"off": "never", "on": "request"}.get(c, c)       # 'off' and 'on' as documented aliases (2026-11-27)
     if c not in CONFIRM:
         raise ValueError(f"LS6T_CONFIRM={c!r}: use one of {', '.join(CONFIRM)}")
     return c

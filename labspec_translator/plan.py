@@ -920,18 +920,20 @@ OPEN_SETTLE_DEFAULT_S = 40.0   # after a fresh shutter opening, a laser marked m
 CAL_OPEN_DEFAULT_S = OPEN_SETTLE_DEFAULT_S
 
 
-CHANGE_SETTLE_DEFAULT_S = 40.0   # after a change of laser, before a calibration (2026-11-25, 532 @ 1200: a creep of
-#                                 +0.17 cm-1 per repeat right after 637.75 -> 532)
+CHANGE_SETTLE_DEFAULT_S = 120.0  # after a change of laser, before a calibration or a laser check (2026-11-25, 532 @
+#                                 1200: a creep of +0.17 cm-1 per repeat right after 637.75 -> 532; 2026-11-27: 40 s
+#                                 was not enough, 532 after 785 crept +1.0 cm-1 over five repeats)
 
 
 def change_settle_s(prof: dict, laser, kind: str | None = None) -> float:
-    """The laser on the sample (a discarded acquisition) after a change to this laser, before the study's spectra:
-    lasers.<k>.change_settle_s, else CHANGE_SETTLE_DEFAULT_S for a calibration, else none."""
+    """The laser settling after a change to this laser, before the study's spectra (with the hold, the shutter held
+    open for it; else a discarded acquisition): lasers.<k>.change_settle_s, else CHANGE_SETTLE_DEFAULT_S for a
+    calibration or a laser check (kind 'laser_check'), else none."""
     lk = laser_key(prof, laser) if laser is not None else None
     L = prof["lasers"][lk] if lk else {}
     if L.get("change_settle_s") is not None:
         return max(0.0, float(L["change_settle_s"]))
-    return CHANGE_SETTLE_DEFAULT_S if kind == "calibration" else 0.0
+    return CHANGE_SETTLE_DEFAULT_S if kind in ("calibration", "laser_check") else 0.0
 
 
 def hold_open_s(prof: dict, laser, kind: str | None = None) -> float:

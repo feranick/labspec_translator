@@ -141,6 +141,35 @@ def warmup_s(study: dict, prof: dict, laser) -> float:
     return float(w or 0)
 
 
+LASER_SELECTED = "laser_selected.json"
+
+
+def note_laser_selected(laser) -> None:
+    """When ls6t changed to this laser (its settling is counted from then, also by a later request)."""
+    try:
+        d = store.read(LASER_SELECTED) or {}
+        d[f"{float(laser):g}"] = time.time()
+        store.write(LASER_SELECTED, d)
+    except (OSError, TypeError, ValueError):
+        pass
+
+
+def select_wait_s(prof: dict, laser, kind, changed_now: bool) -> float:
+    """What is left of the laser's settling after it was selected (plan.change_settle_s): all of it when this request
+    changed to it, the rest when an earlier request did so lately, else none."""
+    if laser is None:
+        return 0.0
+    full = plan.change_settle_s(prof, laser, kind)
+    if full <= 0 or changed_now:
+        return full
+    try:
+        t0 = float((store.read(LASER_SELECTED) or {}).get(f"{float(laser):g}") or 0)
+    except (OSError, TypeError, ValueError):
+        t0 = 0.0
+    left = full - (time.time() - t0) if t0 else 0.0
+    return round(left, 1) if left > 1.0 else 0.0
+
+
 def _warmup(ctx: Ctx, acq: dict, sd: Path, seconds: float) -> dict:
     params = dict(acq, exposure_s=seconds, accumulations=1, out=str(sd / "spectra" / "warmup.txt"),
                   sample="ls6t laser warm-up (discarded)")
@@ -615,10 +644,11 @@ class Ctx:
         """The laser shutter held open (ShutterMode manual) before this study's next acquisition, as HORIBA's
         mapping scripts do for a map; the bridge keeps it only through HOLD_VERBS."""
         w = plan.hold_open_s(self.prof, self.optics[0] if self.optics else None, getattr(self, "study_kind", None))
-        if getattr(self, "laser_changed_now", False):
-            # just changed to this laser: its settling counts too (2026-11-25, 532 after 637.75)
-            w = max(w, plan.change_settle_s(self.prof, self.optics[0] if self.optics else None,
-                                            getattr(self, "study_kind", None)))
+        # this laser selected lately (here or by an earlier request): what is left of its settling counts too
+        # (2026-11-25, 532 after 637.75; 2026-11-27, 532 after 785)
+        w = max(w, select_wait_s(self.prof, self.optics[0] if self.optics else None,
+                                 getattr(self, "settle_kind", None) or getattr(self, "study_kind", None),
+                                 getattr(self, "laser_changed_now", False)))
         r = self.call("shutter_hold", timeout_s=30 + w, state="on", max_s=getattr(self, "hold_max_s", 3600),
                       idle_s=getattr(self, "hold_idle_s", 60), open_wait_s=w, **motor_args(self.prof))
         if not r.get("ok"):
@@ -1041,6 +1071,9 @@ def _setup(name: str, study: dict, ctx: Ctx, warnings: list, unreliable: list, c
     prof = ctx.prof
     kind = study.get("kind", "spectrum")
     before = ctx.call("status", timeout_s=15, **motor_args(prof))
+    rs_ = labspec_restart_note()
+    if rs_ and rs_ not in warnings:
+        warnings.append(rs_)
     readback = []
     for step in plan.setup_steps(study, prof):
         if step["mode"] == "label":
@@ -1144,7 +1177,16 @@ def _setup(name: str, study: dict, ctx: Ctx, warnings: list, unreliable: list, c
 
     # ---- the operator's go-ahead
     policy = config.confirm_policy()
-    if confirm and (policy == "study" or (policy == "request" and not ctx.confirmed)):
+    sf_ = prof.get("safety") or {}
+    # an interlocked enclosure (the laser off whenever a door is open): the go-ahead before the laser fires is
+    # optional (safety.laser_go_ahead false, with safety.interlocked_enclosure true); every other question stays
+    skip_go = bool(sf_.get("interlocked_enclosure")) and sf_.get("laser_go_ahead") is False
+    if skip_go and confirm:
+        checks["go_ahead"] = ("not asked: the enclosure is interlocked (profile safety.interlocked_enclosure, "
+                              "safety.laser_go_ahead false)"
+                              + (f"; its shutter reads '{after.get('safety_shutter')}'"
+                                 if after.get("safety_shutter") not in (None, "") else ""))
+    if confirm and not skip_go and (policy == "study" or (policy == "request" and not ctx.confirmed)):
         obj_q = (f" Objective {after.get('objective')} as LabSpec has it: is that lens on the turret?"
                  if prof.get("manual_objective", True) else f" Objective {after.get('objective')}.")
         what = (f"ls6t is about to expose '{study.get('sample', {}).get('name', name)}' ({kind}, {n_points} "
@@ -1501,6 +1543,10 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
     lb_, la_ = _f(before.get("laser_nm")), _f(after.get("laser_nm"))
     laser_changed = lb_ is not None and la_ is not None and abs(lb_ - la_) > 0.5
     ctx.laser_changed_now = laser_changed
+    ctx.settle_kind = "laser_check" if (kind != "calibration" and (study.get("process") or {}).get("laser_check")) \
+        else kind
+    if laser_changed:
+        note_laser_selected(la_)
     focus = study.get("focus", {})
     af = focus.get("autofocus")
     every = int(focus.get("every", 0) or 0)
@@ -1633,13 +1679,15 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
             # study is always made (with its approach), even when the spectrometer already reads the centre
             first_acq = dict(acq, spectro_force=1) if grating_changed else acq
             warmed = False
-            chg_s = plan.change_settle_s(prof, laser, kind) if (k == 0 and laser_changed) else 0.0
+            chg_s = select_wait_s(prof, laser, ctx.settle_kind, laser_changed) if k == 0 else 0.0
             if chg_s > 0 and not ctx.hold_wanted:
                 # the laser on the sample for a while after a change to it, discarded (2026-11-25: 532 @ 1200 crept
                 # +0.17 cm-1 per repeat right after 637.75 -> 532); with the hold, its open wait does it
                 warmup_info = _warmup(ctx, first_acq, sd, max(chg_s, warmup_s(study, prof, laser)))
                 warmed = True
-                warmup_info["why"] = f"after the change of laser ({lb_:g} -> {la_:g} nm): the laser settling"
+                warmup_info["why"] = (f"after the change of laser ({lb_:g} -> {la_:g} nm): the laser settling"
+                                      if laser_changed else "the laser selected lately (by an earlier request): "
+                                                            "the rest of its settling")
             elif k == 0 and warmup_s(study, prof, laser) > 0:
                 warmup_info = _warmup(ctx, first_acq, sd, warmup_s(study, prof, laser))
                 warmed = True
@@ -1721,7 +1769,7 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
                 # measured in a multimode episode): multimode or a weak signal stops the calibration
                 hc_ = laser_health(prof, laser, _f(after.get("grating")), out, acq.get("exposure_s"),
                                    "labspec" if not rng.get("single", True) else "centred",
-                                   after.get("objective"), after.get("filter"))
+                                   after.get("objective"), after.get("filter"), after.get("hole_um"))
                 ctx.laser_health = hc_
                 if hc_["verdict"] in ("multimode", "low_signal"):
                     raise Stop(f"calibration not run: the laser is not healthy ({hc_['verdict']}: "
@@ -1783,7 +1831,7 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
         checks["grating_changed"] = True     # the first landing after it (analyse: the expected uncertainty)
     result = analyse(name, study, per_point, prof, laser, rng, sd, warnings, unreliable, checks,
                      grating=_f(after.get("grating")) or _f(study.get("setup", {}).get("grating")),
-                     request=str(ctx.folder))
+                     request=str(ctx.folder), objective=after.get("objective"), hole=after.get("hole_um"))
     if kind == "calibration" and warmup_info and "grating change" in str(warmup_info.get("why", "")):
         _learn_first_landing(result, warmup_info, laser, _f(after.get("grating")), rng)
     if stop_exc is not None:
@@ -1815,13 +1863,16 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
         result["why"] = stop_exc.why if stop_exc else "no spectrum was measured"
     if (study.get("process") or {}).get("laser_check") and per_point and laser:
         hc_ = laser_health(prof, laser, _f(after.get("grating")), per_point[0].get("file"),
-                           acq.get("exposure_s"), "centred", after.get("objective"), after.get("filter"))
+                           acq.get("exposure_s"), "centred", after.get("objective"), after.get("filter"),
+                           after.get("hole_um"))
         result["laser_health"] = hc_
         if hc_["verdict"] != "healthy":
             warnings.append(f"laser check: {hc_['verdict']} ({'; '.join(hc_['reasons'])})")
     if result.get("calibration"):
-        store_pending(result["calibration"], warnings, unreliable, prof)
+        store_pending(result["calibration"], warnings, unreliable, prof, objective=after.get("objective"),
+                      hole=after.get("hole_um"))
         cr_ = result["calibration"]
+        zw_ = cr_.pop("_zero_mode_would", None)
         if cr_.get("adjust") == "ls6t" and not cr_.get("stored_as"):
             # said in every case (T9.23 run 2: not judged, no stored_as at all)
             from . import xcal as _xc
@@ -1830,6 +1881,16 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
             cr_["stored_as"] = ("nothing stored" + (f": {cr_['outcome']}" if cr_.get("outcome") else "")
                                 + ("; the correction in use stays" + (f" ({cur_.get('time')})" if cur_ else "")
                                    if cur_ else "; no correction is in use for this laser and grating"))
+        if str(cr_.get("stored_as") or "").startswith("nothing stored") or not cr_.get("zero_mode"):
+            # nothing stored: no zero mode in use from it; the one it would have had, or why none (Nicola, 2026-11-27)
+            would_ = cr_.get("zero_mode") or (zw_[0] if zw_ else None)
+            cr_["zero_mode"] = None
+            if would_:
+                cr_["zero_mode_if_stored"] = would_
+                cr_["zero_mode_why"] = f"nothing stored; stored, it would have been {would_}"
+            else:
+                cr_["zero_mode_why"] = (zw_[1] if zw_ and zw_[1] else
+                                        "no correction was measured (the reference line not fitted)")
         result["reliable"] = bool(per_point) and not unreliable     # a jump waiting for confirmation
         if (checks.get("calibration") or {}).get("outcome"):
             checks["calibration"]["outcome"] = result["calibration"].get("outcome")
@@ -1869,8 +1930,45 @@ def _check_abs(prof: dict, axis: str, value: float, what: str):
         raise Stop(f"{what}: stage {axis.upper()} = {value:g} µm is outside the profile's stage limits {lim}", "study")
 
 
+LABSPEC_SESSION = "labspec_session.json"
+
+
+def labspec_restart_note() -> str | None:
+    """LabSpec started again since ls6t last saw it (its start time from Windows): Z then reads from a new zero
+    (Nicola, 2026-11-27: Z read 0 after a restart with the stage still at the focus), so Z positions kept from before
+    may no longer hold. Said until a focus is found in the new session."""
+    try:
+        from .bridge import session_context
+        started = session_context().get("labspec_started")
+    except Exception:  # noqa: BLE001
+        started = None
+    if not started:
+        return None
+    d = store.read(LABSPEC_SESSION) or {}
+    if d.get("started") != started:
+        prev = d.get("started")
+        d = {"started": started, "previous": prev, "focus_found": prev is None}
+        store.write(LABSPEC_SESSION, d)
+    if d.get("focus_found"):
+        return None
+    return (f"LabSpec was restarted ({started}; before: {d.get('previous')}): its Z reads from a new zero, so Z "
+            "positions kept from before (the focus, spot and clearance offsets) may no longer hold; find the focus "
+            "again before relying on them")
+
+
+def _focus_found_this_session() -> None:
+    try:
+        d = store.read(LABSPEC_SESSION) or {}
+        if d.get("started") and not d.get("focus_found"):
+            d["focus_found"] = True
+            store.write(LABSPEC_SESSION, d)
+    except (OSError, ValueError):
+        pass
+
+
 def _focus_here(ctx: Ctx) -> None:
     """The focus was just found here: offsets toward the sample are measured from this spot's focus again."""
+    _focus_found_this_session()
     ctx.focus_stale = False
     s = _stage_now(ctx)
     if s.get("x_um") is not None:
@@ -2944,7 +3042,11 @@ def _record_resolution(result: dict, after: dict, prof: dict, warnings: list, re
     laser = (result.get("instrument") or {}).get("laser_nm")
     grating = _f(after.get("grating"))
     slit = _f(after.get("slit_um"))
-    k = perf.key(laser, grating, slit)
+    # per objective and hole too (Nicola, 2026-11-27: 785 Si 5.44 cm-1 at x100, 8.55 at x10 with the 300 um hole; the
+    # x10 read '1.52 x its first measurement, alignment?' against an x100 baseline)
+    obj_, hole_ = after.get("objective"), _f(after.get("hole_um"))
+    k = perf.key(laser, grating, slit) + (f"@{obj_}" if obj_ not in (None, "") else "") \
+        + (f"@h{hole_:g}" if hole_ is not None else "")
     fw = float(cal["fwhm_cm1"])
     rec = perf.record("resolution", k, {"fwhm_cm1": round(fw, 3), "line_cm1": cal.get("reference_cm1"),
                                         "reference": cal.get("reference")}, request)
@@ -3823,7 +3925,7 @@ def window_centre_used(rng: dict, per_point: list) -> tuple:
 
 
 def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreliable, checks, grating=None,
-            request=None) -> dict:
+            request=None, objective=None, hole=None) -> dict:
     from . import background as BG
     from . import xcal
     kind = study.get("kind", "spectrum")
@@ -3942,11 +4044,22 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
             zs = checks["zero"] = dict(zs, correction_used={**{k: corr.get(k) for k in (
                 "a", "b", "time", "centre_nm", "interpolated_between_nm", "centre_far", "laser_line_cm1", "placement",
                 "range_match", "range_cm1", "pooled", "pooled_from", "repeats", "expected_uncertainty_cm1",
-                "expected_uncertainty_from", "expected_uncertainty_parts", "age_min", "window_distance_nm")
+                "expected_uncertainty_from", "expected_uncertainty_parts", "age_min", "window_distance_nm", "hole_um",
+                "objective")
                 if corr.get(k) is not None}, **({"age_h": round(xcal.age_h(corr), 2)} if xcal.age_h(corr) is not None
                                                  else {})},
                 note="offset_cm1 is this laser and grating's last calibration check (any window); "
                      "correction_used is the one applied to these spectra")
+            diff_ = []
+            if corr.get("hole_um") is not None and _f(hole) is not None and abs(float(corr["hole_um"]) - _f(hole)) > 1:
+                diff_.append(f"the confocal hole {_f(hole):g} um (the calibration's {float(corr['hole_um']):g})")
+            if corr.get("objective") and objective not in (None, "") and str(corr["objective"]) != str(objective):
+                diff_.append(f"the objective {objective} (the calibration's {corr['objective']})")
+            if diff_ and kind != "calibration":
+                # Si moved 0.5-0.7 cm-1 between holes 100 and 300 (Nicola, 2026-11-27)
+                zs["setup_differs"] = diff_
+                warnings.append("this spectrum's set-up differs from its calibration's: " + "; ".join(diff_)
+                                + ": the line's position can differ by ~0.5 cm-1 or more; calibrate with this set-up")
         tol0 = float(prof["checks"]["si_tol_cm1"])
         if not corr and zs.get("offset_cm1") is not None and abs(float(zs["offset_cm1"])) > tol0:
             warnings.append(f"the last calibration check for {combo(laser, grating)} ({zs['time']}) found the "
@@ -4720,7 +4833,9 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
                             "the reference line was searched where that puts it")
     # the laser running multimode: the calibration's reference line (Si) broader than at the calibration, with nothing
     # moved (T9.22 C, 600, shutter held: Si 7.56 -> 11.39 cm-1 wide and Gaussian, eta 0.69 -> 0.03, 2.5 cm-1 high)
-    w_ref, w_from, _ = si_width_reference(laser, grating, placement) if laser else (None, None, None)
+    w_ref, w_from, _ = (si_width_reference(laser, grating, placement, objective, hole) if laser else (None, None, None))
+    if not w_ref and w_from:
+        checks["linewidth"] = {"skipped": w_from}
     if w_ref:
         refs_w = [(520.7, float(w_ref))]
         broad_pts, ratios, etas = [], [], []
@@ -4754,7 +4869,8 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
                                   "calibration" + (" and Gaussian in shape" if gauss_ else "")
                                   + (f", with the laser line moved {mode_change_:+.1f} cm-1" if mode_change_ else "")
                                   + ": the laser is probably running multimode, and its positions are shifted; wait "
-                                    "a few minutes or power-cycle the laser, then calibrate again")
+                                    "a few minutes or power-cycle the laser, then calibrate again"
+                                  + hole_fill_note(hole))
     cu_f = (checks.get("zero") or {}).get("correction_used")
     if isinstance(cu_f, dict) and (cu_f.get("expected_uncertainty_parts") or {}).get("first_landing") and \
             any(p_.get("applied") for p_ in plateau_report):
@@ -4801,7 +4917,9 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
             if zc_.get("significant"):
                 warnings.append(f"the {zc_['peak']} line crept {zc_['cm1_per_min']:+.2f} cm-1 per minute over the series "
                                 f"({zc_['total_cm1']:+.2f} in {zc_['minutes']:.1f} min) with the laser line "
-                                + ("steady: the spectrometer's zero creeping, not the laser"
+                                + (f"steady, but {zc_['not_the_spectrometer']}" if zc_.get("laser_line_steady")
+                                   and zc_.get("width_changed") else
+                                   "steady: the spectrometer's zero creeping, not the laser"
                                    if zc_.get("laser_line_steady") else
                                    f"moving {zc_['laser_line_cm1_per_min']:+.2f} per minute")
                                 + (" (learned for the expected uncertainty of later spectra)"
@@ -4931,12 +5049,63 @@ HEALTH_MOVE_MIN_CM1 = 3.0      # the laser line this far from the calibration's 
 LASER_LOG = "laser_log.jsonl"
 
 
-def si_width_reference(laser, grating, placement: str = "centred") -> tuple:
-    """Si's FWHM at the last stored calibration of this laser and grating (any window), else the resolution
-    baseline: the one reference for the multimode tests, in the laser check and in every study (01:38: the check said
-    healthy at 1.05 x while the study, against an older correction, said 1.34 x)."""
+SI_WIDTH = "si_width.json"
+
+
+def _sw_key(laser, grating, objective, hole=None) -> str:
+    h_ = _f(hole)
+    return f"{float(laser):g}@{_f(grating) or 0:g}@{objective}" + (f"@h{h_:g}" if h_ is not None else "")
+
+
+def note_si_width(laser, grating, objective, fwhm, eta=None, source: str = "", hole=None) -> None:
+    """Si's FWHM with this laser, grating and objective, from a good state (a stored calibration, a healthy laser
+    check): the reference for the multimode tests at that objective."""
+    if objective in (None, "") or not fwhm:
+        return
+    try:
+        d = store.read(SI_WIDTH) or {}
+        d[_sw_key(laser, grating, objective, hole)] = {"fwhm_cm1": round(float(fwhm), 3),
+                                                 **({"eta": round(float(eta), 3)} if eta is not None else {}),
+                                                 "from": source, "time": time.strftime("%Y-%m-%dT%H:%M:%S")}
+        store.write(SI_WIDTH, d)
+    except (OSError, TypeError, ValueError):
+        pass
+
+
+def si_width_reference(laser, grating, placement: str = "centred", objective=None, hole=None) -> tuple:
+    """Si's FWHM at the last good state of this laser and grating: the one reference for the multimode tests, in the
+    laser check and in every study (01:38: the check said healthy at 1.05 x while the study, against an older
+    correction, said 1.34 x). Per objective (Nicola, 2026-11-27: 785 Si 5.44 cm-1 at x100 against 8.55 at x10, with
+    the 300 um hole, the x10's larger spot broadening the line): with the objective known, only a width measured
+    with it (a stored calibration or a healthy laser check, from .27.7; before, the healthy checks in the laser log);
+    none -> (None, why, correction) and the width test is skipped. Without the objective: the last calibration's
+    width, else the resolution baseline. Returns (width, where from, the correction in use)."""
     from . import xcal, perf
     c_ = xcal.get(laser, grating, None, placement) or {}
+    if objective not in (None, ""):
+        # and per confocal hole (Nicola, 2026-11-27, 532 x100: Si 7.13 cm-1 at hole 100, 10.59 at 300, 10.81 at 500)
+        h_ = _f(hole)
+        with_ = f"{objective}" + (f", hole {h_:g} um" if h_ is not None else "")
+        e_ = (store.read(SI_WIDTH) or {}).get(_sw_key(laser, grating, objective, hole))
+        best = (e_["time"], float(e_["fwhm_cm1"]), f"{e_.get('from') or 'a good state'} with {with_} "
+                f"({e_['time']})") if e_ and e_.get("fwhm_cm1") else None
+        if best is None:
+            # the laser log's healthy checks with this objective (kept before the store existed)
+            try:
+                for ln in reversed((config.home() / LASER_LOG).read_text(encoding="utf-8").splitlines()[-300:]):
+                    g_ = json.loads(ln)
+                    if g_.get("verdict") == "healthy" and g_.get("si_fwhm_cm1") and \
+                            float(g_.get("laser_nm") or 0) == float(laser) and _f(g_.get("grating")) == _f(grating) \
+                            and str(g_.get("objective")) == str(objective) and _f(g_.get("hole_um")) == h_ and \
+                            (g_.get("si_eta") is None or float(g_["si_eta"]) >= GAUSS_ETA):
+                        best = (g_.get("time"), float(g_["si_fwhm_cm1"]),
+                                f"the healthy laser check with {with_} ({g_.get('time')})")
+                        break
+            except (OSError, ValueError, TypeError):
+                pass
+        if best:
+            return best[1], best[2], c_
+        return None, f"no Si width measured with {with_} yet for this laser and grating", c_
     w_ = next((float(l_["fwhm_cm1"]) for l_ in (c_.get("lines") or [])
                if l_.get("fwhm_cm1") and abs(float(l_.get("reference_cm1") or 0) - 520.7) < 20), None)
     if w_:
@@ -4950,14 +5119,30 @@ def si_width_reference(laser, grating, placement: str = "centred") -> tuple:
     return None, None, c_
 
 
+def hole_fill_note(hole) -> str:
+    """A broad (even Gaussian) Si is not only multimode: at a large confocal hole its width follows how the spot fills
+    the hole (Nicola, 2026-11-27, 532 x100: 7.13 cm-1 eta 0.25 at hole 100, 10.59 eta 0.00 at 300; 638 +1.15 at 300
+    with the laser line unchanged)."""
+    h_ = _f(hole)
+    if h_ is not None and h_ <= 150:
+        return ""
+    return (f"; or the spot filling the confocal hole differently (hole {h_:g} um: focus, pointing): check at hole "
+            "100 before taking it for the laser" if h_ is not None else
+            "; or the spot filling the confocal hole differently (focus, pointing): check at hole 100 before taking "
+            "it for the laser")
+
+
+GAUSS_ETA = 0.15       # Si with a Lorentzian share under this: Gaussian, the multimode shape (never a width reference)
+
+
 def laser_health(prof: dict, laser, grating, file, exposure_s=None, placement: str = "centred", objective=None,
-                 filter_=None) -> dict:
+                 filter_=None, hole=None) -> dict:
     """One Si spectrum against the last good state (Nicola, 2026-11-27: the check done by hand three times in a night):
     the laser line against the stored correction's, the counts per second against the last healthy check, Si's FWHM
     against the calibration's (or the performance.resolution baseline). Verdict: healthy | mode_change | multimode |
     low_signal (the worst found first), with the reasons."""
     out: dict = {"laser_nm": laser, "grating": _f(grating), "objective": objective, "filter": filter_,
-                 "time": time.strftime("%Y-%m-%dT%H:%M:%S")}
+                 "hole_um": _f(hole), "time": time.strftime("%Y-%m-%dT%H:%M:%S")}
     try:
         sp = spectra.read(file)
         sh, _ = spectra.to_shift(sp["x"], sp["meta"].get("x_unit", "nm"), laser)
@@ -4965,7 +5150,7 @@ def laser_health(prof: dict, laser, grating, file, exposure_s=None, placement: s
         return dict(out, verdict="unknown", reasons=[f"the spectrum could not be read: {exc}"])
     xs, ys = spectra.sort_xy(sh, sp["y"])
     ys = np.asarray(ys, float)
-    ref_w, ref_from, corr = si_width_reference(laser, grating, placement)
+    ref_w, ref_from, corr = si_width_reference(laser, grating, placement, objective, hole)
     ll = laser_line_fit(xs, ys)
     move = None
     if ll and ll.get("ok"):
@@ -5011,11 +5196,14 @@ def laser_health(prof: dict, laser, grating, file, exposure_s=None, placement: s
     else:
         if ref_w:
             out["width_ratio"] = round(float(si["fwhm_cm1"]) / ref_w, 3)
+        else:
+            out["width_check"] = f"skipped: {ref_from or 'no Si width reference'}"
         if ref_w and float(si["fwhm_cm1"]) > HEALTH_WIDTH_RATIO * ref_w:
             verdicts.append("multimode")
             reasons.append(f"Si is {float(si['fwhm_cm1']) / ref_w:.2f} x as wide as at {ref_from} "
                            f"({float(si['fwhm_cm1']):.2f} vs {ref_w:.2f} cm-1)"
-                           + (", Gaussian in shape" if si.get("eta") is not None and float(si["eta"]) < 0.15 else ""))
+                           + (", Gaussian in shape" if si.get("eta") is not None and float(si["eta"]) < 0.15 else "")
+                           + hole_fill_note(hole))
         if last_ok and out.get("si_counts_per_s") is not None:
             q_ = float(out["si_counts_per_s"]) / float(last_ok["si_counts_per_s"])
             out["counts_ratio"] = round(q_, 3)
@@ -5047,6 +5235,10 @@ def laser_health(prof: dict, laser, grating, file, exposure_s=None, placement: s
     out["compared_with"] = {"correction": corr.get("time"), "si_fwhm_reference_cm1": ref_w,
                             "si_fwhm_reference_from": ref_from, "last_healthy": (last_ok or {}).get("time")}
     out["counts_baseline"] = (out["verdict"] == "healthy" and out.get("si_counts_per_s") is not None)
+    if out["verdict"] == "healthy" and si.get("ok") and (si.get("eta") is None or float(si["eta"]) >= GAUSS_ETA):
+        # the width reference at this objective (a Gaussian Si, the multimode shape, never becomes one)
+        note_si_width(laser, grating, objective, si["fwhm_cm1"], si.get("eta"), "a healthy laser check", hole)
+        out["si_width_reference_set"] = objective not in (None, "")
     try:
         p_ = config.home() / LASER_LOG
         p_.parent.mkdir(parents=True, exist_ok=True)
@@ -5284,6 +5476,9 @@ def _anchor_repeats(repeats: list, offs: list, lines: list, cal: dict, b: float)
             "laser_line_cm1": float(np.median([v for v in lls if v is not None]))}
 
 
+WIDTH_CHANGE_FRAC = 0.08    # a line's width trending by more than this fraction over a series: the sample changed
+
+
 def zero_creep(per_point: list, excluded: dict, laser, grating, placement: str) -> dict | None:
     """A series' slow zero creep (Nicola, 2026-11-25, 637.75 @ 1200: Si 521.07 -> 521.48 over minutes with the laser
     line steady): the first fitted peak's slope against time, with its t value, and the laser line's. Significant
@@ -5298,7 +5493,8 @@ def zero_creep(per_point: list, excluded: dict, laser, grating, placement: str) 
             continue
         ll = r_.get("laser_line") or {}
         rows.append((float(r_["t"]) / 60.0, float(pk["position_cm1"]), pk.get("name") or "peak",
-                     float(ll["position_cm1"]) if ll.get("ok") else None))
+                     float(ll["position_cm1"]) if ll.get("ok") else None,
+                     float(pk["fwhm_cm1"]) if pk.get("fwhm_cm1") else None))
     if len(rows) < 4:
         return None
     t = np.array([r_[0] for r_ in rows])
@@ -5322,11 +5518,29 @@ def zero_creep(per_point: list, excluded: dict, laser, grating, placement: str) 
         out["laser_line_cm1_per_min"] = round(ls_, 4)
         out["laser_line_steady"] = abs(ls_) < 0.3 * abs(slope) if slope else True
     out["significant"] = bool(tval >= 3.0 and abs(slope * span) >= 0.3)
+    ws_ = [(r_[0], r_[4]) for r_ in rows if r_[4] is not None]
+    if len(ws_) >= 4:
+        # the line's width over the series: the spectrometer's zero moving does not change it; the sample does (Nicola,
+        # 2026-11-27, 532 at x100: Si +0.48 in 4.8 min while it narrowed 7.96 -> 6.57 cm-1 and the counts fell ~18 %,
+        # the laser line steady: heating or focus, not the spectrometer)
+        wt = np.array([v[0] for v in ws_])
+        wy = np.array([v[1] for v in ws_])
+        kw_, cw_ = np.polyfit(wt, wy, 1)
+        rw_ = wy - (kw_ * wt + cw_)
+        sew_ = float(np.sqrt(np.sum(rw_ ** 2) / max(1, len(wy) - 2) / np.sum((wt - wt.mean()) ** 2)))
+        dw_ = float(kw_) * span
+        out["width_change_cm1"] = round(dw_, 3)
+        if abs(dw_) > WIDTH_CHANGE_FRAC * float(np.median(wy)) and abs(kw_) > 3.0 * max(sew_, 1e-9):
+            out["width_changed"] = True
+            out["not_the_spectrometer"] = (f"the {rows[0][2]} line's width changed {dw_:+.2f} cm-1 over the series: the "
+                                           "sample changed (laser heating or focus), not the spectrometer's zero; "
+                                           "not learned as a zero creep")
     # every series of a few minutes counts (Nicola, 2026-11-25: ~0.1 cm-1/min once, -0.002 over 20 min an hour
     # later): a rate is applied only when it recurs, in 2 of the last 3 series
     if span >= 3.0:
         learned = learn_zero_creep(laser, grating, placement, abs(slope),
-                                   bool(out["significant"] and out.get("laser_line_steady")))
+                                   bool(out["significant"] and out.get("laser_line_steady")
+                                        and not out.get("width_changed")))
         if learned is not None:
             out["learned"] = learned
     return out
@@ -5470,6 +5684,35 @@ def learn_zero_creep(laser, grating, placement: str, rate: float, significant: b
     return e.get("zero_creep_cm1_per_min")
 
 
+CREEP_T = 3.0     # the laser line's slope over its standard error: a creep, not scatter
+
+
+def _common_creep(lls: list, offs: list, thr: float) -> dict | None:
+    """The laser line and the Raman lines drifting together across the repeats by more than the landing threshold
+    (Nicola, 2026-11-27, 532 just selected: the laser line -7.78, -7.87, -7.34, -6.94, -6.84, Si +0.83 with it; every
+    step under the 0.572 threshold, so nothing was flagged, SD 0.35 and 'settled'). A steady creep counts at least as
+    much as one step: the laser is not settled. Fitted lines over the repeat number; None when there is no such
+    creep."""
+    pts = [(i, float(l_), float(o)) for i, (l_, o) in enumerate(zip(lls, offs)) if l_ is not None and o is not None]
+    if len(pts) < 4:
+        return None
+    t_ = np.array([p[0] for p in pts], float)
+    ll_ = np.array([p[1] for p in pts], float)
+    pk_ = np.array([p[2] for p in pts], float)
+    k_ll, c_ll = np.polyfit(t_, ll_, 1)
+    k_pk, _ = np.polyfit(t_, pk_, 1)
+    res_ = ll_ - (k_ll * t_ + c_ll)
+    se_ = math.sqrt(float(np.sum(res_ ** 2)) / (len(pts) - 2) / float(np.sum((t_ - t_.mean()) ** 2)))
+    span = float(t_[-1] - t_[0])
+    d_ll, d_pk = float(k_ll) * span, float(k_pk) * span
+    if abs(d_ll) <= thr or abs(k_ll) <= CREEP_T * max(se_, 1e-6):
+        return None
+    if d_ll * d_pk <= 0 or not 0.5 * abs(d_ll) <= abs(d_pk) <= 1.5 * abs(d_ll):
+        return None          # the Raman lines did not go with it: not the laser (nor the spectrometer) moving
+    return {"laser_line_cm1": round(d_ll, 3), "raman_cm1": round(d_pk, 3), "over_repeats": len(pts),
+            "threshold_cm1": round(float(thr), 3), "laser_line_t": round(abs(float(k_ll)) / max(se_, 1e-6), 1)}
+
+
 def _landing_steps(repeats: list, offs: list, prof: dict, laser, grating, placement: str,
                    min_thr: float = 0.0) -> dict:
     """Calibration repeats with a landing step: a laser line off the repeats' median by more than the landing
@@ -5514,7 +5757,11 @@ def _landing_steps(repeats: list, offs: list, prof: dict, laser, grating, placem
             steps.append({"repeat": i + 1, "laser_line_step_cm1": round(d, 3), "raman_moved_cm1": round(dpk, 3),
                           "followed": False, "why": "the Raman lines did not move with it"})
     q_sd = float(np.std(quiet, ddof=1)) if len(quiet) >= 3 else None
+    creep = _common_creep(lls, offs, t_)
+    if creep:
+        q_sd = None             # a creeping line's scatter is not the landing scatter: nothing learned from it
     return {"offs_eff": eff, "steps": steps, "laser_line_median_cm1": round(med, 3), "threshold": thr,
+            **({"creep": creep} if creep else {}),
             # the scatter of the repeats without steps (what a later threshold may learn), not the one used above
             "laser_line_sd_quiet_cm1": round(q_sd, 4) if q_sd is not None else None, "n_quiet": len(quiet),
             "ll_sd": round(q_sd, 4) if q_sd is not None else None}
@@ -5662,6 +5909,14 @@ def _calibration_result(study, prof, rec, ref_lines, laser, grating, rng, reques
                 rep_info["absolute_outliers"] = stt_abs["outliers"]
             elif lst is not None:
                 rep_info["landing_steps"] = {k_: v_ for k_, v_ in lst.items() if k_ not in ("offs_eff", "ll_sd")}
+                if lst.get("creep"):
+                    # the laser line and the Raman lines crept together past the threshold: not settled, as a step
+                    # of that size would be (Nicola, 2026-11-27)
+                    rep_info.update(settled=False, drifting=True, laser_creep=lst["creep"])
+                    warnings.append(f"the laser line crept {lst['creep']['laser_line_cm1']:+.2f} cm-1 over the "
+                                    f"repeats and the Raman lines {lst['creep']['raman_cm1']:+.2f} with it (over the "
+                                    f"{lst['creep']['threshold_cm1']:g} cm-1 landing threshold): the laser was not "
+                                    "settled")
                 if lst.get("ll_sd") is not None and lst.get("n_quiet", 0) >= 3 and \
                         "this calibration's repeats" not in str((lst.get("threshold") or {}).get("from")):
                     # learned per laser@grating, but never from repeats that set their own threshold (a step left
@@ -5693,7 +5948,7 @@ def _calibration_result(study, prof, rec, ref_lines, laser, grating, rng, reques
             sd_succ = (float(np.sqrt(np.mean(np.diff(seq_) ** 2) / 2.0)) if len(seq_) >= 3 else None)
             if sd_succ is not None:
                 rep_info["sd_successive_cm1"] = round(sd_succ, 3)
-            if stt_abs["settled"] and len(stt_abs["kept"]) >= 3:
+            if stt_abs["settled"] and not rep_info.get("laser_creep") and len(stt_abs["kept"]) >= 3:
                 sd = float(np.std(stt_abs["kept"], ddof=1)) if anc else sd       # the landing scatter itself
                 if sd_succ is not None and sd_succ < sd:
                     sd = sd_succ
@@ -5813,6 +6068,12 @@ def _calibration_result(study, prof, rec, ref_lines, laser, grating, rng, reques
         res["outcome"] = (f"out of tolerance ({res['offset_cm1']:+.2f} cm-1, tolerance {tol:g}): correct LabSpec's "
                           f"zero for {combo(laser, grating)}")
     checks["calibration"]["outcome"] = res["outcome"]
+    # the zero mode a stored correction has (or would have had): said even when nothing is stored (Nicola, 2026-11-27)
+    if res["adjust"] == "ls6t":
+        anc_w = ((rep_info or {}).get("anchored_to_laser_line") or {}).get("laser_line_cm1")
+        res["_zero_mode_would"] = ("anchored" if anc_w is not None else "absolute", None)
+    else:
+        res["_zero_mode_would"] = (None, "calibration.adjust is 'labspec': ls6t keeps no correction of its own")
     unsettled = bool(rep_info and not rep_info.get("settled", True))
     if unsettled and res["adjust"] == "ls6t" and res["trusted"]:
         # 2026-11-25, 637.75 @ 600: repeats 7.78, 7.13, -0.95, -0.51, -0.00 (a hop of -7.9 cm-1 after the hold was
@@ -5820,6 +6081,9 @@ def _calibration_result(study, prof, rec, ref_lines, laser, grating, rng, reques
         # stored, the correction in use stays, and the calibration is not to be trusted
         what = (f"jump by {rep_info['step']['size_cm1']:+.2f} cm-1 after repeat {rep_info['step']['after_repeat']}"
                 if rep_info.get("step") else
+                (f"creep with the laser line ({rep_info['laser_creep']['laser_line_cm1']:+.2f} cm-1, the Raman lines "
+                 f"{rep_info['laser_creep']['raman_cm1']:+.2f}: the laser not settled)")
+                if rep_info.get("laser_creep") else
                 f"creep by {rep_info['trend']['slope_cm1_per_repeat']:+.2f} cm-1 per repeat" if rep_info.get("trend")
                 else "do not agree")
         res["stored_as"] = "nothing stored: the repeats did not settle; the correction in use stays"
@@ -5827,9 +6091,15 @@ def _calibration_result(study, prof, rec, ref_lines, laser, grating, rng, reques
                           f"{rep_info['offsets_cm1']}); the correction in use stays")
         checks["calibration"]["outcome"] = res["outcome"]
         res.pop("corrected", None)
-        unreliable.append(f"the repeats {what} (a laser hop or the spectrometer landing elsewhere): no correction "
-                          f"is stored for {combo(laser, grating)}, the previous one stays; calibrate again (with the "
-                          "laser settled: the shutter held, no laser_off in between)")
+        if rep_info.get("laser_creep"):
+            lk_ = P.laser_key(prof, laser) or f"{float(laser):g}"
+            unreliable.append(f"the repeats {what}: no correction is stored for {combo(laser, grating)}, the previous "
+                              f"one stays; calibrate again once the laser has settled (a longer wait after selecting "
+                              f"it: lasers.{lk_}.change_settle_s, now {plan.change_settle_s(prof, laser, 'calibration'):g} s)")
+        else:
+            unreliable.append(f"the repeats {what} (a laser hop or the spectrometer landing elsewhere): no correction "
+                              f"is stored for {combo(laser, grating)}, the previous one stays; calibrate again (with the "
+                              "laser settled: the shutter held, no laser_off in between)")
     elif res["adjust"] == "ls6t" and res["trusted"]:
         llc = dict(rec.get("laser_line") or {})
         broad = laser_line_too_broad(llc.get("fwhm_cm1"), lines) if llc.get("ok") else None
@@ -5878,7 +6148,8 @@ def _calibration_result(study, prof, rec, ref_lines, laser, grating, rng, reques
     return res
 
 
-def store_pending(res: dict, warnings: list, unreliable: list, prof: dict | None = None) -> None:
+def store_pending(res: dict, warnings: list, unreliable: list, prof: dict | None = None, objective=None,
+                  hole=None) -> None:
     """A calibration's correction, stored only when the study ended reliable; otherwise nothing is stored, the
     correction in use stays, and stored_as / outcome say so (Nicola, 2026-11-25)."""
     from . import xcal
@@ -5978,7 +6249,12 @@ def store_pending(res: dict, warnings: list, unreliable: list, prof: dict | None
                 # applied once enough good pairs exist (DRIFT_MIN_PAIRS)
                 zd["applied"] = zd["learned_zero_drift_cm1_per_h"] is not None
             res["zero_drift_since_last"] = zd
-    st = xcal.store(*pend["args"], **pend["kw"])
+    st = xcal.store(*pend["args"], **pend["kw"], hole_um=_f(hole), objective=objective)
+    si_ = next((l_ for l_ in (pend["args"][5] or []) if l_.get("fwhm_cm1")
+                and abs(float(l_.get("reference_cm1") or 0) - 520.7) < 20), None)
+    if si_:
+        # the Si width per objective (Nicola, 2026-11-27: 5.44 cm-1 at x100, 8.55 at x10, with the 300 um hole)
+        note_si_width(laser, grating, objective, si_["fwhm_cm1"], si_.get("eta"), "a stored calibration", hole)
     res["stored_as"] = (("one correction for every window of " if st.get("pooled") else
                          "for this range: " if st.get("range_cm1") else "per window centre: ")
                         + combo(laser, grating) + " (" + st["pool"]["why"] + ")"

@@ -630,7 +630,7 @@ Environment variables only (in the Claude config's `env` block for the server; `
 | `LS6T_OUT` | request folders | `%USERPROFILE%\ls6t_runs` |
 | `LS6T_BRIDGE_DIR` | the folder the bridge watches | `%LS6T_HOME%\bridge` |
 | `LS6T_PROFILE` | the machine profile | `%LS6T_HOME%\profile.json` |
-| `LS6T_CONFIRM` | operator confirmation: `request`, `study` or `never` | `request` |
+| `LS6T_CONFIRM` | operator confirmation: `request`, `study` or `never` (`off` = `never`, `on` = `request`). For an interlocked enclosure prefer the profile's `safety.interlocked_enclosure` + `safety.laser_go_ahead false` (per instrument); keep `request` for unattended small-model use | `request` |
 | `LS6T_HEARTBEAT_S` | the bridge counts as gone after this many seconds without a heartbeat | `20` |
 | `LS6T_MAX_MINUTES` | a lower ceiling than the profile's `max_minutes` | unset |
 

@@ -29,7 +29,12 @@ DEFAULT_PROFILE: dict = {
                "laser_shutter": None,     # needed only for video snapshots with the laser on (from discovery)
                "laser_pol": None, "raman_pol": None,    # the polarisers, when the instrument has them (discovery)
                "illumination": None,      # bright / dark field (XploRA: IlluminatorV), from discovery
-               "illumination_light": None},   # the light source's mode (XploRA: uLight), read only
+               "illumination_light": None,    # the light source's mode (XploRA: uLight), read only
+               "safety_shutter": None},       # the interlock's shutter, if LabSpec has one (OLConfig lists a
+    #                                           'SafetyShutter' motor): read only, reported by status
+    # the enclosure: interlocked (the laser off whenever a door is open) makes the per-request laser go-ahead in
+    # LabSpec optional (Nicola, 2026-11-27); set by a person: ls6t profile set safety.interlocked_enclosure true
+    "safety": {"interlocked_enclosure": False, "laser_go_ahead": True},
     # the laser shutter's positions (OLConfig on the XploRA: Off / On); ls6t moves it by label and reads it back
     # (2026-11-23: moved by value 0, unchecked, it did not block the beam). by: label or value
     "shutter": {"off": "Off", "on": "On", "by": "label", "verify_max_days": 30, "max_leak_frac": 0.005},
@@ -496,6 +501,13 @@ def laser_problems(prof: dict) -> list[str]:
     if not prof.get("lasers"):
         out.append("lasers")
     return out
+
+
+def go_ahead_waived(prof: dict) -> bool:
+    """The per-request laser go-ahead is skipped only when a person has said both: the enclosure is interlocked (the
+    laser off with a door open) and no go-ahead is wanted (Nicola, 2026-11-27)."""
+    sf_ = prof.get("safety") or {}
+    return bool(sf_.get("interlocked_enclosure")) and sf_.get("laser_go_ahead") is False
 
 
 def review_gate(prof: dict) -> str | None:

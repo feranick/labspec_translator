@@ -1897,6 +1897,8 @@ def test_unsettled_repeats_store_nothing_and_laser_off_cancels_the_running_reque
     r = run_inline({"c": st})["studies"]["c"]
     c = r["calibration"]
     assert c["repeats"]["settled"] is False and "nothing stored" in c["stored_as"], c
+    # nothing stored: no zero mode in use, the one it would have had said (.27.7)
+    assert c["zero_mode"] is None and c["zero_mode_if_stored"] == "absolute", c
     assert not r["reliable"] and any("no correction is stored" in u for u in r["unreliable_because"])
     assert xcal.get(637.75, 600, 660.0, "centred") is None
     monkeypatch.undo()
@@ -1966,6 +1968,7 @@ def test_unreliable_calibration_stores_nothing_and_fixed_profile_problems_clear(
     c = run_inline({"c": cal})["studies"]["c"]
     assert "calibration" in c, {k: c.get(k) for k in ("why", "unreliable_because", "ok")}
     assert not c["reliable"] and c["calibration"]["stored_as"].startswith("nothing stored"), c["calibration"]
+    assert c["calibration"]["zero_mode"] is None and c["calibration"]["zero_mode_if_stored"] == "absolute"
     assert "NOT stored" in c["calibration"]["outcome"] and xcal.load() == {}
     monkeypatch.setattr(R, "analyse", real)
     c = run_inline({"c": cal})["studies"]["c"]
@@ -2176,6 +2179,15 @@ def test_series_zero_creep_reported_learned_and_widens_the_expected_uncertainty(
             for p in pts]
     assert not R.zero_creep(flat, {}, 637.75, 1200, "centred")["significant"]
     R.zero_creep(flat, {}, 637.75, 1200, "centred")          # two quiet series after it: no longer applied
+    assert R.spectro_repeatability(P.load(), 637.75, 1200).get("zero_creep_cm1_per_min") is None
+    # the line narrowing as it moves (Nicola, 2026-11-27, 532 at x100: Si +0.48 in 4.8 min, 7.96 -> 6.57 cm-1 wide,
+    # the laser line steady): the sample (heating, focus), never learned as the spectrometer's creep
+    store.write("spectro_repeatability.json", {})
+    hot = [dict(p, peaks=[{"name": "Si", "ok": True, "position_cm1": 521.0 + 0.1 * p["point"],
+                           "fwhm_cm1": 7.96 - 0.28 * p["point"]}]) for p in pts]
+    for _ in range(2):
+        z = R.zero_creep(hot, {}, 637.75, 1200, "centred")
+    assert z["significant"] and z["width_changed"] and "not the spectrometer" in z["not_the_spectrometer"], z
     assert R.spectro_repeatability(P.load(), 637.75, 1200).get("zero_creep_cm1_per_min") is None
     # the expected uncertainty grows with the correction's age in minutes (532 @ 1800 in the simulator)
     xcal.clear()
@@ -2817,3 +2829,137 @@ def test_objective_plausibility_camera_roi_and_laser_log_by_objective():
                                 "filter": "10%", "si_counts_per_s": 50.0, "time": "t"}) + "\n")
     r = api.references_clear("laser_log", "x10")
     assert r["cleared"] == 1 and log_.read_text().strip() == ""
+
+
+def test_laser_go_ahead_optional_with_an_interlocked_enclosure():
+    """Nicola, 2026-11-27: the XploRA is fully enclosed and interlocked (the laser off with a door open): the
+    per-request go-ahead before the laser fires is optional; set by a person in the profile."""
+    S.ensure(config.active_bridge_dir())
+    sp = {"kind": "spectrum", "sample": {"name": "Si"}, "setup": dict(SETUP),
+          "acquire": {"center_cm1": 520.7, "exposure_s": 0.2}}
+    s = run_inline({"s": sp})["studies"]["s"]
+    assert "go_ahead" not in s["checks"]                                   # asked (the default)
+    assert api.profile_set("safety.interlocked_enclosure", "true")["ok"]
+    assert api.profile_set("safety.laser_go_ahead", "false")["ok"]
+    r = run_inline({"s": sp})
+    s = r["studies"]["s"]
+    assert "not asked" in s["checks"]["go_ahead"], s["checks"].get("go_ahead")
+    log_ = (Path(r["request"]) / "runner.log").read_text()
+    assert "-> confirm" not in log_
+    api.profile_set("safety.laser_go_ahead", "true")
+    api.profile_set("safety.interlocked_enclosure", "false")
+
+
+def test_laser_creep_with_the_raman_lines_is_not_settled():
+    """Nicola, 2026-11-27, 532 just selected (after 785): the laser line -7.78, -7.87, -7.34, -6.94, -6.84 over five
+    repeats and Si +0.83 with it; every step under the 0.572 threshold, so nothing was flagged and +2.69 was stored. A
+    common creep over the threshold is the laser not settled: nothing stored."""
+    import labspec_translator.runner as R
+    lls = [-7.78, -7.87, -7.34, -6.94, -6.84]
+    offs = [-2.70, -2.78, -2.40, -2.05, -1.95]
+    cr = R._common_creep(lls, offs, 0.572)
+    assert cr and cr["laser_line_cm1"] > 0.9 and cr["raman_cm1"] > 0.7, cr
+    assert R._common_creep(lls, [-2.7, -2.6, -2.8, -2.65, -2.7], 0.572) is None       # Si stayed: not the laser
+    assert R._common_creep([-7.3, -7.5, -7.2, -7.45, -7.3], offs, 0.572) is None       # the laser line steady
+    assert R._common_creep(lls, offs, 1.5) is None                                     # under the threshold
+    from labspec_translator import xcal
+    xcal.clear()
+    bdir = config.active_bridge_dir()
+    sim = S.ensure(bdir)
+    (bdir / "sim_laser_line").write_text("1")
+    (bdir / "sim_landing").write_text("-0.44,-0.53,0.0,0.4,0.5,0.5,0.5")
+    sim._landing_n = 0
+    cal = {"kind": "calibration", "sample": {"name": "Si"}, "setup": dict(SETUP),
+           "acquire": {"center_cm1": 250, "exposure_s": 1},
+           "calibration": {"adjust": "ls6t", "repeats": 5}, "video": {"before": False}}
+    try:
+        c = run_inline({"c": cal})["studies"]["c"]
+    finally:
+        (bdir / "sim_landing").unlink(missing_ok=True)
+        (bdir / "sim_laser_line").unlink(missing_ok=True)
+    rp = c["calibration"]["repeats"]
+    assert rp.get("laser_creep"), rp
+    assert not c["reliable"] and any("not settled" in u for u in c["unreliable_because"]), c["unreliable_because"]
+    assert c["calibration"]["stored_as"].startswith("nothing stored") and xcal.load() == {}
+    assert c["calibration"]["zero_mode"] is None and c["calibration"]["zero_mode_if_stored"] == "absolute"
+
+
+def test_si_width_reference_per_objective():
+    """Nicola, 2026-11-27: 785 Si 5.44 cm-1 at x100 against 8.55 at x10 (the 300 um hole): the width reference is
+    kept per objective; none yet at an objective: the width test is skipped, not compared with another lens."""
+    import labspec_translator.runner as R
+    R.store.write(R.SI_WIDTH, {})
+    R.note_si_width(785, 1200, "x10", 8.55, 0.7, "a stored calibration")
+    w, why, _ = R.si_width_reference(785, 1200, "centred", "x100")
+    assert w is None and "x100" in why
+    R.note_si_width(785, 1200, "x100", 5.44, 0.7, "a stored calibration")
+    assert R.si_width_reference(785, 1200, "centred", "x100")[0] == pytest.approx(5.44)
+    assert R.si_width_reference(785, 1200, "centred", "x10")[0] == pytest.approx(8.55)
+    R.store.write(R.SI_WIDTH, {})
+
+
+def test_settle_after_selecting_a_laser_counts_across_requests():
+    """Nicola, 2026-11-27: 532 crept just after it was selected; 40 s was not enough. The settling after a selection
+    (lasers.<k>.change_settle_s, default 120 s for calibrations and laser checks) is counted from the selection, also
+    by a later request."""
+    import labspec_translator.runner as R
+    prof = P.load()
+    assert plan.change_settle_s(prof, 532, "laser_check") == plan.CHANGE_SETTLE_DEFAULT_S == 120.0
+    R.store.write(R.LASER_SELECTED, {})
+    assert R.select_wait_s(prof, 532, "calibration", False) == 0.0        # never selected by ls6t: nothing known
+    R.note_laser_selected(532)
+    assert 110 < R.select_wait_s(prof, 532, "calibration", False) <= 120
+    assert R.select_wait_s(prof, 532, "spectrum", False) == 0.0
+    assert R.select_wait_s(prof, 532, "calibration", True) == 120.0
+    R.store.write(R.LASER_SELECTED, {"532": 0})
+    assert R.select_wait_s(prof, 532, "calibration", False) == 0.0
+
+
+def test_hole_and_objective_keep_their_own_width_and_labspec_restart_is_said(monkeypatch):
+    """Nicola, 2026-11-27 (532 x100): Si 7.13 cm-1 at hole 100, 10.59 at 300, 10.81 at 500, and 0.5-0.7 cm-1 apart;
+    the hole read back as '300' and as '500 µm'; Z read 0 after a LabSpec restart with the stage at the focus."""
+    import labspec_translator.runner as R
+    from labspec_translator import bridge as B
+    assert B.num_um("500 µm") == 500 and B.num_um("300") == 300 and B.num_um("12.5um") == 12.5
+    R.store.write(R.SI_WIDTH, {})
+    R.note_si_width(532, 1200, "x100", 7.13, 0.25, "a stored calibration", 100)
+    assert R.si_width_reference(532, 1200, "centred", "x100", 300)[0] is None
+    assert R.si_width_reference(532, 1200, "centred", "x100", 100)[0] == pytest.approx(7.13)
+    assert "hole 100" in R.hole_fill_note(300) and R.hole_fill_note(100) == ""
+    R.store.write(R.SI_WIDTH, {})
+    monkeypatch.setenv("LS6T_CONFIRM", "off")
+    assert config.confirm_policy() == "never"
+    monkeypatch.delenv("LS6T_CONFIRM")
+    R.store.write(R.LABSPEC_SESSION, {})
+    monkeypatch.setattr(B, "session_context", lambda: {"labspec_started": "2026-11-27 10:00:00"})
+    assert R.labspec_restart_note() is None                    # first seen: nothing to compare
+    monkeypatch.setattr(B, "session_context", lambda: {"labspec_started": "2026-11-27 16:00:00"})
+    n = R.labspec_restart_note()
+    assert n and "new zero" in n and R.labspec_restart_note() == n      # said until a focus is found
+    R._focus_found_this_session()
+    assert R.labspec_restart_note() is None
+    R.store.write(R.LABSPEC_SESSION, {})
+
+
+def test_spectrum_with_another_hole_than_its_calibration_is_warned():
+    from labspec_translator import xcal
+    xcal.clear()
+    S.ensure(config.active_bridge_dir())
+    cal = {"kind": "calibration", "sample": {"name": "Si"}, "setup": dict(SETUP),
+           "acquire": {"center_cm1": 520.7, "exposure_s": 1}, "calibration": {"adjust": "ls6t"},
+           "video": {"before": False}}
+    c = run_inline({"c": cal})["studies"]["c"]
+    assert c["calibration"]["stored_correction"].get("hole_um") is not None, c["calibration"]["stored_correction"]
+    d = xcal.load()
+    for v_ in d.values():
+        for e_ in (v_.get("by_centre") or {}).values():
+            e_["hole_um"] = 12345.0
+        if "hole_um" in v_:
+            v_["hole_um"] = 12345.0
+    xcal._save(d)
+    sp = {"kind": "spectrum", "sample": {"name": "Si"}, "setup": dict(SETUP),
+          "acquire": {"center_cm1": 520.7, "exposure_s": 1}}
+    s = run_inline({"s": sp})["studies"]["s"]
+    assert s["checks"]["zero"].get("setup_differs"), s["checks"]["zero"]
+    assert any("differs from its calibration" in w for w in s["warnings"])
+    xcal.clear()

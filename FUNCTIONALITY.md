@@ -237,6 +237,13 @@ documented; `SetExtendedVideo` is not in the installed build (the extended video
 **Laser shutter.** Opening it for snapshots, or closing it for backgrounds, needs a shutter motor named in the
 profile. The shutter mode is restored on every path.
 
+**Laser go-ahead.** Each request that fires the laser asks the operator in LabSpec first (`LS6T_CONFIRM`). On an
+enclosure whose interlock turns the laser off with a door open, a person may waive it:
+`ls6t profile set safety.interlocked_enclosure true` and `ls6t profile set safety.laser_go_ahead false` (both are
+needed). `instrument shutter-verify` then runs without the question too. Every other question stays. LabSpec's
+script interface has no interlock call; `motors.safety_shutter` (a "SafetyShutter" motor, if this instrument has
+one) is read in `instrument status`.
+
 ---
 
 ## 7. What ls6t remembers between sessions
@@ -248,6 +255,8 @@ profile. The shutter mode is restored on every path.
 | Alignment checks | `alignment_log.jsonl` | every `alignment` study | readiness warnings, drift |
 | Beam offsets per objective and laser | `spot.json` | `spot` studies, lit snapshots | the marker, `move.to_um` |
 | Spectral corrections per laser and grating | `xcal.json` | `calibration` with `adjust: ls6t` | later spectra's Raman shift |
+| Si width per laser, grating and objective | `si_width.json` | stored calibrations, healthy laser checks | the multimode tests at that objective |
+| When ls6t last selected each laser | `laser_selected.json` | laser changes (requests, `instrument set`) | the settling wait (`lasers.<k>.change_settle_s`, 120 s default) before calibrations and laser checks |
 | Laser shutter verifications per laser | `shutter_verified.json` | `instrument shutter-verify`, on a pass only | every use of the shutter (refused without a valid record) |
 | White-light backgrounds | `backgrounds\` | `background` studies | `acquire.subtract_background` |
 | LabSpec configurations | `configs\NAME.ini` | a person (`instrument config save`) | `instrument config load` |

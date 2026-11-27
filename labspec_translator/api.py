@@ -750,6 +750,9 @@ def _instrument(action, camera, setup, seconds, um=None) -> dict:
             mism = bridge_mismatch(ping)
             if mism:
                 out["bridge_mismatch"] = mism
+            rs_ = runner.labspec_restart_note()
+            if rs_:
+                out["labspec_restarted"] = rs_
             return out
         if action == "discover":
             dump = config.home() / f"discovery_{time.strftime('%Y%m%d_%H%M%S')}.txt"
@@ -1195,9 +1198,14 @@ def shutter_verify(exposure_s: float = VERIFY_EXPOSURE_S, repeats: int = 3, burs
                f"{1 + len(closed_plan)} times (2 accumulations each) at {laser:g} nm, filter {st.get('filter')}: once "
                f"as a reference ({ex:g} s), then {len(closed_plan)} times with the shutter closed (the Si line must "
                "then be gone). Continue?")
-        yes, dt, err = _operator_yes(b, txt)
-        if not yes:
-            return {"ok": False, "error": err, "confirm_s": dt}
+        if P.go_ahead_waived(prof):
+            # the enclosure is interlocked and no go-ahead is wanted: runs remotely (Nicola, 2026-11-27); silicon must
+            # still be under the objective, in focus
+            out["go_ahead"] = "not asked: the enclosure is interlocked (profile safety)"
+        else:
+            yes, dt, err = _operator_yes(b, txt)
+            if not yes:
+                return {"ok": False, "error": err, "confirm_s": dt}
         nm = shift_to_nm(520.7, laser)
         mode = 10 + plan.SPIKE_MODES["double"] + (plan.ACQ_NO_ICS if plan.ics_off(prof, laser, grating) else 0)
         base = dict(mode=mode, accumulations=2, from_nm=round(nm, 4), to_nm=round(nm, 4),
@@ -1825,6 +1833,8 @@ def set_instrument(setup: dict) -> dict:
                          **_move_timing(r), **({"retried_after_laser_reselect": retried} if retried else {})})
             if r.get("ok") and what == "grating":
                 runner.note_grating_set(value, got, "instrument set")
+            if ok and what == "laser":
+                runner.note_laser_selected(value)       # its settling counted from now (calibrations, laser checks)
             if r.get("ok") and not ok and what == "grating":
                 done[-1]["error"] = _grating_short(b, prof, value, got, r)
             if not r.get("ok"):

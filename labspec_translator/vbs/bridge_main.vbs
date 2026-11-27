@@ -452,6 +452,8 @@ Sub VStatus(cmd, res)
     res("grating") = MotorValue(GetP(cmd, "m_grating", "Grating"))
     res("filter") = MotorLabel(GetP(cmd, "m_filter", "Filter"))
     res("objective") = MotorLabel(GetP(cmd, "m_objective", "Objective"))
+    ' the interlock's shutter, when the profile names one (OLConfig lists 'SafetyShutter'): its label, read only
+    If GetP(cmd, "m_safety_shutter", "") <> "" Then res("safety_shutter") = MotorLabel(GetP(cmd, "m_safety_shutter", ""))
     res("hole_um") = MotorValue(GetP(cmd, "m_hole", "Hole"))
     res("slit_um") = MotorValue(GetP(cmd, "m_slit", "Slit"))
     res("x_um") = MotorValue(GetP(cmd, "m_x", "X"))

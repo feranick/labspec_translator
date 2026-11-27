@@ -92,6 +92,16 @@ STUCK_ADVICE = ("the bridge cannot react to anything while it waits inside LabSp
                 "then ls6t_bridge.vbs. Tell the ls6t maintainer the command it was in.")
 
 
+def num_um(v):
+    """A read-back such as '500 µm', '500um' or '300' as a number (um); unchanged when it holds none."""
+    import re as _re
+    m = _re.match(r"\s*([-+]?\d+(?:[.,]\d+)?)", str(v))
+    if not m:
+        return v
+    x = float(m.group(1).replace(",", "."))
+    return int(x) if x.is_integer() else x
+
+
 def session_context() -> dict:
     """When LabSpec started and how long Windows has been up (Windows only): the context of a bridge start, for the
     slow first grating status (36, 51 s after bridge restarts in a running session; 0 s after a fresh login)."""
@@ -380,6 +390,11 @@ class Bridge:
                 except OSError:
                     pass
                 d["ok"] = d.get("ok") == "1"
+                if verb == "status":
+                    # '300' and '500 µm' both seen for the hole (Nicola, 2026-11-27): numbers in um
+                    for k_ in ("hole_um", "slit_um"):
+                        if d.get(k_) not in (None, ""):
+                            d[k_] = num_um(d[k_])
                 d["seconds"] = round(time.monotonic() - t0, 3)
                 if startup_wait:
                     d["waited_for_bridge_start_s"] = round(startup_wait, 1)
