@@ -331,7 +331,7 @@ def _file_sig(p: Path | None):
         return None
     try:
         st = p.stat()
-        return (str(p), st.st_mtime_ns, st.st_size)
+        return (str(p), st.st_ino, st.st_mtime_ns, st.st_size)
     except OSError:
         return None
 

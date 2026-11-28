@@ -88,8 +88,8 @@ def parse_kv_and_csv(path):
     import numpy as np
 
     meta: dict = {}
-    rows: list[str] = []
-    for line in read_text(path).splitlines():
+    rows: list[tuple[int, str]] = []
+    for line_no, line in enumerate(read_text(path).splitlines(), 1):
         s = line.strip()
         if not s:
             continue
@@ -97,15 +97,26 @@ def parse_kv_and_csv(path):
             k, _, v = s[1:].strip().partition("=")
             meta[k.strip()] = v.strip()
         else:
-            rows.append(s)
+            rows.append((line_no, s))
     if not rows:
         return meta, np.empty(0, dtype=np.float64)
-    body = ",".join(r.strip(",") for r in rows if r.strip(","))
-    if not body:
-        return meta, np.empty(0, dtype=np.float64)
-    if ",," in body:
-        body = re.sub(r",+", ",", body).strip(",")
+    body = ",".join(r for _, r in rows)
+    expected = body.count(",") + 1
     data = np.fromstring(body, sep=",", dtype=np.float64)
+    if data.size != expected:
+        seen = 0
+        bad_row, bad_line, bad_col, bad_tok = len(rows), rows[-1][0], 0, ""
+        for idx, (ln, r) in enumerate(rows, 1):
+            toks = r.split(",")
+            if seen + len(toks) > data.size:
+                bad_row, bad_line, bad_col = idx, ln, data.size - seen
+                bad_tok = toks[bad_col]
+                break
+            seen += len(toks)
+        raise ValueError(
+            f"{path} (data row {bad_row}/{len(rows)}, line {bad_line}, col {bad_col + 1}): "
+            f"malformed numeric token {bad_tok!r} (parsed {data.size} of {expected} values)"
+        )
     return meta, data
 
 
