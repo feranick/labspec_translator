@@ -135,8 +135,8 @@ def study_format(status: dict | None = None) -> dict:
             "calibration": "(kind calibration) {reference: si | polystyrene | cyclohexane | naphthalene | "
                            "diamond, lines_cm1: [...] (your own), tol_cm1 (1), adjust: none | labspec | ls6t | auto "
                            "(LabSpec's AutoCalibration when enabled in the profile, else guided like labspec), "
-                           "window_cm1 (the fit window: 30 at 1200 gr/mm and finer, 60 at 600); a video frame is "
-                           "taken first unless video.before is false (or the profile's calibration.video_before)}",
+                           "window_cm1 (the fit window: 30 at 1200 gr/mm and finer, 60 at 600); no video frame is "
+                           "taken first unless video.before is true (or the profile's calibration.video_before)}",
             "background": "(kind background) {name, laser_off: shutter | operator}; acquire as for the spectra "
                           "it will correct (same grating and range)",
             "filters": "(kind filters) {line_cm1 (520.7), window_cm1 (30), labels (all within the caps), "
@@ -165,7 +165,7 @@ def study_format(status: dict | None = None) -> dict:
             "expect": "[{quantity: dotted result path (e.g. 'peaks.0.position_cm1', "
                       "'calibration.offset_cm1', 'map.summary.G.position_cm1.mean'), value, tol}]",
             "images": "true: PNG plots (spectrum with fits; map images of each peak and band)",
-            "video": "{before: true (default for calibration), after, with_laser}: a video frame with the laser "
+            "video": "{before, after, with_laser}: a video frame with the laser "
                      "position marked, before the first and/or after the last acquisition (results video.before/"
                      "after, images video_before/after: look with get_image); with_laser opens the laser shutter "
                      "for about a second so the beam itself shows",
@@ -762,7 +762,8 @@ def _validate_video(study: dict, kind: str, s: dict, prof: dict, errors: list) -
         if k in vd and not isinstance(vd[k], bool):
             errors.append(f"video.{k}: true or false")
     if vd.get("with_laser"):
-        if not (vd.get("before", kind == "calibration") or vd.get("after")):
+        default_before = kind == "calibration" and plan.calibration_video_before(prof)
+        if not (vd.get("before", default_before) or vd.get("after")):
             errors.append("video.with_laser: also give before or after (when to take the frame)")
         g = SH.gate(prof, s.get("laser_nm"))
         if g:

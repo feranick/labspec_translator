@@ -46,15 +46,26 @@ def test_snapshot_with_laser_is_guarded(tmp_path):
     assert not r["ok"] and "declined" in r["error"]
 
 
-def test_calibration_takes_a_video_frame_by_default(tmp_path):
+def test_calibration_video_before_is_off_by_default(tmp_path):
     _profile_with_shutter(tmp_path)
-    st = run_inline({"si": {"kind": "calibration", "sample": {"name": "Si"}, "setup": SETUP,
-                            "acquire": {"exposure_s": 1, "accumulations": 2},
-                            "video": {"after": True, "with_laser": True}}})
+    cal = {"kind": "calibration", "sample": {"name": "Si"}, "setup": SETUP,
+           "acquire": {"exposure_s": 1, "accumulations": 2}}
+    # default: no video frame before calibration (saves ~17-20 s per calibration)
+    assert plan.estimate(cal, P.load())["seconds"]["video_snapshots"] == 0.0
+    st = run_inline({"si": dict(cal, video={"after": True, "with_laser": True})})
     r = st["studies"]["si"]
     assert r["reliable"], (r["unreliable_because"], r["warnings"])
-    assert set(r["video"]) == {"before", "after"} and Path(r["images"]["video_before"]["path"]).exists()
-    assert r["video"]["before"]["measured_offset_um"][0] == pytest.approx(1.5, abs=0.1)
+    assert set(r["video"]) == {"after"}
+    # explicit video.before or profile calibration.video_before=True enables it
+    st2 = run_inline({"si": dict(cal, video={"before": True, "after": True, "with_laser": True})})
+    r2 = st2["studies"]["si"]
+    assert r2["reliable"], (r2["unreliable_because"], r2["warnings"])
+    assert set(r2["video"]) == {"before", "after"} and Path(r2["images"]["video_before"]["path"]).exists()
+    assert r2["video"]["before"]["measured_offset_um"][0] == pytest.approx(1.5, abs=0.1)
+    P.save(dict(P.load(), calibration=dict(P.load()["calibration"], video_before=True)))
+    assert plan.estimate(cal, P.load())["seconds"]["video_snapshots"] > 0.0
+    st3 = run_inline({"si": cal})
+    assert set(st3["studies"]["si"]["video"]) == {"before"}
 
 
 def test_video_validation():

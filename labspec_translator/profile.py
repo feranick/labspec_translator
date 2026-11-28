@@ -123,8 +123,9 @@ DEFAULT_PROFILE: dict = {
     # "<laser>@<grating>", {still_sd_cm1, moved_sd_cm1} set by a person (else the last measured is used)
     "spectrometer": {"approach_nm": -2.0, "repeatability": {}, "repeat_jog_nm": None},
     "calibration": {"max_age_h": 24.0, "max_retries": 2,
-                    # a video frame before each calibration (false: none, for batches; a study's video.before wins)
-                    "video_before": True,
+                    # a video frame before each calibration (false by default: saves ~17-20 s per calibration; a
+                    # study's video.before wins)
+                    "video_before": False,
                     # LabSpec's own AutoCalibration, run by the bridge (calibration.adjust 'auto'): off until it was
                     # tried with the maintainer (TESTING T4.9); script: its .vbs; sample: what it needs under the
                     # objective, told to the operator first

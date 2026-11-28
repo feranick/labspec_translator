@@ -1477,7 +1477,7 @@ End Sub
 
 Sub VAcquireInner(cmd, res)
     Dim mode, ex, acc, f, t, outPath, native, sample, id, t0, started, who, tmo, r, spm, waitedS, tp, tAll, cur
-    Dim prevId, same, staleId, gap, settle, mspec, mgr, apJog
+    Dim prevId, same, staleId, gap, settle, mspec, mgr, apJog, apVal
     mode = CLng(ParseNum(GetP(cmd, "mode", "10")))
     ex = ParseNum(GetP(cmd, "exposure_s", "1"))
     acc = CLng(ParseNum(GetP(cmd, "accumulations", "1")))
@@ -1517,18 +1517,29 @@ Sub VAcquireInner(cmd, res)
         waitedS = WaitMotor("", 0, 120, res)
         res("t_motors_before_s") = Secs(Elapsed(tp))       ' e.g. a grating turret still turning
         tp = Timer
-        If ParseNum(GetP(cmd, "spectro_jog_nm", "0")) <> 0 Then
-            ' a calibration repeat: the spectrometer sent away and back, so each repeat lands on the pixels afresh
-            ' (2026-11-24, 600 gr/mm: Si spans ~2 pixels and the same window gave +9.2 ... +9.9 cm-1)
-            r = BlockingMove(spm, f + ParseNum(GetP(cmd, "spectro_jog_nm", "0")), "", LS_MOTOR_VALUE)
-            waitedS = WaitMotor(spm, gNoId, 120, res)
-            res("spectro_jogged") = 1
-            res("t_spectro_jog_s") = Secs(Elapsed(tp))     ' its own line: not 'waiting for motors' (2026-11-25)
-            tp = Timer
-            Err.Clear
-        End If
         cur = MotorValue(spm)
         Err.Clear
+        If ParseNum(GetP(cmd, "spectro_jog_nm", "0")) <> 0 Then
+            ' Skip the jog when the spectrometer is already far from f (e.g. repeat 0 arriving from another
+            ' window or laser, not forced after a grating change): cur -> f+approach -> f already lands like a
+            ' fresh spectrum without an extra blocking move.
+            apVal = ParseNum(GetP(cmd, "spectro_approach_nm", "0"))
+            If GetP(cmd, "spectro_force", "0") = "1" Or Not IsNumeric(cur) Or cur = "" Or _
+                    Abs(CDbl(cur) - f) <= Abs(apVal) + 0.5 Then
+                ' a calibration repeat: the spectrometer sent away and back, so each repeat lands on the pixels afresh
+                ' (2026-11-24, 600 gr/mm: Si spans ~2 pixels and the same window gave +9.2 ... +9.9 cm-1)
+                r = BlockingMove(spm, f + ParseNum(GetP(cmd, "spectro_jog_nm", "0")), "", LS_MOTOR_VALUE)
+                waitedS = WaitMotor(spm, gNoId, 120, res)
+                res("spectro_jogged") = 1
+                res("t_spectro_jog_s") = Secs(Elapsed(tp))     ' its own line: not 'waiting for motors' (2026-11-25)
+                tp = Timer
+                cur = MotorValue(spm)
+                Err.Clear
+            Else
+                res("spectro_jog_skipped") = 1
+                res("t_spectro_jog_s") = 0
+            End If
+        End If
     End If
     If f > 0 And f = t And GetP(cmd, "center_move", "1") = "1" And IsNumeric(cur) And cur <> "" And GetP(cmd, "spectro_force", "0") <> "1" Then
         If Abs(CDbl(cur) - f) <= ParseNum(GetP(cmd, "spectro_tol_nm", "0.01")) Then

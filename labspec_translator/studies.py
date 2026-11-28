@@ -83,9 +83,9 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
     stop_exc = None
     t_acq = 0.0
     vd = study.get("video") or {}
-    # a calibration takes a frame first unless the profile's calibration.video_before is false (17-20 s each in a
-    # batch of calibrations, 2026-11-23) or the study says otherwise
-    want_before = vd.get("before", kind == "calibration" and bool((prof.get("calibration") or {}).get("video_before", True)))
+    # a calibration takes no video frame first by default (17-20 s each, 2026-11-23), unless the profile's
+    # calibration.video_before is true or the study's video.before says otherwise
+    want_before = vd.get("before", kind == "calibration" and plan.calibration_video_before(prof))
     focus_scans: list = []
     snaps: dict = {}
     # LabSpec's own map engine: not the same as save_native (`native` above), which this name once overwrote, so no

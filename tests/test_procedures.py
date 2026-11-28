@@ -2539,6 +2539,12 @@ def test_calibration_repeats_land_like_spectra(monkeypatch):
     run_inline({"c": cal})
     reps = [p for p in sent if p.get("spectro_jog_nm") is not None]
     assert reps and all(p["spectro_jog_nm"] == 3.0 and p["spectro_approach_nm"] == -2.0 for p in reps), reps[:2]
+    # estimate accounts for calibration repeat spectrometer moves; bridge skips redundant jog when already far from f
+    est = plan.estimate(cal, P.load())["seconds"]
+    assert est.get("calibration_moves", 0) > 0, est
+    vbs = api.compose_vbs(config.active_bridge_dir(), config.home())["ls6t_bridge.vbs"]
+    assert 'res("spectro_jog_skipped") = 1' in vbs
+    assert vbs.index("cur = MotorValue(spm)") < vbs.index('GetP(cmd, "spectro_jog_nm", "0")')
 
 
 def test_first_landing_after_a_grating_change_learned_and_counted_where_nothing_can_be_followed():

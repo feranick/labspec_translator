@@ -1005,6 +1005,11 @@ def hold_shutter(study: dict, prof: dict, laser) -> bool:
     return True
 
 
+def calibration_video_before(prof: dict) -> bool:
+    """Whether a calibration takes a video frame first when video.before is not set in the study."""
+    return bool((prof.get("calibration") or {}).get("video_before", False))
+
+
 def hold_shutter_expired_warning(study: dict, prof: dict, laser) -> str | None:
     """Warning when hold_shutter is left at its None default and falls back to 'auto' because the laser's shutter
     verification expired (distinct from never-verified)."""
@@ -1114,9 +1119,16 @@ def estimate(study: dict, prof: dict, current: dict | None = None) -> dict:
             total += settle_s(prof, laser)          # the pause between spectra (a laser that needs it)
         if k == 0 and held_:
             total += hold_open_s(prof, laser, study.get("kind"))    # the laser settling after the hold opens it
+    cal_moves_s = 0.0
+    if study.get("kind") == "calibration" and len(pts) > 1 and (study.get("calibration") or {}).get("repeats_move", True):
+        # each repeat re-places the spectrometer (jog + approach + centre; k=0 already has 1 move in acq_s)
+        appr_ = float((prof.get("spectrometer") or {}).get("approach_nm", 0) or 0)
+        cal_moves_s = ((2 if appr_ else 1) + (len(pts) - 1) * (3 if appr_ else 2)) * float(t["window_move_s"])
+        total += cal_moves_s
     vd = study.get("video") or {}
     v = prof.get("video", {})
-    shots = int(bool(vd.get("before", study.get("kind") == "calibration"))) + int(bool(vd.get("after")))
+    default_before = study.get("kind") == "calibration" and calibration_video_before(prof)
+    shots = int(bool(vd.get("before", default_before))) + int(bool(vd.get("after")))
     total += shots * (float(v.get("settle_s", 1.5)) + 5.0 +
                       (float(v.get("laser_s", 1.0)) if vd.get("with_laser") else 0.0))
     held_all = hold_shutter(study, prof, laser)
@@ -1133,6 +1145,7 @@ def estimate(study: dict, prof: dict, current: dict | None = None) -> dict:
             "seconds": {"setup": round(setup, 1), "setup_parts": parts, "per_acquisition": round(acq_next, 2),
                         "first_acquisition": round(acq_s, 2),
                         "acquisitions": round(acq_total, 1), "video_snapshots": round(snap_s, 1),
+                        **({"calibration_moves": round(cal_moves_s, 1)} if cal_moves_s else {}),
                         **({"series_waits": round(series_wait, 1)} if study.get("kind") == "series" else {}),
                         "total": round(total, 1)},
             "not_included": "the operator's answers in LabSpec (the go-ahead before the first exposure, the "
