@@ -982,7 +982,7 @@ def _setup(name: str, study: dict, ctx: Ctx, warnings: list, unreliable: list, c
 
 
 RELEASE_WAIT_S = 90.0     # how long ls6t waits for a silent bridge to answer again before giving up on the release
-NO_HOLD_KINDS = ("move", "background", "cutoff")      # no laser, or the laser off on purpose
+NO_HOLD_KINDS = plan.NO_HOLD_KINDS                    # no laser, or the laser off on purpose
 # the bridge commands that keep the shutter held (bridge_main.vbs HOLD_VERBS)
 HOLD_VERBS = ("ping", "status", "acquire", "map_native", "guide", "move_xy", "move", "view", "remove", "save",
               "labels", "last_error", "message", "shutter_hold", "paint", "cursors")      # video and others release it

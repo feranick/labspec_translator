@@ -68,11 +68,12 @@ def _profile_nm(prof: dict, laser_nm):
     return near if near is not None and abs(near - want) <= 5.0 else want
 
 
-def gate(prof: dict, laser_nm=None) -> str | None:
-    """None when ls6t may rely on the shutter for this laser; else why not (said to the LLM and the person)."""
+def _gate_detail(prof: dict, laser_nm=None) -> tuple[str | None, str | None]:
+    """(reason_code, message) for shutter gating: (None, None) when ls6t may rely on the shutter for this laser,
+    else one of ('no_motor', 'missing', 'mismatch', 'rev', 'expired') with the human-readable explanation."""
     motor = (prof.get("motors") or {}).get("laser_shutter")
     if not motor:
-        return "no laser shutter motor in the profile (motors.laser_shutter)"
+        return "no_motor", "no laser shutter motor in the profile (motors.laser_shutter)"
     by = str((prof.get("shutter") or {}).get("by", "label"))
     recs = records()
     rec = None
@@ -86,19 +87,26 @@ def gate(prof: dict, laser_nm=None) -> str | None:
            "the Si line must disappear with the shutter closed")
     what = f"the {float(laser_nm):g} nm laser" if laser_nm is not None else "any laser"
     if not rec:
-        return f"the laser shutter has not been shown to block {what} on this instrument: {how}"
+        return "missing", f"the laser shutter has not been shown to block {what} on this instrument: {how}"
     if rec.get("motor") != motor or rec.get("by") != by:
-        return (f"the shutter was verified as {rec.get('motor')!r} moved by {rec.get('by')}, the profile now has "
-                f"{motor!r} by {by}: {how}")
+        return "mismatch", (f"the shutter was verified as {rec.get('motor')!r} moved by {rec.get('by')}, the profile "
+                            f"now has {motor!r} by {by}: {how}")
     if int(rec.get("rev", 0)) != REV:
-        return f"the bridge's shutter handling has changed since the last verification ({rec.get('version')}): {how}"
+        return "rev", (f"the bridge's shutter handling has changed since the last verification "
+                       f"({rec.get('version')}): {how}")
     days = (time.time() - float(rec.get("time", 0))) / 86400.0
     mx = max_days(prof, rec)
     if days > mx:
-        return (f"the shutter was last shown to block {what} {days:.0f} days ago (more than {mx:g}"
-                + (": shorter, as it leaked in the 30 days before that pass" if rec.get("recent_leaks") else "")
-                + f"): {how}")
-    return None
+        return "expired", (f"the shutter was last shown to block {what} {days:.0f} days ago (more than {mx:g}"
+                           + (": shorter, as it leaked in the 30 days before that pass"
+                              if rec.get("recent_leaks") else "")
+                           + f"): {how}")
+    return None, None
+
+
+def gate(prof: dict, laser_nm=None) -> str | None:
+    """None when ls6t may rely on the shutter for this laser; else why not (said to the LLM and the person)."""
+    return _gate_detail(prof, laser_nm)[1]
 
 
 MAX_DAYS_AFTER_LEAK = 7.0
@@ -106,20 +114,11 @@ MAX_DAYS_AFTER_LEAK = 7.0
 
 def expired_note(prof: dict, laser_nm=None) -> str | None:
     """When a previously verified shutter record for this laser has expired (older than max_days), returns the
-    gate reason; None if valid, never verified, or invalidated for another reason (missing motor, changed motor/by,
-    or bridge rev)."""
-    motor = (prof.get("motors") or {}).get("laser_shutter")
-    if not motor or laser_nm is None:
+    gate reason; None if valid, never verified, or invalidated for another reason."""
+    if laser_nm is None:
         return None
-    by = str((prof.get("shutter") or {}).get("by", "label"))
-    recs = records()
-    rec = recs.get(_key(laser_nm)) or recs.get(_key(_profile_nm(prof, laser_nm)))
-    if not rec or rec.get("motor") != motor or rec.get("by") != by or int(rec.get("rev", 0)) != REV:
-        return None
-    days = (time.time() - float(rec.get("time", 0))) / 86400.0
-    if days > max_days(prof, rec):
-        return gate(prof, laser_nm)
-    return None
+    code, msg = _gate_detail(prof, laser_nm)
+    return msg if code == "expired" else None
 
 
 def max_days(prof: dict, rec: dict | None) -> float:

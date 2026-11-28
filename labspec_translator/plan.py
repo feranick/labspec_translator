@@ -962,6 +962,27 @@ def hold_open_s(prof: dict, laser, kind: str | None = None) -> float:
     return float(L.get("settle_s") or 0.0)
 
 
+NO_HOLD_KINDS = ("move", "background", "cutoff")      # no laser, or the laser off on purpose
+
+
+def _series_recovers_between_spectra(study: dict, prof: dict, laser, lk: str) -> bool:
+    """True for a series whose gap between spectra is at least the laser's settle_s (so the beam can stay off
+    between spectra instead of holding the shutter open)."""
+    if study.get("kind") != "series":
+        return False
+    # the time between one spectrum's end and the next one's start, with each acquisition's real duration
+    # (exposure, readout, LabSpec's overheads): 6 s asked with 1 s exposures left about 3.5 s, not 5 (2026-11-24)
+    try:
+        busy = acquire_seconds(study, prof, acq_range(study, prof, laser))
+    except (KeyError, ValueError, TypeError):
+        acq = study.get("acquire") or {}
+        ex = acq.get("exposure_s", 1.0)
+        busy = (float(ex) if isinstance(ex, (int, float)) else 0.0) * int(acq.get("accumulations", 1) or 1)
+    gap = float((study.get("series") or {}).get("interval_s", 0) or 0) - busy
+    rec = float(prof["lasers"][lk].get("settle_s") or 0)
+    return rec > 0 and gap >= rec
+
+
 def hold_shutter(study: dict, prof: dict, laser) -> bool:
     """Whether a study's spectra are taken with the laser shutter held open between them (acquire.shutter 'hold', or
     the laser's lasers.<k>.hold_shutter — defaulting to True when the laser's shutter is verified — unless the study
@@ -979,26 +1000,15 @@ def hold_shutter(study: dict, prof: dict, laser) -> bool:
         return False
     if hs is None and SH.gate(prof, laser) is not None:
         return False
-    if study.get("kind") == "series":
-        # the time between one spectrum's end and the next one's start, with each acquisition's real duration
-        # (exposure, readout, LabSpec's overheads): 6 s asked with 1 s exposures left about 3.5 s, not 5 (2026-11-24)
-        try:
-            busy = acquire_seconds(study, prof, acq_range(study, prof, laser))
-        except (KeyError, ValueError, TypeError):
-            acq = study.get("acquire") or {}
-            ex = acq.get("exposure_s", 1.0)
-            busy = (float(ex) if isinstance(ex, (int, float)) else 0.0) * int(acq.get("accumulations", 1) or 1)
-        gap = float((study.get("series") or {}).get("interval_s", 0) or 0) - busy
-        rec = float(prof["lasers"][lk].get("settle_s") or 0)
-        if rec > 0 and gap >= rec:
-            return False
+    if _series_recovers_between_spectra(study, prof, laser, lk):
+        return False
     return True
 
 
 def hold_shutter_expired_warning(study: dict, prof: dict, laser) -> str | None:
     """Warning when hold_shutter is left at its None default and falls back to 'auto' because the laser's shutter
     verification expired (distinct from never-verified)."""
-    if study.get("kind", "spectrum") in ("move", "background", "cutoff"):
+    if study.get("kind", "spectrum") in NO_HOLD_KINDS:
         return None
     if (study.get("acquire") or {}).get("shutter") in ("hold", "auto"):
         return None
@@ -1006,20 +1016,9 @@ def hold_shutter_expired_warning(study: dict, prof: dict, laser) -> str | None:
     if not lk or prof["lasers"][lk].get("hold_shutter") is not None:
         return None
     why = SH.expired_note(prof, laser)
-    if not why:
+    if not why or _series_recovers_between_spectra(study, prof, laser, lk):
         return None
-    if study.get("kind") == "series":
-        try:
-            busy = acquire_seconds(study, prof, acq_range(study, prof, laser))
-        except (KeyError, ValueError, TypeError):
-            acq = study.get("acquire") or {}
-            ex = acq.get("exposure_s", 1.0)
-            busy = (float(ex) if isinstance(ex, (int, float)) else 0.0) * int(acq.get("accumulations", 1) or 1)
-        gap = float((study.get("series") or {}).get("interval_s", 0) or 0) - busy
-        rec = float(prof["lasers"][lk].get("settle_s") or 0)
-        if rec > 0 and gap >= rec:
-            return None
-    return f"acquire.shutter fell back to 'auto' (not held) because the shutter verification expired: {why}"
+    return f"the shutter will not be held (auto) — shutter verification expired: {why}"
 
 
 def estimate(study: dict, prof: dict, current: dict | None = None) -> dict:

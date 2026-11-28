@@ -760,25 +760,32 @@ def test_expired_shutter_approval_warns_on_hold_fallback(tmp_path):
     SH.record(dict(rec, time=_t.time() - 8 * 86400, recent_leaks=[{"date": "2026-11-23"}]))
     assert not plan.hold_shutter(st0, P.load(), 532)
     v = F.validate({"s": st0})["s"]
-    assert v["ok"] and any("fell back to 'auto'" in w and "expired" in w for w in v["warnings"]), v["warnings"]
+    assert v["ok"] and any("shutter will not be held (auto)" in w and "expired" in w for w in v["warnings"]), v["warnings"]
     # explicit 'auto' or hold_shutter=False: no fallback warning
     v_auto = F.validate({"s": dict(st0, acquire=dict(st0["acquire"], shutter="auto"))})["s"]
-    assert v_auto["ok"] and not any("fell back to 'auto'" in w for w in v_auto["warnings"])
+    assert v_auto["ok"] and not any("shutter will not be held (auto)" in w for w in v_auto["warnings"])
     prof = P.load()
     lk = next(k for k, v_ in prof["lasers"].items() if abs(v_["nm"] - 532) < 1)
     prof["lasers"][lk]["hold_shutter"] = False
     P.save(prof)
-    assert not any("fell back to 'auto'" in w for w in F.validate({"s": st0})["s"]["warnings"])
+    assert not any("shutter will not be held (auto)" in w for w in F.validate({"s": st0})["s"]["warnings"])
     prof["lasers"][lk]["hold_shutter"] = None
     P.save(prof)
     # runtime result carries the warning and timing.shutter == 'auto'
     s = run_inline({"s": st0})["studies"]["s"]
     assert s["timing"]["shutter"] == "auto"
-    assert any("fell back to 'auto'" in w and "expired" in w for w in s["warnings"]), s["warnings"]
+    assert any("shutter will not be held (auto)" in w and "expired" in w for w in s["warnings"]), s["warnings"]
+    # study without setup.laser_nm (uses currently selected laser): no warning at validation, warned at run time
+    st_nolaser = dict(st0, setup={k: v_ for k, v_ in SETUP.items() if k != "laser_nm"})
+    v_nl = F.validate({"s": st_nolaser})["s"]
+    assert v_nl["ok"] and not any("shutter will not be held (auto)" in w for w in v_nl["warnings"])
+    s_nl = run_inline({"s": st_nolaser})["studies"]["s"]
+    assert s_nl["timing"]["shutter"] == "auto"
+    assert any("shutter will not be held (auto)" in w and "expired" in w for w in s_nl["warnings"]), s_nl["warnings"]
     # never-verified laser: no expired-fallback warning
     SH.store.path(SH.FILE).unlink()
     v_never = F.validate({"s": st0})["s"]
-    assert v_never["ok"] and not any("fell back to 'auto'" in w for w in v_never["warnings"])
+    assert v_never["ok"] and not any("shutter will not be held (auto)" in w for w in v_never["warnings"])
 
 
 def test_series_hold_native_and_estimate():
