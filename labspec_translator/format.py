@@ -123,7 +123,7 @@ def study_format(status: dict | None = None) -> dict:
                        "(the laser fires; default the profile's lasers.<laser>.warmup_s), shutter: auto (LabSpec "
                        "opens and closes the laser shutter around each spectrum) | hold (held open from the first "
                        "spectrum to the last, as HORIBA's mapping scripts do; needs the verified shutter; default "
-                       "the profile's lasers.<laser>.hold_shutter)}",
+                       "lasers.<laser>.hold_shutter, or hold automatically when the laser's shutter is verified)}",
             "focus": "{autofocus: laser | raman | video (LabSpec's routines) | scan (ls6t's focus scan on the "
                      "Raman line) | camera (ls6t's: the top camera's sharpness under white light, no laser; refused "
                      "on a featureless view) (before the first point; map: also every N points with 'every'), "

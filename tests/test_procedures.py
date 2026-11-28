@@ -421,14 +421,20 @@ def test_calibration_belongs_to_one_laser_and_grating():
     assert any("no calibration check yet for the 1200 gr/mm grating" in w for w in o["warnings"])
     t = s["timing"]
     assert t["bridge_commands"]["acquire"]["n"] == 1 and "t_until_data_s" in t["acquire_phases_s"]
+    assert "t_settle_s" in t["acquire_phases_s"] and t["shutter"] == "auto"
     assert t["overhead_s"] == pytest.approx(t["total_s"] - t["exposure_s"], abs=0.02)
     assert t["operator_s"] == 0 and "operator" in s["seconds"]          # the simulator answers at once
     from labspec_translator import runner
-    tm = runner.timing([{"verb": "confirm", "s": 6.0}, {"verb": "acquire", "s": 23.0, "t_acq_call_s": 0.1,
-                                                         "t_motors_after_s": 18.0, "t_acquire_total_s": 22.5}],
-                       [{"exposure_s": 1, "accumulations": 1}], 30.0)
-    assert tm["operator_s"] == 6.0 and tm["overhead_s"] == 23.0 and tm["acquire_handoff_s"] == 0.5
-    assert "until every motor reported idle (18.0 s)" in tm["note"]
+    tm = runner.timing([{"verb": "confirm", "s": 6.0},
+                        {"verb": "acquire", "s": 49.7, "t_acq_call_s": 49.5, "t_acquire_total_s": 49.7,
+                         "shutter": "auto", "settle_acq": True},
+                        {"verb": "acquire", "s": 23.0, "t_settle_s": 4.0,
+                         "t_acq_call_s": 0.1, "shutter": "auto",
+                         "t_motors_after_s": 18.0, "t_acquire_total_s": 22.5}],
+                       [{"exposure_s": 1, "accumulations": 1}], 80.0)
+    assert tm["operator_s"] == 6.0 and tm["overhead_s"] == 73.0 and tm["acquire_handoff_s"] == 0.5
+    assert tm["acquire_phases_s"]["t_settle_s"] == 53.7 and tm["acquire_phases_s"]["t_acq_call_s"] == 0.1
+    assert tm["shutter"] == "auto"
 
 
 def test_laser_off_shutter_is_read_back_and_checked(tmp_path):
@@ -691,14 +697,28 @@ def test_shutter_held_open_across_spectra(tmp_path):
            "points": [{}, {}, {}], "process": {"peaks": [{"name": "Si", "near_cm1": 520.7, "window_cm1": 30}]}}
     (bdir / "sim_shift_after_first").write_text("1")
     sim._shift_armed = False
-    st = run_inline({"s": st0})
+    st = run_inline({"s": dict(st0, acquire=dict(st0["acquire"], shutter="auto"))})
     assert st["studies"]["s"]["checks"]["same_spot"]["disagree"]            # LabSpec's shutter per spectrum: hop
+    assert st["studies"]["s"]["timing"]["shutter"] == "auto"
+    # verified laser defaults to holding the shutter open when hold_shutter is unset
+    sim._shift_armed = False
+    st_def = run_inline({"s": st0})
+    s_def = st_def["studies"]["s"]
+    assert s_def["reliable"] and not s_def["checks"]["same_spot"]["disagree"], s_def["unreliable_because"]
+    assert s_def["shutter_hold"]["held"] and s_def["timing"]["shutter"] == "held"
+    prof = P.load()
+    lk0 = next(k for k, v in prof["lasers"].items() if abs(v["nm"] - 532) < 1)
+    prof["lasers"][lk0]["hold_shutter"] = False
+    P.save(prof)
+    assert not plan.hold_shutter(st0, P.load(), 532)
+    prof["lasers"][lk0]["hold_shutter"] = None
+    P.save(prof)
     sim._shift_armed = False
     st = run_inline({"s": dict(st0, acquire=dict(st0["acquire"], shutter="hold"))})
     s = st["studies"]["s"]
     assert s["reliable"] and not s["checks"]["same_spot"]["disagree"], s["unreliable_because"]
     assert s["shutter_hold"]["held"] and s["shutter_hold"]["released"] and not sim.held
-    assert s["shutter_hold"]["times_held"] == 1
+    assert s["shutter_hold"]["times_held"] == 1 and s["timing"]["shutter"] == "held"
     # every kind that acquires: a filters study holds too (2026-11-23: it was not held and read 0.54 x low)
     st = run_inline({"f": {"kind": "filters", "sample": {"name": "Si"}, "setup": {"laser_nm": 532, "grating": 1800,
                                                                                  "objective": "x100"},

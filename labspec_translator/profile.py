@@ -385,7 +385,8 @@ def load(path: Path | None = None) -> dict:
             v.setdefault("mode_hops", False)
             v.setdefault("unstable_multi", False)      # true: refuse multi-spectrum studies; "warn": warn
             v.setdefault("settle_s", 0)                # a pause between spectra with this laser (its mode holds)
-            v.setdefault("hold_shutter", False)        # the shutter held open across a study's spectra
+            v.setdefault("hold_shutter", None)         # None: hold automatically when the shutter is verified for
+            # this laser; True / False overrides
             v.setdefault("calibration_open_s", None)   # before a calibration (None: 40 s for mode_hops lasers)
             v.setdefault("hold_open_s", None)          # the wait after a fresh opening (None: 40 s for mode_hops /
             # unstable_multi lasers, else settle_s

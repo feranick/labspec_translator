@@ -1229,7 +1229,7 @@ class SimLabSpec:
         return {"id": sid, "out": str(out), "points": int(nm.size), "x_unit": "nm", "y_unit": "cnt",
                 "max_counts": float(y.max()), "exposure_s": float(p.get("exposure_s", 1.0)) or exp, "accumulations": acc,
                 **extra,
-                "detector_temp_c": self.temp_c, "windows": windows,
+                "detector_temp_c": self.temp_c, "windows": windows, "t_settle_s": 0.0,
                 **({"t_acq_call_s": round(time.monotonic() - t_w, 3), "t_until_data_s": 0.02} if laser_off_asked and holds
                    else {"t_acq_call_s": 0.01, "t_until_data_s": max(round(time.monotonic() - t_w, 3), 0.6)}),
                 **({"shutter_reads": 1 if holds else 12,

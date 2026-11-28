@@ -964,14 +964,20 @@ def hold_open_s(prof: dict, laser, kind: str | None = None) -> float:
 
 def hold_shutter(study: dict, prof: dict, laser) -> bool:
     """Whether a study's spectra are taken with the laser shutter held open between them (acquire.shutter 'hold', or
-    the laser's lasers.<k>.hold_shutter unless the study says 'auto'), as HORIBA's mapping scripts do. A series whose
-    spectra are further apart than the laser's settle_s (the time it needs to recover after LabSpec closes and opens
-    the shutter: 5 s for the XploRA's 637.75 nm) is not held: the beam is then off the sample between spectra."""
+    the laser's lasers.<k>.hold_shutter — defaulting to True when the laser's shutter is verified — unless the study
+    says 'auto' or hold_shutter is False), as HORIBA's mapping scripts do. A series whose spectra are further apart
+    than the laser's settle_s (the time it needs to recover after LabSpec closes and opens the shutter: 5 s for the
+    XploRA's 637.75 nm) is not held: the beam is then off the sample between spectra."""
     a = (study.get("acquire") or {}).get("shutter")
     if a in ("hold", "auto"):
         return a == "hold"
     lk = laser_key(prof, laser) if laser is not None else None
-    if not (lk and prof["lasers"][lk].get("hold_shutter")):
+    if not lk:
+        return False
+    hs = prof["lasers"][lk].get("hold_shutter")
+    if hs is False:
+        return False
+    if hs is None and SH.gate(prof, laser) is not None:
         return False
     if study.get("kind") == "series":
         # the time between one spectrum's end and the next one's start, with each acquisition's real duration

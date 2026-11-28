@@ -1611,6 +1611,7 @@ Sub VAcquireInner(cmd, res)
             End If
         End If
     End If
+    res("t_settle_s") = Secs(Elapsed(tp))                ' pause between spectra (settle_s, when not held)
     res("spectro_before_acq") = MotorValue(mspec)
     res("grating_before_acq") = MotorValue(mgr)
     res("motors_busy_before_acq") = LabSpec.GetMotorStatus("", 0)
@@ -1621,6 +1622,7 @@ Sub VAcquireInner(cmd, res)
     gShutterT0 = Timer
     ' from the command's start to LabSpec's Acq (the spectrometer move, the flush, the settle): the spectrum's own
     ' clock starts here (2026-11-24: a 26 s spectrometer move counted as point 0's in a series' first gap)
+    tp = Timer
     res("t_to_acq_s") = Secs(Elapsed(tAll))
     LabSpec.Acq mode, ex, acc, f, t
     res("t_acq_call_s") = Secs(Elapsed(tp))              ' Acq itself (it can hold the script)

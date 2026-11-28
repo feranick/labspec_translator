@@ -191,6 +191,8 @@ def _warmup(ctx: Ctx, acq: dict, sd: Path, seconds: float) -> dict:
     params.pop("native", None)
     t0 = time.time()
     r = ctx.call("acquire", timeout_s=120 + 3 * seconds, **params)
+    if ctx.calls and ctx.calls[-1].get("verb") == "acquire":
+        ctx.calls[-1]["settle_acq"] = True
     out = {"seconds": seconds, "ok": bool(r.get("ok")), "took_s": round(time.time() - t0, 2),
            "file": params["out"]}
     try:
@@ -348,6 +350,8 @@ class Ctx:
             r = self.bridge.call(verb, timeout_s=timeout_s, should_stop=self.cancelled, on_wait=self.beat, **params)
             rec = {"verb": verb, "s": round(time.monotonic() - t0, 3)}
             rec.update({k: _f(v) for k, v in r.items() if k.startswith("t_") and k.endswith("_s") and _f(v) is not None})
+            if verb in ("acquire", "map_native"):
+                rec["shutter"] = "held" if (self.holding and not laser_off) else "auto"
             if verb == "move" and params.get("motor"):
                 rec["motor"] = params["motor"]
             if str(r.get("spectro_skipped", "")) == "1":
@@ -484,6 +488,7 @@ PHASES = (("t_motors_before_s", "waiting for motors before the spectrometer move
           ("t_spectro_wait_s", "until the spectrometer reported idle"),
           ("t_motors_after_s", "until every motor reported idle"),
           ("t_flush_s", "collecting earlier results from LabSpec"),
+          ("t_settle_s", "pause between spectra (settle_s, when the shutter is not held) and discarded settle/warm-up acquisitions"),
           ("t_acq_call_s", "LabSpec's Acq call (it can hold the script)"),
           ("t_until_data_s", "after Acq, until the spectrum was there (exposure, readout)"),
           ("t_write_s", "writing the spectrum file"),
@@ -493,7 +498,7 @@ PHASES = (("t_motors_before_s", "waiting for motors before the spectrometer move
 OPERATOR_VERBS = ("confirm", "notice")
 
 
-def timing(calls: list, per_point: list, total_s: float) -> dict:
+def timing(calls: list, per_point: list, total_s: float, shutter: str | None = None) -> dict:
     """Where a study's time went (2026-11-23: 42-64 s for 4 s of exposure, 10-15 s on 2026.11.22.15): per bridge
     command, the acquisition's phases inside the bridge (t_*_s), the time between the bridge and ls6t, and ls6t's
     own work (set-up checks, analysis, plots)."""
@@ -503,17 +508,27 @@ def timing(calls: list, per_point: list, total_s: float) -> dict:
         v = by_verb.setdefault(c["verb"] + (f" {c['motor']}" if c.get("motor") else ""), {"n": 0, "s": 0.0})
         v["n"] += 1
         v["s"] = round(v["s"] + c["s"], 2)
-    acq = [c for c in calls if c["verb"] == "acquire"]
+    acq = [c for c in calls if c["verb"] == "acquire" and not c.get("settle_acq")]
+    settle_acqs = [c for c in calls if c["verb"] == "acquire" and c.get("settle_acq")]
     # the operator reading and answering LabSpec's questions (the laser's Yes, the objective, a notice): not overhead
     operator = round(sum(c["s"] for c in calls if c["verb"] in OPERATOR_VERBS), 2)
     phases = {k: round(sum(c.get(k) or 0 for c in acq), 2) for k, _ in PHASES if any(c.get(k) is not None for c in acq)}
+    if settle_acqs:
+        settle_acq_s = sum(c.get("t_acquire_total_s") or c.get("s") or 0 for c in settle_acqs)
+        phases["t_settle_s"] = round(phases.get("t_settle_s", 0.0) + settle_acq_s, 2)
     inside = sum(c.get("t_acquire_total_s") or 0 for c in acq)
     bridge_s = sum(c["s"] for c in calls)
     out = {"total_s": round(total_s, 2), "exposure_s": round(exposure, 2), "operator_s": operator,
            "overhead_s": round(total_s - exposure - operator, 2),
            "acquire_s": round(sum(c["s"] for c in acq), 2), "bridge_commands": by_verb, "bridge_s": round(bridge_s, 2),
            "ls6t_s": round(max(0.0, total_s - bridge_s), 2)}
-    if acq:
+    if shutter is None:
+        sh_states = {c["shutter"] for c in calls
+                     if c.get("verb") in ("acquire", "map_native") and not c.get("settle_acq") and c.get("shutter")}
+        shutter = next(iter(sh_states)) if len(sh_states) == 1 else ("mixed" if len(sh_states) > 1 else None)
+    if shutter is not None:
+        out["shutter"] = shutter
+    if acq or settle_acqs:
         out["acquire_phases_s"] = phases
         out["acquire_phases"] = {k: d for k, d in PHASES if k in phases}
         if inside:
