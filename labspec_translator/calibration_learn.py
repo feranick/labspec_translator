@@ -392,15 +392,18 @@ def learn_window_rate(laser, grating, placement: str, centre_nm, a: float, reque
 
 
 FIRST_LANDING_MIN_N = 3  # the first-landing term counts once learned from this many calibrations
+UNFOLLOWED_MIN_CM1 = 0.3  # minimum estimated unfollowed shift (max(0.5*|dr|, |dpk|)) to widen expected_uncertainty
 
 
 def _unfollowed_term(cu_, dr: float, dpk) -> None:
     """A move seen in this study but not followed, into the expected uncertainty as its own part (unfollowed_move:
-    the larger of the Raman peaks' own move and half the laser line's), and said in expected_uncertainty_from
-    (T9.22: it had been filed under first_landing, and the text omitted it)."""
+    the larger of the Raman peaks' own move and half the laser line's, once it reaches UNFOLLOWED_MIN_CM1), and said
+    in expected_uncertainty_from (T9.22: it had been filed under first_landing, and the text omitted it)."""
     if not isinstance(cu_, dict):
         return
-    t_ = max(DRIFT_RAMAN_FRACTION * abs(float(dr)), float(dpk or 0.0))
+    t_ = max(DRIFT_RAMAN_FRACTION * abs(float(dr)), abs(float(dpk)) if dpk is not None else 0.0)
+    if t_ < UNFOLLOWED_MIN_CM1:
+        return
     parts_ = dict(cu_.get("expected_uncertainty_parts") or {})
     parts_["unfollowed_move"] = round(t_, 3)
     cu_["expected_uncertainty_parts"] = parts_

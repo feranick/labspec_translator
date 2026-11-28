@@ -2679,6 +2679,11 @@ def test_multimode_detected_from_the_reference_line_width_and_uncertainty_parts_
     cu = {"expected_uncertainty_parts": {"repositioning": 0.3}, "expected_uncertainty_from": "measured"}
     R._unfollowed_term(cu, 3.59, 2.56)
     assert cu["expected_uncertainty_parts"]["unfollowed_move"] == 2.56 and "not followed" in cu["expected_uncertainty_from"]
+    # consistent minimum move floor (UNFOLLOWED_MIN_CM1 = 0.3): both +0.53/+0.46 and +0.45/+0.39 count; noise does not
+    for dr_, dpk_, want_ in ((0.53, 0.46, 0.46), (0.45, 0.39, 0.39), (0.20, 0.15, None)):
+        cu_ = {"expected_uncertainty_parts": {"repositioning": 0.33}, "expected_uncertainty_from": "measured"}
+        R._unfollowed_term(cu_, dr_, dpk_)
+        assert cu_["expected_uncertainty_parts"].get("unfollowed_move") == want_
     xcal.clear()
 
 

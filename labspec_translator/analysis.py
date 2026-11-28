@@ -19,7 +19,7 @@ from .calibration_learn import (
     DRIFT_MIN_PAIRS, DRIFT_RAMAN_FRACTION, DRIFT_VERSION, FIRST_LANDING_MIN_N,
     JUMP_AGE_CAP_CM1, JUMP_AGE_CM1_PER_H, JUMP_CONFIRM_MIN_CM1, LANDING_K,
     LANDING_MIN_CM1, LL_SD_DEFAULT_CM1, LL_SD_VERSION, OUTLIER_K, STEP_T, TREND_T,
-    WIDTH_CHANGE_FRAC, WINDOW_PAIR_MAX_H, WINDOW_PAIR_MIN_NM, WINDOW_SAME_NM,
+    UNFOLLOWED_MIN_CM1, WIDTH_CHANGE_FRAC, WINDOW_PAIR_MAX_H, WINDOW_PAIR_MIN_NM, WINDOW_SAME_NM,
     WINDOW_TERM_CAP_CM1, _anchor_repeats, _clean_rep_entry, _cm1_per_px, _common_creep,
     _landing_steps, _learn_first_landing, _repeat_offsets, _robust_sd, _tight_sd,
     _u_total, _unfollowed_term, landing_threshold, learn_laser_line_sd,
@@ -1299,6 +1299,17 @@ def _analyse_summaries(name, study, per_point, prof, laser, rng, sd, warnings, u
                                       f"followed: more than twice the expected uncertainty without that move "
                                       f"(+-{eu_u:.2f}; +-{eu_now:.2f} with it): positions may be off by about that; "
                                       "calibrate again")
+            elif kind != "calibration":
+                # below STALE_DRIFT_CM1 (0.5 cm-1) the laser line alone is not warned as stale, but an unfollowed
+                # move whose estimated Raman shift reaches UNFOLLOWED_MIN_CM1 (0.3 cm-1) — e.g. laser line +0.45 /
+                # Si +0.39 — still enters expected_uncertainty_parts["unfollowed_move"]
+                followed_ = ll_mode == "correct" and (follow_each or any(p_.get("applied") for p_ in plateau_report))
+                if not followed_:
+                    cu_ = (checks.get("zero") or {}).get("correction_used")
+                    dpks_ = [abs(float(p_["raman_moved_cm1"])) for p_ in plateau_report
+                             if not p_.get("applied") and p_.get("raman_moved_cm1") is not None]
+                    dpk_ = max(dpks_) if dpks_ else None
+                    _unfollowed_term(cu_, dr, dpk_)
         if jumps:
             after_ = checks["laser_line"]["points_after_a_jump"]
             smv = any(h.get("after_spectrometer_move") for h in hop_info)
