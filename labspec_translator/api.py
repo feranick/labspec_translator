@@ -2337,6 +2337,14 @@ def references_clear(what: str, name: str | None = None, field: str | None = Non
     from . import spot as SP
     from . import xcal
     if what == "correction":
+        if name == "legacy":
+            # the corrections without a set-up (before .27.8): never applied to a known set-up, retired here
+            d_ = xcal.load()
+            ks_ = [k_ for k_ in d_ if k_.count("@") == 1]
+            for k_ in ks_:
+                d_.pop(k_)
+            xcal._save(d_)
+            return {"cleared": len(ks_), "keys": ks_}
         if name:
             parts = name.split("@")
             if len(parts) >= 3 and not parts[2].replace(".", "", 1).isdigit():

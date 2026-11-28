@@ -415,7 +415,9 @@ def test_calibration_belongs_to_one_laser_and_grating():
     s, o = st["studies"]["s"], st["studies"]["o"]
     assert s["checks"]["zero"]["offset_cm1"] == pytest.approx(3.0, abs=0.3)
     assert any("last calibration check for the 1800 gr/mm grating with 532 nm" in w for w in s["warnings"])
-    assert o["checks"]["zero"]["offset_cm1"] is None and "532@1800" in o["checks"]["zero"]["other_gratings"]
+    assert o["checks"]["zero"]["offset_cm1"] is None and \
+        any(k_.startswith("532@1800@") for k_ in o["checks"]["zero"]["other_set_ups"])
+    assert s["checks"]["zero"]["key"].startswith("532@1800@x100")      # the full key (Nicola, 2026-11-27)
     assert any("no calibration check yet for the 1200 gr/mm grating" in w for w in o["warnings"])
     t = s["timing"]
     assert t["bridge_commands"]["acquire"]["n"] == 1 and "t_until_data_s" in t["acquire_phases_s"]
@@ -2997,6 +2999,7 @@ def test_corrections_per_objective_and_hole_and_the_simple_tools_hole():
     assert m["study"]["setup"]["hole_um"] == 100
     full = runner.read_json(Path(m["request"]) / "spectrum" / "spectrum.json", {})
     assert full["checks"]["zero"].get("correction_used"), full["checks"]["zero"]
+    assert full["checks"]["zero"]["key"] == full["checks"]["zero"]["correction_used"]["key"] == "532@1800@x100@h100"
     # another hole: no correction applied, said
     sp = {"kind": "spectrum", "sample": {"name": "Si"}, "setup": dict(SETUP, hole_um=300),
           "acquire": {"center_cm1": 520.7, "exposure_s": 1}}
@@ -3004,6 +3007,7 @@ def test_corrections_per_objective_and_hole_and_the_simple_tools_hole():
     assert not (s["checks"].get("zero") or {}).get("correction_used"), s["checks"].get("zero")
     assert s["checks"]["zero_setup"]["corrections_for"] == ["x100, hole 100 um"]
     assert any("not corrected" in w for w in s["warnings"])
+    assert not any("carry it" in w for w in s["warnings"]), s["warnings"]    # never another set-up's offset
     # asked otherwise: that hole
     assert api.default_hole(P.load(), "x100_VIS", 500) == 500 and api.default_hole(P.load(), "x10", None) is None
     # a legacy correction (no set-up recorded) is not applied to a known set-up
@@ -3011,6 +3015,8 @@ def test_corrections_per_objective_and_hole_and_the_simple_tools_hole():
     xcal.store(532, 1800, 0.1, 1.0, "si", [], centre_nm=547.16, placement="centred")
     assert xcal.get(532, 1800, 547.16, "centred", setup=xcal.setup_of("x100", 300)) is None
     assert xcal.get(532, 1800, 547.16, "centred") is not None             # a person's view: the latest of any
+    assert "legacy, not applied" in xcal.describe("532@1800")
+    assert api.references_clear("correction", "legacy")["cleared"] == 1 and xcal.load() == {}
     # stored with its set-up under laser@grating (.27.7): moved under its full key
     xcal.clear()
     xcal._save({"532@1800": {"a": 0.1, "b": 1.0, "time": "2026-11-27T15:00:00", "objective": "x100", "hole_um": 300.0}})
@@ -3054,6 +3060,10 @@ def test_settle_after_a_laser_change_with_the_hold(tmp_path):
     s = r["studies"]["c"]
     hl = json.dumps({k: s.get(k) for k in ("laser_shutter", "shutter_hold", "checks")})
     assert '"open_wait_s": 2' in hl, hl[:3000]
+    assert s["settle"]["settle_waited_s"] == 2.0 and "changed" in s["settle"]["why"], s["settle"]
+    # no laser change: 0 with its reason
+    r2 = run_inline({"c": c})["studies"]["c"]
+    assert "settle_waited_s" in r2["settle"] and r2["settle"]["why"], r2["settle"]
 
 
 def test_axial_profile_shape_and_calibration_zero_uncertain_from_si():
@@ -3069,3 +3079,49 @@ def test_axial_profile_shape_and_calibration_zero_uncertain_from_si():
     assert lop["lopsided"], lop
     assert R.axial_shape([-2, -1, 0, 1, 2], [100, 500, 1000, 500, 100], 0.0) is None or \
         not R.axial_shape([-2, -1, 0, 1, 2], [100, 500, 1000, 500, 100], 0.0).get("second_maximum")
+
+
+def test_laser_check_compares_with_its_own_window():
+    """Nicola, 2026-11-27: a check at 260 cm-1 compared its laser line with a calibration at 520.7 (-2.51 against a
+    0.835 threshold): the reference is the first healthy check at its own window, per objective and hole."""
+    import labspec_translator.runner as R
+    R.store.write(R.CHECK_REF, {})
+    bdir = config.active_bridge_dir()
+    S.ensure(bdir)
+    (bdir / "sim_laser_line").write_text("1")
+    a = api.laser_check(laser_nm=532, grating=1800, filter="10%", objective="x100", inline=True, wait_total_s=60)
+    h1 = a["laser_health"]
+    assert h1["window_reference_set"] is True and h1["si_width_reference_set"] in (True, False), json.dumps(h1)
+    b = api.laser_check(laser_nm=532, grating=1800, filter="10%", objective="x100", inline=True, wait_total_s=60)
+    h2 = b["laser_health"]
+    assert "first healthy check at this window" in h2["laser_line_reference_from"], h2
+    assert abs(h2["laser_line_move_cm1"]) < 0.5 and "si_move_cm1" in h2 and h2["window_reference_set"] is False
+    assert h2["si_width_reference_set"] is False
+    R.store.write(R.CHECK_REF, {})
+    (bdir / "sim_laser_line").unlink()
+
+
+def test_calibration_refused_in_another_laser_mode_than_its_window_reference():
+    """Nicola, 2026-11-27: 638 at -13.9, -8.6 from its healthy check at the same window: a correction stored then
+    holds in that mode only. Refused unless calibration.accept_mode_change."""
+    import labspec_translator.runner as R
+    from labspec_translator import xcal
+    xcal.clear()
+    bdir = config.active_bridge_dir()
+    S.ensure(bdir)
+    (bdir / "sim_laser_line").write_text("1")
+    R.store.write(R.CHECK_REF, {R._check_ref_key(532, 1800, "x100", 100, 250):
+                                {"laser_line_cm1": 8.6, "si_cm1": 520.7, "time": "2026-11-27T01:38:00"}})
+    cal = {"kind": "calibration", "sample": {"name": "Si"}, "setup": dict(SETUP, hole_um=100),
+           "acquire": {"center_cm1": 250, "exposure_s": 0.5}, "calibration": {"adjust": "ls6t", "repeats": 3},
+           "video": {"before": False}}
+    try:
+        c = run_inline({"c": cal})["studies"]["c"]
+        assert any("another mode" in u for u in c["unreliable_because"]) and xcal.load() == {}, c["unreliable_because"]
+        cal["calibration"]["accept_mode_change"] = True
+        c2 = run_inline({"c": cal})["studies"]["c"]
+        assert any("accept_mode_change" in w for w in c2["warnings"]), c2["warnings"]
+    finally:
+        (bdir / "sim_laser_line").unlink(missing_ok=True)
+        R.store.write(R.CHECK_REF, {})
+        xcal.clear()

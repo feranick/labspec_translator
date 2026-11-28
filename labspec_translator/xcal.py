@@ -63,7 +63,7 @@ def describe(k: str) -> str:
     o_ = next((p for p in parts if not p.startswith("h")), None)
     h_ = next((p[1:] for p in parts if p.startswith("h")), None)
     if not parts:
-        return "objective and hole not recorded (before 2026.11.27.8)"
+        return "legacy, not applied (objective and hole not recorded, before 2026.11.27.8)"
     return ", ".join(x for x in (o_, f"hole {h_} um" if h_ else None) if x)
 
 
