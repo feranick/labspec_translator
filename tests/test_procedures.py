@@ -3221,11 +3221,16 @@ def test_extended_range_excluding_zero_uses_stored_correction_silently():
         ext = {"kind": "spectrum", "sample": {"name": "Si"}, "setup": setup,
                "acquire": {"range_cm1": [100, 3200], "exposure_s": 0.5}}
         s = run_inline({"s": ext})["studies"]["s"]
-        assert s["reliable"], s.get("unreliable_because")
+        assert not s["reliable"]
+        assert any("stitched by LabSpec" in u for u in s.get("unreliable_because", [])), s.get("unreliable_because")
+        assert not any("no laser line found" in u for u in s.get("unreliable_because", [])), s.get("unreliable_because")
         assert s["checks"]["zero_correction"]["laser_reference"] == "report"
         cu = s["checks"]["zero"]["correction_used"]
-        if cu.get("expected_uncertainty_from") is not None:
-            assert not str(cu["expected_uncertainty_from"]).startswith("None"), cu
+        assert cu.get("before_labspec_restart") is False, cu
+        assert cu.get("focus_sensitive") is True, cu
+        assert "positions depend on focus" in str(cu.get("expected_uncertainty_from")), cu
+        assert "single-window correction" in str(cu.get("expected_uncertainty_from")), cu
+        assert not str(cu["expected_uncertainty_from"]).startswith("None"), cu
         stitched = [w for w in s["warnings"] if "stitched by LabSpec" in w]
         assert stitched and "532@1200@x100@h100" in stitched[0] and "measured in one window" in stitched[0], stitched
         assert not any("2026-11-24" in w or "637.75" in w for w in s["warnings"]), s["warnings"]
@@ -3252,20 +3257,28 @@ def test_correction_before_labspec_restart_is_flagged():
         s = run_inline({"s": {"kind": "spectrum", "sample": {"name": "Si"}, "setup": setup,
                               "acquire": {"center_cm1": 520.7, "exposure_s": 0.5}}})["studies"]["s"]
         cu = s["checks"]["zero"]["correction_used"]
-        assert cu.get("before_labspec_restart") == "2099-01-01 00:00:00", cu
+        assert cu.get("before_labspec_restart") is True, cu
+        assert cu.get("labspec_started") == "2099-01-01 00:00:00", cu
         assert any("before LabSpec restarted" in w for w in s["warnings"]), s["warnings"]
+        R.store.write(R.LABSPEC_SESSION, {"started": "2000-01-01 00:00:00"})
+        s2 = run_inline({"s2": {"kind": "spectrum", "sample": {"name": "Si"}, "setup": setup,
+                                "acquire": {"center_cm1": 520.7, "exposure_s": 0.5}}})["studies"]["s2"]
+        cu2 = s2["checks"]["zero"]["correction_used"]
+        assert cu2.get("before_labspec_restart") is False, cu2
+        assert "labspec_started" not in cu2, cu2
     finally:
         R.store.write(R.LABSPEC_SESSION, {})
         xcal.clear()
 
 
 def test_readback_got_resolution_key_and_calibration_zero_key():
-    """Smoke test 2026.11.28.8: value-mode moves keep numeric readbacks ('100', '1200'), resolution keys tag slit as
-    @s<slit>, and calibration studies populate checks.zero.key."""
+    """Smoke test 2026.11.28.12: value-mode moves return numeric readbacks (100, 1200, 785.04), resolution keys tag
+    slit as @s<slit>, and calibration studies populate checks.zero.key."""
     import labspec_translator.runner_core as RC
     from labspec_translator import xcal
-    assert RC._readback_got({"mode": "value"}, {"value": "100", "label": "100 µm"}) == "100"
-    assert RC._readback_got({"mode": "value"}, {"value": "1200", "label": "1200 (750nm)"}) == "1200"
+    assert RC._readback_got({"mode": "value"}, {"value": "100", "label": "100 µm"}) == 100
+    assert RC._readback_got({"mode": "value"}, {"value": "1200", "label": "1200 (750nm)"}) == 1200
+    assert RC._readback_got({"mode": "value"}, {"value": "785.04", "label": "785.04"}) == 785.04
     assert RC._readback_got({"mode": "label"}, {"value": "1", "label": "x100_VIS"}) == "x100_VIS"
     xcal.clear()
     S.ensure(config.active_bridge_dir())
@@ -3293,4 +3306,69 @@ def test_native_map_lists_spectra_and_phase_timing():
     vbs = api.compose_vbs(config.active_bridge_dir(), config.home())["ls6t_bridge.vbs"]
     nm = vbs.split("Sub VMapNative")[1].split("End Sub")[0]
     assert 'res("t_acq_call_s")' in nm and 'res("t_write_s")' in nm and 'res("t_acquire_total_s")' in nm
+
+
+def test_focus_drift_suspect_and_calibration_refocus():
+    """2026.11.28.12: laser_health flags focus_drift_suspect when counts drop and width grows together, and
+    calibration.refocus runs a focus scan before the calibration repeats."""
+    from labspec_translator import format as F, analysis as A, profile as P, xcal, store
+    prof = P.load()
+    cal_study = {"kind": "calibration", "sample": {"name": "Si"}, "setup": dict(SETUP, grating=1200, hole_um=100),
+                 "acquire": {"center_cm1": 520.7, "exposure_s": 0.5},
+                 "calibration": {"adjust": "ls6t", "repeats": 3, "refocus": True}}
+    v = F.validate({"c": cal_study})
+    assert v["ok"], v
+    bad = dict(cal_study, calibration={"adjust": "ls6t", "refocus": "yes"})
+    assert not F.validate({"c": bad})["ok"]
+    S.ensure(config.active_bridge_dir())
+    xcal.clear()
+    try:
+        c = run_inline({"c": cal_study})["studies"]["c"]
+        assert c.get("focus_scans") and len(c["focus_scans"]) == 1, c
+        assert c["calibration"]["repeats"]["n_total"] == 3
+    finally:
+        xcal.clear()
+    # focus_drift_suspect when counts_ratio < 0.7 and width_ratio > 1.2
+    import numpy as np
+    tmp = config.home() / "tmp_focus_drift.txt"
+    x = np.linspace(450, 600, 400)
+    y = 100.0 + 300.0 * np.exp(-0.5 * ((x - 520.7) / 4.5) ** 2)
+    tmp.write_text("\n".join(f"{xi:.4f}\t{yi:.4f}" for xi, yi in zip(x, y)))
+    old_res = store.read("resolution.json")
+    old_log = store.read("laser_log.jsonl")
+    try:
+        store.write("resolution.json", {"532@1200@x100@h100": {"fwhm_cm1": 4.0, "counts_per_s": 1000.0}})
+        hc = A.laser_health(prof, 532.0, 1200.0, tmp, 1.0, "centred", "x100", None, 100, 520.7)
+        assert hc.get("focus_drift_suspect") is True, hc
+        assert hc["reasons"] and "focus may have drifted" in hc["reasons"][0], hc["reasons"]
+    finally:
+        tmp.unlink(missing_ok=True)
+        if old_res is not None:
+            store.write("resolution.json", old_res)
+        if old_log is not None:
+            store.write("laser_log.jsonl", old_log)
+
+
+def test_settling_progress_stage(monkeypatch):
+    """2026.11.28.12: progress.json reports stage='settling' during shutter-hold settle waits."""
+    import labspec_translator.runner_core as RC
+    stages = []
+    orig_progress = RC._progress
+    def _spy(sd, **kw):
+        if "stage" in kw:
+            stages.append(kw["stage"])
+        return orig_progress(sd, **kw)
+    monkeypatch.setattr(RC, "_progress", _spy)
+    import labspec_translator.studies as ST
+    monkeypatch.setattr(ST, "_progress", _spy)
+    S.ensure(config.active_bridge_dir())
+    p = P.load()
+    # force a tiny hold_open_s so _hold_on emits stage='settling'
+    monkeypatch.setattr(RC.plan, "hold_open_s", lambda *a, **kw: 0.1)
+    monkeypatch.setattr(RC.plan, "hold_shutter", lambda *a, **kw: True)
+    run_inline({"s": {"kind": "spectrum", "sample": {"name": "Si"}, "setup": dict(SETUP),
+                      "acquire": {"center_cm1": 520.7, "exposure_s": 0.2}}})
+    assert "settling" in stages and "measuring" in stages, stages
+    assert stages.index("settling") < stages.index("measuring"), stages
+
 

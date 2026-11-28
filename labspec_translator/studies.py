@@ -36,6 +36,7 @@ from .calibration_learn import _learn_first_landing
 def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
     prof = ctx.prof
     sd = sd or ctx.folder / name
+    ctx.study_dir = sd
     (sd / "spectra").mkdir(parents=True, exist_ok=True)
     t_start = time.time()
     n_calls = len(ctx.calls)
@@ -116,6 +117,7 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
             if warmup_s(study, prof, laser) > 0:
                 # a discarded acquisition before LabSpec's map starts (2026-11-24: the first point of a native map
                 # was taken before the beam was really on)
+                _progress(sd, stage="settling", point=0, points=len(pts))
                 native_warmup = _warmup(ctx, acq, sd, warmup_s(study, prof, laser))
             t_a = time.time()
             per_point = _native_map(ctx, name, study, sd, rng, laser, acq, x0, y0, zref, warnings)
@@ -131,8 +133,6 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
             stop_exc = Stop("cancelled", "cancel")
             break
         try:
-            _progress(sd, stage="measuring", point=k, points=len(pts),
-                      eta_min=_eta(t_start, k, len(pts), study, prof))
             if kind == "series" and k > 0:
                 # start to start from the previous spectrum's start: a late spectrum does not make the next one
                 # start early to catch up (a fixed grid from the first start did: 0.4 s after a slow one)
@@ -184,6 +184,16 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
                         ctx.z_focus = zref
                     else:
                         warnings.append(f"point {k}: autofocus failed ({r.get('error')}); kept the previous focus")
+            if k == 0 and kind == "calibration" and (study.get("calibration") or {}).get("refocus") and not af:
+                _progress(sd, stage="focusing", point=0, points=len(pts))
+                fs = focus_scan(ctx, study, laser, zref if zref is not None else zcur, sd / "focus" / "refocus", warnings)
+                focus_scans.append(fs)
+                if fs.get("found"):
+                    zref = zcur = ctx.z_focus = fs["z_um"]
+                    _focus_here(ctx)
+                else:
+                    zcur = fs.get("z_now", zcur)
+                    warnings.append(f"calibration refocus found no clear best ({fs.get('why')}); kept the previous focus")
             if p["dz_um"] and zref is None:
                 raise Stop("the Z position could not be read: Z offsets are refused", "study")
             if zref is not None:
@@ -210,17 +220,20 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
             if chg_s > 0 and not ctx.hold_wanted:
                 # the laser on the sample for a while after a change to it, discarded (2026-11-25: 532 @ 1200 crept
                 # +0.17 cm-1 per repeat right after 637.75 -> 532); with the hold, its open wait does it
+                _progress(sd, stage="settling", point=k, points=len(pts))
                 warmup_info = _warmup(ctx, first_acq, sd, max(chg_s, warmup_s(study, prof, laser)))
                 warmed = True
                 warmup_info["why"] = (f"after the change of laser ({lb_:g} -> {la_:g} nm): the laser settling"
                                       if laser_changed else "the laser selected lately (by an earlier request): "
                                                             "the rest of its settling")
             elif k == 0 and warmup_s(study, prof, laser) > 0:
+                _progress(sd, stage="settling", point=k, points=len(pts))
                 warmup_info = _warmup(ctx, first_acq, sd, warmup_s(study, prof, laser))
                 warmed = True
             elif k == 0 and cal_reps and grating_changed:
                 # the first spectrum after a grating change was the outlier twice (2026-11-24: 11.31, 11.09 against
                 # ~9.5): one discarded first
+                _progress(sd, stage="settling", point=k, points=len(pts))
                 warmup_info = _warmup(ctx, first_acq, sd, float(acq.get("exposure_s") or 1.0))
                 warmed = True
                 warmup_info["why"] = "the first spectrum after a grating change (calibration repeats)"
@@ -256,6 +269,8 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
                 # the hold (and its open wait: the laser settling) before this spectrum's clock starts: on .13 the
                 # 5 s wait sat inside point 0's call, so point 0's t_start came 5 s early and the first gap read 8.3 s
                 ctx._hold_on()
+            _progress(sd, stage="measuring", point=k, points=len(pts),
+                      eta_min=_eta(t_start, k, len(pts), study, prof))
             t_a = time.time()
             t_last_start = t_a
             r = ctx.call("acquire", timeout_s=_acq_timeout(study, prof, rng), **params)
@@ -300,6 +315,11 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
                                    (study.get("acquire") or {}).get("center_cm1"))
                 ctx.laser_health = hc_
                 if hc_["verdict"] in ("multimode", "low_signal"):
+                    if hc_.get("focus_drift_suspect"):
+                        raise Stop(f"calibration not run: focus may have drifted (counts fell and line broadened together) — "
+                                   f"refocus first (or set calibration.refocus true); otherwise the laser may not be healthy "
+                                   f"({hc_['verdict']}: " + "; ".join(hc_["reasons"]) + "). If refocusing does not help, "
+                                   "wait or power-cycle the laser, then calibrate again (calibration.precheck false calibrates anyway)", "study")
                     raise Stop(f"calibration not run: the laser is not healthy ({hc_['verdict']}: "
                                + "; ".join(hc_["reasons"]) + "). Wait for it to settle, or power-cycle the laser, "
                                "then calibrate again (calibration.precheck false calibrates anyway)", "study")
@@ -475,6 +495,7 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
     result = clean(result)
     write_json(sd / f"{name}.json", result)
     _progress(sd, state="done" if stop_exc is None else "stopped", stage="done", point=len(per_point))
+    ctx.study_dir = None
     if stop_exc is not None and stop_exc.by in ("cancel", "operator", "bridge", "timeout"):
         raise stop_exc
     return result

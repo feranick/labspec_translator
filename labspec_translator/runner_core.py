@@ -269,6 +269,7 @@ class Ctx:
         self.bridge_version = None
         self.optics = (None, None)          # (laser nm, grating) after the last setup: for ics.off_for
         self.last_ics = None                # the ICS state of the last acquisition sent
+        self.study_dir = None               # current study folder for progress updates (e.g. settling)
 
     def cancelled(self) -> bool:
         return (self.folder / "cancel").exists()
@@ -442,6 +443,8 @@ class Ctx:
         w = max(w, w_sel)
         self.settle_info = {"settle_waited_s": round(w, 1), "after_selection_s": round(w_sel, 1),
                             "hold_open_s": round(w_open, 1), "why": why_, "how": "the shutter held open"}
+        if w > 0 and getattr(self, "study_dir", None) is not None:
+            _progress(self.study_dir, stage="settling", settle_s=round(w, 1))
         r = self.call("shutter_hold", timeout_s=30 + w, state="on", max_s=getattr(self, "hold_max_s", 3600),
                       idle_s=getattr(self, "hold_idle_s", 60), open_wait_s=w, **motor_args(self.prof))
         if not r.get("ok"):
@@ -828,6 +831,13 @@ def _f(v):
     return to_float(v, finite=True)
 
 
+def _num_val(v):
+    f = _f(v)
+    if f is None:
+        return v
+    return int(f) if f.is_integer() else f
+
+
 # --------------------------------------------------------------------------------------------- one study
 
 def _progress(sd: Path, **kw):
@@ -859,7 +869,9 @@ def _setup(name: str, study: dict, ctx: Ctx, warnings: list, unreliable: list, c
                     step = dict(step, value=lab)
         if plan.already_set(step, before):
             # already in place: not sent (and a manual objective is not asked for again)
-            readback.append({"motor": step["motor"], "asked": step["value"], "got": before.get(step["role"]),
+            got_v = before.get(step["role"])
+            readback.append({"motor": step["motor"], "asked": step["value"],
+                             "got": _num_val(got_v) if step["mode"] == "value" else got_v,
                              "ok": True, "already_set": True, "error": None})
             continue
         if step["motor"] == prof["motors"]["objective"] and prof.get("manual_objective", True) \
@@ -1833,7 +1845,7 @@ def move_extra(prof: dict, motor: str, confirmed_now: bool = False) -> dict:
 def _readback_got(step: dict, r: dict):
     """Consistent read-back value: numeric value for mode='value' moves (matching status/already_set), label for label moves."""
     if step.get("mode") == "value" and r.get("value") not in (None, ""):
-        return r.get("value")
+        return _num_val(r.get("value"))
     return r.get("label") or r.get("value")
 
 

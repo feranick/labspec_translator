@@ -409,6 +409,9 @@ def laser_check(laser_nm=637.75, grating=1200, filter=None, objective="x100_VIS"
         out["laser_health"] = full["laser_health"]
         out["verdict"] = full["laser_health"]["verdict"]
         out["next"] = ("healthy: calibrate or measure" if out["verdict"] == "healthy" else
+                       "focus may have drifted (counts fell and line broadened together): refocus first and check "
+                       "again; if it persists, wait or power-cycle the laser — do not calibrate now"
+                       if full["laser_health"].get("focus_drift_suspect") else
                        "the laser is not healthy: wait a few minutes and check again, or power-cycle the laser; do "
                        "not calibrate now" if out["verdict"] in ("multimode", "low_signal") else
                        "the laser changed mode: calibrate again (calibrate_si) before measuring")
@@ -423,16 +426,18 @@ def SH_gate_ok(prof: dict, laser) -> bool:
 
 def calibrate_si(laser_nm=637.75, grating=1200, repeats=5, filter=None, objective="x100_VIS", center_cm1=None,
                  from_cm1=None, to_cm1=None, wait_total_s: float | None = None, inline: bool = False,
-                 hole_um=None) -> dict:
+                 hole_um=None, refocus: bool = False) -> dict:
     """A silicon calibration (520.7 cm-1) from flat arguments: the correction ls6t applies to later spectra. The
     window is centred on Si, or where the measurements will be (center_cm1, or from_cm1 + to_cm1): the zero
     differs between windows (2026-11-25, 1200: +0.66 cm-1 with the window ~0.9 nm off the calibration's). The
     correction holds for its objective and confocal hole only: hole_um, else the profile's default for the objective
-    (x100: 100 um); measure with the same."""
+    (x100: 100 um); measure with the same. refocus=True runs a Raman focus scan before the repeats."""
     prof = P.load()
     try:
         las = snap_laser(prof, laser_nm)
         cal = {"reference": "si", "adjust": "ls6t", "repeats": int(repeats)}
+        if refocus:
+            cal["refocus"] = True
         if float(grating) <= 600:
             cal["window_cm1"] = 60
         obj_ = snap_objective(prof, objective)
@@ -1875,12 +1880,13 @@ def set_instrument(setup: dict) -> dict:
         for what, motor, mode, value in moves:
             cur = before.get({"laser": "laser_nm"}.get(what, what))
             if cur not in (None, "") and P.same_position(cur, value):
-                done.append({"set": what, "asked": value, "got": cur, "ok": True, "already_set": True,
-                             "error": None})
+                done.append({"set": what, "asked": value,
+                             "got": runner._num_val(cur) if mode == "value" else cur,
+                             "ok": True, "already_set": True, "error": None})
                 continue
             r = b.call("move", timeout_s=600 if what in ("laser", "grating", "objective") else 120, motor=motor,
                        mode=mode, value=value, **runner.move_extra(prof, motor, what == "objective" and obj_asked))
-            got = r.get("label") if mode == "label" else r.get("value")
+            got = r.get("label") if mode == "label" else runner._num_val(r.get("value"))
             ok = bool(r.get("ok")) and P.same_position(got, value)
             retried = None
             if r.get("ok") and not ok and what == "grating":

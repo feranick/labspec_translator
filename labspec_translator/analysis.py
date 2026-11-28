@@ -427,6 +427,8 @@ def _analyse_zero_and_bg(study, per_point, prof, laser, rng, warnings, unreliabl
                                         and n_fl_ >= FIRST_LANDING_MIN_N) else 0.0
             # the correction's own uncertainty: its repeats' standard error (600: SD ~0.27 over 5 -> ~0.12)
             sem_term = float(((corr.get("repeats") or {}).get("sem_cm1")) or 0.0)
+            focus_sensitive = bool(objective not in (None, "") and plan.magnification(objective) >= 100
+                                   and _f(hole) is not None and _f(hole) <= 150)
             if rep_.get("moved_sd_cm1") or creep_term or centre_term or sem_term:
                 # the zero across spectrometer moves is no better than the spectrometer repeats (2026-11-24, 600:
                 # SD 0.9-1.2 cm-1 moved, 0.12 without moves); and it creeps with the correction's age (2026-11-25,
@@ -457,23 +459,37 @@ def _analyse_zero_and_bg(study, per_point, prof, laser, rng, warnings, unreliabl
                     eu_from_parts.append(f"another window centre ({dist_:.2f} nm away: {float(wrate_ or 0):.2f} cm-1 per nm "
                                          f"from {rep_.get('window_zero_from') or rep_.get('source')}, at most "
                                          f"{WINDOW_TERM_CAP_CM1:g})")
+                if focus_sensitive:
+                    eu_from_parts.append(f"positions depend on focus at hole {_f(hole):g} um with {objective}")
+                if ext_range and not corr.get("range_match"):
+                    eu_from_parts.append("stitched extended range using a single-window correction (actual zero error "
+                                         "can be several cm-1)")
                 corr = dict(corr, expected_uncertainty_cm1=_u_total(parts_),
                             expected_uncertainty_parts={k_: v_ for k_, v_ in parts_.items() if v_},
                             expected_uncertainty_from="; ".join(eu_from_parts) or f"{rep_place} placement")
                 rep_ = dict(rep_, moved_sd_cm1=corr["expected_uncertainty_cm1"])
                 # the warning quoting it is said once, at the end of the analysis, with the final value
+            if focus_sensitive:
+                corr = dict(corr, focus_sensitive=True)
+                if not corr.get("expected_uncertainty_from"):
+                    corr["expected_uncertainty_from"] = f"positions depend on focus at hole {_f(hole):g} um with {objective}"
+            if ext_range and not corr.get("range_match") and not corr.get("expected_uncertainty_from"):
+                corr = dict(corr, expected_uncertainty_from="stitched extended range using a single-window correction "
+                                                            "(actual zero error can be several cm-1)")
             from .runner_core import _parse_ts, labspec_started_time
             ls_started, ls_started_ts = labspec_started_time()
             corr_ts = _parse_ts(corr.get("time"))
-            if ls_started_ts is not None and corr_ts is not None and corr_ts < ls_started_ts:
-                corr = dict(corr, before_labspec_restart=ls_started)
+            before_restart = bool(ls_started_ts is not None and corr_ts is not None and corr_ts < ls_started_ts)
+            corr = dict(corr, before_labspec_restart=before_restart,
+                        **({"labspec_started": ls_started} if before_restart else {}))
+            if before_restart:
                 warnings.append(f"the spectral correction ({corr['time']}) was measured before LabSpec restarted "
                                 f"({ls_started}): the zero can shift across a LabSpec restart; calibrate again")
             zs = checks["zero"] = dict(zs, correction_used={**{k: corr.get(k) for k in (
                 "a", "b", "time", "centre_nm", "interpolated_between_nm", "centre_far", "laser_line_cm1", "placement",
                 "range_match", "range_cm1", "pooled", "pooled_from", "repeats", "expected_uncertainty_cm1",
                 "expected_uncertainty_from", "expected_uncertainty_parts", "age_min", "window_distance_nm", "hole_um",
-                "objective", "before_labspec_restart")
+                "objective", "before_labspec_restart", "labspec_started", "focus_sensitive")
                 if corr.get(k) is not None}, "key": xcal.key(laser, grating, setup_),
                 **({"age_h": round(xcal.age_h(corr), 2)} if xcal.age_h(corr) is not None else {})},
                 note="offset_cm1 is the last calibration check of this laser, grating, objective and hole (any "
@@ -517,9 +533,11 @@ def _analyse_zero_and_bg(study, per_point, prof, laser, rng, warnings, unreliabl
                             "(center_cm1 or range_cm1), or keep the laser line in the window with "
                             "acquire.laser_reference 'correct'")
         elif ext_range and not corr.get("range_match"):
-            warnings.append(f"this range is stitched by LabSpec from {rng.get('windows')} windows, each with its own "
-                            f"zero; the correction applied ({xcal.key(laser, grating, setup_)}) was measured in one "
-                            "window: calibrate with this same range_cm1 and ls6t keeps that correction for this range")
+            msg_ext = (f"this range is stitched by LabSpec from {rng.get('windows')} windows, each with its own "
+                       f"zero; the correction applied ({xcal.key(laser, grating, setup_)}) was measured in one "
+                       "window: calibrate with this same range_cm1 and ls6t keeps that correction for this range")
+            warnings.append(msg_ext)
+            unreliable.append(msg_ext)
         elif corr.get("centre_unknown"):
             warnings.append("the correction's window centre is not known (a calibration stored before "
                             "2026.11.24.8): the zero differs between windows")
@@ -1828,6 +1846,12 @@ def laser_health(prof: dict, laser, grating, file, exposure_s=None, placement: s
         if abs(move) > max(HEALTH_MOVE_MIN_CM1, 3.0 * sd_):
             verdicts.append("mode_change")
             reasons.append(f"the laser line sits {move:+.2f} cm-1 from {ll_ref_from}")
+    if ((out.get("counts_ratio") is not None and out["counts_ratio"] < 0.7
+         and out.get("width_ratio") is not None and out["width_ratio"] > 1.2)
+            or ("low_signal" in verdicts and "multimode" in verdicts)):
+        out["focus_drift_suspect"] = True
+        reasons.insert(0, "focus may have drifted (counts fell and line broadened together): refocus before assuming "
+                          "the laser is unhealthy")
     order = ("multimode", "low_signal", "mode_change")
     out["verdict"] = next((v for v in order if v in verdicts), "healthy")
     out["reasons"] = reasons
@@ -1974,7 +1998,8 @@ def _calibration_result(study, prof, rec, ref_lines, laser, grating, rng, reques
                 a = a + (float(np.mean(meas - refs)) - centre_o) * b      # the zero moved to the repeats' median
             worst = (abs(float(stt_abs["centre"])) if anc and stt_abs.get("centre") is not None else abs(centre_o))
             moved = bool((study.get("calibration") or {}).get("repeats_move", True))
-            rep_info = {"n": len(use), "offsets_cm1": [None if o is None else round(o, 3) for o in offs],
+            rep_info = {"n": len(use), "n_total": len(offs),
+                        "offsets_cm1": [None if o is None else round(o, 3) for o in offs],
                         "median_cm1": round(centre_o, 3),
                         "mean_cm1": round(float(np.mean(use)) + (anc["laser_line_cm1"] if anc else 0.0), 3),
                         "sd_cm1": round(sd, 3), "sem_cm1": round(sd / math.sqrt(len(use)), 3),
@@ -2045,7 +2070,8 @@ def _calibration_result(study, prof, rec, ref_lines, laser, grating, rng, reques
                 store.write("spectro_repeatability.json", {k_: _clean_rep_entry(v_) for k_, v_ in rec_r.items()})
                 res["repeatability"] = _clean_rep_entry(dict(rec_r[kk]))
             if stt["outliers"]:
-                warnings.append(f"repeat(s) {', '.join(str(i + 1) for i in stt['outliers'])} left out as outliers "
+                warnings.append(f"repeat index(es) {', '.join(str(i) for i in stt['outliers'])} "
+                                "(0-based, matching repeats.outliers) left out as outliers "
                                 "(more than 3 robust SDs from the median; the first after a grating change was one "
                                 "twice on 2026-11-24)")
             if stt["trend"] and not stt["step"]:

@@ -17,7 +17,7 @@ TOP_KEYS = {"kind", "sample", "setup", "acquire", "focus", "points", "map", "ser
 FILTERS_KEYS = {"line_cm1", "window_cm1", "labels", "exposure_s", "max_exposure_s"}
 CUTOFF_KEYS = {"from_cm1", "to_cm1", "light", "laser_off", "plateau_cm1"}
 CAL_KEYS = {"reference", "lines_cm1", "tol_cm1", "adjust", "window_cm1", "repeats", "store", "repeats_move",
-            "anchor", "precheck", "accept_mode_change"}
+            "anchor", "precheck", "accept_mode_change", "refocus"}
 BG_KEYS = {"name", "laser_off"}
 DEPTH_KEYS = {"from_um", "to_um", "step_um", "refractive_index", "engine", "swift"}
 MOVE_KEYS = {"x_um", "y_um", "to_um", "dz_um", "stay", "snapshot", "travel", "focus"}
@@ -320,6 +320,8 @@ def _validate_calibration(study: dict, errors: list) -> None:
     if cal.get("accept_mode_change") is not None and not isinstance(cal["accept_mode_change"], bool):
         errors.append("calibration.accept_mode_change: true (store a correction although the laser is in another "
                       "mode than at its last healthy check at this window; it holds in this mode only)")
+    if cal.get("refocus") is not None and not isinstance(cal["refocus"], bool):
+        errors.append("calibration.refocus: true (run a Raman focus scan before the calibration repeats) or false")
     if cal.get("repeats_move") is not None and not isinstance(cal["repeats_move"], bool):
         errors.append("calibration.repeats_move: true (the spectrometer sent away and back before each repeat: "
                       "noise plus repositioning) or false (it stays: noise alone)")

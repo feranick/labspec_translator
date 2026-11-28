@@ -27,8 +27,8 @@ from .runner_core import *  # noqa: F401, F403
 from .runner_core import (  # noqa: F401 - explicit underscore re-exports
     _acq_timeout, _acquire_lock, _af_bound, _band_said, _check_abs, _confirm_depth,
     _continues_hold, _eta, _f, _finish, _focus_found_this_session, _focus_here,
-    _jsonable, _live_view, _matches, _not_returned, _objective_source, _paint_band,
-    _progress, _release_lock, _retract_before_xy, _return_home, _run_kind, _setup,
+    _jsonable, _live_view, _matches, _not_returned, _num_val, _objective_source, _paint_band,
+    _progress, _readback_got, _release_lock, _retract_before_xy, _return_home, _run_kind, _setup,
     _shutter_gate, _snapshot, _stage_now, _study_laser, _video_focus_after_travel,
     _warmup, _z_direct, _z_guard,
 )
