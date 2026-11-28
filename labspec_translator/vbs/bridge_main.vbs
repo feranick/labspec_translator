@@ -2802,7 +2802,7 @@ End Sub
 ' map is written for ls6t (out & ".map.txt": axes and values) and saved as .l6s (and LabSpec's text export).
 Sub VMapNative(cmd, res)
     Dim ax, i, mname, f, t, st, n, ex, acc, sw, swOk, id, t0, started, who, tmo, outBase, r, mode, tval, axes
-    Dim gf, gt, gs, gm, gu, tMap
+    Dim gf, gt, gs, gm, gu, tMap, tAll, tp
     outBase = GetP(cmd, "out", "")
     gChunk = CLng(ParseNum(GetP(cmd, "chunk", "65536")))
     ex = ParseNum(GetP(cmd, "exposure_s", "1"))
@@ -2812,28 +2812,35 @@ Sub VMapNative(cmd, res)
         Fail res, "map_native needs 'out'"
         Exit Sub
     End If
+    tAll = Timer
     On Error Resume Next
     ' the spectrometer centre (one window)
     If GetP(cmd, "center_nm", "") <> "" Then
         If ParseNum(GetP(cmd, "spectro_approach_nm", "0")) <> 0 Then
             ' from the same side as ls6t's other moves (spectrometer.approach_nm: the backlash out)
+            tp = Timer
             r = BlockingMove("Spectro", ParseNum(GetP(cmd, "center_nm", "0")) + ParseNum(GetP(cmd, "spectro_approach_nm", "0")), "", LS_MOTOR_VALUE)
             WaitMotor "Spectro", gNoId, 120, res
             res("spectro_approached_from") = ParseNum(GetP(cmd, "center_nm", "0")) + ParseNum(GetP(cmd, "spectro_approach_nm", "0"))
+            res("t_spectro_approach_s") = Secs(Elapsed(tp))
             Err.Clear
         End If
+        tp = Timer
         r = LabSpec.MoveMotor("Spectro", ParseNum(GetP(cmd, "center_nm", "0")), "", LS_MOTOR_VALUE + LS_MOTOR_NO_WAIT)
         If Err.Number <> 0 Then
             Fail res, ErrText("Spectro")
             Err.Clear
             Exit Sub
         End If
+        res("t_spectro_call_s") = Secs(Elapsed(tp))
+        tp = Timer
         ' wait for this last move whatever MoveMotor returned (2026-11-25: 'before' read the approach point)
         If r > 0 Then
             WaitMotor "Spectro", r, 120, res
         Else
             WaitMotor "Spectro", gNoId, 120, res
         End If
+        res("t_spectro_wait_s") = Secs(Elapsed(tp))
         res("spectro_before_map") = MotorValue("Spectro")
     End If
     ' the axes: all off, then the ones asked for
@@ -2890,19 +2897,23 @@ Sub VMapNative(cmd, res)
     res("acq_mode") = mode
     tval = -1
     If GetP(cmd, "acq_time", "interface") = "exposure" Then tval = ex
+    tp = Timer
     FlushAcqID res, n, False
     Err.Clear
+    res("t_flush_s") = Secs(Elapsed(tp))
     ' LabSpec's map holds the script for the whole map: the heartbeat says so first, with how long it may take
     ' (2026-11-24: ls6t called the bridge gone after 20 s of a 1-minute native map)
     gBlocking = "map_native"
     gBlockingS = tmo
     Beat "busy", True
     tMap = Timer                ' LabSpec's Acq may hold the bridge for the whole map (2026-11-24: 0.0 s reported)
+    tp = Timer
     If GetP(cmd, "horiba_start", "1") = "1" Then
         LabSpec.Acq mode, tval, 0, 0, 0
     Else
         LabSpec.Acq mode, tval, acc, ParseNum(GetP(cmd, "from_nm", "0")), ParseNum(GetP(cmd, "to_nm", "0"))
     End If
+    res("t_acq_call_s") = Secs(Elapsed(tp))
     gBlocking = ""
     gBlockingS = 0
     Beat "busy", True
@@ -2952,13 +2963,17 @@ Sub VMapNative(cmd, res)
     Loop
     Err.Clear
     On Error GoTo 0
+    res("t_until_data_s") = Secs(Elapsed(t0))
     HoldCheck res, "hold_after_map"
     res("spectro_after_map") = MotorValue("Spectro")
     res("id") = id
     res("seconds_map") = Elapsed(tMap)
     ' and on the map LabSpec made (the default's values may not all carry over: T9.13, the baseline did not)
     If GetP(cmd, "band_from_cm1", "") <> "" Then SetBand id, cmd, res, "band_map"
+    tp = Timer
     If WriteData(id, outBase & ".map.txt", res, "map") Then res("out") = outBase & ".map.txt"
+    res("t_write_s") = Secs(Elapsed(tp))
+    tp = Timer
     On Error Resume Next
     r = LabSpec.Save(id, outBase & ".l6s", "")
     res("native_ok") = Bit(Err.Number = 0 And r = 0)
@@ -2969,7 +2984,9 @@ Sub VMapNative(cmd, res)
     LabSpec.Exec id, LS_SHOW_DATA, r
     Err.Clear
     On Error GoTo 0
+    res("t_save_s") = Secs(Elapsed(tp))
     res("detector_temp_c") = DetectorTemp()
+    res("t_acquire_total_s") = Secs(Elapsed(tAll))
 End Sub
 
 Sub VConfirm(cmd, res)

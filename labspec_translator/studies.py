@@ -1329,7 +1329,8 @@ def _record_resolution(result: dict, after: dict, prof: dict, warnings: list, re
     # per objective and hole too (Nicola, 2026-11-27: 785 Si 5.44 cm-1 at x100, 8.55 at x10 with the 300 um hole; the
     # x10 read '1.52 x its first measurement, alignment?' against an x100 baseline)
     obj_, hole_ = after.get("objective"), _f(after.get("hole_um"))
-    k = perf.key(laser, grating, slit) + (f"@{obj_}" if obj_ not in (None, "") else "") \
+    k = perf.key(laser, grating) + (f"@s{slit:g}" if slit is not None else "") \
+        + (f"@{obj_}" if obj_ not in (None, "") else "") \
         + (f"@h{hole_:g}" if hole_ is not None else "")
     fw = float(cal["fwhm_cm1"])
     rec = perf.record("resolution", k, {"fwhm_cm1": round(fw, 3), "line_cm1": cal.get("reference_cm1"),

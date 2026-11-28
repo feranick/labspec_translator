@@ -906,8 +906,12 @@ class SimLabSpec:
         if c_nm:
             hold = dict(hold, spectro_before_map=c_nm, spectro_after_map=c_nm,
                         spectro_map_started=c_nm + (2.0 if (self.dir / "sim_native_moves_spectro").exists() else 0.0))
+        sec_map = round(npts * (ex * acc + speed), 2)
         return {"id": 950, "out": str(path), "native_ok": 0, "text_ok": 0, "pixels": int(data.size), "data_via": via,
-                "axes": " ".join(m for m, _ in axes), "seconds_map": round(npts * (ex * acc + speed), 2),
+                "axes": " ".join(m for m, _ in axes), "seconds_map": sec_map,
+                "t_spectro_approach_s": 0.0, "t_spectro_call_s": 0.0, "t_spectro_wait_s": 0.0,
+                "t_flush_s": 0.0, "t_acq_call_s": sec_map, "t_until_data_s": 0.0,
+                "t_write_s": 0.01, "t_save_s": 0.0, "t_acquire_total_s": round(sec_map + 0.01, 2),
                 "detector_temp_c": self.temp_c, **hold, **band_, "acq_mode": 10 + 2,
                 **{f"{ax}_readback": f"{p.get(ax + '_from')} / {p.get(ax + '_to')} / {p.get(ax + '_step')} / mode 0 / "
                                      "use 1" for ax in ("x", "y", "z") if p.get(f"{ax}_from") is not None}}

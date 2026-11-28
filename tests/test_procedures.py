@@ -3199,3 +3199,98 @@ def test_calibration_refused_in_another_laser_mode_than_its_window_reference():
         (bdir / "sim_laser_line").unlink(missing_ok=True)
         R.store.write(R.CHECK_REF, {})
         xcal.clear()
+
+
+def test_extended_range_excluding_zero_uses_stored_correction_silently():
+    """Smoke test 2026.11.28.8 (s9): an extended range (100-3200 cm-1) excluding ~0 cm-1 must not be marked
+    unreliable for missing laser line when acquire.laser_reference is unset; expected_uncertainty_from must not start
+    with 'None'; and the stitched-range warning must cite the applied correction key, not 2026-11-24 / 637.75."""
+    from labspec_translator import xcal, store
+    xcal.clear()
+    store.write("spectro_repeatability.json", {})
+    bdir = config.active_bridge_dir()
+    S.ensure(bdir)
+    (bdir / "sim_laser_line").write_text("1")
+    setup = dict(SETUP, grating=1200, hole_um=100)
+    cal = {"kind": "calibration", "sample": {"name": "Si"}, "setup": setup,
+           "acquire": {"center_cm1": 250, "exposure_s": 0.5},
+           "calibration": {"adjust": "ls6t", "repeats": 3}}
+    try:
+        c = run_inline({"c": cal})["studies"]["c"]
+        assert c["reliable"] and c["calibration"].get("stored_correction", {}).get("laser_line_cm1") is not None
+        ext = {"kind": "spectrum", "sample": {"name": "Si"}, "setup": setup,
+               "acquire": {"range_cm1": [100, 3200], "exposure_s": 0.5}}
+        s = run_inline({"s": ext})["studies"]["s"]
+        assert s["reliable"], s.get("unreliable_because")
+        assert s["checks"]["zero_correction"]["laser_reference"] == "report"
+        cu = s["checks"]["zero"]["correction_used"]
+        if cu.get("expected_uncertainty_from") is not None:
+            assert not str(cu["expected_uncertainty_from"]).startswith("None"), cu
+        stitched = [w for w in s["warnings"] if "stitched by LabSpec" in w]
+        assert stitched and "532@1200@x100@h100" in stitched[0] and "measured in one window" in stitched[0], stitched
+        assert not any("2026-11-24" in w or "637.75" in w for w in s["warnings"]), s["warnings"]
+    finally:
+        (bdir / "sim_laser_line").unlink(missing_ok=True)
+        store.write("spectro_repeatability.json", {})
+        xcal.clear()
+
+
+def test_correction_before_labspec_restart_is_flagged():
+    """Smoke test 2026.11.28.8: a spectral correction measured before LabSpec restarted is flagged in
+    checks.zero.correction_used.before_labspec_restart and warned."""
+    import labspec_translator.runner as R
+    from labspec_translator import xcal
+    xcal.clear()
+    S.ensure(config.active_bridge_dir())
+    setup = dict(SETUP, grating=1200, hole_um=100)
+    cal = {"kind": "calibration", "sample": {"name": "Si"}, "setup": setup,
+           "acquire": {"center_cm1": 520.7, "exposure_s": 0.5},
+           "calibration": {"adjust": "ls6t"}}
+    try:
+        run_inline({"c": cal})
+        R.store.write(R.LABSPEC_SESSION, {"started": "2099-01-01 00:00:00"})
+        s = run_inline({"s": {"kind": "spectrum", "sample": {"name": "Si"}, "setup": setup,
+                              "acquire": {"center_cm1": 520.7, "exposure_s": 0.5}}})["studies"]["s"]
+        cu = s["checks"]["zero"]["correction_used"]
+        assert cu.get("before_labspec_restart") == "2099-01-01 00:00:00", cu
+        assert any("before LabSpec restarted" in w for w in s["warnings"]), s["warnings"]
+    finally:
+        R.store.write(R.LABSPEC_SESSION, {})
+        xcal.clear()
+
+
+def test_readback_got_resolution_key_and_calibration_zero_key():
+    """Smoke test 2026.11.28.8: value-mode moves keep numeric readbacks ('100', '1200'), resolution keys tag slit as
+    @s<slit>, and calibration studies populate checks.zero.key."""
+    import labspec_translator.runner_core as RC
+    from labspec_translator import xcal
+    assert RC._readback_got({"mode": "value"}, {"value": "100", "label": "100 µm"}) == "100"
+    assert RC._readback_got({"mode": "value"}, {"value": "1200", "label": "1200 (750nm)"}) == "1200"
+    assert RC._readback_got({"mode": "label"}, {"value": "1", "label": "x100_VIS"}) == "x100_VIS"
+    xcal.clear()
+    S.ensure(config.active_bridge_dir())
+    setup = dict(SETUP, grating=1200, hole_um=100)
+    c = run_inline({"c": {"kind": "calibration", "sample": {"name": "Si"}, "setup": setup,
+                          "acquire": {"center_cm1": 520.7, "exposure_s": 0.5},
+                          "calibration": {"adjust": "ls6t"}}})["studies"]["c"]
+    assert c["checks"]["zero"]["key"] == "532@1200@x100@h100", c["checks"].get("zero")
+    rk = (c["calibration"].get("resolution") or {}).get("key", "")
+    assert rk.startswith("532@1200") and "@h100" in rk and "@100@" not in rk, rk
+    xcal.clear()
+
+
+def test_native_map_lists_spectra_and_phase_timing():
+    """Smoke test 2026.11.28.8: native maps list parsed spectra in result['spectra'] and populate timing.acquire_phases_s."""
+    S.ensure(config.active_bridge_dir())
+    nat = {"kind": "map", "sample": {"name": "Si"}, "setup": dict(SETUP),
+           "acquire": {"center_cm1": 520.7, "exposure_s": 0.2},
+           "map": {"x_um": [0, 2, 1], "y_um": [0, 2, 1], "engine": "native"}}
+    m = run_inline({"m": nat})["studies"]["m"]
+    assert m["points_measured"] == 9 and len(m["spectra"]) == 9
+    ph = m["timing"]["acquire_phases_s"]
+    assert ph and "t_acq_call_s" in ph and "t_write_s" in ph, m["timing"]
+    assert m["timing"]["acquire_s"] > 0
+    vbs = api.compose_vbs(config.active_bridge_dir(), config.home())["ls6t_bridge.vbs"]
+    nm = vbs.split("Sub VMapNative")[1].split("End Sub")[0]
+    assert 'res("t_acq_call_s")' in nm and 'res("t_write_s")' in nm and 'res("t_acquire_total_s")' in nm
+

@@ -437,27 +437,43 @@ def _analyse_zero_and_bg(study, per_point, prof, laser, rng, warnings, unreliabl
                 parts_ = {"repositioning": round(mv_, 3), "drift": round(creep_term, 3),
                           "first_landing": round(first_term, 3), "window": round(centre_term, 3),
                           "correction_sem": round(sem_term, 3)}
+                eu_from_parts: list[str] = []
+                if mv_ > 0 and rep_.get("source"):
+                    eu_from_parts.append(f"{rep_.get('source')}, {rep_place} placement")
+                if creep_term and (creep_ or drh_):
+                    eu_from_parts.append(
+                        f"the zero's drift since the calibration ({float(age_m_):.0f} min: "
+                        + (f"creep {abs(float(creep_)):.2f} cm-1/min" if creep_ else "")
+                        + (", " if creep_ and drh_ else "")
+                        + (f"{float(drh_):.2f} cm-1/h between calibrations" if drh_ else "")
+                        + f", learned; at most {CREEP_CAP_CM1:g} each)"
+                    )
+                if first_term:
+                    eu_from_parts.append(f"the first landing after a grating change ({first_term:.2f} cm-1 learned; no laser "
+                                         "line to bring it back)")
+                if sem_term:
+                    eu_from_parts.append(f"the correction's own standard error ({sem_term:.2f})")
+                if centre_term:
+                    eu_from_parts.append(f"another window centre ({dist_:.2f} nm away: {float(wrate_ or 0):.2f} cm-1 per nm "
+                                         f"from {rep_.get('window_zero_from') or rep_.get('source')}, at most "
+                                         f"{WINDOW_TERM_CAP_CM1:g})")
                 corr = dict(corr, expected_uncertainty_cm1=_u_total(parts_),
                             expected_uncertainty_parts={k_: v_ for k_, v_ in parts_.items() if v_},
-                            expected_uncertainty_from=f"{rep_.get('source')}, {rep_place} placement"
-                            + (f"; the zero's drift since the calibration ({float(age_m_):.0f} min: "
-                               + (f"creep {abs(float(creep_)):.2f} cm-1/min" if creep_ else "")
-                               + (", " if creep_ and drh_ else "")
-                               + (f"{float(drh_):.2f} cm-1/h between calibrations" if drh_ else "")
-                               + f", learned; at most {CREEP_CAP_CM1:g} each)" if creep_term and (creep_ or drh_) else "")
-                            + (f"; the first landing after a grating change ({first_term:.2f} cm-1 learned; no laser "
-                               "line to bring it back)" if first_term else "")
-                            + (f"; the correction's own standard error ({sem_term:.2f})" if sem_term else "")
-                            + (f"; another window centre ({dist_:.2f} nm away: {float(wrate_ or 0):.2f} cm-1 per nm "
-                               f"from {rep_.get('window_zero_from') or rep_.get('source')}, at most "
-                               f"{WINDOW_TERM_CAP_CM1:g})" if centre_term else ""))
+                            expected_uncertainty_from="; ".join(eu_from_parts) or f"{rep_place} placement")
                 rep_ = dict(rep_, moved_sd_cm1=corr["expected_uncertainty_cm1"])
                 # the warning quoting it is said once, at the end of the analysis, with the final value
+            from .runner_core import _parse_ts, labspec_started_time
+            ls_started, ls_started_ts = labspec_started_time()
+            corr_ts = _parse_ts(corr.get("time"))
+            if ls_started_ts is not None and corr_ts is not None and corr_ts < ls_started_ts:
+                corr = dict(corr, before_labspec_restart=ls_started)
+                warnings.append(f"the spectral correction ({corr['time']}) was measured before LabSpec restarted "
+                                f"({ls_started}): the zero can shift across a LabSpec restart; calibrate again")
             zs = checks["zero"] = dict(zs, correction_used={**{k: corr.get(k) for k in (
                 "a", "b", "time", "centre_nm", "interpolated_between_nm", "centre_far", "laser_line_cm1", "placement",
                 "range_match", "range_cm1", "pooled", "pooled_from", "repeats", "expected_uncertainty_cm1",
                 "expected_uncertainty_from", "expected_uncertainty_parts", "age_min", "window_distance_nm", "hole_um",
-                "objective")
+                "objective", "before_labspec_restart")
                 if corr.get(k) is not None}, "key": xcal.key(laser, grating, setup_),
                 **({"age_h": round(xcal.age_h(corr), 2)} if xcal.age_h(corr) is not None else {})},
                 note="offset_cm1 is the last calibration check of this laser, grating, objective and hole (any "
@@ -502,9 +518,8 @@ def _analyse_zero_and_bg(study, per_point, prof, laser, rng, warnings, unreliabl
                             "acquire.laser_reference 'correct'")
         elif ext_range and not corr.get("range_match"):
             warnings.append(f"this range is stitched by LabSpec from {rng.get('windows')} windows, each with its own "
-                            "zero; the correction applied was measured in one window (2026-11-24, 637.75 @ 1200, "
-                            "100-3200 cm-1: Si read 1.5 cm-1 low with it): calibrate with this same range_cm1 and ls6t "
-                            "keeps that correction for this range")
+                            f"zero; the correction applied ({xcal.key(laser, grating, setup_)}) was measured in one "
+                            "window: calibrate with this same range_cm1 and ls6t keeps that correction for this range")
         elif corr.get("centre_unknown"):
             warnings.append("the correction's window centre is not known (a calibration stored before "
                             "2026.11.24.8): the zero differs between windows")
@@ -563,7 +578,7 @@ def _analyse_zero_and_bg(study, per_point, prof, laser, rng, warnings, unreliabl
     }
 
 
-def _analyse_laser_line_tracking(study, per_point, prof, laser, warnings, checks,
+def _analyse_laser_line_tracking(study, per_point, prof, laser, rng, warnings, checks,
                                  grating, kind, process, st):
     """Stage 2 of analyse(): screen weak points and track laser-line plateaus/hops against Raman peaks."""
     from . import xcal
@@ -571,12 +586,19 @@ def _analyse_laser_line_tracking(study, per_point, prof, laser, warnings, checks
     ll_asked = study.get("acquire", {}).get("laser_reference")
     ll_mode = ll_asked or ((prof["lasers"][lk_].get("laser_reference") if lk_ else None) or "report")
     ll_mode_asked = ll_mode
+    # A range that excludes ~0 cm-1 cannot contain the laser line: unless the user explicitly asked for
+    # acquire.laser_reference, silently use the stored correction alone instead of flagging unreliable.
+    rng_lo, rng_hi = (rng or {}).get("from_cm1"), (rng or {}).get("to_cm1")
+    range_excludes_zero = (rng_lo is not None and rng_hi is not None
+                           and (float(rng_lo) > -15.0 or float(rng_hi) < 15.0))
+    if not ll_asked and range_excludes_zero:
+        ll_mode = ll_mode_asked = "report"
     # a correction measured relative to a narrow laser line (its calibration stored where the line was): later
     # spectra are brought to that line first, landing and all (Nicola, 2026-11-25: at 1200 the repeats' Si scattered
     # 0.76 cm-1 with the spectrometer's landing, Si - laser line 0.06). Asked for explicitly, the study's own choice
     corr_broad = bool(corr and laser_line_too_broad(corr.get("laser_line_fwhm_cm1"), corr.get("lines")))
-    if (not ll_asked and kind != "calibration" and ll_mode in ("report", "correct") and corr
-            and corr.get("laser_line_cm1") is not None):
+    if (not ll_asked and not range_excludes_zero and kind != "calibration" and ll_mode in ("report", "correct")
+            and corr and corr.get("laser_line_cm1") is not None):
         # a broad line (600 gr/mm) too, but only where a well fitted Raman peak moved alike (the plateau rules
         # below): it misjudges moves alone (+3.48 then +1.92 with no move, Si steady: 2026-11-26 11:44), yet a real
         # hop moves both (12:50: line -5.1, Si -6.4)
@@ -1194,7 +1216,7 @@ def _analyse_summaries(name, study, per_point, prof, laser, rng, sd, warnings, u
             unreliable.append(f"zero uncertain at {len(uncertain)} of {len(per_point)} spectra (the laser line jumped "
                               "or broadened: checks.zero_correction.uncertain_points)")
     miss = [r["point"] for r in per_point if not (r.get("laser_line") or {}).get("ok") and r["point"] not in excluded]
-    if ll_mode == "correct" and miss:
+    if ll_mode == "correct" and miss and not (anchor and not study.get("acquire", {}).get("laser_reference")):
         # (2026-11-24: 'no laser line was found in spectra :' with an empty list, when every spectrum after the
         # first had a bad laser-line fit: those have a line, it is not used)
         unreliable.append(f"acquire.laser_reference 'correct', but no laser line was found in spectra "
@@ -1452,6 +1474,7 @@ def _analyse_summaries(name, study, per_point, prof, laser, rng, sd, warnings, u
     if kind == "map":
         out["map"] = _map_result(name, study, per_point, axes, ys, sd, process)
         out["files"]["map"] = out["map"]["files"]
+        out["spectra"] = [_point_summary(r) for r in per_point[:400]]
         if out["map"]["nx"] == 1 and out["map"]["ny"] == 1 and out["map"]["nz"] > 1:
             out["depth"] = depth_result(study, out["map"], prof, sd, warnings)
         if failed:
@@ -1543,7 +1566,7 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
                             for p_ in process["peaks"]]
     st = _analyse_zero_and_bg(study, per_point, prof, laser, rng, warnings, unreliable, checks,
                               grating, objective, hole, kind, process)
-    ll_st = _analyse_laser_line_tracking(study, per_point, prof, laser, warnings, checks,
+    ll_st = _analyse_laser_line_tracking(study, per_point, prof, laser, rng, warnings, checks,
                                          grating, kind, process, st)
     _analyse_points(study, per_point, prof, laser, rng, warnings, checks, grating, kind,
                     process, st, ll_st)
@@ -2109,6 +2132,8 @@ def _calibration_result(study, prof, rec, ref_lines, laser, grating, rng, reques
                                                         "pass": res["pass"], "tol_cm1": tol,
                                                         **({"laser_line_cm1": ll_rec}
                                                            if ll_rec is not None and res["pass"] else {})}, request)
+    if laser and "zero" not in checks:
+        checks["zero"] = zero_state(laser, grating, prof, setup)
     lk = P.laser_key(prof, laser)
     if lk and prof["lasers"][lk].get("mode_hops"):
         res["mode_note"] = (f"the {float(laser):g} nm laser has mode hops (profile lasers.{lk}.mode_hops): this "

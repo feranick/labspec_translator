@@ -508,7 +508,7 @@ def timing(calls: list, per_point: list, total_s: float, shutter: str | None = N
         v = by_verb.setdefault(c["verb"] + (f" {c['motor']}" if c.get("motor") else ""), {"n": 0, "s": 0.0})
         v["n"] += 1
         v["s"] = round(v["s"] + c["s"], 2)
-    acq = [c for c in calls if c["verb"] == "acquire" and not c.get("settle_acq")]
+    acq = [c for c in calls if c["verb"] in ("acquire", "map_native") and not c.get("settle_acq")]
     settle_acqs = [c for c in calls if c["verb"] == "acquire" and c.get("settle_acq")]
     # the operator reading and answering LabSpec's questions (the laser's Yes, the objective, a notice): not overhead
     operator = round(sum(c["s"] for c in calls if c["verb"] in OPERATOR_VERBS), 2)
@@ -887,7 +887,7 @@ def _setup(name: str, study: dict, ctx: Ctx, warnings: list, unreliable: list, c
         r = ctx.call("move", timeout_s=600 if long_move else 120, **p, **move_extra(prof, p["motor"], asked_here))
         ok, got = _matches(step, r)
         from .api import _move_timing
-        readback.append({"motor": step["motor"], "asked": step["value"], "got": r.get("label") or r.get("value"),
+        readback.append({"motor": step["motor"], "asked": step["value"], "got": _readback_got(step, r),
                          "ok": bool(r["ok"] and ok), "error": r.get("error") or None, **_move_timing(r)})
         if p["motor"] == prof["motors"]["grating"] and r.get("ok") and not ok:
             # once more, after selecting the laser again, then stop: a study on the wrong grating is wrong
@@ -902,7 +902,7 @@ def _setup(name: str, study: dict, ctx: Ctx, warnings: list, unreliable: list, c
             readback[-1]["retried"] = True          # superseded by the retry below: checks.setup goes by that one
             r, tried = retry_grating(ctx.call, prof, dict(p, **move_extra(prof, p["motor"], asked_here)), step["value"])
             ok, got = _matches(step, r)
-            readback.append({"motor": step["motor"], "asked": step["value"], "got": r.get("label") or r.get("value"),
+            readback.append({"motor": step["motor"], "asked": step["value"], "got": _readback_got(step, r),
                              "ok": bool(r["ok"] and ok), "error": r.get("error") or None, "retry": tried,
                              **_move_timing(r)})
             if not (r["ok"] and ok):
@@ -991,6 +991,8 @@ HOLD_VERBS = ("ping", "status", "acquire", "map_native", "guide", "move_xy", "mo
 def _study_laser(study: dict, ctx: Ctx):
     las = (study.get("setup") or {}).get("laser_nm")
     if las is None:
+        las = (ctx.optics[0] if ctx.optics and ctx.optics[0] is not None else None)
+    if las is None:
         las = (ctx.start or {}).get("laser_nm")
     return _f(las)
 
@@ -1012,9 +1014,7 @@ def run_any(name: str, study: dict, ctx: Ctx) -> dict:
     kind = study.get("kind", "spectrum")
     ctx.live_band = None                     # map.live_band: what LabSpec took, this study's own
     ctx.laser_health = None                  # a laser check (process.laser_check, calibration.precheck)
-    laser = (study.get("setup") or {}).get("laser_nm")
-    if laser is None:
-        laser = (ctx.start or {}).get("laser_nm")
+    laser = _study_laser(study, ctx)
     ctx.hold_wanted = kind not in NO_HOLD_KINDS and plan.hold_shutter(study, ctx.prof, laser)
     hold_expired_warn = None if ctx.hold_wanted else plan.hold_shutter_expired_warning(study, ctx.prof, laser)
     ctx.study_kind = kind
@@ -1297,6 +1297,29 @@ def _check_abs(prof: dict, axis: str, value: float, what: str):
 
 
 LABSPEC_SESSION = "labspec_session.json"
+
+
+def _parse_ts(s) -> float | None:
+    if not s:
+        return None
+    try:
+        return time.mktime(time.strptime(str(s).strip()[:19].replace(" ", "T"), "%Y-%m-%dT%H:%M:%S"))
+    except (ValueError, TypeError):
+        return None
+
+
+def labspec_started_time() -> tuple[str | None, float | None]:
+    """Current LabSpec session start time (string, epoch seconds) from labspec_session.json or session_context()."""
+    started = (store.read(LABSPEC_SESSION) or {}).get("started")
+    if not started:
+        try:
+            from .bridge import session_context
+            started = session_context().get("labspec_started")
+        except Exception:  # noqa: BLE001
+            started = None
+    if not started:
+        return None, None
+    return str(started), _parse_ts(started)
 
 
 def labspec_restart_note() -> str | None:
@@ -1805,6 +1828,13 @@ def move_extra(prof: dict, motor: str, confirmed_now: bool = False) -> dict:
     if confirmed_now and motor == prof["motors"].get("objective") and prof.get("suppress_labspec_prompt", True):
         out["no_message"] = 1
     return out
+
+
+def _readback_got(step: dict, r: dict):
+    """Consistent read-back value: numeric value for mode='value' moves (matching status/already_set), label for label moves."""
+    if step.get("mode") == "value" and r.get("value") not in (None, ""):
+        return r.get("value")
+    return r.get("label") or r.get("value")
 
 
 def _matches(step: dict, r: dict) -> tuple[bool, str]:
