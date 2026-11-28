@@ -995,6 +995,33 @@ def hold_shutter(study: dict, prof: dict, laser) -> bool:
     return True
 
 
+def hold_shutter_expired_warning(study: dict, prof: dict, laser) -> str | None:
+    """Warning when hold_shutter is left at its None default and falls back to 'auto' because the laser's shutter
+    verification expired (distinct from never-verified)."""
+    if study.get("kind", "spectrum") in ("move", "background", "cutoff"):
+        return None
+    if (study.get("acquire") or {}).get("shutter") in ("hold", "auto"):
+        return None
+    lk = laser_key(prof, laser) if laser is not None else None
+    if not lk or prof["lasers"][lk].get("hold_shutter") is not None:
+        return None
+    why = SH.expired_note(prof, laser)
+    if not why:
+        return None
+    if study.get("kind") == "series":
+        try:
+            busy = acquire_seconds(study, prof, acq_range(study, prof, laser))
+        except (KeyError, ValueError, TypeError):
+            acq = study.get("acquire") or {}
+            ex = acq.get("exposure_s", 1.0)
+            busy = (float(ex) if isinstance(ex, (int, float)) else 0.0) * int(acq.get("accumulations", 1) or 1)
+        gap = float((study.get("series") or {}).get("interval_s", 0) or 0) - busy
+        rec = float(prof["lasers"][lk].get("settle_s") or 0)
+        if rec > 0 and gap >= rec:
+            return None
+    return f"acquire.shutter fell back to 'auto' (not held) because the shutter verification expired: {why}"
+
+
 def estimate(study: dict, prof: dict, current: dict | None = None) -> dict:
     """{minutes, points, windows, seconds: {setup, per_point, total}}: an upper-end estimate from the profile's
     timing (measured values replace the defaults once the instrument has run)."""

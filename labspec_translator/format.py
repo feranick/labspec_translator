@@ -630,6 +630,10 @@ def _validate_acquire(study: dict, kind: str, prof: dict, errors: list, warnings
         g = SH.gate(prof, (study.get("setup") or {}).get("laser_nm"))
         if g:
             errors.append(f"acquire.shutter 'hold': {g}")
+    else:
+        w_exp = plan.hold_shutter_expired_warning(study, prof, (study.get("setup") or {}).get("laser_nm"))
+        if w_exp:
+            warnings.append(w_exp)
     w = a.get("warmup_s")
     if w is not None and (not _num(w) or not 0 <= float(w) <= float(prof["limits"].get("max_exposure_s", 60))):
         errors.append("acquire.warmup_s: seconds, 0 to limits.max_exposure_s")

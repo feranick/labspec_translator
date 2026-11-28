@@ -104,6 +104,24 @@ def gate(prof: dict, laser_nm=None) -> str | None:
 MAX_DAYS_AFTER_LEAK = 7.0
 
 
+def expired_note(prof: dict, laser_nm=None) -> str | None:
+    """When a previously verified shutter record for this laser has expired (older than max_days), returns the
+    gate reason; None if valid, never verified, or invalidated for another reason (missing motor, changed motor/by,
+    or bridge rev)."""
+    motor = (prof.get("motors") or {}).get("laser_shutter")
+    if not motor or laser_nm is None:
+        return None
+    by = str((prof.get("shutter") or {}).get("by", "label"))
+    recs = records()
+    rec = recs.get(_key(laser_nm)) or recs.get(_key(_profile_nm(prof, laser_nm)))
+    if not rec or rec.get("motor") != motor or rec.get("by") != by or int(rec.get("rev", 0)) != REV:
+        return None
+    days = (time.time() - float(rec.get("time", 0))) / 86400.0
+    if days > max_days(prof, rec):
+        return gate(prof, laser_nm)
+    return None
+
+
 def max_days(prof: dict, rec: dict | None) -> float:
     """How long a pass holds: shutter.verify_max_days (30), or shutter.verify_max_days_after_leak (7) when the laser
     leaked in the 30 days before it (Nicola, 2026-11-27: 637.75 leaked 0.38 % on 11-23, passed at 0.057 % on 11-27)."""

@@ -745,6 +745,42 @@ def test_shutter_held_open_across_spectra(tmp_path):
     assert "Sub VShutterHold(cmd, res)" in text and 'HoldRelease "bridge stopped"' in text
 
 
+def test_expired_shutter_approval_warns_on_hold_fallback(tmp_path):
+    """When hold_shutter is left at its None default and a laser's shutter approval expires (e.g. 7 days after a
+    recent leak), hold falls back to 'auto' with an explicit warning in validation and in the study result; a
+    never-verified laser or an explicit shutter 'auto' / hold_shutter False does not emit that warning."""
+    import time as _t
+    from labspec_translator import shutter as SH
+    _profile_with_shutter(tmp_path)
+    S.ensure(config.active_bridge_dir())
+    st0 = {"kind": "spectrum", "sample": {"name": "Si"}, "setup": SETUP,
+           "acquire": {"center_cm1": 520, "exposure_s": 0.2}}
+    rec = SH.records()["532"]
+    # 8 days old with a recent leak -> exceeds 7-day post-leak limit
+    SH.record(dict(rec, time=_t.time() - 8 * 86400, recent_leaks=[{"date": "2026-11-23"}]))
+    assert not plan.hold_shutter(st0, P.load(), 532)
+    v = F.validate({"s": st0})["s"]
+    assert v["ok"] and any("fell back to 'auto'" in w and "expired" in w for w in v["warnings"]), v["warnings"]
+    # explicit 'auto' or hold_shutter=False: no fallback warning
+    v_auto = F.validate({"s": dict(st0, acquire=dict(st0["acquire"], shutter="auto"))})["s"]
+    assert v_auto["ok"] and not any("fell back to 'auto'" in w for w in v_auto["warnings"])
+    prof = P.load()
+    lk = next(k for k, v_ in prof["lasers"].items() if abs(v_["nm"] - 532) < 1)
+    prof["lasers"][lk]["hold_shutter"] = False
+    P.save(prof)
+    assert not any("fell back to 'auto'" in w for w in F.validate({"s": st0})["s"]["warnings"])
+    prof["lasers"][lk]["hold_shutter"] = None
+    P.save(prof)
+    # runtime result carries the warning and timing.shutter == 'auto'
+    s = run_inline({"s": st0})["studies"]["s"]
+    assert s["timing"]["shutter"] == "auto"
+    assert any("fell back to 'auto'" in w and "expired" in w for w in s["warnings"]), s["warnings"]
+    # never-verified laser: no expired-fallback warning
+    SH.store.path(SH.FILE).unlink()
+    v_never = F.validate({"s": st0})["s"]
+    assert v_never["ok"] and not any("fell back to 'auto'" in w for w in v_never["warnings"])
+
+
 def test_series_hold_native_and_estimate():
     """2026-11-23 on the first series with 637.75 nm: spectra 5 s apart need no held shutter (the laser recovers in
     its settle_s), the estimate shows the waits, and series spectra are saved as .l6s too."""

@@ -1016,6 +1016,7 @@ def run_any(name: str, study: dict, ctx: Ctx) -> dict:
     if laser is None:
         laser = (ctx.start or {}).get("laser_nm")
     ctx.hold_wanted = kind not in NO_HOLD_KINDS and plan.hold_shutter(study, ctx.prof, laser)
+    hold_expired_warn = None if ctx.hold_wanted else plan.hold_shutter_expired_warning(study, ctx.prof, laser)
     ctx.study_kind = kind
     ctx.hold_log = []
     if ctx.hold_wanted:
@@ -1061,35 +1062,38 @@ def run_any(name: str, study: dict, ctx: Ctx) -> dict:
                 ctx.hold_log.append({"released": bool(r.get("ok"))})
             except Stop as exc:
                 ctx.hold_log.append({"released": False, "why": exc.why})
-    if isinstance(res, dict) and ctx.hold_log:
-        holds = [h for h in ctx.hold_log if "held" in h]
-        for h in ctx.hold_log:
-            if h.get("reopened"):
+    if isinstance(res, dict) and (ctx.hold_log or hold_expired_warn):
+        if hold_expired_warn and hold_expired_warn not in (res.get("warnings") or []):
+            res.setdefault("warnings", []).append(hold_expired_warn)
+        if ctx.hold_log:
+            holds = [h for h in ctx.hold_log if "held" in h]
+            for h in ctx.hold_log:
+                if h.get("reopened"):
+                    res.setdefault("warnings", []).append(
+                        f"the shutter hold from the previous study had been released by the bridge "
+                        f"({h.get('previous_release')}): the shutter closed and opened again before this study (a mode "
+                        "hop is possible: see the laser line)")
+            res["shutter_hold"] = {"held": bool(holds) or any(h.get("continued") for h in ctx.hold_log),
+                                   "times_held": len(holds),
+                                   "continued_from_previous_study": any(h.get("continued") for h in ctx.hold_log),
+                                   "kept_for_next_study": any(h.get("kept_for_next_study") for h in ctx.hold_log),
+                                   "released": ("kept for the next study (same laser)"
+                                                if any(h.get("kept_for_next_study") for h in ctx.hold_log) else
+                                                all(h.get("released", True) for h in ctx.hold_log if "released" in h)),
+                                   "shutter_before": holds[0].get("shutter_before") if holds else None,
+                                   "mode_before": holds[0].get("mode_before") if holds else None,
+                                   "label_while_held": holds[0].get("label_while_held") if holds else None,
+                                   "open_wait_s": holds[0].get("open_wait_s", 0.0) if holds else None,
+                                   **({"after_native_map": next(h["after_native_map"] for h in ctx.hold_log
+                                                                if "after_native_map" in h)}
+                                      if any("after_native_map" in h for h in ctx.hold_log) else {}),
+                                   **({"reopened_after_bridge_release": True}
+                                      if any(h.get("reopened") for h in ctx.hold_log) else {}),
+                                   "log": ctx.hold_log[-20:]}
+            if len(holds) > 1:
                 res.setdefault("warnings", []).append(
-                    f"the shutter hold from the previous study had been released by the bridge "
-                    f"({h.get('previous_release')}): the shutter closed and opened again before this study (a mode "
-                    "hop is possible: see the laser line)")
-        res["shutter_hold"] = {"held": bool(holds) or any(h.get("continued") for h in ctx.hold_log),
-                               "times_held": len(holds),
-                               "continued_from_previous_study": any(h.get("continued") for h in ctx.hold_log),
-                               "kept_for_next_study": any(h.get("kept_for_next_study") for h in ctx.hold_log),
-                               "released": ("kept for the next study (same laser)"
-                                            if any(h.get("kept_for_next_study") for h in ctx.hold_log) else
-                                            all(h.get("released", True) for h in ctx.hold_log if "released" in h)),
-                               "shutter_before": holds[0].get("shutter_before") if holds else None,
-                               "mode_before": holds[0].get("mode_before") if holds else None,
-                               "label_while_held": holds[0].get("label_while_held") if holds else None,
-                               "open_wait_s": holds[0].get("open_wait_s", 0.0) if holds else None,
-                               **({"after_native_map": next(h["after_native_map"] for h in ctx.hold_log
-                                                            if "after_native_map" in h)}
-                                  if any("after_native_map" in h for h in ctx.hold_log) else {}),
-                               **({"reopened_after_bridge_release": True}
-                                  if any(h.get("reopened") for h in ctx.hold_log) else {}),
-                               "log": ctx.hold_log[-20:]}
-        if len(holds) > 1:
-            res.setdefault("warnings", []).append(
-                f"the laser shutter was held {len(holds)} times in this study: another command (a snapshot, an "
-                "autofocus, the operator's question) let it go in between, and LabSpec closed and opened it")
+                    f"the laser shutter was held {len(holds)} times in this study: another command (a snapshot, an "
+                    "autofocus, the operator's question) let it go in between, and LabSpec closed and opened it")
         f = ctx.folder / name / f"{name}.json"
         if f.exists():
             write_json(f, clean(res))
