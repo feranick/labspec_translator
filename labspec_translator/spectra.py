@@ -192,7 +192,7 @@ def baseline(x, y, degree: int = 3, iterations: int = 100, tol: float = 1e-4) ->
     if span > 1e-12 and np.unique(u).size > degree:
         Q, _ = np.linalg.qr(np.vander(u, degree + 1, increasing=True), mode="reduced")
         for _ in range(iterations):
-            fit = Q @ (Q.T @ work)
+            fit = np.sum(Q * np.sum(Q * work[:, None], axis=0), axis=1)
             new = np.minimum(work, fit)
             if np.linalg.norm(new - work) <= tol * max(np.linalg.norm(work), 1e-12):
                 break

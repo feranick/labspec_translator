@@ -406,7 +406,7 @@ def frame_too_dark(lum) -> bool:
 
 def _lum(img) -> np.ndarray:
     img = np.asarray(img, float)
-    return img @ np.array([0.299, 0.587, 0.114]) if img.ndim == 3 else img
+    return (0.299 * img[..., 0] + 0.587 * img[..., 1] + 0.114 * img[..., 2]) if img.ndim == 3 else img
 
 
 def find_spot(dec: dict, dark: dict | None = None) -> dict | None:

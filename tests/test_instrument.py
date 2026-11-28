@@ -451,8 +451,11 @@ def test_grating_reach_and_blocking_heartbeat(tmp_path, monkeypatch):
     assert not b.alive()
     assert "blocking move of the Grating" in bridge.diagnose(b.heartbeat(), b.dir)
     br = Path(api.install_bridge(tmp_path / "vbs")["files"]["ls6t_bridge.vbs"]).read_text()
+    bm = br[br.index("Function BlockingMove("):]
+    bm = bm[:bm.index("End Function")]
+    assert bm.index("gBlocking = motor") < bm.index("LabSpec.MoveMotor(motor, posVal, posName, flags)")
     mv = br[br.index("Sub VMove("):]
-    assert mv.index("gBlocking = motor") < mv.index("moveId = LabSpec.MoveMotor(motor, posVal, posName, mc)\n")
+    assert "moveId = BlockingMove(motor, posVal, posName, mc)" in mv[:mv.index("End Sub")]
 
 
 def test_spectrometer_range_from_labspec(tmp_path):
@@ -1175,7 +1178,7 @@ def test_spectrometer_centre_moved_and_the_window_checked(tmp_path):
     br = Path(api.install_bridge(tmp_path / "vbs")["files"]["ls6t_bridge.vbs"]).read_text()
     vi = br[br.index("Sub VAcquireInner("):]
     vi = vi[:vi.index("End Sub")]
-    assert vi.index("LabSpec.MoveMotor(spm, f, \"\", LS_MOTOR_VALUE)") < vi.index("LabSpec.Acq mode, ex, acc, f, t")
+    assert vi.index('BlockingMove(spm, f, "", LS_MOTOR_VALUE)') < vi.index("LabSpec.Acq mode, ex, acc, f, t")
     assert 'res("spectro_nm") = MotorValue(spm)' in vi
     prof = P.load()
     rng = {"single": True, "center_nm": 659.66, "from_nm": 659.66}

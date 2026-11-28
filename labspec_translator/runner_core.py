@@ -1048,7 +1048,8 @@ def run_any(name: str, study: dict, ctx: Ctx) -> dict:
             ctx.holding = False
             ctx.call("shutter_hold", timeout_s=30, state="off")
     try:
-        res = _run_kind(name, study, ctx)
+        from . import runner as _R
+        res = _R._run_kind(name, study, ctx)
     finally:
         ctx.hold_wanted = False
         if ctx.holding and getattr(ctx, "keep_hold", False):
