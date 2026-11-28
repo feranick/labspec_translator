@@ -408,7 +408,7 @@ def test_calibration_belongs_to_one_laser_and_grating():
                      "o": {"kind": "spectrum", "sample": {"name": "Si"}, "setup": {**SETUP, "grating": 1200},
                            "acquire": {"center_cm1": 520}, "process": si}})
     c = st["studies"]["c"]
-    assert c["calibration"]["applies_to"]["key"] == "532@1800" and "1800 gr/mm grating with 532 nm" in \
+    assert c["calibration"]["applies_to"]["key"].startswith("532@1800@") and "1800 gr/mm grating with 532 nm" in \
         c["calibration"]["applies_to"]["what"]
     assert any("for the 1800 gr/mm grating with 532 nm" in u for u in c["unreliable_because"])
     assert c["calibration"]["outcome"].startswith("out of tolerance (+3.0") and not c["calibration"].get("corrected")
@@ -522,7 +522,7 @@ def test_shutter_used_only_once_shown_to_block_on_si(tmp_path):
     P.save(prof)
     # the rule, with the XploRA's numbers (2026-11-23): 0.04 % left, seen (SNR 14.8) but under the 0.1 % limit
     v = api.leak_verdict({"si_signal_cps": 1185.4}, {"si_signal_cps": 0.494, "noise_cps": 0.033, "snr": 14.8}, 5.0, 0.001)
-    assert v["status"] == "blocked" and v["leak_detected"] and v["leak_frac"] == pytest.approx(0.000417, abs=1e-5)
+    assert v["status"] == "blocked" and v["leak_measurable"] and v["leak_frac"] == pytest.approx(0.000417, abs=1e-5)
     assert api._pct(v["leak_frac"]) == "0.042 %"
     assert api.leak_verdict({"si_signal_cps": 100}, {"si_signal_cps": 86, "noise_cps": 1, "snr": 86}, 5, 0.001)[
         "status"] == "leak"
@@ -553,6 +553,13 @@ def test_shutter_used_only_once_shown_to_block_on_si(tmp_path):
     assert r["record"]["failed_attempts_before"] == 2 and "earlier attempt" in r["note"]
     assert [a["status"] for a in r["record"]["attempts"]][-3:] == ["not_conclusive", "leak", "blocked"]
     # the burst check: one more closed spectrum of another exposure, counts per acquisition compared
+    # the set-up asked for is set first (Nicola, 2026-11-27: asked for 532, it verified the selected 637.75)
+    api.set_instrument({"laser_nm": 637.75, "filter": "10%"})
+    r3 = api.shutter_verify(setup={"laser_nm": 532, "filter": "10%"})
+    assert r3["ok"] and r3["laser_nm"] == 532 and r3.get("set_first"), r3.get("error")
+    # a leak in the 30 days before a pass: a shorter approval (637.75: 0.38 % on 11-23, passed on 11-27)
+    assert r3["record"]["recent_leaks"] and SH.max_days(P.load(), r3["record"]) == SH.MAX_DAYS_AFTER_LEAK
+    assert api.instrument("shutter-verify", setup={"laser_nm": 532, "filter": "10%"})["ok"]     # the hyphen too
     r2 = api.shutter_verify(2.0, 2, 8.0)
     assert r2["ok"] and len(r2["closed"]) == 3 and r2["burst_check"]["exposure_ratio"] == pytest.approx(4)
     assert r2["record"]["failed_attempts_before"] == 0
@@ -1619,7 +1626,8 @@ def test_expected_uncertainty_warned_above_the_tolerance():
     it exceeds the Si tolerance; the calibration's own pass tolerance is not widened."""
     from labspec_translator import xcal, store
     xcal.clear()
-    xcal.store(532, 1800, 0.1, 1.0, "si", [], centre_nm=547.16, placement="centred")
+    xcal.store(532, 1800, 0.1, 1.0, "si", [], centre_nm=547.16, placement="centred",
+               setup=xcal.setup_of("x100", 300))                    # the simulator's objective and hole
     store.write("spectro_repeatability.json", {"532@1800": {"moved_sd_cm1": 1.1, "approach_nm": -2.0}})
     sp = {"kind": "spectrum", "sample": {"name": "Si"}, "setup": SETUP, "acquire": {"center_cm1": 520.7, "exposure_s": 1}}
     s = run_inline({"s": sp})["studies"]["s"]
@@ -1648,7 +1656,8 @@ def test_native_map_spectrometer_read_back_picks_the_repeatability_entry():
     the '@labspec' entry does."""
     from labspec_translator import xcal, store
     xcal.clear()
-    xcal.store(532, 1800, 0.1, 1.0, "si", [], centre_nm=547.16, placement="centred")
+    xcal.store(532, 1800, 0.1, 1.0, "si", [], centre_nm=547.16, placement="centred",
+               setup=xcal.setup_of("x100", 300))
     store.write("spectro_repeatability.json", {"532@1800": {"moved_sd_cm1": 0.3, "approach_nm": -2.0},
                                                "532@1800@labspec": {"moved_sd_cm1": 0.6}})
     nat = {"kind": "map", "sample": {"name": "Si"}, "setup": SETUP, "acquire": {"center_cm1": 520.7, "exposure_s": 0.2},
@@ -2583,7 +2592,8 @@ def test_summary_carries_the_expected_uncertainty():
     store.write("xcal_pending.json", {})
     store.write("spectro_repeatability.json", {"532@1800": {"moved_sd_cm1": 0.3, "approach_nm": -2.0}})
     S.ensure(config.active_bridge_dir())
-    run_inline({"c": {"kind": "calibration", "sample": {"name": "Si"}, "setup": dict(SETUP),
+    # at hole 100: the simple tools' default at x100 (a correction holds for its own hole, .27.8)
+    run_inline({"c": {"kind": "calibration", "sample": {"name": "Si"}, "setup": dict(SETUP, hole_um=100),
                       "acquire": {"center_cm1": 520.7, "exposure_s": 1}, "calibration": {"adjust": "ls6t"},
                       "video": {"before": False}}})
     m = api.measure_spectrum(laser_nm=532, grating=1800, objective="x100", filter="10%", peak_cm1=520.7,
@@ -2931,8 +2941,14 @@ def test_hole_and_objective_keep_their_own_width_and_labspec_restart_is_said(mon
     assert config.confirm_policy() == "never"
     monkeypatch.delenv("LS6T_CONFIRM")
     R.store.write(R.LABSPEC_SESSION, {})
+    # first seen by this version: the earlier start from the bridge starts' log (16:34 after 15:18 went unsaid)
+    config.home().mkdir(parents=True, exist_ok=True)
+    (config.home() / "warmup_log.jsonl").write_text(json.dumps({"labspec_started": "2026-11-27 09:00:00"}) + "\n")
     monkeypatch.setattr(B, "session_context", lambda: {"labspec_started": "2026-11-27 10:00:00"})
-    assert R.labspec_restart_note() is None                    # first seen: nothing to compare
+    assert "09:00:00" in (R.labspec_restart_note() or "")
+    assert "labspec_restarted" in api.tool_status()
+    R._focus_found_this_session()
+    assert R.labspec_restart_note() is None
     monkeypatch.setattr(B, "session_context", lambda: {"labspec_started": "2026-11-27 16:00:00"})
     n = R.labspec_restart_note()
     assert n and "new zero" in n and R.labspec_restart_note() == n      # said until a focus is found
@@ -2963,3 +2979,93 @@ def test_spectrum_with_another_hole_than_its_calibration_is_warned():
     assert s["checks"]["zero"].get("setup_differs"), s["checks"]["zero"]
     assert any("differs from its calibration" in w for w in s["warnings"])
     xcal.clear()
+
+
+def test_corrections_per_objective_and_hole_and_the_simple_tools_hole():
+    """Nicola, 2026-11-27: Si 0.53 cm-1 apart between holes 100 and 300 at 532 (1.15 at 638): a correction holds for
+    its laser, grating, objective and hole only; calibrate_si and measure_spectrum use the same hole (100 at x100)."""
+    from labspec_translator import xcal
+    xcal.clear()
+    S.ensure(config.active_bridge_dir())
+    c = api.calibrate_si(laser_nm=532, grating=1800, repeats=1, filter="10%", objective="x100", inline=True,
+                         wait_total_s=60)
+    assert c["study"]["setup"]["hole_um"] == 100
+    ks = list(xcal.load())
+    assert ks == ["532@1800@x100@h100"], ks
+    m = api.measure_spectrum(laser_nm=532, grating=1800, objective="x100", filter="10%", peak_cm1=520.7,
+                             inline=True, wait_total_s=60)
+    assert m["study"]["setup"]["hole_um"] == 100
+    full = runner.read_json(Path(m["request"]) / "spectrum" / "spectrum.json", {})
+    assert full["checks"]["zero"].get("correction_used"), full["checks"]["zero"]
+    # another hole: no correction applied, said
+    sp = {"kind": "spectrum", "sample": {"name": "Si"}, "setup": dict(SETUP, hole_um=300),
+          "acquire": {"center_cm1": 520.7, "exposure_s": 1}}
+    s = run_inline({"s": sp})["studies"]["s"]
+    assert not (s["checks"].get("zero") or {}).get("correction_used"), s["checks"].get("zero")
+    assert s["checks"]["zero_setup"]["corrections_for"] == ["x100, hole 100 um"]
+    assert any("not corrected" in w for w in s["warnings"])
+    # asked otherwise: that hole
+    assert api.default_hole(P.load(), "x100_VIS", 500) == 500 and api.default_hole(P.load(), "x10", None) is None
+    # a legacy correction (no set-up recorded) is not applied to a known set-up
+    xcal.clear()
+    xcal.store(532, 1800, 0.1, 1.0, "si", [], centre_nm=547.16, placement="centred")
+    assert xcal.get(532, 1800, 547.16, "centred", setup=xcal.setup_of("x100", 300)) is None
+    assert xcal.get(532, 1800, 547.16, "centred") is not None             # a person's view: the latest of any
+    # stored with its set-up under laser@grating (.27.7): moved under its full key
+    xcal.clear()
+    xcal._save({"532@1800": {"a": 0.1, "b": 1.0, "time": "2026-11-27T15:00:00", "objective": "x100", "hole_um": 300.0}})
+    assert "532@1800@x100@h300" in xcal.load()
+    fmt = api.study_format()
+    pr = fmt.get("profile") or {}
+    assert "safety" in pr and "laser_go_ahead" in pr and "motors" in pr and pr["default_hole_um"]["x100"] == 100, \
+        list(pr)
+    xcal.clear()
+    api.bridge_call("move", {"motor": "Hole", "mode": "value", "value": 300})
+
+
+def test_dry_run_shows_the_shutter_hold_and_a_shutter_approval_can_be_withdrawn(tmp_path):
+    """Nicola, 2026-11-27: get_inputs showed a plain acquire only; a verification on the wrong laser approved 637.75."""
+    _profile_with_shutter(tmp_path)
+    st = {"kind": "spectrum", "sample": {"name": "Si"}, "setup": dict(SETUP),
+          "acquire": {"center_cm1": 520.7, "exposure_s": 1, "shutter": "hold"}}
+    inp = api.inputs(st)
+    steps = inp.get("steps") or []
+    hs = [s_ for s_ in steps if s_.get("verb") == "shutter_hold"]
+    assert [h["state"] for h in hs] == ["on", "off"], inp
+    from labspec_translator import shutter as SH, store
+    store.write(SH.FILE, {"lasers": {"637.75": {"laser_nm": 637.75, "time": 0}}})
+    assert api.references_clear("shutter", "637.75")["cleared"] == 1 and "637.75" not in SH.records()
+    store.write(SH.FILE, {})
+
+
+def test_settle_after_a_laser_change_with_the_hold(tmp_path):
+    """Nicola, 2026-11-27 (.27.7, 16:44): 785 -> 532, the calibration's hold waited 0.0 s."""
+    _profile_with_shutter(tmp_path)
+    prof = P.load()
+    for k_, v_ in prof["lasers"].items():
+        v_["change_settle_s"] = 2.0
+    P.save(prof)
+    a = {"kind": "spectrum", "sample": {"name": "Si"}, "setup": dict(SETUP, laser_nm=785.04, filter="10%"),
+         "acquire": {"center_cm1": 520.7, "exposure_s": 0.2, "shutter": "hold"}}
+    c = {"kind": "calibration", "sample": {"name": "Si"}, "setup": dict(SETUP, grating=1200),
+         "acquire": {"center_cm1": 520.7, "exposure_s": 0.2, "shutter": "hold"},
+         "calibration": {"adjust": "ls6t", "repeats": 3}, "video": {"before": False}}
+    r = run_inline({"a": a, "c": c})
+    s = r["studies"]["c"]
+    hl = json.dumps({k: s.get(k) for k in ("laser_shutter", "shutter_hold", "checks")})
+    assert '"open_wait_s": 2' in hl, hl[:3000]
+
+
+def test_axial_profile_shape_and_calibration_zero_uncertain_from_si():
+    """Nicola, 2026-11-27 (hole 100): the focus profile 951 -> 338 between +1.0 and +1.5 um, then 334 at +2.5; the
+    calibration refused for 'zero uncertain' (the laser line 1.3 x the narrowest) with Si agreeing to SD 0.11."""
+    import labspec_translator.runner as R
+    zs = [-2.0, -1.5, -1.0, -0.5, 0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0]
+    v = [200, 380, 600, 820, 951, 930, 800, 338, 220, 334, 250]
+    sh = R.axial_shape(zs, v, 0.1)
+    assert sh["second_maximum"]["z_um"] == pytest.approx(2.4, abs=0.01), sh
+    lop = R.axial_shape([-2, -1.5, -1, -0.5, 0, 0.5, 1, 1.5, 2, 2.5], [50, 100, 300, 1000, 950, 900, 800, 650, 450, 300],
+                        -0.4)
+    assert lop["lopsided"], lop
+    assert R.axial_shape([-2, -1, 0, 1, 2], [100, 500, 1000, 500, 100], 0.0) is None or \
+        not R.axial_shape([-2, -1, 0, 1, 2], [100, 500, 1000, 500, 100], 0.0).get("second_maximum")

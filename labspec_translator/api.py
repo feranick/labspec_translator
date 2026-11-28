@@ -54,6 +54,12 @@ def tool_status() -> dict:
     elif not out["bridge"]["running"]:
         out["bridge"]["note"] = ("not running: in LabSpec, Processing > Scripts, start ls6t_bridge.vbs "
                                  "(ls6t bridge install writes it)")
+    try:
+        rs_ = runner.labspec_restart_note()
+        if rs_:
+            out["labspec_restarted"] = rs_
+    except Exception:  # noqa: BLE001 - a note only
+        pass
     prof = P.load()
     out["profile"] = {"path": prof.get("path"), "measured": prof.get("measured"), "source": prof.get("source")}
     if prof.get("auto"):
@@ -217,6 +223,30 @@ def snap_laser(prof: dict, laser_nm) -> float:
     return best
 
 
+def default_hole(prof: dict, objective, hole_um=None):
+    """The hole a simple tool uses: as asked, else the profile's default_hole_um for this objective (by its
+    magnification: x100 matches x100_VIS), else None (left as LabSpec has it)."""
+    if hole_um is not None:
+        return float(hole_um)
+    import re as _re
+    m = _re.search(r"(\d+)", str(objective or ""))
+    for k_, v_ in ((prof.get("default_hole_um") or {}).items() if isinstance(prof.get("default_hole_um"), dict)
+                   else []):
+        mk = _re.search(r"(\d+)", str(k_))
+        if v_ is not None and m and mk and mk.group(1) == m.group(1):
+            allowed = prof.get("holes_um") or []
+            if allowed and not any(abs(float(v_) - float(a_)) < 1e-6 for a_ in allowed):
+                return None                     # not a hole this instrument has: left as LabSpec has it
+            return float(v_)
+    return None
+
+
+def _with_hole(setup: dict, hole) -> dict:
+    if hole is not None:
+        setup["hole_um"] = hole
+    return setup
+
+
 def snap_objective(prof: dict, objective: str) -> str:
     """The profile's objective with the same magnification when the name differs (x100 -> x100_VIS)."""
     objs = [str(o) for o in (prof.get("objectives") or [])]
@@ -317,10 +347,12 @@ def run_and_wait(studies: dict, wait_total_s: float | None = None, inline: bool 
 
 def measure_spectrum(laser_nm=637.75, center_cm1=None, from_cm1=None, to_cm1=None, exposure_s=1.0,
                      accumulations=2, grating=1200, filter=None, objective="x100_VIS", peak_cm1=None,
-                     sample="sample", wait_total_s: float | None = None, inline: bool = False) -> dict:
+                     sample="sample", wait_total_s: float | None = None, inline: bool = False,
+                     hole_um=None) -> dict:
     """One spectrum from flat arguments (for small models): a centre, or from/to for a range; a peak fitted near
     peak_cm1 (None, the default: the strongest peaks are found; 2026-11-25: the default was 520.7, so a small model
-    that left it out fitted Si on any sample)."""
+    that left it out fitted Si on any sample). The confocal hole: hole_um, else the profile's default for the
+    objective (x100: 100 um), as calibrate_si uses: a correction holds for its own hole."""
     prof = P.load()
     try:
         las = snap_laser(prof, laser_nm)
@@ -332,9 +364,11 @@ def measure_spectrum(laser_nm=637.75, center_cm1=None, from_cm1=None, to_cm1=Non
             acq["range_cm1"] = [float(from_cm1), float(to_cm1)]
         else:
             acq["center_cm1"] = float(center_cm1 if center_cm1 is not None else (peak_cm1 or 520.7))
+        obj_ = snap_objective(prof, objective)
         study = {"kind": "spectrum", "sample": {"name": str(sample)},
-                 "setup": {"laser_nm": las, "grating": float(grating), "filter": laser_filter(prof, las, filter),
-                           "objective": snap_objective(prof, objective)},
+                 "setup": _with_hole({"laser_nm": las, "grating": float(grating),
+                                      "filter": laser_filter(prof, las, filter), "objective": obj_},
+                                     default_hole(prof, obj_, hole_um)),
                  "acquire": acq}
         if peak_cm1 is not None:
             # the fit window with the grating, as calibrations do (T9.19: +-15 at 600 held fewer than 7 points)
@@ -350,16 +384,18 @@ def measure_spectrum(laser_nm=637.75, center_cm1=None, from_cm1=None, to_cm1=Non
 
 
 def laser_check(laser_nm=637.75, grating=1200, filter=None, objective="x100_VIS", wait_total_s: float | None = None,
-                inline: bool = False) -> dict:
+                inline: bool = False, hole_um=None) -> dict:
     """A quick laser health check (Nicola, 2026-11-27): one short Si spectrum with the shutter held, the laser line
     and Si in the window, compared with the last good state: verdict healthy | mode_change | multimode | low_signal,
     logged to LS6T_HOME/laser_log.jsonl."""
     prof = P.load()
     try:
         las = snap_laser(prof, laser_nm)
+        obj_ = snap_objective(prof, objective)
         study = {"kind": "spectrum", "sample": {"name": "Si wafer"},
-                 "setup": {"laser_nm": las, "grating": float(grating), "filter": laser_filter(prof, las, filter),
-                           "objective": snap_objective(prof, objective)},
+                 "setup": _with_hole({"laser_nm": las, "grating": float(grating),
+                                      "filter": laser_filter(prof, las, filter), "objective": obj_},
+                                     default_hole(prof, obj_, hole_um)),
                  # centred at 260 cm-1: the laser line (0) and Si (520.7) in one window at 600 and 1200
                  "acquire": {"center_cm1": 260.0, "exposure_s": 1, "accumulations": 2, "spike": "double",
                              **({"shutter": "hold"} if SH_gate_ok(prof, las) else {})},
@@ -386,19 +422,24 @@ def SH_gate_ok(prof: dict, laser) -> bool:
 
 
 def calibrate_si(laser_nm=637.75, grating=1200, repeats=5, filter=None, objective="x100_VIS", center_cm1=None,
-                 from_cm1=None, to_cm1=None, wait_total_s: float | None = None, inline: bool = False) -> dict:
+                 from_cm1=None, to_cm1=None, wait_total_s: float | None = None, inline: bool = False,
+                 hole_um=None) -> dict:
     """A silicon calibration (520.7 cm-1) from flat arguments: the correction ls6t applies to later spectra. The
     window is centred on Si, or where the measurements will be (center_cm1, or from_cm1 + to_cm1): the zero
-    differs between windows (2026-11-25, 1200: +0.66 cm-1 with the window ~0.9 nm off the calibration's)."""
+    differs between windows (2026-11-25, 1200: +0.66 cm-1 with the window ~0.9 nm off the calibration's). The
+    correction holds for its objective and confocal hole only: hole_um, else the profile's default for the objective
+    (x100: 100 um); measure with the same."""
     prof = P.load()
     try:
         las = snap_laser(prof, laser_nm)
         cal = {"reference": "si", "adjust": "ls6t", "repeats": int(repeats)}
         if float(grating) <= 600:
             cal["window_cm1"] = 60
+        obj_ = snap_objective(prof, objective)
         study = {"kind": "calibration", "sample": {"name": "Si wafer"},
-                 "setup": {"laser_nm": las, "grating": float(grating), "filter": laser_filter(prof, las, filter),
-                           "objective": snap_objective(prof, objective)},
+                 "setup": _with_hole({"laser_nm": las, "grating": float(grating),
+                                      "filter": laser_filter(prof, las, filter), "objective": obj_},
+                                     default_hole(prof, obj_, hole_um)),
                  "acquire": {"center_cm1": 520.7, "exposure_s": 1, "accumulations": 2, "spike": "double"},
                  "calibration": cal, "video": {"before": False}}
         if center_cm1 is not None:
@@ -689,6 +730,7 @@ def instrument(action: str = "status", camera=None, setup: dict | None = None, s
     (written next to the profile as profile.proposed.json; a person reviews it and applies it with `ls6t profile
     import <profile.proposed.json>`). resume: asks the operator in LabSpec to lift a halt. Every action but the
     reads goes to LS6T_HOME/instrument_log.jsonl (shown by jobs)."""
+    action = str(action or "status").strip().replace("-", "_")      # shutter-verify as written in the docs
     t0 = time.time()
     r = _instrument(action, camera, setup, seconds, um)
     if action not in QUIET_ACTIONS:
@@ -833,7 +875,7 @@ def _instrument(action, camera, setup, seconds, um=None) -> dict:
         if action == "shutter_test":
             return shutter_test()
         if action == "shutter_verify":
-            return shutter_verify(float(seconds or VERIFY_EXPOSURE_S))
+            return shutter_verify(float(seconds or VERIFY_EXPOSURE_S), setup=setup)
         if action in ("camera_on", "camera_off"):
             prof = P.load()
             num, err = P.camera_number(prof, camera)
@@ -1129,7 +1171,7 @@ def leak_verdict(ref: dict, off: dict, detect: float, limit: float) -> dict:
     status = ("leak" if seen and frac > limit else "not_conclusive" if sens > limit else
               "blocked" if frac <= limit else "leak")
     return {"status": status, "leak_frac": round(frac, 6), "sensitivity": round(sens, 6), "max_leak_frac": limit,
-            "leak_detected": seen}
+            "leak_measurable": seen}
 
 
 def _pct(f: float) -> str:
@@ -1142,7 +1184,8 @@ VERIFY_EXPOSURE_S = 8.0     # 2026-11-23: the closed shutter passes a burst of a
                             # on the burst alone, at 8 s it passed (0.042-0.048 %)
 
 
-def shutter_verify(exposure_s: float = VERIFY_EXPOSURE_S, repeats: int = 3, burst_s: float | None = None) -> dict:
+def shutter_verify(exposure_s: float = VERIFY_EXPOSURE_S, repeats: int = 3, burst_s: float | None = None,
+                   setup: dict | None = None) -> dict:
     """The spectral proof that the laser shutter blocks the beam (TESTING T1.2 step 2), with silicon under the
     objective, in focus, in the current set-up: a reference spectrum at 520 cm-1 with the laser, then `repeats`
     spectra with laser_off 'shutter' (and, with burst_s, one more of that exposure: a burst at the start or end of
@@ -1156,6 +1199,14 @@ def shutter_verify(exposure_s: float = VERIFY_EXPOSURE_S, repeats: int = 3, burs
     gate = P.review_gate(prof) if config.mode() == "labspec" else None
     if gate:
         return {"ok": False, "error": gate}
+    s_ = {k: v for k, v in (setup or {}).items() if v not in (None, "")}
+    set_ = None
+    if s_:
+        # the set-up asked for is set first (Nicola, 2026-11-27: asked for 532, it verified the selected 637.75)
+        set_ = set_instrument(s_)
+        if not set_.get("ok"):
+            return {"ok": False, "error": f"the set-up asked for could not be set ({set_.get('error')}): nothing "
+                                          "was verified", "set": set_}
     motor = prof["motors"].get("laser_shutter")
     if not motor:
         return {"ok": False, "error": "set motors.laser_shutter first (ls6t profile set motors.laser_shutter "
@@ -1192,8 +1243,12 @@ def shutter_verify(exposure_s: float = VERIFY_EXPOSURE_S, repeats: int = 3, burs
         if laser is None or pct is None or pct > min(caps) + 1e-9:
             return {"ok": False, "error": f"laser {st.get('laser_nm')}, filter {st.get('filter')!r}: a known laser "
                                           f"and a filter within the caps ({min(caps):g} %) first (instrument set)"}
+        if s_.get("laser_nm") is not None and (laser is None or abs(float(laser) - float(s_["laser_nm"])) > 1.0):
+            return {"ok": False, "error": f"the laser in use reads {st.get('laser_nm')} nm, not the "
+                                          f"{float(s_['laser_nm']):g} nm asked for: select the laser first "
+                                          "(ls6t instrument set --laser-nm ...)"}
         out.update(laser_nm=laser, grating=grating, filter=st.get("filter"), objective=st.get("objective"),
-                   max_leak_frac=limit)
+                   max_leak_frac=limit, **({"set_first": set_.get("moves") or set_} if set_ else {}))
         txt = (f"ls6t shutter verification ({motor}): silicon under the objective, in focus. The laser fires "
                f"{1 + len(closed_plan)} times (2 accumulations each) at {laser:g} nm, filter {st.get('filter')}: once "
                f"as a reference ({ex:g} s), then {len(closed_plan)} times with the shutter closed (the Si line must "
@@ -1248,7 +1303,7 @@ def shutter_verify(exposure_s: float = VERIFY_EXPOSURE_S, repeats: int = 3, burs
     worst = max(closed, key=lambda c: c["leak_frac"])
     out.update(worst_leak_frac=worst["leak_frac"], leak_fracs=fracs, leak_frac=worst["leak_frac"],
                ratio=worst["leak_frac"], sensitivity=max(c["sensitivity"] for c in closed),
-               leak_detected=any(c["leak_detected"] for c in closed))
+               leak_measurable=any(c["leak_measurable"] for c in closed))
     # a burst at the start / end of each acquisition, or a steady leak? (2026-11-23: 1.3-3.5 counts per acquisition
     # in every run, whatever the run-to-run spread)
     same = [c for c in closed if abs(c["exposure_used_s"] - ref["exposure_used_s"]) < 1e-6]
@@ -1292,12 +1347,16 @@ def shutter_verify(exposure_s: float = VERIFY_EXPOSURE_S, repeats: int = 3, burs
            "version": __version__, "rev": SH.REV, "motor": motor, "by": out["by"], "grating": grating,
            "filter": st.get("filter"), "objective": st.get("objective"), "leak_frac": out["worst_leak_frac"],
            "worst_leak_frac": out["worst_leak_frac"], "leak_fracs": fracs, "max_leak_frac": limit,
-           "leak_detected": out["leak_detected"], "sensitivity": out["sensitivity"],
+           "leak_measurable": out["leak_measurable"], "sensitivity": out["sensitivity"],
            "reference_cps": ref["si_signal_cps"], "closed_cps": [c["si_signal_cps"] for c in closed],
            "closed_counts": [c["si_counts"] for c in closed], "exposure_s": ex,
            "burst_check": out.get("burst_check"), "reference_snr": ref["snr"],
            "during_checked": (closed[0].get("laser_shutter") or {}).get("during_checked"),
            "failed_attempts_before": len(earlier),
+           # leaks seen with this laser in the last 30 days: the approval is then shorter (shutter.py; Nicola,
+           # 2026-11-27: 637.75 leaked 0.38 % on 11-23 and passed at 0.057 % today)
+           "recent_leaks": [{"date": a.get("date"), "worst_leak_frac": a.get("worst_leak_frac")} for a in prev
+                            if a.get("status") == "leak" and time.time() - float(a.get("time") or 0) <= 30 * 86400],
            "attempts": [{k: a.get(k) for k in ("date", "status", "worst_leak_frac", "version")}
                         for a in SH.attempts(laser)][-20:],
            "folder": str(d)}
@@ -1305,8 +1364,9 @@ def shutter_verify(exposure_s: float = VERIFY_EXPOSURE_S, repeats: int = 3, burs
     out.update(ok=True, record=rec,
                next=f"ls6t may now use the shutter with the {laser:g} nm laser (laser_off 'shutter', laser_on, "
                     "snapshots with the laser) for "
-                    f"{float((prof.get('shutter') or {}).get('verify_max_days', SH.MAX_DAYS)):g} days; verify "
-                    "each laser you use the shutter with")
+                    f"{SH.max_days(prof, rec):g} days"
+                    + (" (shorter: it leaked in the last 30 days)" if rec["recent_leaks"] else "")
+                    + "; verify each laser you use the shutter with")
     if earlier:
         out["note"] = (f"{len(earlier)} earlier attempt(s) with this laser did not pass (their worst leaks: "
                        + ", ".join(_pct(a.get("worst_leak_frac") or 0) for a in earlier[-5:])
@@ -2279,6 +2339,12 @@ def references_clear(what: str, name: str | None = None, field: str | None = Non
     if what == "correction":
         if name:
             parts = name.split("@")
+            if len(parts) >= 3 and not parts[2].replace(".", "", 1).isdigit():
+                # laser@grating@objective@h<hole>: that set-up's corrections only (.27.8)
+                d_ = xcal.load()
+                gone_ = 1 if d_.pop(name, None) is not None else 0
+                xcal._save(d_)
+                return {"cleared": gone_, "key": name}
             if len(parts) == 3:          # laser@grating@centre_nm: that window's correction only
                 return {"cleared": xcal.clear_centre(float(parts[0]), float(parts[1]), float(parts[2]))}
             las, gr = parts
@@ -2294,6 +2360,19 @@ def references_clear(what: str, name: str | None = None, field: str | None = Non
         return {"deleted": name}
     if what == "spot":
         return SP.forget()
+    if what == "shutter":
+        # a laser's shutter approval withdrawn (Nicola, 2026-11-27: a verification on the wrong laser approved
+        # 637.75 for 30 days): the hold and every shutter use are refused for it until verified again
+        from . import shutter as SH_
+        from . import store as store_
+        d_ = store_.read(SH_.FILE)
+        if not name:
+            raise ValueError("references clear shutter LASER_NM (e.g. 637.75)")
+        k_ = SH_._key(name)
+        gone_ = (d_.get("lasers") or {}).pop(k_, None)
+        store_.write(SH_.FILE, d_)
+        return {"cleared": 1 if gone_ else 0, "laser_nm": k_,
+                "note": "attempts are kept in the history; verify again to use the shutter with this laser"}
     if what == "laser_log":
         # the laser checks' history (their counts baselines), all or for one objective (2026-11-27: the 01:38
         # baseline was x10)

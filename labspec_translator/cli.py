@@ -133,7 +133,7 @@ def main(argv=None) -> int:
     s.add_argument("value", nargs="?", help="set: the value (JSON)")
     s = sub.add_parser("references")
     s.add_argument("action", choices=["show", "clear"])
-    s.add_argument("what", nargs="?", choices=["correction", "background", "spot", "learned", "laser_log"])
+    s.add_argument("what", nargs="?", choices=["correction", "background", "spot", "learned", "laser_log", "shutter"])
     s.add_argument("name", nargs="?")
     s.add_argument("field", nargs="?", help="learned: zero_drift | first_landing | laser_line_sd | zero_creep | "
                                             "window_zero | moved_sd | still_sd (all when left out)")
@@ -218,7 +218,12 @@ def main(argv=None) -> int:
         if a.action == "shutter-test":
             _print(api.shutter_test(a.motor))
         elif a.action == "shutter-verify":
-            _print(api.shutter_verify(a.seconds or api.VERIFY_EXPOSURE_S, a.repeats, a.burst_seconds))
+            # --laser-nm / --filter / --objective... set first (the laser to verify)
+            sv_ = {k[4:]: v for k, v in vars(a).items() if k.startswith("set_") and v is not None}
+            for k in ("laser_nm", "grating", "hole_um", "slit_um"):
+                if k in sv_:
+                    sv_[k] = float(sv_[k])
+            _print(api.shutter_verify(a.seconds or api.VERIFY_EXPOSURE_S, a.repeats, a.burst_seconds, setup=sv_))
         else:
             _print(api.instrument(a.action.replace("-", "_"), camera=a.camera, seconds=a.seconds, um=a.um))
     elif a.cmd == "bridge":

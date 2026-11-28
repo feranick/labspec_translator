@@ -194,36 +194,42 @@ async def measure_spectrum(ctx: Context, laser_nm: float = 637.75, center_cm1: f
                            from_cm1: float | None = None, to_cm1: float | None = None, exposure_s: float = 1.0,
                            accumulations: int = 2, grating: float = 1200, filter: str | None = None,
                            objective: str = "x100_VIS", peak_cm1: float | None = None,
-                           sample: str = "sample") -> dict:
+                           sample: str = "sample", hole_um: float | None = None) -> dict:
     """Measures one Raman spectrum and waits for it (up to about 90 s), returning the result in a few numbers.
     All arguments are optional: laser_nm (638 is taken as 637.75, 785 as 785.04), center_cm1 (one detector window
     centred there) or from_cm1 + to_cm1 (a range), exposure_s, accumulations, grating, filter (never above 10%;
     default the laser's own, else 1%),
     objective, peak_cm1 (the peak to fit, e.g. 520.7 for silicon; left out: the strongest peaks are found), sample
-    (its name). If the answer says it is still running, call study_status with its request."""
+    (its name), hole_um (the confocal hole; left out: 100 at x100, the same as calibrate_si: a calibration holds for
+    its own hole). If the answer says it is still running, call study_status with its request."""
     return await _keepalive(ctx, functools.partial(api.measure_spectrum, laser_nm, center_cm1, from_cm1, to_cm1,
                                                    exposure_s, accumulations, grating, filter, objective, peak_cm1,
-                                                   sample), msg=api.flat_progress)
+                                                   sample, hole_um=hole_um), msg=api.flat_progress)
 
 
 @server.tool()
-async def laser_check(ctx: Context, laser_nm: float = 637.75, grating: float = 1200) -> dict:
+async def laser_check(ctx: Context, laser_nm: float = 637.75, grating: float = 1200,
+                      hole_um: float | None = None) -> dict:
     """A quick laser health check: one short silicon spectrum (the shutter held), compared with the last good state.
     Answers verdict healthy | mode_change | multimode | low_signal with the reasons and what to do next. Use it
-    before calibrating, or when results look off. The sample must be the silicon wafer."""
-    return await _keepalive(ctx, functools.partial(api.laser_check, laser_nm, grating), msg=api.flat_progress)
+    before calibrating, or when results look off. The sample must be the silicon wafer. hole_um: the confocal hole
+    (left out: 100 at x100)."""
+    return await _keepalive(ctx, functools.partial(api.laser_check, laser_nm, grating, hole_um=hole_um),
+                            msg=api.flat_progress)
 
 
 @server.tool()
 async def calibrate_si(ctx: Context, laser_nm: float = 637.75, grating: float = 1200, repeats: int = 5,
                        center_cm1: float | None = None, from_cm1: float | None = None,
-                       to_cm1: float | None = None) -> dict:
+                       to_cm1: float | None = None, hole_um: float | None = None) -> dict:
     """Calibrates the spectral zero on silicon (520.7 cm-1) for this laser and grating and waits for it (up to about
     90 s; then call study_status with its request): ls6t then corrects later spectra. All arguments optional
     (laser_nm 638 is taken as 637.75). To measure later at another window, give the same center_cm1 (or from_cm1 and
-    to_cm1) here: the zero differs between windows."""
+    to_cm1) here: the zero differs between windows. The correction holds for its objective and confocal hole only:
+    hole_um (left out: 100 at x100); measure with the same hole (measure_spectrum uses the same default)."""
     return await _keepalive(ctx, functools.partial(api.calibrate_si, laser_nm, grating, repeats,
-                                                   center_cm1=center_cm1, from_cm1=from_cm1, to_cm1=to_cm1),
+                                                   center_cm1=center_cm1, from_cm1=from_cm1, to_cm1=to_cm1,
+                                                   hole_um=hole_um),
                             msg=api.flat_progress)
 
 
@@ -261,7 +267,8 @@ async def instrument(ctx: Context, action: str = "status", camera: str | int | N
     nothing fires the laser; returns what LabSpec read back. laser_on (seconds, up to the
     profile's limit; default 30): the laser shutter open so the beam shows on the camera, after the operator's Yes
     in LabSpec; the bridge closes it when the time is up, at laser_off, at a halt, or before any other command.
-    laser_off. camera_on / camera_off (camera: a number, or a name in study_format's profile.cameras such as
+    laser_off. shutter_verify (Si under the objective, in focus): proves the laser shutter blocks the laser; with
+    setup {laser_nm, filter...} that set-up is set first, so the laser verified is the one asked for. camera_on / camera_off (camera: a number, or a name in study_format's profile.cameras such as
     "top"; none: the active one): LabSpec's live view; for a picture use snapshot. Another camera than the
     active one is switched only where the profile allows it (a video restart, checked); otherwise, and whenever an
     answer refuses, it says what the operator does: relay it, do not retry. end_bridge: ends the bridge cleanly

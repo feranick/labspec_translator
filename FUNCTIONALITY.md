@@ -254,7 +254,7 @@ one) is read in `instrument status`.
 | Alignment baselines and settings per laser | in the profile | a person (`alignment record`) | `alignment` checks |
 | Alignment checks | `alignment_log.jsonl` | every `alignment` study | readiness warnings, drift |
 | Beam offsets per objective and laser | `spot.json` | `spot` studies, lit snapshots | the marker, `move.to_um` |
-| Spectral corrections per laser and grating | `xcal.json` | `calibration` with `adjust: ls6t` | later spectra's Raman shift |
+| Spectral corrections per laser, grating, objective and confocal hole (from .27.8) | `xcal.json` | `calibration` with `adjust: ls6t` | later spectra's Raman shift |
 | Si width per laser, grating and objective | `si_width.json` | stored calibrations, healthy laser checks | the multimode tests at that objective |
 | When ls6t last selected each laser | `laser_selected.json` | laser changes (requests, `instrument set`) | the settling wait (`lasers.<k>.change_settle_s`, 120 s default) before calibrations and laser checks |
 | Laser shutter verifications per laser | `shutter_verified.json` | `instrument shutter-verify`, on a pass only | every use of the shutter (refused without a valid record) |

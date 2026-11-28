@@ -1172,6 +1172,15 @@ def inputs(study: dict, prof: dict, max_steps: int = 40, current: dict | None = 
     focus = study.get("focus", {})
     acq = acquire_step(study, prof, rng)
     pts = positions(study)
+    held_ = study.get("kind") not in ("cutoff", "background") and hold_shutter(study, prof, laser)
+    if held_:
+        # the hold shown in the dry run (Nicola, 2026-11-27: get_inputs showed a plain acquire only)
+        from . import shutter as _SH
+        gate_ = _SH.gate(prof, laser)
+        steps.append({"verb": "shutter_hold", "state": "on", "open_wait_s": hold_open_s(prof, laser, study.get("kind")),
+                      "why": ("the laser shutter held open between this study's spectra; the wait lets the laser "
+                              "settle (longer right after a change of laser: lasers.<k>.change_settle_s)")
+                      if gate_ is None else f"not held at run time: {gate_}"})
     for k, p in enumerate(pts):
         if len(steps) >= max_steps:
             break
@@ -1183,6 +1192,9 @@ def inputs(study: dict, prof: dict, max_steps: int = 40, current: dict | None = 
         if focus.get("autofocus") and (k == 0 or (focus.get("every") and k % int(focus["every"]) == 0)):
             steps.append({"verb": "autofocus", "how": focus["autofocus"]})
         steps.append(dict(acq, point=p["i"]))
+    if held_:
+        steps = steps[:max_steps - 1] + [{"verb": "shutter_hold", "state": "off",
+                                          "why": "released at the end of the study (or kept for the next one)"}]
     return {"laser_nm": laser, "range": rng, "points": len(pts), "steps": steps[:max_steps],
             "steps_shown": min(len(steps), max_steps), "estimate": estimate(study, prof, current)}
 

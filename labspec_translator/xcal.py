@@ -29,17 +29,75 @@ def path() -> Path:
     return jstore.path("xcal.json")
 
 
-def key(laser_nm, grating) -> str:
+def setup_of(objective=None, hole_um=None) -> dict:
+    """The optical set-up a correction holds for (Nicola, 2026-11-27: Si 0.53 cm-1 apart between holes 100 and 300 at
+    532, 1.15 at 638; the objective changes the spot and the width too)."""
+    try:
+        h_ = float(hole_um) if hole_um not in (None, "") else None
+    except (TypeError, ValueError):
+        h_ = None
+    return {"objective": str(objective) if objective not in (None, "") else None, "hole_um": h_}
+
+
+def _suffix(setup: dict | None) -> str:
+    if not setup:
+        return ""
+    o_, h_ = setup.get("objective"), setup.get("hole_um")
+    return (f"@{o_}" if o_ else "") + (f"@h{float(h_):g}" if h_ is not None else "")
+
+
+def key(laser_nm, grating, setup: dict | None = None) -> str:
+    """laser@grating, then @objective@h<hole> when the set-up is known: one correction per laser, grating, objective
+    and confocal hole."""
     def f(v):
         try:
             return f"{float(v):g}"
         except (TypeError, ValueError):
             return "?"
-    return f"{f(laser_nm)}@{f(grating)}"
+    return f"{f(laser_nm)}@{f(grating)}" + _suffix(setup)
+
+
+def describe(k: str) -> str:
+    """'532@1200@x100@h100' -> 'x100, hole 100 um'; a key without a set-up -> 'objective and hole not recorded'."""
+    parts = k.split("@")[2:]
+    o_ = next((p for p in parts if not p.startswith("h")), None)
+    h_ = next((p[1:] for p in parts if p.startswith("h")), None)
+    if not parts:
+        return "objective and hole not recorded (before 2026.11.27.8)"
+    return ", ".join(x for x in (o_, f"hole {h_} um" if h_ else None) if x)
+
+
+def _same_base(k: str, laser_nm, grating) -> bool:
+    b_ = key(laser_nm, grating)
+    return k == b_ or k.startswith(b_ + "@")
+
+
+def _resolve(d: dict, laser_nm, grating, setup) -> str:
+    """The key for this set-up; with setup None (a person's tool, a test), the most recent of any set-up."""
+    if setup is not None:
+        return key(laser_nm, grating, setup)
+    ks = [k for k in d if _same_base(k, laser_nm, grating)]
+    if not ks:
+        return key(laser_nm, grating)
+    return max(ks, key=lambda k: str((d.get(k) or {}).get("time") or ""))
+
+
+def other_setups(laser_nm, grating, setup) -> list:
+    """The set-ups with a correction for this laser and grating other than this one (what to say when none fits)."""
+    k0 = key(laser_nm, grating, setup)
+    return [describe(k) for k in load() if _same_base(k, laser_nm, grating) and k != k0]
 
 
 def load() -> dict:
-    return jstore.read("xcal.json")
+    d = jstore.read("xcal.json")
+    # corrections stored with their set-up but under laser@grating (2026.11.27.7): moved under their full key
+    for k in [k for k in d if k.count("@") == 1]:
+        r_ = d[k] or {}
+        if r_.get("objective") or r_.get("hole_um") is not None:
+            nk = key(*k.split("@"), setup_of(r_.get("objective"), r_.get("hole_um")))
+            if nk not in d:
+                d[nk] = d.pop(k)
+    return d
 
 
 def _save(d: dict):
@@ -60,11 +118,14 @@ def range_key(range_cm1) -> str:
     return f"{lo:g}-{hi:g}"
 
 
-def get(laser_nm, grating, centre_nm=None, placement: str | None = None, range_cm1=None) -> dict | None:
+def get(laser_nm, grating, centre_nm=None, placement: str | None = None, range_cm1=None,
+        setup: dict | None = None) -> dict | None:
     """The correction for this laser and grating, for a window centred at centre_nm: the one measured there, or
     interpolated between the two around it, or the nearest (then 'centre_far': the zero differs between windows:
-    1.7 cm-1 between two windows a minute apart, 2026-11-24). Without a centre, the last one measured."""
-    rec = load().get(key(laser_nm, grating))
+    1.7 cm-1 between two windows a minute apart, 2026-11-24). Without a centre, the last one measured. Only a
+    correction of this set-up (objective, hole: setup_of); setup None: the most recent of any."""
+    d_ = load()
+    rec = d_.get(_resolve(d_, laser_nm, grating, setup))
     if not rec:
         return None
     if range_cm1 is not None and (rec.get("by_range") or {}).get(range_key(range_cm1)):
@@ -108,11 +169,13 @@ def store(laser_nm, grating, a: float, b: float, reference: str, lines: list, re
           centre_nm=None, laser_line_cm1=None, laser_line_fwhm_cm1=None, placement: str | None = None,
           pool: str = "per_centre", repeats: dict | None = None, range_cm1=None,
           cm1_per_px: float | None = None, zero_mode: str | None = None, shutter: str | None = None,
-          hole_um=None, objective=None) -> dict:
+          hole_um=None, objective=None, setup: dict | None = None) -> dict:
     """Keeps the correction per window centre (2026-11-24: two Si calibrations a minute apart, in two windows, gave
     -0.72 and -2.40 cm-1: each had overwritten the other)."""
     d = load()
-    k = key(laser_nm, grating)
+    if setup is None and (hole_um is not None or objective):
+        setup = setup_of(objective, hole_um)
+    k = key(laser_nm, grating, setup)
     rec = {"a": round(float(a), 5), "b": round(float(b), 7), "reference": reference, "lines": lines,
            "time": time.strftime("%Y-%m-%dT%H:%M:%S"), "request": request}
     if centre_nm is not None:
@@ -278,43 +341,51 @@ def pool_decision(by: dict, pool: str, cm1_per_px: float | None, newest: dict | 
 
 
 def clear_centre(laser_nm, grating, centre_nm) -> int:
-    """One window centre's correction (within CENTRE_TOL_NM) out of laser@grating; the others stay."""
+    """One window centre's correction (within CENTRE_TOL_NM) out of laser@grating, for every set-up; the other
+    centres stay."""
     d = load()
-    k = key(laser_nm, grating)
-    rec = d.get(k)
-    if not rec:
-        return 0
-    by = dict(rec.get("by_centre") or {})
-    gone = [c for c in by if abs(float(c) - float(centre_nm)) <= CENTRE_TOL_NM]
-    for c in gone:
-        by.pop(c)
-    if not gone:
-        return 0
-    if by:
-        last = max(by.values(), key=lambda v: v.get("time") or "")
-        d[k] = dict(last, by_centre=by)
-    else:
-        d.pop(k)
-    _save(d)
-    return len(gone)
+    n = 0
+    for k in [k for k in d if _same_base(k, laser_nm, grating)]:
+        rec = d.get(k)
+        by = dict(rec.get("by_centre") or {})
+        gone = [c for c in by if abs(float(c) - float(centre_nm)) <= CENTRE_TOL_NM]
+        for c in gone:
+            by.pop(c)
+        if not gone:
+            continue
+        n += len(gone)
+        if by:
+            last = max(by.values(), key=lambda v: v.get("time") or "")
+            d[k] = dict(last, by_centre=by)
+        else:
+            d.pop(k)
+    if n:
+        _save(d)
+    return n
 
 
 def clear(laser_nm=None, grating=None) -> int:
+    """Every correction (no arguments), or every set-up's of this laser and grating."""
     d = load()
     if laser_nm is None and grating is None:
         n = len(d)
         d = {}
     else:
-        n = 1 if d.pop(key(laser_nm, grating), None) else 0
+        ks = [k for k in d if _same_base(k, laser_nm, grating)]
+        for k in ks:
+            d.pop(k)
+        n = len(ks)
     _save(d)
     return n
 
 
-def at_centre(laser_nm, grating, centre_nm, placement: str | None = None, range_cm1=None) -> dict | None:
+def at_centre(laser_nm, grating, centre_nm, placement: str | None = None, range_cm1=None,
+              setup: dict | None = None) -> dict | None:
     """The correction measured at this window itself (or this range), never pooled or interpolated: what a new
     calibration there is compared with (2026-11-26: at 1200 the pooled correction hid three calibrations at
     659.66 nm from the drift and jump checks)."""
-    rec = load().get(key(laser_nm, grating))
+    d_ = load()
+    rec = d_.get(_resolve(d_, laser_nm, grating, setup))
     if not rec:
         return None
     if range_cm1 is not None:

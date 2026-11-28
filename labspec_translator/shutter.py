@@ -93,10 +93,25 @@ def gate(prof: dict, laser_nm=None) -> str | None:
     if int(rec.get("rev", 0)) != REV:
         return f"the bridge's shutter handling has changed since the last verification ({rec.get('version')}): {how}"
     days = (time.time() - float(rec.get("time", 0))) / 86400.0
-    mx = float((prof.get("shutter") or {}).get("verify_max_days", MAX_DAYS))
+    mx = max_days(prof, rec)
     if days > mx:
-        return f"the shutter was last shown to block {what} {days:.0f} days ago (more than {mx:g}): {how}"
+        return (f"the shutter was last shown to block {what} {days:.0f} days ago (more than {mx:g}"
+                + (": shorter, as it leaked in the 30 days before that pass" if rec.get("recent_leaks") else "")
+                + f"): {how}")
     return None
+
+
+MAX_DAYS_AFTER_LEAK = 7.0
+
+
+def max_days(prof: dict, rec: dict | None) -> float:
+    """How long a pass holds: shutter.verify_max_days (30), or shutter.verify_max_days_after_leak (7) when the laser
+    leaked in the 30 days before it (Nicola, 2026-11-27: 637.75 leaked 0.38 % on 11-23, passed at 0.057 % on 11-27)."""
+    sh_ = prof.get("shutter") or {}
+    mx = float(sh_.get("verify_max_days", MAX_DAYS))
+    if (rec or {}).get("recent_leaks"):
+        mx = min(mx, float(sh_.get("verify_max_days_after_leak", MAX_DAYS_AFTER_LEAK)))
+    return mx
 
 
 def default_laser_off(prof: dict, laser_nm=None) -> str:

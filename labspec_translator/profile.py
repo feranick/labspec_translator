@@ -61,6 +61,10 @@ DEFAULT_PROFILE: dict = {
     # (the grating's blocking move returned in 0.02-0.04 s like the other way, 2026-11-20: none by default)
     "blocking_motors": [],
     "holes_um": None,              # null: any value LabSpec accepts
+    # the confocal hole the simple tools (calibrate_si, measure_spectrum, laser_check) use per objective unless asked
+    # otherwise: calibrate at the hole you measure with (Nicola, 2026-11-27: Si 0.53 cm-1 apart between holes 100
+    # and 300 at 532, 1.15 at 638; steadier and narrower at 100, ~1000 counts/s on Si at 1 %)
+    "default_hole_um": {"x100": 100},
     "slits_um": None,
     # e_per_count: the CCD's electrons per count (the spike test's counting-noise floor); 1 unless known
     "detector": {"full_scale": 65535, "max_temp_c": -50.0, "pixels": 1024, "e_per_count": 1.0},
@@ -772,6 +776,12 @@ def summary(prof: dict) -> dict:
                                "max_dz_um": "the farthest Z from the operator's focus, either way"},
             "alignment_lasers": sorted(prof.get("alignment", {}).get("baselines", {})),
             "laser_shutter": bool(prof.get("motors", {}).get("laser_shutter")),
+            # what a client needs to know about the go-ahead and the motors (Nicola, 2026-11-27)
+            "safety": dict(prof.get("safety") or {}),
+            "laser_go_ahead": ("not asked: interlocked enclosure (safety)" if go_ahead_waived(prof) else
+                               "asked in LabSpec (LS6T_CONFIRM)"),
+            "motors": {k: v for k, v in (prof.get("motors") or {}).items() if v},
+            "default_hole_um": prof.get("default_hole_um"),
             "cameras": prof.get("video", {}).get("cameras") or {},
             "polarizers": prof.get("polarizers") or {},
             "objectives_info": prof.get("objectives_info") or {},
