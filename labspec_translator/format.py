@@ -301,199 +301,169 @@ def _z_safety(study: dict, prof: dict, errors: list, warnings: list) -> None:
                           "with travel 'retract' first")
 
 
-def validate_study(name: str, study: dict, prof: dict) -> dict:
-    errors: list[str] = []
-    warnings: list[str] = []
-    if not isinstance(study, dict):
-        return {"ok": False, "errors": ["a study is an object"], "warnings": []}
-    if not name or not all(c.isalnum() or c in "_-" for c in name):
-        errors.append(f"study name {name!r}: use letters, digits, _ and -")
-    _unknown({k: v for k, v in study.items() if not str(k).startswith("_")}, TOP_KEYS, "study", errors)
-    kind = study.get("kind", "spectrum")
-    if kind not in KINDS:
-        errors.append(f"kind {kind!r}: use one of {', '.join(KINDS)}")
-        return {"ok": False, "errors": errors, "warnings": warnings}
-    lim = prof["limits"]
-    if kind == "move":
-        return _validate_move(name, study, prof, errors, warnings)
-    if kind == "spot":
-        return _validate_spot(name, study, prof, errors, warnings)
-    if study.get("calibration") is not None and kind != "calibration":
-        errors.append("calibration: only with kind 'calibration'")
-    if study.get("background") is not None and kind != "background":
-        errors.append("background: only with kind 'background'")
-    if kind == "calibration":
-        cal = study.get("calibration") or {}
-        if not isinstance(cal, dict):
-            errors.append("calibration: {reference, lines_cm1, tol_cm1, adjust}")
-            cal = {}
-        _unknown(cal, CAL_KEYS, "calibration", errors)
-        from .xcal import REFERENCES
-        if cal.get("reference") is not None and cal["reference"] not in REFERENCES:
-            errors.append(f"calibration.reference {cal['reference']!r}: {', '.join(REFERENCES)} (or lines_cm1)")
-        if cal.get("lines_cm1") is not None and not (isinstance(cal["lines_cm1"], list) and cal["lines_cm1"]
-                                                     and all(_num(v) for v in cal["lines_cm1"])):
-            errors.append("calibration.lines_cm1: a list of Raman shifts (cm-1)")
-        if cal.get("adjust", "none") not in ("none", "labspec", "ls6t", "auto"):
-            errors.append("calibration.adjust: none, labspec, ls6t or auto")
-        if cal.get("repeats") is not None and (not isinstance(cal["repeats"], int) or not 1 <= cal["repeats"] <= 20):
-            errors.append("calibration.repeats: 1 to 20 spectra, the spectrometer re-placed before each (mean and SD)")
-        if cal.get("accept_mode_change") is not None and not isinstance(cal["accept_mode_change"], bool):
-            errors.append("calibration.accept_mode_change: true (store a correction although the laser is in another "
-                          "mode than at its last healthy check at this window; it holds in this mode only)")
-        if cal.get("repeats_move") is not None and not isinstance(cal["repeats_move"], bool):
-            errors.append("calibration.repeats_move: true (the spectrometer sent away and back before each repeat: "
-                          "noise plus repositioning) or false (it stays: noise alone)")
-        if cal.get("anchor", "auto") not in ("auto", "always", "off"):
-            errors.append("calibration.anchor: auto (a repeat whose laser line steps beyond its own scatter, with "
-                          "the Raman lines moving alike, is brought back by the step: a spectrometer landing), always "
-                          "(every repeat judged relative to the laser line) or off")
-        if cal.get("store", "auto") not in ("auto", "per_centre", "pooled"):
-            errors.append("calibration.store: auto (pooled at coarse gratings, per window centre otherwise), "
-                          "per_centre or pooled")
-        if cal.get("tol_cm1") is not None and (not _num(cal["tol_cm1"]) or cal["tol_cm1"] <= 0):
-            errors.append("calibration.tol_cm1: > 0")
-        if cal.get("window_cm1") is not None and (not _num(cal["window_cm1"]) or not 5 <= cal["window_cm1"] <= 200):
-            errors.append("calibration.window_cm1: the fit window around each line, 5 to 200 cm-1 (default: 30 at "
-                          "1200 gr/mm and finer, scaled up for coarser gratings, 60 at 600)")
-    for k in ("filters", "cutoff"):
-        if study.get(k) is not None and kind != k:
-            errors.append(f"{k}: only with kind '{k}'")
-    if kind == "filters":
-        fp = study.get("filters") or {}
-        if not isinstance(fp, dict):
-            errors.append("filters: {line_cm1, window_cm1, labels, exposure_s, max_exposure_s}")
-            fp = {}
-        _unknown(fp, FILTERS_KEYS, "filters", errors)
-        if (study.get("setup") or {}).get("filter") is not None:
-            errors.append("setup.filter: not with kind 'filters' (it steps through the filters itself)")
-        if fp.get("labels") is not None:
-            bad = [lab for lab in fp["labels"] if str(lab) not in prof.get("filters", {})] \
-                if isinstance(fp["labels"], list) else ["?"]
-            if bad:
-                errors.append(f"filters.labels: from the profile's filters ({', '.join(prof.get('filters', {}))})")
-        for k in ("exposure_s", "max_exposure_s"):
-            if fp.get(k) is not None and (not _num(fp[k]) or not 0 < fp[k] <= lim["max_exposure_s"]):
-                errors.append(f"filters.{k}: 0 < s <= limits.max_exposure_s ({lim['max_exposure_s']:g})")
-        steps = plan.filters_steps(study, prof, plan.laser_nm(study, prof))
-        if len([s_ for s_ in steps if s_.get("exposure_s")]) < 2:
-            errors.append("filters: fewer than two filters can be measured within the caps and exposure limits")
-        for s_ in steps:
-            if not s_.get("exposure_s"):
-                warnings.append(f"filter {s_['label']} not measured: {s_.get('skip', 'no exposure within the limits')}")
-    if kind == "cutoff":
-        cp = study.get("cutoff") or {}
-        if not isinstance(cp, dict):
-            errors.append("cutoff: {from_cm1, to_cm1, light: white | laser, laser_off, plateau_cm1}")
-            cp = {}
-        _unknown(cp, CUTOFF_KEYS, "cutoff", errors)
-        if cp.get("light", "white") not in ("white", "laser"):
-            errors.append("cutoff.light: white (the white light, laser off) or laser (the sample's own background)")
-        lo = cp.get("laser_off", SH.default_laser_off(prof, (study.get("setup") or {}).get("laser_nm")))
-        g = SH.gate(prof, (study.get("setup") or {}).get("laser_nm")) if lo == "shutter" else None
-        if cp.get("light", "white") == "white" and g:
-            errors.append(f"cutoff.laser_off 'shutter': {g}; or use 'operator' (the operator blocks the laser)")
-        if lo not in ("shutter", "operator"):
-            errors.append("cutoff.laser_off: shutter or operator")
-        elif cp.get("light", "white") == "white" and lo == "operator":
-            _blocked_by_hand(study, prof, errors, warnings, "cutoff")
-    if kind == "background":
-        bgk = study.get("background")
-        if not isinstance(bgk, dict):
-            errors.append("background: {name, laser_off: shutter | operator}")
-            bgk = {}
-        _unknown(bgk, BG_KEYS, "background", errors)
-        from . import background as BG
-        if not BG.valid_name(bgk.get("name", "")):
-            errors.append("background.name: letters, digits, _ and - (up to 60)")
-        lo = bgk.get("laser_off", SH.default_laser_off(prof, (study.get("setup") or {}).get("laser_nm")))
-        g = SH.gate(prof, (study.get("setup") or {}).get("laser_nm")) if lo == "shutter" else None
-        if lo not in ("shutter", "operator"):
-            errors.append("background.laser_off: shutter or operator")
-        elif g:
-            errors.append(f"background.laser_off 'shutter': {g}; or use 'operator' (the operator blocks the laser)")
-        if lo == "operator":
-            _blocked_by_hand(study, prof, errors, warnings, "background")
-        for k in ("points", "map", "series", "process", "video", "focus"):
-            if study.get(k) is not None:
-                errors.append(f"{k}: not with kind 'background'")
-    sb = (study.get("acquire") or {}).get("subtract_background") if isinstance(study.get("acquire"), dict) else None
-    if sb is not None:
-        from . import background as BG
-        if not BG.valid_name(sb):
-            errors.append("acquire.subtract_background: a background's name")
-        elif sb not in BG.index():
-            errors.append(f"acquire.subtract_background {sb!r}: no such background (stored: "
-                          f"{', '.join(BG.index()) or 'none'}); a 'background' study makes it")
-    if kind == "depth":
-        dp = study.get("depth")
-        if not isinstance(dp, dict):
-            errors.append("depth: {from_um, to_um, step_um, refractive_index}")
-            return {"ok": False, "errors": errors, "warnings": warnings}
-        _unknown(dp, DEPTH_KEYS, "depth", errors)
-        for k in ("from_um", "to_um", "step_um"):
-            if dp.get(k) is not None and not _num(dp[k]):
-                errors.append(f"depth.{k}: a number (µm)")
-        if dp.get("step_um") is not None and _num(dp["step_um"]) and dp["step_um"] <= 0:
-            errors.append("depth.step_um: > 0")
-        n = dp.get("refractive_index")
-        if n is not None and (not _num(n) or not 1.0 <= n <= 4.5):
-            errors.append("depth.refractive_index: between 1.0 and 4.5 (e.g. 1.33 water, 1.46 silica, 1.59 PS)")
-        for k in ("points", "map", "series"):
-            if study.get(k) is not None:
-                errors.append(f"{k}: not with kind 'depth' (it stays at the current spot; aim first with a 'move')")
-        if errors:
-            return {"ok": False, "errors": errors, "warnings": warnings}
-        derived = plan.depth_as_map(study, prof)
-        derived["_kind"] = "depth"            # Z limits for depth profiles (z_limits purpose 'depth')
-        inner = validate_study(name, derived, prof)
-        inner["errors"] = [e.replace("map.z_um", "depth (from_um / to_um)") for e in inner["errors"]]
-        if not plan.into_sign(prof)[1]:
-            inner["warnings"].append("the profile does not say which Z direction goes into the sample "
-                                     "(stage.z_into_sample): + is assumed")
-        if inner["ok"] and inner["estimate"]["points"] < 3:
-            inner["errors"].append("depth: at least 3 steps")
-            inner["ok"] = False
-        return _merge({}, inner, errors, warnings)
-    if kind == "focus":
-        for k in ("points", "map", "series", "acquire", "guide", "alignment", "process", "move"):
-            if study.get(k) is not None:
-                errors.append(f"{k}: not with kind 'focus' (it scans Z at the current spot; focus.scan sets it)")
-        if (study.get("setup") or {}).get("laser_nm") is None:
-            errors.append("focus: give setup.laser_nm")
-        fo = study.get("focus") or {}
-        if not isinstance(fo, dict):
-            errors.append("focus: {scan: {...}}")
-            fo = {}
-        _unknown(fo, {"scan", "autofocus", "camera"}, "focus (kind focus)", errors)
-        if fo.get("autofocus") not in (None, "scan", "camera"):
-            errors.append("focus.autofocus with kind 'focus': scan (the Raman line, default) or camera (the video's "
-                          "sharpness, no laser)")
-        if fo.get("autofocus") == "camera":
-            _validate_camera(fo, prof, errors)
-        else:
-            _validate_scan(fo.get("scan") or {}, prof, errors)
-        if errors:
-            return {"ok": False, "errors": errors, "warnings": warnings}
-        inner = validate_study(name, plan.focus_spectrum_study(study, prof), prof)
-        inner["warnings"] = [w for w in inner["warnings"] if not w.startswith("acquire.spike")]
-        out = _merge({}, inner, errors, warnings)
-        if out["ok"]:
-            out["estimate"] = plan.estimate(study, prof)
-        return out
-    if kind == "alignment":
-        return _validate_alignment(name, study, prof, errors, warnings)
-    if kind == "guide":
-        return _validate_guide(name, study, prof, errors, warnings)
-    sample = study.get("sample", {})
-    if not isinstance(sample, dict):
-        errors.append("sample: an object {name, notes, sensitive}")
-        sample = {}
-    _unknown(sample, SAMPLE_KEYS, "sample", errors)
-    if not sample.get("name"):
-        warnings.append("sample.name is empty: give the sample a name (it goes into the LabSpec file)")
+def _validate_calibration(study: dict, errors: list) -> None:
+    cal = study.get("calibration") or {}
+    if not isinstance(cal, dict):
+        errors.append("calibration: {reference, lines_cm1, tol_cm1, adjust}")
+        cal = {}
+    _unknown(cal, CAL_KEYS, "calibration", errors)
+    from .xcal import REFERENCES
+    if cal.get("reference") is not None and cal["reference"] not in REFERENCES:
+        errors.append(f"calibration.reference {cal['reference']!r}: {', '.join(REFERENCES)} (or lines_cm1)")
+    if cal.get("lines_cm1") is not None and not (isinstance(cal["lines_cm1"], list) and cal["lines_cm1"]
+                                                 and all(_num(v) for v in cal["lines_cm1"])):
+        errors.append("calibration.lines_cm1: a list of Raman shifts (cm-1)")
+    if cal.get("adjust", "none") not in ("none", "labspec", "ls6t", "auto"):
+        errors.append("calibration.adjust: none, labspec, ls6t or auto")
+    if cal.get("repeats") is not None and (not isinstance(cal["repeats"], int) or not 1 <= cal["repeats"] <= 20):
+        errors.append("calibration.repeats: 1 to 20 spectra, the spectrometer re-placed before each (mean and SD)")
+    if cal.get("accept_mode_change") is not None and not isinstance(cal["accept_mode_change"], bool):
+        errors.append("calibration.accept_mode_change: true (store a correction although the laser is in another "
+                      "mode than at its last healthy check at this window; it holds in this mode only)")
+    if cal.get("repeats_move") is not None and not isinstance(cal["repeats_move"], bool):
+        errors.append("calibration.repeats_move: true (the spectrometer sent away and back before each repeat: "
+                      "noise plus repositioning) or false (it stays: noise alone)")
+    if cal.get("anchor", "auto") not in ("auto", "always", "off"):
+        errors.append("calibration.anchor: auto (a repeat whose laser line steps beyond its own scatter, with "
+                      "the Raman lines moving alike, is brought back by the step: a spectrometer landing), always "
+                      "(every repeat judged relative to the laser line) or off")
+    if cal.get("store", "auto") not in ("auto", "per_centre", "pooled"):
+        errors.append("calibration.store: auto (pooled at coarse gratings, per window centre otherwise), "
+                      "per_centre or pooled")
+    if cal.get("tol_cm1") is not None and (not _num(cal["tol_cm1"]) or cal["tol_cm1"] <= 0):
+        errors.append("calibration.tol_cm1: > 0")
+    if cal.get("window_cm1") is not None and (not _num(cal["window_cm1"]) or not 5 <= cal["window_cm1"] <= 200):
+        errors.append("calibration.window_cm1: the fit window around each line, 5 to 200 cm-1 (default: 30 at "
+                      "1200 gr/mm and finer, scaled up for coarser gratings, 60 at 600)")
 
-    # ---- setup
+
+def _validate_filters(study: dict, prof: dict, errors: list, warnings: list) -> None:
+    lim = prof["limits"]
+    fp = study.get("filters") or {}
+    if not isinstance(fp, dict):
+        errors.append("filters: {line_cm1, window_cm1, labels, exposure_s, max_exposure_s}")
+        fp = {}
+    _unknown(fp, FILTERS_KEYS, "filters", errors)
+    if (study.get("setup") or {}).get("filter") is not None:
+        errors.append("setup.filter: not with kind 'filters' (it steps through the filters itself)")
+    if fp.get("labels") is not None:
+        bad = [lab for lab in fp["labels"] if str(lab) not in prof.get("filters", {})] \
+            if isinstance(fp["labels"], list) else ["?"]
+        if bad:
+            errors.append(f"filters.labels: from the profile's filters ({', '.join(prof.get('filters', {}))})")
+    for k in ("exposure_s", "max_exposure_s"):
+        if fp.get(k) is not None and (not _num(fp[k]) or not 0 < fp[k] <= lim["max_exposure_s"]):
+            errors.append(f"filters.{k}: 0 < s <= limits.max_exposure_s ({lim['max_exposure_s']:g})")
+    steps = plan.filters_steps(study, prof, plan.laser_nm(study, prof))
+    if len([s_ for s_ in steps if s_.get("exposure_s")]) < 2:
+        errors.append("filters: fewer than two filters can be measured within the caps and exposure limits")
+    for s_ in steps:
+        if not s_.get("exposure_s"):
+            warnings.append(f"filter {s_['label']} not measured: {s_.get('skip', 'no exposure within the limits')}")
+
+
+def _validate_cutoff(study: dict, prof: dict, errors: list, warnings: list) -> None:
+    cp = study.get("cutoff") or {}
+    if not isinstance(cp, dict):
+        errors.append("cutoff: {from_cm1, to_cm1, light: white | laser, laser_off, plateau_cm1}")
+        cp = {}
+    _unknown(cp, CUTOFF_KEYS, "cutoff", errors)
+    if cp.get("light", "white") not in ("white", "laser"):
+        errors.append("cutoff.light: white (the white light, laser off) or laser (the sample's own background)")
+    lo = cp.get("laser_off", SH.default_laser_off(prof, (study.get("setup") or {}).get("laser_nm")))
+    g = SH.gate(prof, (study.get("setup") or {}).get("laser_nm")) if lo == "shutter" else None
+    if cp.get("light", "white") == "white" and g:
+        errors.append(f"cutoff.laser_off 'shutter': {g}; or use 'operator' (the operator blocks the laser)")
+    if lo not in ("shutter", "operator"):
+        errors.append("cutoff.laser_off: shutter or operator")
+    elif cp.get("light", "white") == "white" and lo == "operator":
+        _blocked_by_hand(study, prof, errors, warnings, "cutoff")
+
+
+def _validate_background(study: dict, prof: dict, errors: list, warnings: list) -> None:
+    bgk = study.get("background")
+    if not isinstance(bgk, dict):
+        errors.append("background: {name, laser_off: shutter | operator}")
+        bgk = {}
+    _unknown(bgk, BG_KEYS, "background", errors)
+    from . import background as BG
+    if not BG.valid_name(bgk.get("name", "")):
+        errors.append("background.name: letters, digits, _ and - (up to 60)")
+    lo = bgk.get("laser_off", SH.default_laser_off(prof, (study.get("setup") or {}).get("laser_nm")))
+    g = SH.gate(prof, (study.get("setup") or {}).get("laser_nm")) if lo == "shutter" else None
+    if lo not in ("shutter", "operator"):
+        errors.append("background.laser_off: shutter or operator")
+    elif g:
+        errors.append(f"background.laser_off 'shutter': {g}; or use 'operator' (the operator blocks the laser)")
+    if lo == "operator":
+        _blocked_by_hand(study, prof, errors, warnings, "background")
+    for k in ("points", "map", "series", "process", "video", "focus"):
+        if study.get(k) is not None:
+            errors.append(f"{k}: not with kind 'background'")
+
+
+def _validate_depth(name: str, study: dict, prof: dict, errors: list, warnings: list) -> dict:
+    dp = study.get("depth")
+    if not isinstance(dp, dict):
+        errors.append("depth: {from_um, to_um, step_um, refractive_index}")
+        return {"ok": False, "errors": errors, "warnings": warnings}
+    _unknown(dp, DEPTH_KEYS, "depth", errors)
+    for k in ("from_um", "to_um", "step_um"):
+        if dp.get(k) is not None and not _num(dp[k]):
+            errors.append(f"depth.{k}: a number (µm)")
+    if dp.get("step_um") is not None and _num(dp["step_um"]) and dp["step_um"] <= 0:
+        errors.append("depth.step_um: > 0")
+    n = dp.get("refractive_index")
+    if n is not None and (not _num(n) or not 1.0 <= n <= 4.5):
+        errors.append("depth.refractive_index: between 1.0 and 4.5 (e.g. 1.33 water, 1.46 silica, 1.59 PS)")
+    for k in ("points", "map", "series"):
+        if study.get(k) is not None:
+            errors.append(f"{k}: not with kind 'depth' (it stays at the current spot; aim first with a 'move')")
+    if errors:
+        return {"ok": False, "errors": errors, "warnings": warnings}
+    derived = plan.depth_as_map(study, prof)
+    derived["_kind"] = "depth"            # Z limits for depth profiles (z_limits purpose 'depth')
+    inner = validate_study(name, derived, prof)
+    inner["errors"] = [e.replace("map.z_um", "depth (from_um / to_um)") for e in inner["errors"]]
+    if not plan.into_sign(prof)[1]:
+        inner["warnings"].append("the profile does not say which Z direction goes into the sample "
+                                 "(stage.z_into_sample): + is assumed")
+    if inner["ok"] and inner["estimate"]["points"] < 3:
+        inner["errors"].append("depth: at least 3 steps")
+        inner["ok"] = False
+    return _merge({}, inner, errors, warnings)
+
+
+def _validate_focus_kind(name: str, study: dict, prof: dict, errors: list, warnings: list) -> dict:
+    for k in ("points", "map", "series", "acquire", "guide", "alignment", "process", "move"):
+        if study.get(k) is not None:
+            errors.append(f"{k}: not with kind 'focus' (it scans Z at the current spot; focus.scan sets it)")
+    if (study.get("setup") or {}).get("laser_nm") is None:
+        errors.append("focus: give setup.laser_nm")
+    fo = study.get("focus") or {}
+    if not isinstance(fo, dict):
+        errors.append("focus: {scan: {...}}")
+        fo = {}
+    _unknown(fo, {"scan", "autofocus", "camera"}, "focus (kind focus)", errors)
+    if fo.get("autofocus") not in (None, "scan", "camera"):
+        errors.append("focus.autofocus with kind 'focus': scan (the Raman line, default) or camera (the video's "
+                      "sharpness, no laser)")
+    if fo.get("autofocus") == "camera":
+        _validate_camera(fo, prof, errors)
+    else:
+        _validate_scan(fo.get("scan") or {}, prof, errors)
+    if errors:
+        return {"ok": False, "errors": errors, "warnings": warnings}
+    inner = validate_study(name, plan.focus_spectrum_study(study, prof), prof)
+    inner["warnings"] = [w for w in inner["warnings"] if not w.startswith("acquire.spike")]
+    out = _merge({}, inner, errors, warnings)
+    if out["ok"]:
+        out["estimate"] = plan.estimate(study, prof)
+    return out
+
+
+def _validate_setup(study: dict, kind: str, sample: dict, prof: dict, errors: list, warnings: list) -> dict:
+    lim = prof["limits"]
     s = study.get("setup", {})
     if not isinstance(s, dict):
         errors.append("setup: an object")
@@ -589,8 +559,11 @@ def validate_study(name: str, study: dict, prof: dict) -> dict:
             errors.append(f"setup.{key}: a positive number (µm)")
         elif allowed and not any(abs(float(v) - a) < 1e-6 for a in allowed):
             errors.append(f"setup.{key} {v}: use one of {', '.join(f'{a:g}' for a in allowed)}")
+    return s
 
-    # ---- acquire
+
+def _validate_acquire(study: dict, kind: str, prof: dict, errors: list, warnings: list) -> None:
+    lim = prof["limits"]
     a = study.get("acquire", {})
     if not isinstance(a, dict):
         errors.append("acquire: an object")
@@ -661,7 +634,9 @@ def validate_study(name: str, study: dict, prof: dict) -> dict:
     if w is not None and (not _num(w) or not 0 <= float(w) <= float(prof["limits"].get("max_exposure_s", 60))):
         errors.append("acquire.warmup_s: seconds, 0 to limits.max_exposure_s")
 
-    # ---- focus, points, map, series
+
+def _validate_focus_and_geometry(study: dict, kind: str, s: dict, prof: dict, errors: list, warnings: list) -> None:
+    lim = prof["limits"]
     f = study.get("focus", {})
     if not isinstance(f, dict):
         errors.append("focus: an object")
@@ -770,29 +745,32 @@ def validate_study(name: str, study: dict, prof: dict) -> dict:
     elif study.get("series") is not None:
         errors.append("series: only with kind 'series'")
 
-    # ---- video snapshots
-    vd = study.get("video")
-    if vd is not None:
-        if not isinstance(vd, dict):
-            errors.append("video: {before, after, with_laser} (booleans)")
-        else:
-            _unknown(vd, VIDEO_KEYS, "video", errors)
-            for k in VIDEO_KEYS:
-                if k in vd and not isinstance(vd[k], bool):
-                    errors.append(f"video.{k}: true or false")
-            if vd.get("with_laser"):
-                if not (vd.get("before", kind == "calibration") or vd.get("after")):
-                    errors.append("video.with_laser: also give before or after (when to take the frame)")
-                g = SH.gate(prof, s.get("laser_nm"))
-                if g:
-                    errors.append(f"video.with_laser: {g}")
-                if s.get("filter") is None:
-                    errors.append("video.with_laser: give setup.filter (the laser shines during the snapshot)")
-                v = prof.get("video", {})
-                if float(v.get("laser_s", 1.0)) > float(v.get("max_laser_s", 5.0)):
-                    errors.append("profile video.laser_s is above video.max_laser_s")
 
-    # ---- process, expect
+def _validate_video(study: dict, kind: str, s: dict, prof: dict, errors: list) -> None:
+    vd = study.get("video")
+    if vd is None:
+        return
+    if not isinstance(vd, dict):
+        errors.append("video: {before, after, with_laser} (booleans)")
+        return
+    _unknown(vd, VIDEO_KEYS, "video", errors)
+    for k in VIDEO_KEYS:
+        if k in vd and not isinstance(vd[k], bool):
+            errors.append(f"video.{k}: true or false")
+    if vd.get("with_laser"):
+        if not (vd.get("before", kind == "calibration") or vd.get("after")):
+            errors.append("video.with_laser: also give before or after (when to take the frame)")
+        g = SH.gate(prof, s.get("laser_nm"))
+        if g:
+            errors.append(f"video.with_laser: {g}")
+        if s.get("filter") is None:
+            errors.append("video.with_laser: give setup.filter (the laser shines during the snapshot)")
+        v = prof.get("video", {})
+        if float(v.get("laser_s", 1.0)) > float(v.get("max_laser_s", 5.0)):
+            errors.append("profile video.laser_s is above video.max_laser_s")
+
+
+def _validate_process_and_expect(study: dict, errors: list) -> None:
     pr = study.get("process", {})
     if not isinstance(pr, dict):
         errors.append("process: an object")
@@ -802,7 +780,6 @@ def validate_study(name: str, study: dict, prof: dict) -> dict:
     if bl not in (False, None) and not (isinstance(bl, dict) and isinstance(bl.get("degree", 3), int)
                                         and 0 <= bl.get("degree", 3) <= 9):
         errors.append("process.baseline: {degree: 0..9} or false")
-    names = set()
     for i, p in enumerate(pr.get("peaks", []) or []):
         if not isinstance(p, dict) or not _num(p.get("near_cm1")):
             errors.append(f"process.peaks[{i}]: {{near_cm1, window_cm1, shape, name}}")
@@ -812,7 +789,6 @@ def validate_study(name: str, study: dict, prof: dict) -> dict:
             errors.append(f"process.peaks[{i}].shape: {', '.join(SHAPES)}")
         if p.get("window_cm1") is not None and (not _num(p["window_cm1"]) or p["window_cm1"] <= 0):
             errors.append(f"process.peaks[{i}].window_cm1: > 0")
-        names.add(p.get("name", f"peak{i}"))
     for i, b in enumerate(pr.get("bands", []) or []):
         if not (isinstance(b, dict) and _num(b.get("from_cm1")) and _num(b.get("to_cm1"))
                 and b["from_cm1"] != b["to_cm1"]):
@@ -822,13 +798,9 @@ def validate_study(name: str, study: dict, prof: dict) -> dict:
                 and _num(e.get("tol", 0)) and e.get("tol", 0) >= 0):
             errors.append(f"expect[{i}]: {{quantity: 'dotted.result.path', value, tol >= 0}}")
 
-    out = {"ok": not errors, "errors": errors, "warnings": warnings}
-    if errors:
-        return out
 
-    _z_safety(study, prof, errors, warnings)
-
-    # ---- range in nm, windows, estimate (now that the study is well formed)
+def _validate_range_and_estimate(study: dict, kind: str, prof: dict, errors: list, warnings: list) -> tuple:
+    lim = prof["limits"]
     laser = plan.laser_nm(study, prof)
     rng = plan.acq_range(study, prof, laser)
     if laser and rng.get("from_nm") is not None and (study.get("setup") or {}).get("grating") is None:
@@ -909,6 +881,73 @@ def validate_study(name: str, study: dict, prof: dict) -> dict:
                           "profile from it), then review it: ls6t profile propose, edit, ls6t profile import")
         else:
             warnings.append("no machine profile yet: the built-in XploRA defaults are used (simulator)")
+    return est, rng, laser
+
+
+def validate_study(name: str, study: dict, prof: dict) -> dict:
+    errors: list[str] = []
+    warnings: list[str] = []
+    if not isinstance(study, dict):
+        return {"ok": False, "errors": ["a study is an object"], "warnings": []}
+    if not name or not all(c.isalnum() or c in "_-" for c in name):
+        errors.append(f"study name {name!r}: use letters, digits, _ and -")
+    _unknown({k: v for k, v in study.items() if not str(k).startswith("_")}, TOP_KEYS, "study", errors)
+    kind = study.get("kind", "spectrum")
+    if kind not in KINDS:
+        errors.append(f"kind {kind!r}: use one of {', '.join(KINDS)}")
+        return {"ok": False, "errors": errors, "warnings": warnings}
+    if kind == "move":
+        return _validate_move(name, study, prof, errors, warnings)
+    if kind == "spot":
+        return _validate_spot(name, study, prof, errors, warnings)
+    for k in ("calibration", "background", "filters", "cutoff"):
+        if study.get(k) is not None and kind != k:
+            errors.append(f"{k}: only with kind '{k}'")
+    if kind == "calibration":
+        _validate_calibration(study, errors)
+    elif kind == "filters":
+        _validate_filters(study, prof, errors, warnings)
+    elif kind == "cutoff":
+        _validate_cutoff(study, prof, errors, warnings)
+    elif kind == "background":
+        _validate_background(study, prof, errors, warnings)
+    sb = (study.get("acquire") or {}).get("subtract_background") if isinstance(study.get("acquire"), dict) else None
+    if sb is not None:
+        from . import background as BG
+        if not BG.valid_name(sb):
+            errors.append("acquire.subtract_background: a background's name")
+        elif sb not in BG.index():
+            errors.append(f"acquire.subtract_background {sb!r}: no such background (stored: "
+                          f"{', '.join(BG.index()) or 'none'}); a 'background' study makes it")
+    if kind == "depth":
+        return _validate_depth(name, study, prof, errors, warnings)
+    if kind == "focus":
+        return _validate_focus_kind(name, study, prof, errors, warnings)
+    if kind == "alignment":
+        return _validate_alignment(name, study, prof, errors, warnings)
+    if kind == "guide":
+        return _validate_guide(name, study, prof, errors, warnings)
+
+    sample = study.get("sample", {})
+    if not isinstance(sample, dict):
+        errors.append("sample: an object {name, notes, sensitive}")
+        sample = {}
+    _unknown(sample, SAMPLE_KEYS, "sample", errors)
+    if not sample.get("name"):
+        warnings.append("sample.name is empty: give the sample a name (it goes into the LabSpec file)")
+
+    s = _validate_setup(study, kind, sample, prof, errors, warnings)
+    _validate_acquire(study, kind, prof, errors, warnings)
+    _validate_focus_and_geometry(study, kind, s, prof, errors, warnings)
+    _validate_video(study, kind, s, prof, errors)
+    _validate_process_and_expect(study, errors)
+
+    out = {"ok": not errors, "errors": errors, "warnings": warnings}
+    if errors:
+        return out
+
+    _z_safety(study, prof, errors, warnings)
+    est, rng, laser = _validate_range_and_estimate(study, kind, prof, errors, warnings)
     out.update(ok=not errors, errors=errors, warnings=warnings, estimate=est,
                range=rng, laser_nm=laser)
     return out

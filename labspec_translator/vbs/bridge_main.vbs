@@ -261,6 +261,47 @@ Function LabSpecError()
 End Function
 
 ' ---------------------------------------------------------------- waiting for motors
+' Shared blocking MoveMotor helper: announces the blocking motor in the heartbeat before LabSpec holds the script,
+' then clears it on return so ls6t never mistakes a long blocking move for a stuck bridge.
+Function BlockingMove(motor, posVal, posName, flags)
+    gBlocking = motor
+    Beat "busy", True
+    BlockingMove = LabSpec.MoveMotor(motor, posVal, posName, flags)
+    gBlocking = ""
+    Beat "busy", True
+End Function
+
+' Shared GetAcqID flush helper: drains earlier results until LabSpec reports -1 (none) or repeats the same id
+' three times in a row (2026-11-23). Sets staleId to any persistent positive id so it is never mistaken for the
+' new acquisition; when record=True, writes flush_tries and flush_last_id into res.
+Sub FlushAcqID(res, ByRef staleId, record)
+    Dim r, id, prevId, same
+    prevId = "x"
+    same = 0
+    id = -1
+    For r = 1 To 50
+        id = LabSpec.GetAcqID()
+        If Err.Number <> 0 Then Exit For
+        If id = -1 Then Exit For
+        If CStr(id) = CStr(prevId) Then
+            same = same + 1
+            If same >= 2 Then Exit For
+        Else
+            same = 0
+        End If
+        prevId = id
+        LabSpec.Pause 20
+    Next
+    If record Then
+        res("flush_tries") = r
+        res("flush_last_id") = id
+    End If
+    staleId = -99
+    If IsNumeric(id) Then
+        If id > 0 Then staleId = id
+    End If
+End Sub
+
 Function WaitMotor(motor, moveId, tmo, res)
     Dim t0, st, who
     WaitMotor = True
@@ -939,11 +980,7 @@ Sub VMove(cmd, res)
     ' MOTOR_VALUE), then GetMotorStatus with the id it returns): with NO_WAIT the XploRA's grating reported idle at
     ' once, and once stopped at 1800 on its way from 1200 to 2400 (2026-11-20). No stop request while it runs.
     If GetP(cmd, "blocking", "0") = "1" Then
-        gBlocking = motor
-        Beat "busy", True                   ' says so before LabSpec holds the script: ls6t waits longer, not 'stuck'
-        moveId = LabSpec.MoveMotor(motor, posVal, posName, mc)
-        gBlocking = ""
-        Beat "busy", True
+        moveId = BlockingMove(motor, posVal, posName, mc)
         res("blocking") = 1
     Else
         moveId = LabSpec.MoveMotor(motor, posVal, posName, mc + LS_MOTOR_NO_WAIT)
@@ -1483,11 +1520,7 @@ Sub VAcquireInner(cmd, res)
         If ParseNum(GetP(cmd, "spectro_jog_nm", "0")) <> 0 Then
             ' a calibration repeat: the spectrometer sent away and back, so each repeat lands on the pixels afresh
             ' (2026-11-24, 600 gr/mm: Si spans ~2 pixels and the same window gave +9.2 ... +9.9 cm-1)
-            gBlocking = spm                 ' a blocking move: announced, so ls6t does not call the bridge stuck
-            Beat "busy", True
-            LabSpec.MoveMotor spm, f + ParseNum(GetP(cmd, "spectro_jog_nm", "0")), "", LS_MOTOR_VALUE
-            gBlocking = ""
-            Beat "busy", True
+            r = BlockingMove(spm, f + ParseNum(GetP(cmd, "spectro_jog_nm", "0")), "", LS_MOTOR_VALUE)
             waitedS = WaitMotor(spm, gNoId, 120, res)
             res("spectro_jogged") = 1
             res("t_spectro_jog_s") = Secs(Elapsed(tp))     ' its own line: not 'waiting for motors' (2026-11-25)
@@ -1513,11 +1546,7 @@ Sub VAcquireInner(cmd, res)
             If Not res.Exists("spectro_jogged") Or apJog <> ParseNum(GetP(cmd, "spectro_approach_nm", "0")) Then
                 ' announced: after a grating change this move took ~25 s with no heartbeat, and ls6t called the
                 ' bridge stuck (2026-11-25)
-                gBlocking = spm
-                Beat "busy", True
-                LabSpec.MoveMotor spm, f + ParseNum(GetP(cmd, "spectro_approach_nm", "0")), "", LS_MOTOR_VALUE
-                gBlocking = ""
-                Beat "busy", True
+                r = BlockingMove(spm, f + ParseNum(GetP(cmd, "spectro_approach_nm", "0")), "", LS_MOTOR_VALUE)
                 waitedS = WaitMotor(spm, gNoId, 120, res)
             End If
             res("spectro_approached_from") = f + ParseNum(GetP(cmd, "spectro_approach_nm", "0"))
@@ -1525,11 +1554,7 @@ Sub VAcquireInner(cmd, res)
             tp = Timer
             Err.Clear
         End If
-        gBlocking = spm
-        Beat "busy", True
-        r = LabSpec.MoveMotor(spm, f, "", LS_MOTOR_VALUE)
-        gBlocking = ""
-        Beat "busy", True
+        r = BlockingMove(spm, f, "", LS_MOTOR_VALUE)
         If Err.Number <> 0 Then
             Fail res, ErrText("MoveMotor " & spm)
             Err.Clear
@@ -1549,11 +1574,7 @@ Sub VAcquireInner(cmd, res)
         If IsNumeric(res("spectro_nm")) And res("spectro_nm") <> "" Then
             If Abs(CDbl(res("spectro_nm")) - f) > 1 Then
                 res("spectro_first_nm") = res("spectro_nm")
-                gBlocking = spm
-                Beat "busy", True
-                LabSpec.MoveMotor spm, f, "", LS_MOTOR_VALUE
-                gBlocking = ""
-                Beat "busy", True
+                r = BlockingMove(spm, f, "", LS_MOTOR_VALUE)
                 Err.Clear
                 waitedS = WaitMotor(spm, gNoId, 120, res)
                 waitedS = WaitMotor("", 0, 120, res)
@@ -1565,31 +1586,7 @@ Sub VAcquireInner(cmd, res)
     End If
     If f < 0 Then f = -f
     tp = Timer
-    ' collect earlier results (and a 'cancelled' state) until LabSpec reports none, so the next ID is ours
-    ' 2026-11-23: this took 1.6 s on the XploRA (the 50 tries ran out: GetAcqID kept answering the same): it stops
-    ' when LabSpec reports none (-1) or the same answer three times in a row, and says what it saw; a result it
-    ' keeps answering (staleId) is never taken for this acquisition's
-    prevId = "x"
-    same = 0
-    For r = 1 To 50
-        id = LabSpec.GetAcqID()
-        If Err.Number <> 0 Then Exit For
-        If id = -1 Then Exit For
-        If CStr(id) = CStr(prevId) Then
-            same = same + 1
-            If same >= 2 Then Exit For
-        Else
-            same = 0
-        End If
-        prevId = id
-        LabSpec.Pause 20
-    Next
-    res("flush_tries") = r
-    res("flush_last_id") = id
-    staleId = -99
-    If IsNumeric(id) Then
-        If id > 0 Then staleId = id
-    End If
+    FlushAcqID res, staleId, True
     Err.Clear
     res("t_flush_s") = Secs(Elapsed(tp))
     tp = Timer
@@ -2807,11 +2804,7 @@ Sub VMapNative(cmd, res)
     If GetP(cmd, "center_nm", "") <> "" Then
         If ParseNum(GetP(cmd, "spectro_approach_nm", "0")) <> 0 Then
             ' from the same side as ls6t's other moves (spectrometer.approach_nm: the backlash out)
-            gBlocking = "Spectro"
-            Beat "busy", True
-            LabSpec.MoveMotor "Spectro", ParseNum(GetP(cmd, "center_nm", "0")) + ParseNum(GetP(cmd, "spectro_approach_nm", "0")), "", LS_MOTOR_VALUE
-            gBlocking = ""
-            Beat "busy", True
+            r = BlockingMove("Spectro", ParseNum(GetP(cmd, "center_nm", "0")) + ParseNum(GetP(cmd, "spectro_approach_nm", "0")), "", LS_MOTOR_VALUE)
             WaitMotor "Spectro", gNoId, 120, res
             res("spectro_approached_from") = ParseNum(GetP(cmd, "center_nm", "0")) + ParseNum(GetP(cmd, "spectro_approach_nm", "0"))
             Err.Clear
@@ -2884,11 +2877,7 @@ Sub VMapNative(cmd, res)
     res("acq_mode") = mode
     tval = -1
     If GetP(cmd, "acq_time", "interface") = "exposure" Then tval = ex
-    For i = 1 To 50
-        id = LabSpec.GetAcqID()
-        If Err.Number <> 0 Or id = -1 Then Exit For
-        LabSpec.Pause 20
-    Next
+    FlushAcqID res, n, False
     Err.Clear
     ' LabSpec's map holds the script for the whole map: the heartbeat says so first, with how long it may take
     ' (2026-11-24: ls6t called the bridge gone after 20 s of a 1-minute native map)
