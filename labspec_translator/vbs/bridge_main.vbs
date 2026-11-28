@@ -1524,8 +1524,7 @@ Sub VAcquireInner(cmd, res)
             ' window or laser, not forced after a grating change): cur -> f+approach -> f already lands like a
             ' fresh spectrum without an extra blocking move.
             apVal = ParseNum(GetP(cmd, "spectro_approach_nm", "0"))
-            If GetP(cmd, "spectro_force", "0") = "1" Or Not IsNumeric(cur) Or cur = "" Or _
-                    Abs(CDbl(cur) - f) <= Abs(apVal) + 0.5 Then
+            If GetP(cmd, "spectro_force", "0") = "1" Or Not IsNumeric(cur) Or cur = "" Or Abs(CDbl(cur) - f) <= Abs(apVal) + 0.5 Then
                 ' a calibration repeat: the spectrometer sent away and back, so each repeat lands on the pixels afresh
                 ' (2026-11-24, 600 gr/mm: Si spans ~2 pixels and the same window gave +9.2 ... +9.9 cm-1)
                 r = BlockingMove(spm, f + ParseNum(GetP(cmd, "spectro_jog_nm", "0")), "", LS_MOTOR_VALUE)
