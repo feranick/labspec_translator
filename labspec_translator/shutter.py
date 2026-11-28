@@ -70,7 +70,9 @@ def _profile_nm(prof: dict, laser_nm):
 
 def _gate_detail(prof: dict, laser_nm=None) -> tuple[str | None, str | None]:
     """(reason_code, message) for shutter gating: (None, None) when ls6t may rely on the shutter for this laser,
-    else one of ('no_motor', 'missing', 'mismatch', 'rev', 'expired') with the human-readable explanation."""
+    else one of ('no_motor', 'missing', 'mismatch', 'rev', 'expired') with the human-readable explanation.
+    When laser_nm is None, checks the most recent record (so it can return 'expired' for whichever laser was
+    verified most recently; expired_note(prof, None) returns None)."""
     motor = (prof.get("motors") or {}).get("laser_shutter")
     if not motor:
         return "no_motor", "no laser shutter motor in the profile (motors.laser_shutter)"
