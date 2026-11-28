@@ -23,7 +23,8 @@ import time
 from pathlib import Path
 
 from . import config
-from .profile import escape, parse_kv, read_text
+from .io_util import read_text, replace_retry
+from .profile import escape, parse_kv
 
 
 def labspec_windows() -> dict | None:
@@ -182,7 +183,7 @@ def diagnose(hb: dict | None, folder=None) -> str:
     laser shutter was held open by ls6t, that the laser may still reach the sample (2026-11-24)."""
     msg = _diagnose(hb, folder)
     if hb and str(hb.get("shutter_held", "0")) == "1":
-        from .runner import LASER_MAY_BE_ON
+        from .io_util import LASER_MAY_BE_ON
         return LASER_MAY_BE_ON + " " + msg
     return msg
 
@@ -259,18 +260,7 @@ def decode(text: str) -> dict:
     return parse_kv(text)
 
 
-def replace_retry(src, dst, tries: int = 100, wait_s: float = 0.02):
-    """os.replace, tried again while Windows refuses it (PermissionError while another process, e.g. a virus
-    scanner or the reader, has one of the files open): a renamed file must not be lost to a moment's lock (the
-    simulated bridge's thread died of it in the Windows CI now and then: bench graphene_map)."""
-    for k in range(tries):
-        try:
-            os.replace(src, dst)
-            return
-        except PermissionError:
-            if k == tries - 1:
-                raise
-            time.sleep(wait_s)
+# replace_retry is imported from .io_util and re-exported here for callers
 
 
 def _write_atomic(path: Path, text: str):

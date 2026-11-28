@@ -1296,27 +1296,8 @@ def ensure(folder: Path) -> SimLabSpec | None:
 
 
 def _pid_alive(pid) -> bool:
-    try:
-        pid = int(pid)
-    except (TypeError, ValueError):
-        return False
-    if os.name == "nt":
-        import ctypes
-        k32 = ctypes.windll.kernel32
-        h = k32.OpenProcess(0x1000, False, pid)        # PROCESS_QUERY_LIMITED_INFORMATION
-        if not h:
-            return False
-        code = ctypes.c_ulong()
-        ok = k32.GetExitCodeProcess(h, ctypes.byref(code))
-        k32.CloseHandle(h)
-        return bool(ok) and code.value == 259         # STILL_ACTIVE
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
+    from .io_util import pid_alive
+    return bool(pid_alive(pid))
 
 
 def stop_all():

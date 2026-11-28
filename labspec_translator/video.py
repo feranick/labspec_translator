@@ -13,25 +13,14 @@ from pathlib import Path
 
 import numpy as np
 
-from .profile import read_text
+from .io_util import parse_kv_and_csv, to_float
 
 UM_UNITS = ("mkm", "um", "µm", "micron", "microns", "?m")
 
 
 def decode(path, packing: str = "colorref", order: str = "x_fastest") -> dict:
     """{img: (H, W, 3) uint8 or (H, W) float, xs, ys, um: bool, meta}."""
-    meta: dict = {}
-    vals: list[str] = []
-    for line in read_text(path).splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        if line.startswith("#"):
-            k, _, v = line[1:].strip().partition("=")
-            meta[k.strip()] = v.strip()
-        else:
-            vals.append(line)
-    data = np.array([float(v) for row in vals for v in row.split(",") if v != ""], float)
+    meta, data = parse_kv_and_csv(path)
     types = [t.strip() for t in meta.get("axis_types", "").split(",") if t.strip()]
     sizes = [int(float(s)) for s in meta.get("axis_sizes", "").split(",") if s.strip()]
     units = [u.strip() for u in meta.get("axis_units", "").split(",")]
@@ -732,7 +721,4 @@ def snapshot(res: dict, prof: dict, base: Path, title: str, laser_nm=None) -> di
 
 
 def _f(v):
-    try:
-        return float(v)
-    except (TypeError, ValueError):
-        return None
+    return to_float(v, finite=False)

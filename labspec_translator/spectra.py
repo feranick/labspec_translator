@@ -21,9 +21,9 @@ SQRT_LN2 = math.sqrt(math.log(2.0))
 
 def read(path: Path | str) -> dict:
     """A bridge spectrum file: '# key=value' header lines, then 'x<TAB>y' rows. Returns {x, y, meta}."""
+    from .io_util import read_text
     meta: dict = {}
     xs, ys = [], []
-    from .profile import read_text
     for line in read_text(path).splitlines():
         line = line.strip()
         if not line:
@@ -47,19 +47,8 @@ def read(path: Path | str) -> dict:
 
 def header(path: Path | str) -> dict:
     """The '# key=value' lines at the top of a bridge spectrum file only."""
-    meta: dict = {}
-    from .profile import read_text
-    for line in read_text(path).splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        if not line.startswith("#"):
-            break
-        body = line[1:].strip()
-        if "=" in body:
-            k, v = body.split("=", 1)
-            meta[k.strip()] = v.strip()
-    return meta
+    from .io_util import read_header_lines
+    return read_header_lines(path)
 
 
 EXPOSURE_KEYS = ("acq.Exposition", "acq.Exposure", "acq.Exposure time", "acq.Acq. time")
@@ -77,6 +66,7 @@ def acq_exposure(meta: dict) -> float | None:
 
 
 def write(path: Path | str, x, y, meta: dict | None = None):
+    from .io_util import replace_retry
     p = Path(path)
     tmp = p.with_suffix(p.suffix + ".tmp")
     with open(tmp, "w", encoding="utf-8") as fh:
@@ -84,7 +74,6 @@ def write(path: Path | str, x, y, meta: dict | None = None):
             fh.write(f"# {k}={v}\n")
         for a, b in zip(x, y):
             fh.write(f"{a:.6f}\t{b:.4f}\n")
-    from .bridge import replace_retry
     replace_retry(tmp, p)
 
 
@@ -196,15 +185,24 @@ def baseline(x, y, degree: int = 3, iterations: int = 100, tol: float = 1e-4) ->
     y = np.asarray(y, float)
     if x.size < degree + 2:
         return np.zeros_like(y)
-    u = (2 * x - (x.max() + x.min())) / max(x.max() - x.min(), 1e-12)
+    span = float(x.max() - x.min())
+    u = (2 * x - (x.max() + x.min())) / max(span, 1e-12)
     work = y.copy()
     fit = np.zeros_like(y)
+    if span > 1e-12 and np.unique(u).size > degree:
+        Q, _ = np.linalg.qr(np.vander(u, degree + 1, increasing=True), mode="reduced")
+        for _ in range(iterations):
+            fit = Q @ (Q.T @ work)
+            new = np.minimum(work, fit)
+            if np.linalg.norm(new - work) <= tol * max(np.linalg.norm(work), 1e-12):
+                break
+            work = new
+        return fit
     for _ in range(iterations):
         c = np.polynomial.polynomial.polyfit(u, work, degree)
         fit = np.polynomial.polynomial.polyval(u, c)
         new = np.minimum(work, fit)
         if np.linalg.norm(new - work) <= tol * max(np.linalg.norm(work), 1e-12):
-            work = new
             break
         work = new
     return fit

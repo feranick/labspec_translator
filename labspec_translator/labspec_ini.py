@@ -68,10 +68,8 @@ def _array(d: dict, key: str) -> list:
 
 
 def _num(v):
-    try:
-        return float(v)
-    except (TypeError, ValueError):
-        return None
+    from .io_util import to_float
+    return to_float(v, finite=False)
 
 
 def motors(secs: dict) -> dict:

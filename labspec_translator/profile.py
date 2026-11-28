@@ -323,22 +323,38 @@ def _ini_facts(prof: dict) -> None:
         prof["facts_from_ini"] = {"added": added, "from": str(p)}
 
 
+_LOAD_CACHE: dict = {}
+
+
+def _file_sig(p: Path | None):
+    if p is None:
+        return None
+    try:
+        st = p.stat()
+        return (str(p), st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+
+
 def load(path: Path | None = None) -> dict:
     """The profile in use: the file merged over the defaults ('measured': false when there is no file). With no
     file but an inventory from the bridge, a profile is made from it automatically (auto_profile); an automatic
     profile follows newer inventories until a person has reviewed it."""
     p = Path(path) if path else config.profile_path()
-    if path is None:
-        dump = latest_dump()
-        if dump is not None:
-            try:
-                cur = json.loads(p.read_text(encoding="utf-8")) if p.is_file() else None
-                stale = cur is not None and isinstance(cur.get("auto"), dict) and \
-                    cur["auto"].get("dump_time") != parse_kv(read_text(dump)).get("time")
-                if cur is None or stale:
-                    save(auto_profile(dump), p)
-            except (OSError, ValueError, KeyError):
-                pass
+    dump = latest_dump() if path is None else None
+    cache_key = (str(p), _file_sig(p), _file_sig(dump), path is None)
+    cached = _LOAD_CACHE.get(cache_key)
+    if cached is not None:
+        return copy.deepcopy(cached)
+    if path is None and dump is not None:
+        try:
+            cur = json.loads(p.read_text(encoding="utf-8")) if p.is_file() else None
+            stale = cur is not None and isinstance(cur.get("auto"), dict) and \
+                cur["auto"].get("dump_time") != parse_kv(read_text(dump)).get("time")
+            if cur is None or stale:
+                save(auto_profile(dump), p)
+        except (OSError, ValueError, KeyError):
+            pass
     if p.is_file():
         data = json.loads(p.read_text(encoding="utf-8"))
         if isinstance(data, dict):
@@ -380,10 +396,15 @@ def load(path: Path | None = None) -> dict:
             v.setdefault("default_filter", None)       # the flat tools' filter with this laser (None: 1%)
             v.setdefault("change_settle_s", None)      # after a change to this laser, before a calibration
             # (None: CHANGE_SETTLE_DEFAULT_S for calibrations, none otherwise)
+    if len(_LOAD_CACHE) > 8:
+        _LOAD_CACHE.clear()
+    final_key = (str(p), _file_sig(p), _file_sig(dump), path is None)
+    _LOAD_CACHE[final_key] = copy.deepcopy(prof)
     return prof
 
 
 def save(prof: dict, path: Path | None = None) -> Path:
+    from .io_util import replace_retry
     p = Path(path) if path else config.profile_path()
     p.parent.mkdir(parents=True, exist_ok=True)
     # 'problems' is what load() found, never part of the file (2026-11-25: profile set saved it, and the next load
@@ -391,8 +412,8 @@ def save(prof: dict, path: Path | None = None) -> Path:
     data = {k: v for k, v in prof.items() if k not in ("measured", "path", "problems")}
     tmp = p.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, indent=1), encoding="utf-8")
-    from .bridge import replace_retry
     replace_retry(tmp, p)
+    _LOAD_CACHE.clear()
     return p
 
 
@@ -434,18 +455,7 @@ def laser_key(prof: dict, laser) -> str | None:
 
 # --------------------------------------------------------------------------------------------- discovery import
 
-def read_text(path) -> str:
-    """A text file from the bridge or the simulator: UTF-16 with a BOM (LabSpec's FSO in Unicode mode), UTF-8
-    with or without a BOM, or else the Windows ANSI page."""
-    raw = Path(path).read_bytes()
-    if raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
-        return raw.decode("utf-16", errors="replace")
-    if raw[:3] == b"\xef\xbb\xbf":
-        return raw[3:].decode("utf-8", errors="replace")
-    try:
-        return raw.decode("utf-8")
-    except UnicodeDecodeError:
-        return raw.decode("cp1252", errors="replace")
+from .io_util import read_text, to_float  # noqa: E402, F401 - re-exported for callers
 
 
 def unescape(v: str) -> str:
@@ -483,10 +493,7 @@ def _motor(d: dict, name: str) -> dict | None:
 
 
 def _num(s) -> float | None:
-    try:
-        return float(str(s).replace(",", "."))
-    except (TypeError, ValueError):
-        return None
+    return to_float(s, finite=False, comma=True)
 
 
 def laser_problems(prof: dict) -> list[str]:

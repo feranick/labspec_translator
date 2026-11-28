@@ -19,16 +19,7 @@ from . import store
 
 
 
-def read_text(p: Path) -> str:
-    b = Path(p).read_bytes()
-    if b[:2] in (b"\xff\xfe", b"\xfe\xff"):
-        return b.decode("utf-16")
-    if len(b) > 1 and b[1:2] == b"\x00":
-        return b.decode("utf-16-le", errors="replace")
-    try:
-        return b.decode("utf-8")
-    except UnicodeDecodeError:
-        return b.decode("latin-1")
+from .io_util import read_text  # noqa: F401 - re-exported for callers
 
 
 def _num(v):

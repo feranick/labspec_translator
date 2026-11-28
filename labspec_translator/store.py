@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 
 from . import config
+from .io_util import read_json, write_json
 
 
 def path(name: str) -> Path:
@@ -19,19 +20,11 @@ def path(name: str) -> Path:
 
 
 def read(name: str) -> dict:
-    try:
-        d = json.loads(path(name).read_text(encoding="utf-8"))
-        return d if isinstance(d, dict) else {}
-    except (OSError, ValueError):
-        return {}
+    d = read_json(path(name), {})
+    return d if isinstance(d, dict) else {}
 
 
 def write(name: str, data: dict) -> dict:
     """Atomic: never a half-written file for a reader (the runner, the MCP server, another app)."""
-    from .bridge import replace_retry
-    p = path(name)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_name(p.name + ".tmp")
-    tmp.write_text(json.dumps(data, indent=1, default=str), encoding="utf-8")
-    replace_retry(tmp, p)
+    write_json(path(name), data, indent=1, default=str)
     return data

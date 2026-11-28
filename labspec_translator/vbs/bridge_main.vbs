@@ -2070,7 +2070,7 @@ End Function
 ' Writes data object `id` (a video frame, a map...) as '# key=value' header lines (axis types, sizes, units, values)
 ' and its values in LabSpec's order, comma-separated, 256 per line.
 Function WriteData(id, outPath, res, kind)
-    Dim data, at, sz, au, ax, ts, tmp, i, j, n, line, d2, n1, n2
+    Dim data, at, sz, au, ax, ts, tmp, i, j, n, buf, d2, n1, n2
     Dim total, chunk, start, part, cnt, k, via
     WriteData = False
     On Error Resume Next
@@ -2119,39 +2119,36 @@ Function WriteData(id, outPath, res, kind)
     ts.WriteLine "# kind=" & kind
     ts.WriteLine "# id=" & id
     If IsArray(at) Then
-        line = ""
+        ReDim buf(UBound(at))
         For i = 0 To UBound(at)
-            If i > 0 Then line = line & ","
-            line = line & CStr(at(i))
+            buf(i) = CStr(at(i))
         Next
-        ts.WriteLine "# axis_types=" & line
+        ts.WriteLine "# axis_types=" & Join(buf, ",")
     End If
     If IsArray(sz) Then
-        line = ""
+        ReDim buf(UBound(sz))
         For i = 0 To UBound(sz)
-            If i > 0 Then line = line & ","
-            line = line & Fmt(sz(i))
+            buf(i) = Fmt(sz(i))
         Next
-        ts.WriteLine "# axis_sizes=" & line
+        ts.WriteLine "# axis_sizes=" & Join(buf, ",")
     End If
     If IsArray(au) Then
-        line = ""
+        ReDim buf(UBound(au))
         For i = 0 To UBound(au)
-            If i > 0 Then line = line & ","
-            line = line & CStr(au(i))
+            buf(i) = CStr(au(i))
         Next
-        ts.WriteLine "# axis_units=" & line
+        ts.WriteLine "# axis_units=" & Join(buf, ",")
     End If
     If IsArray(ax) Then
-        line = ""
+        ReDim buf(UBound(ax))
         For i = 0 To UBound(ax)
-            If i > 0 Then line = line & ","
-            line = line & Fmt(ax(i))
+            buf(i) = Fmt(ax(i))
         Next
-        ts.WriteLine "# axis_values=" & line
+        ts.WriteLine "# axis_values=" & Join(buf, ",")
     End If
     If chunk > 0 Then
         ts.WriteLine "# data_dims=" & total
+        ReDim buf(255)
         start = 0
         Do While start < total
             cnt = chunk
@@ -2169,18 +2166,20 @@ Function WriteData(id, outPath, res, kind)
                 ts.Close
                 Exit Function
             End If
-            line = ""
             k = 0
             For j = LBound(part) To UBound(part)
-                If line <> "" Then line = line & ","
-                line = line & Fmt(part(j))
+                buf(k) = Fmt(part(j))
                 k = k + 1
-                If k Mod 256 = 0 Then
-                    ts.WriteLine line
-                    line = ""
+                If k = 256 Then
+                    ts.WriteLine Join(buf, ",")
+                    k = 0
                 End If
             Next
-            If line <> "" Then ts.WriteLine line
+            If k > 0 Then
+                ReDim Preserve buf(k - 1)
+                ts.WriteLine Join(buf, ",")
+                ReDim buf(255)
+            End If
             start = start + cnt
             BeatNow
         Loop
@@ -2203,28 +2202,31 @@ Function WriteData(id, outPath, res, kind)
     End If
     If n2 >= 0 Then
         ts.WriteLine "# data_dims=" & (n1 + 1) & "," & (n2 + 1)
+        ReDim buf(n1)
         For j = 0 To n2
-            line = ""
             For i = 0 To n1
-                If i > 0 Then line = line & ","
-                line = line & Fmt(data(i, j))
+                buf(i) = Fmt(data(i, j))
             Next
-            ts.WriteLine line
+            ts.WriteLine Join(buf, ",")
         Next
         n = (n1 + 1) * (n2 + 1)
     Else
         ts.WriteLine "# data_dims=" & (n1 + 1)
-        line = ""
+        ReDim buf(255)
+        k = 0
         For i = 0 To n1
-            If line <> "" Then line = line & ","
-            line = line & Fmt(data(i))
-            If (i + 1) Mod 256 = 0 Then
-                ts.WriteLine line
-                line = ""
+            buf(k) = Fmt(data(i))
+            k = k + 1
+            If k = 256 Then
+                ts.WriteLine Join(buf, ",")
+                k = 0
                 BeatNow
             End If
         Next
-        If line <> "" Then ts.WriteLine line
+        If k > 0 Then
+            ReDim Preserve buf(k - 1)
+            ts.WriteLine Join(buf, ",")
+        End If
         n = n1 + 1
     End If
     ts.Close

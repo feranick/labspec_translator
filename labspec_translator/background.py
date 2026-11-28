@@ -21,10 +21,6 @@ def folder() -> Path:
     return store.path("backgrounds")
 
 
-def _index_path() -> Path:
-    return folder() / "index.json"
-
-
 def index() -> dict:
     return store.read("backgrounds/index.json")
 

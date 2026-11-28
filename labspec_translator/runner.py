@@ -22,7 +22,9 @@ from . import spot as SP
 from . import store
 from . import shutter as SH
 from . import profile as P
-from .bridge import replace_retry, Bridge, BridgeError, BridgeGone, BridgeTimeout  # noqa: F401
+from .bridge import Bridge, BridgeError, BridgeGone, BridgeTimeout  # noqa: F401
+from .io_util import (parse_kv_and_csv, pid_alive, read_json, replace_retry, to_float,  # noqa: F401
+                      write_json as _write_json)
 
 FINAL = ("done", "cancelled", "failed", "interrupted")
 
@@ -38,17 +40,7 @@ class Stop(Exception):
 # --------------------------------------------------------------------------------------------- files
 
 def write_json(path: Path, data):
-    path = Path(path)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, indent=1, default=_jsonable), encoding="utf-8")
-    replace_retry(tmp, path)        # Windows: a reader (study_status) holding the file must not crash the runner
-
-
-def read_json(path: Path, default=None):
-    try:
-        return json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return default
+    _write_json(path, data, indent=1, default=_jsonable)
 
 
 def _jsonable(o):
@@ -258,8 +250,13 @@ def screen_points(per_point: list, laser, kind: str = "spectrum", warnings: list
             continue
         spans[rec["point"]] = float(np.nanmax(y) - np.nanmedian(y))
         try:
-            sh, _ = spectra.to_shift(sp["x"], sp["meta"].get("x_unit", "nm"), laser)
-            lines[rec["point"]] = laser_line_fit(sh, y)
+            sh = rec.get("_shift")
+            if sh is None:
+                sh, _ = spectra.to_shift(sp["x"], sp["meta"].get("x_unit", "nm"), laser)
+                rec["_shift"] = sh
+            ll_ = rec.get("_ll") if "_ll" in rec else laser_line_fit(sh, y)
+            rec["_ll"] = ll_
+            lines[rec["point"]] = ll_
         except (ValueError, TypeError):
             pass
     out: dict = {}
@@ -537,16 +534,15 @@ class Ctx:
             self._beat_lock.release()
 
     def _beat(self, now: float):
-        if True:
-            self.last_beat = now
-            write_json(self.folder / "runner.json", {"pid": os.getpid(), "time": now, "version": __version__})
-            if getattr(self, "owns_lock", False):
-                # only the holder keeps the lock fresh (2026-11-25: a queued request's beat kept a dead runner's
-                # lock fresh, and every request after it queued forever)
-                try:
-                    os.utime(lock_path(), None)
-                except OSError:
-                    pass
+        self.last_beat = now
+        write_json(self.folder / "runner.json", {"pid": os.getpid(), "time": now, "version": __version__})
+        if getattr(self, "owns_lock", False):
+            # only the holder keeps the lock fresh (2026-11-25: a queued request's beat kept a dead runner's
+            # lock fresh, and every request after it queued forever)
+            try:
+                os.utime(lock_path(), None)
+            except OSError:
+                pass
 
     def call(self, verb: str, timeout_s: float = 60.0, **params) -> dict:
         if verb == "acquire" and "mode" in params:
@@ -816,36 +812,7 @@ def shutter_report(r: dict, warnings: list, verified: bool = False) -> dict:
 LOCK_STALE_S = 90.0     # a lock nobody refreshed for this long is free
 
 
-def pid_alive(pid) -> bool | None:
-    """Whether a process with this id runs (None: cannot tell). Windows: OpenProcess + GetExitCodeProcess (never
-    os.kill, which ends the process there)."""
-    try:
-        pid = int(pid)
-    except (TypeError, ValueError):
-        return None
-    if pid <= 0:
-        return None
-    if os.name == "nt":
-        try:
-            import ctypes
-            k32 = ctypes.windll.kernel32
-            h = k32.OpenProcess(0x1000, False, pid)          # PROCESS_QUERY_LIMITED_INFORMATION
-            if not h:
-                return False
-            code = ctypes.c_ulong()
-            ok = k32.GetExitCodeProcess(h, ctypes.byref(code))
-            k32.CloseHandle(h)
-            return bool(ok) and code.value == 259            # STILL_ACTIVE
-        except Exception:  # noqa: BLE001
-            return None
-    try:
-        os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except OSError:
-        return True             # exists, another user's
-    return None
+# pid_alive is imported from .io_util and re-exported here for callers
 
 
 def runner_alive(folder) -> bool:
@@ -1079,11 +1046,7 @@ def run_request(folder: Path | str) -> dict:
 
 
 def _f(v):
-    try:
-        x = float(v)
-        return x if math.isfinite(x) else None
-    except (TypeError, ValueError):
-        return None
+    return to_float(v, finite=True)
 
 
 # --------------------------------------------------------------------------------------------- one study
@@ -1239,10 +1202,7 @@ def _setup(name: str, study: dict, ctx: Ctx, warnings: list, unreliable: list, c
 
 
 RELEASE_WAIT_S = 90.0     # how long ls6t waits for a silent bridge to answer again before giving up on the release
-LASER_MAY_BE_ON = ("THE LASER MAY STILL REACH THE SAMPLE: ls6t held the laser shutter open (LabSpec's ShutterMode "
-                   "manual) when the bridge stopped answering. Close it now: switch the laser off in LabSpec's status "
-                   "bar if LabSpec responds, otherwise switch the laser off at its power supply or key; after "
-                   "restarting LabSpec, check that the laser shutter reads Off and ShutterMode is automatic (0).")
+from .io_util import LASER_MAY_BE_ON  # noqa: E402, F401 - re-exported for callers
 NO_HOLD_KINDS = ("move", "background", "cutoff")      # no laser, or the laser off on purpose
 # the bridge commands that keep the shutter held (bridge_main.vbs HOLD_VERBS)
 HOLD_VERBS = ("ping", "status", "acquire", "map_native", "guide", "move_xy", "move", "view", "remove", "save",
@@ -3018,8 +2978,6 @@ def run_spot(name: str, study: dict, ctx: Ctx) -> dict:
                                                                   "what": a["snapshot"].get("what")}
         if a.get("image"):
             images["spot_scan"] = a["image"]
-        if a.get("snapshot") is None and a.get("method") == "raman":
-            pass
     result = {"ok": True, "complete": True, "reliable": found is not None and not unreliable,
               "unreliable_because": unreliable, "warnings": warnings, "checks": checks, "kind": "spot",
               "sample": study.get("sample", {}),
@@ -4395,10 +4353,14 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
         if "_sp" not in rec:
             rec["_sp"] = spectra.read(rec["file"])
         try:
-            sh_, _ = spectra.to_shift(rec["_sp"]["x"], rec["_sp"]["meta"].get("x_unit", "nm"), laser)
+            sh_ = rec.get("_shift")
+            if sh_ is None:
+                sh_, _ = spectra.to_shift(rec["_sp"]["x"], rec["_sp"]["meta"].get("x_unit", "nm"), laser)
+                rec["_shift"] = sh_
         except (ValueError, TypeError):
             continue
-        l_ = laser_line_fit(sh_, rec["_sp"]["y"])
+        l_ = rec.get("_ll") if "_ll" in rec else laser_line_fit(sh_, rec["_sp"]["y"])
+        rec["_ll"] = l_
         if not (l_ and l_.get("ok")):
             continue
         xs_, ys_ = spectra.sort_xy(sh_, rec["_sp"]["y"])
@@ -4558,8 +4520,12 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
         auto_proc = dict(process, auto_from_cm1=max(spectra.AUTO_FROM_CM1, float(cut_ or 0.0)))
     for rec in per_point:
         sp = rec.pop("_sp") if "_sp" in rec else spectra.read(rec["file"])
+        cached_shift = rec.pop("_shift", None)
+        has_cached_ll = "_ll" in rec
+        cached_ll = rec.pop("_ll", None)
         try:
-            shift, unit = spectra.to_shift(sp["x"], sp["meta"].get("x_unit", "nm"), laser)
+            shift = cached_shift if cached_shift is not None else spectra.to_shift(
+                sp["x"], sp["meta"].get("x_unit", "nm"), laser)[0]
         except ValueError as exc:
             warnings.append(f"point {rec['point']}: {exc}")
             continue
@@ -4576,7 +4542,7 @@ def analyse(name, study, per_point, prof, laser, rng, sd: Path, warnings, unreli
         else:
             y_counts = y
         sat = spectra.saturation(y_counts, fs, frac)
-        ll = laser_line_fit(shift, y)
+        ll = (dict(cached_ll) if cached_ll else cached_ll) if has_cached_ll else laser_line_fit(shift, y)
         proc_pt = auto_proc
         if kind == "calibration" and ll and ll.get("ok") and ll_ref is not None and process.get("peaks"):
             # the laser changed mode (T9.23 run 2: the line -14.0 against -4.6, Si at 510.3 outside a +-15 window):
@@ -5575,18 +5541,6 @@ def landing_threshold(prof: dict, laser, grating, placement: str = "centred", fa
     return {"threshold_cm1": round(max(LANDING_MIN_CM1, LANDING_K * float(sd)), 3),
             "laser_line_sd_used_cm1": round(float(sd), 3), "from": src}
 
-
-def _rep_store_add(laser, grating, placement: str, field: str, value: float, keep: int = 5) -> float:
-    """Learns a value per laser@grating in spectro_repeatability.json: the median of the last `keep`."""
-    rec_r = store.read("spectro_repeatability.json") or {}
-    kk = f"{float(laser):g}@{_f(grating) or 0:g}" + ("@labspec" if placement == "labspec" else "")
-    e = rec_r.setdefault(kk, {})
-    hist = (list(e.get(field + "_history") or []) + [round(float(value), 4)])[-keep:]
-    e[field + "_history"] = hist
-    e[field] = round(float(np.median(hist)), 4)
-    e[field.replace("_cm1", "") + "_time"] = time.strftime("%Y-%m-%dT%H:%M:%S")
-    store.write("spectro_repeatability.json", {k_: _clean_rep_entry(v_) for k_, v_ in rec_r.items()})
-    return e[field]
 
 
 COARSE_CM1_PER_PX = 2.0    # a grating this coarse at the reference line: per-centre corrections are pooled (auto)
@@ -6610,19 +6564,7 @@ def parse_native_map(path, study: dict, prof: dict, x0, y0, zref) -> list:
     (profile mapping.data_order: each spectrum contiguous, or each wavelength's image contiguous; points with the
     first spatial axis fastest). Each point becomes a record with its spectrum and grid indices (the study's
     axes)."""
-    from .profile import read_text
-    meta: dict = {}
-    rows: list = []
-    for line in read_text(path).splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        if line.startswith("#"):
-            k, _, v = line[1:].strip().partition("=")
-            meta[k.strip()] = v.strip()
-        else:
-            rows.append(line)
-    data = np.array([float(v) for row in rows for v in row.split(",") if v != ""], float)
+    meta, data = parse_kv_and_csv(path)
     types = [t.strip() for t in meta.get("axis_types", "").split(",")]
     sizes = [int(float(v)) for v in meta.get("axis_sizes", "").split(",") if v.strip()]
     units = [u.strip() for u in meta.get("axis_units", "").split(",")]

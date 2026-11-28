@@ -267,10 +267,3 @@ def study_images(name: str, study: dict, result: dict, sd: Path) -> dict:
             out[f"spectrum_{i}"] = spectrum_png(img / f"spectrum_{i}.png", [f], process, laser,
                                                 f"{name}: point {i}", pk)
     return out
-
-
-def is_finite(v) -> bool:
-    try:
-        return math.isfinite(float(v))
-    except (TypeError, ValueError):
-        return False
