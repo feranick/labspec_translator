@@ -1112,7 +1112,11 @@ def estimate(study: dict, prof: dict, current: dict | None = None) -> dict:
             total += scan_seconds(study, prof) if af == "scan" else camera_seconds(study, prof) if af == "camera" \
                 else t["autofocus_s"]
         if k == 0 and study.get("kind") == "calibration" and (study.get("calibration") or {}).get("refocus") and not af:
-            total += scan_seconds(study, prof)
+            foc_ = dict(study.get("focus") or {})
+            sc_ = dict(foc_.get("scan") or {})
+            sc_.setdefault("range_um", 6.0)
+            foc_["scan"] = sc_
+            total += scan_seconds(dict(study, focus=foc_), prof)
         held_ = hold_shutter(study, prof, laser)
         total += acq_s if k == 0 else acq_next_s(study, prof, rng, held_)
         if k > 0 and study.get("kind") in ("map", "series") and (prof.get("display") or {}).get("live_view"):

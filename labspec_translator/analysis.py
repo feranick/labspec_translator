@@ -479,7 +479,10 @@ def _analyse_zero_and_bg(study, per_point, prof, laser, rng, warnings, unreliabl
             from .runner_core import _parse_ts, labspec_started_time
             ls_started, ls_started_ts = labspec_started_time()
             corr_ts = _parse_ts(corr.get("time"))
-            before_restart = bool(ls_started_ts is not None and corr_ts is not None and corr_ts < ls_started_ts)
+            if ls_started_ts is None or corr_ts is None:
+                before_restart = None
+            else:
+                before_restart = bool(corr_ts < ls_started_ts)
             corr = dict(corr, before_labspec_restart=before_restart,
                         **({"labspec_started": ls_started} if before_restart else {}))
             if before_restart:
@@ -489,8 +492,8 @@ def _analyse_zero_and_bg(study, per_point, prof, laser, rng, warnings, unreliabl
                 "a", "b", "time", "centre_nm", "interpolated_between_nm", "centre_far", "laser_line_cm1", "placement",
                 "range_match", "range_cm1", "pooled", "pooled_from", "repeats", "expected_uncertainty_cm1",
                 "expected_uncertainty_from", "expected_uncertainty_parts", "age_min", "window_distance_nm", "hole_um",
-                "objective", "before_labspec_restart", "labspec_started", "focus_sensitive")
-                if corr.get(k) is not None}, "key": xcal.key(laser, grating, setup_),
+                "objective", "labspec_started", "focus_sensitive")
+                if corr.get(k) is not None}, "before_labspec_restart": before_restart, "key": xcal.key(laser, grating, setup_),
                 **({"age_h": round(xcal.age_h(corr), 2)} if xcal.age_h(corr) is not None else {})},
                 note="offset_cm1 is the last calibration check of this laser, grating, objective and hole (any "
                      "window); correction_used is the one applied to these spectra")
@@ -1846,13 +1849,20 @@ def laser_health(prof: dict, laser, grating, file, exposure_s=None, placement: s
         if abs(move) > max(HEALTH_MOVE_MIN_CM1, 3.0 * sd_):
             verdicts.append("mode_change")
             reasons.append(f"the laser line sits {move:+.2f} cm-1 from {ll_ref_from}")
-    if ((out.get("counts_ratio") is not None and out["counts_ratio"] < 0.7
-         and out.get("width_ratio") is not None and out["width_ratio"] > 1.2)
-            or ("low_signal" in verdicts and "multimode" in verdicts)):
+    large_mode_shift = bool("mode_change" in verdicts and move is not None and abs(move) > HEALTH_MOVE_MIN_CM1)
+    if (not large_mode_shift
+            and ((out.get("counts_ratio") is not None and out["counts_ratio"] < 0.7
+                  and out.get("width_ratio") is not None and out["width_ratio"] > 1.2)
+                 or ("low_signal" in verdicts and "multimode" in verdicts))):
         out["focus_drift_suspect"] = True
         reasons.insert(0, "focus may have drifted (counts fell and line broadened together): refocus before assuming "
                           "the laser is unhealthy")
-    order = ("multimode", "low_signal", "mode_change")
+    if large_mode_shift:
+        for idx_, rsn_ in enumerate(reasons):
+            if rsn_.startswith("the laser line sits "):
+                reasons.insert(0, reasons.pop(idx_))
+                break
+    order = ("mode_change", "multimode", "low_signal") if large_mode_shift else ("multimode", "low_signal", "mode_change")
     out["verdict"] = next((v for v in order if v in verdicts), "healthy")
     out["reasons"] = reasons
     out["same_window_reference"] = bool(same_win) if ll_ref_v is not None else None

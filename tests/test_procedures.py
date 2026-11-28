@@ -3226,7 +3226,7 @@ def test_extended_range_excluding_zero_uses_stored_correction_silently():
         assert not any("no laser line found" in u for u in s.get("unreliable_because", [])), s.get("unreliable_because")
         assert s["checks"]["zero_correction"]["laser_reference"] == "report"
         cu = s["checks"]["zero"]["correction_used"]
-        assert cu.get("before_labspec_restart") is False, cu
+        assert "before_labspec_restart" in cu and cu["before_labspec_restart"] in (False, None), cu
         assert cu.get("focus_sensitive") is True, cu
         assert "positions depend on focus" in str(cu.get("expected_uncertainty_from")), cu
         assert "single-window correction" in str(cu.get("expected_uncertainty_from")), cu
@@ -3266,6 +3266,11 @@ def test_correction_before_labspec_restart_is_flagged():
         cu2 = s2["checks"]["zero"]["correction_used"]
         assert cu2.get("before_labspec_restart") is False, cu2
         assert "labspec_started" not in cu2, cu2
+        R.store.write(R.LABSPEC_SESSION, {})
+        s3 = run_inline({"s3": {"kind": "spectrum", "sample": {"name": "Si"}, "setup": setup,
+                                "acquire": {"center_cm1": 520.7, "exposure_s": 0.5}}})["studies"]["s3"]
+        cu3 = s3["checks"]["zero"]["correction_used"]
+        assert "before_labspec_restart" in cu3 and cu3["before_labspec_restart"] is None, cu3
     finally:
         R.store.write(R.LABSPEC_SESSION, {})
         xcal.clear()
@@ -3326,27 +3331,46 @@ def test_focus_drift_suspect_and_calibration_refocus():
         c = run_inline({"c": cal_study})["studies"]["c"]
         assert c.get("focus_scans") and len(c["focus_scans"]) == 1, c
         assert c["calibration"]["repeats"]["n_total"] == 3
+        rf = c["calibration"].get("refocus_result")
+        assert rf and rf["range_um"] == 6.0 and rf["half_range_um"] == 3.0 and rf["step_um"] == 1.0, rf
+        assert "z_best_um" in rf and "counts_before" in rf and "counts_after" in rf, rf
     finally:
         xcal.clear()
-    # focus_drift_suspect when counts_ratio < 0.7 and width_ratio > 1.2
+    # focus_drift_suspect when counts_ratio < 0.7 and width_ratio > 1.2; mode_change (>3 cm-1) ranks above focus drift
     import numpy as np
     tmp = config.home() / "tmp_focus_drift.txt"
-    x = np.linspace(450, 600, 400)
-    y = 100.0 + 300.0 * np.exp(-0.5 * ((x - 520.7) / 4.5) ** 2)
+    x = np.linspace(-30, 600, 1200)
+    y = 100.0 + 300.0 * np.exp(-0.5 * ((x - 520.7) / 4.5) ** 2) + 5000.0 * np.exp(-0.5 * ((x - 0.5) / 1.0) ** 2)
     tmp.write_text("\n".join(f"{xi:.4f}\t{yi:.4f}" for xi, yi in zip(x, y)))
+    tmp_mc = config.home() / "tmp_mode_change.txt"
+    y_mc = 100.0 + 300.0 * np.exp(-0.5 * ((x - 512.7) / 4.5) ** 2) + 5000.0 * np.exp(-0.5 * ((x - (-8.0)) / 1.0) ** 2)
+    tmp_mc.write_text("\n".join(f"{xi:.4f}\t{yi:.4f}" for xi, yi in zip(x, y_mc)))
     old_res = store.read("resolution.json")
-    old_log = store.read("laser_log.jsonl")
+    old_log_p = config.home() / A.LASER_LOG
+    old_log_txt = old_log_p.read_text(encoding="utf-8") if old_log_p.exists() else None
     try:
         store.write("resolution.json", {"532@1200@x100@h100": {"fwhm_cm1": 4.0, "counts_per_s": 1000.0}})
-        hc = A.laser_health(prof, 532.0, 1200.0, tmp, 1.0, "centred", "x100", None, 100, 520.7)
+        import json as _j
+        old_log_p.write_text(_j.dumps({"verdict": "healthy", "laser_nm": 532.0, "grating": 1200.0,
+                                       "si_counts_per_s": 1000.0, "objective": "x100", "filter": None,
+                                       "laser_line_cm1": 0.0, "centre_nm": round(P.shift_to_nm(260.0, 532.0), 2),
+                                       "time": "2026-11-28T00:00:00"}) + "\n", encoding="utf-8")
+        hc = A.laser_health(prof, 532.0, 1200.0, tmp, 1.0, "centred", "x100", None, 100, 260.0)
         assert hc.get("focus_drift_suspect") is True, hc
         assert hc["reasons"] and "focus may have drifted" in hc["reasons"][0], hc["reasons"]
+        hc_mc = A.laser_health(prof, 532.0, 1200.0, tmp_mc, 1.0, "centred", "x100", None, 100, 260.0)
+        assert hc_mc["verdict"] == "mode_change", hc_mc
+        assert not hc_mc.get("focus_drift_suspect"), hc_mc
+        assert hc_mc["reasons"] and hc_mc["reasons"][0].startswith("the laser line sits "), hc_mc["reasons"]
     finally:
         tmp.unlink(missing_ok=True)
+        tmp_mc.unlink(missing_ok=True)
         if old_res is not None:
             store.write("resolution.json", old_res)
-        if old_log is not None:
-            store.write("laser_log.jsonl", old_log)
+        if old_log_txt is not None:
+            old_log_p.write_text(old_log_txt, encoding="utf-8")
+        else:
+            old_log_p.unlink(missing_ok=True)
 
 
 def test_settling_progress_stage(monkeypatch):
@@ -3370,5 +3394,54 @@ def test_settling_progress_stage(monkeypatch):
                       "acquire": {"center_cm1": 520.7, "exposure_s": 0.2}}})
     assert "settling" in stages and "measuring" in stages, stages
     assert stages.index("settling") < stages.index("measuring"), stages
+
+
+def test_calibration_precheck_refocus_retry_and_order(monkeypatch):
+    """2026.11.28.12: calibration.refocus runs settle -> refocus -> precheck -> repeats, and a precheck failing with
+    focus_drift_suspect refocuses once and re-checks before stopping."""
+    import labspec_translator.runner_core as RC
+    import labspec_translator.studies as ST
+    from labspec_translator import xcal
+    stages = []
+    orig_progress = RC._progress
+    def _spy(sd, **kw):
+        if "stage" in kw:
+            stages.append(kw["stage"])
+        return orig_progress(sd, **kw)
+    monkeypatch.setattr(RC, "_progress", _spy)
+    monkeypatch.setattr(ST, "_progress", _spy)
+    monkeypatch.setattr(RC.plan, "hold_open_s", lambda *a, **kw: 0.1)
+    monkeypatch.setattr(RC.plan, "hold_shutter", lambda *a, **kw: True)
+    S.ensure(config.active_bridge_dir())
+    xcal.clear()
+    try:
+        # 1) Explicit calibration.refocus: settle -> focusing -> measuring
+        cal = {"kind": "calibration", "sample": {"name": "Si"}, "setup": dict(SETUP, grating=1200, hole_um=100),
+               "acquire": {"center_cm1": 520.7, "exposure_s": 0.2},
+               "calibration": {"adjust": "ls6t", "repeats": 2, "refocus": True}}
+        run_inline({"c": cal})
+        assert "settling" in stages and "focusing" in stages and "measuring" in stages, stages
+        assert stages.index("settling") < stages.index("focusing") < stages.index("measuring"), stages
+
+        # 2) Precheck fails once with focus_drift_suspect -> refocuses once and re-checks -> succeeds
+        calls = {"n": 0}
+        def _fake_health(*a, **kw):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return {"verdict": "low_signal", "focus_drift_suspect": True,
+                        "reasons": ["focus may have drifted"]}
+            return {"verdict": "healthy", "reasons": []}
+        monkeypatch.setattr(ST, "laser_health", _fake_health)
+        cal2 = {"kind": "calibration", "sample": {"name": "Si"}, "setup": dict(SETUP, grating=1200, hole_um=100),
+                "acquire": {"center_cm1": 520.7, "exposure_s": 0.2},
+                "calibration": {"adjust": "ls6t", "repeats": 2}}
+        c2 = run_inline({"c2": cal2})["studies"]["c2"]
+        assert calls["n"] == 2
+        assert c2["reliable"], c2.get("unreliable_because")
+        rf = c2["calibration"].get("refocus_result")
+        assert rf and rf["trigger"] == "precheck_focus_drift" and rf["precheck_after_refocus"] == "healthy", rf
+    finally:
+        xcal.clear()
+
 
 

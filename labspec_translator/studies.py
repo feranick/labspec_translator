@@ -125,6 +125,8 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
         except Stop as exc:
             stop_exc = exc
     warmup_info = native_warmup
+    cal_refocus_result = None
+    refocused_cal = False
     t_last_start = time.time()
     live_on = bool((prof.get("display") or {}).get("live_view"))
     pending_views: list = []
@@ -184,16 +186,6 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
                         ctx.z_focus = zref
                     else:
                         warnings.append(f"point {k}: autofocus failed ({r.get('error')}); kept the previous focus")
-            if k == 0 and kind == "calibration" and (study.get("calibration") or {}).get("refocus") and not af:
-                _progress(sd, stage="focusing", point=0, points=len(pts))
-                fs = focus_scan(ctx, study, laser, zref if zref is not None else zcur, sd / "focus" / "refocus", warnings)
-                focus_scans.append(fs)
-                if fs.get("found"):
-                    zref = zcur = ctx.z_focus = fs["z_um"]
-                    _focus_here(ctx)
-                else:
-                    zcur = fs.get("z_now", zcur)
-                    warnings.append(f"calibration refocus found no clear best ({fs.get('why')}); kept the previous focus")
             if p["dz_um"] and zref is None:
                 raise Stop("the Z position could not be read: Z offsets are refused", "study")
             if zref is not None:
@@ -269,6 +261,20 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
                 # the hold (and its open wait: the laser settling) before this spectrum's clock starts: on .13 the
                 # 5 s wait sat inside point 0's call, so point 0's t_start came 5 s early and the first gap read 8.3 s
                 ctx._hold_on()
+            if k == 0 and kind == "calibration" and (study.get("calibration") or {}).get("refocus") and not af:
+                # Order: settle (above), then refocus, then precheck & repeats
+                _progress(sd, stage="focusing", point=0, points=len(pts))
+                rf_study = _cal_refocus_study(study)
+                fs = focus_scan(ctx, rf_study, laser, zref if zref is not None else zcur, sd / "focus" / "refocus", warnings)
+                focus_scans.append(fs)
+                cal_refocus_result = _cal_refocus_summary(fs, plan.scan_params(rf_study, prof), "calibration.refocus")
+                refocused_cal = True
+                if fs.get("found"):
+                    zref = zcur = ctx.z_focus = fs["z_um"]
+                    _focus_here(ctx)
+                else:
+                    zcur = fs.get("z_now", zcur)
+                    warnings.append(f"calibration refocus found no clear best ({fs.get('why')}); kept the previous focus")
             _progress(sd, stage="measuring", point=k, points=len(pts),
                       eta_min=_eta(t_start, k, len(pts), study, prof))
             t_a = time.time()
@@ -314,6 +320,42 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
                                    after.get("objective"), after.get("filter"), after.get("hole_um"),
                                    (study.get("acquire") or {}).get("center_cm1"))
                 ctx.laser_health = hc_
+                if (hc_["verdict"] in ("multimode", "low_signal") and hc_.get("focus_drift_suspect")
+                        and not refocused_cal and not af and (zref is not None or zcur is not None)):
+                    # Precheck suspected focus drift: refocus once and re-check before stopping
+                    _progress(sd, stage="focusing", point=0, points=len(pts))
+                    rf_study = _cal_refocus_study(study)
+                    fs = focus_scan(ctx, rf_study, laser, zref if zref is not None else zcur,
+                                    sd / "focus" / "refocus_precheck", warnings)
+                    focus_scans.append(fs)
+                    cal_refocus_result = _cal_refocus_summary(fs, plan.scan_params(rf_study, prof),
+                                                              "precheck_focus_drift")
+                    refocused_cal = True
+                    if fs.get("found"):
+                        zref = zcur = ctx.z_focus = fs["z_um"]
+                        _focus_here(ctx)
+                    else:
+                        zcur = fs.get("z_now", zcur)
+                        warnings.append(f"precheck refocus found no clear best ({fs.get('why')}); kept the previous focus")
+                    _progress(sd, stage="measuring", point=0, points=len(pts),
+                              eta_min=_eta(t_start, 0, len(pts), study, prof))
+                    t_re = time.time()
+                    r_re = ctx.call("acquire", timeout_s=_acq_timeout(study, prof, rng), **params)
+                    t_acq += time.time() - t_re
+                    if not r_re["ok"]:
+                        raise Stop(f"point 0 (after refocus): acquisition failed: {r_re.get('error')}", "study")
+                    rec.update(stage={"x_um": ax, "y_um": ay, "z_um": zcur}, id=r_re.get("id"),
+                               t=round(time.time() - t_start, 3))
+                    per_point[-1] = rec
+                    hc_ = laser_health(prof, laser, _f(after.get("grating")), out, acq.get("exposure_s"),
+                                       "labspec" if not rng.get("single", True) else "centred",
+                                       after.get("objective"), after.get("filter"), after.get("hole_um"),
+                                       (study.get("acquire") or {}).get("center_cm1"))
+                    ctx.laser_health = hc_
+                    cal_refocus_result["precheck_after_refocus"] = hc_["verdict"]
+                    if hc_["verdict"] not in ("multimode", "low_signal"):
+                        warnings.append(f"precheck suspected focus drift; refocused (dz={cal_refocus_result['dz_um']:+.3f} um) "
+                                        f"and re-check verdict was '{hc_['verdict']}'")
                 if hc_["verdict"] in ("multimode", "low_signal"):
                     if hc_.get("focus_drift_suspect"):
                         raise Stop(f"calibration not run: focus may have drifted (counts fell and line broadened together) — "
@@ -439,6 +481,11 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
         result["laser_health"] = hc_
         if hc_["verdict"] != "healthy":
             warnings.append(f"laser check: {hc_['verdict']} ({'; '.join(hc_['reasons'])})")
+    if cal_refocus_result is not None:
+        if isinstance(result.get("calibration"), dict):
+            result["calibration"]["refocus_result"] = cal_refocus_result
+        else:
+            result["refocus_result"] = cal_refocus_result
     if result.get("calibration"):
         store_pending(result["calibration"], warnings, unreliable, prof, objective=after.get("objective"),
                       hole=after.get("hole_um"))
@@ -504,6 +551,41 @@ def run_study(name: str, study: dict, ctx: Ctx, sd: Path | None = None) -> dict:
 
 FOCUS_MIN_COUNTS = 300          # per step at the best, to see a focus curve above counting noise
 FOCUS_MIN_CONTRAST_SIGMA = 4.0  # the change with Z must be this many times one step's noise
+
+
+def _cal_refocus_study(study: dict) -> dict:
+    """Study copy with default ±3 um (6 um) range for calibration refocus unless focus.scan.range_um is set."""
+    foc = dict(study.get("focus") or {})
+    sc = dict(foc.get("scan") or {})
+    sc.setdefault("range_um", 6.0)
+    foc["scan"] = sc
+    return dict(study, focus=foc)
+
+
+def _cal_refocus_summary(fs: dict, sc: dict, trigger: str) -> dict:
+    """Compact refocus report for calibration.refocus_result: range, step, best Z, counts before/after."""
+    offs = fs.get("offsets_um") or []
+    sig = fs.get("signal") or []
+    c_before = None
+    for dz, s_ in zip(offs, sig):
+        if abs(float(dz)) < 1e-6:
+            c_before = round(float(s_), 1)
+            break
+    c_after = round(float(max(sig)), 1) if (fs.get("found") and sig) else c_before
+    z0 = fs.get("z0_um")
+    zb = fs.get("z_um") if fs.get("found") else None
+    dz_ = round(float(zb) - float(z0), 3) if (zb is not None and z0 is not None) else 0.0
+    out = {"trigger": trigger, "range_um": float(sc["range_um"]), "half_range_um": round(float(sc["range_um"]) / 2.0, 3),
+           "step_um": float(sc["step_um"]), "found": bool(fs.get("found")),
+           "z_before_um": round(float(z0), 3) if z0 is not None else None,
+           "z_best_um": round(float(zb), 3) if zb is not None else None,
+           "dz_um": dz_, "moved": bool(fs.get("found") and abs(dz_) > 1e-3),
+           "counts_before": c_before, "counts_after": c_after,
+           "counts_ratio": round(c_after / c_before, 3) if (c_before and c_after is not None) else None,
+           "unit": fs.get("unit", "counts/s")}
+    if not fs.get("found") and fs.get("why"):
+        out["why"] = fs["why"]
+    return out
 
 
 def focus_scan(ctx: Ctx, study: dict, laser: float, z0: float | None, sd: Path, warnings: list) -> dict:
